@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Myggiz AB
 
-#![cfg_attr(test, allow(clippy::unwrap_used))]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 //! Ed25519 identity keys, public keys, and detached signatures.
 
@@ -93,14 +93,19 @@ impl IdentityKey {
     }
 
     /// Sign an arbitrary message.
-    pub fn sign(&self, _message: &[u8]) -> Signature {
-        let _ = &self.secret;
-        todo!("Ed25519 sign")
+    pub fn sign(&self, message: &[u8]) -> Signature {
+        let signing = SigningKey::from_bytes(&self.secret);
+        let sig: ed25519_dalek::Signature = signing.sign(message);
+        Signature(sig.to_bytes())
     }
 
     /// Verify a signature against a pubkey. Constant-time, no panics.
-    pub fn verify(_pubkey: &PublicKey, _message: &[u8], _signature: &Signature) -> Result<()> {
-        todo!("Ed25519 verify")
+    pub fn verify(pubkey: &PublicKey, message: &[u8], signature: &Signature) -> Result<()> {
+        let vk = VerifyingKey::from_bytes(&pubkey.0)
+            .map_err(|e| CoreError::Identity(format!("invalid pubkey bytes: {e}")))?;
+        let sig = ed25519_dalek::Signature::from_bytes(&signature.0);
+        vk.verify_strict(message, &sig)
+            .map_err(|_| CoreError::Identity("signature verification failed".into()))
     }
 
     /// Consume into raw secret bytes. Caller is responsible for zeroization.
@@ -144,5 +149,31 @@ mod tests {
         let a = IdentityKey::generate().unwrap();
         let b = IdentityKey::generate().unwrap();
         assert_ne!(a.public(), b.public());
+    }
+
+    #[test]
+    fn sign_and_verify_roundtrip() {
+        let id = IdentityKey::generate().unwrap();
+        let msg = b"skattr handshake payload v1";
+        let sig = id.sign(msg);
+        IdentityKey::verify(&id.public(), msg, &sig).expect("signature must verify");
+    }
+
+    #[test]
+    fn verify_rejects_tampered_message() {
+        let id = IdentityKey::generate().unwrap();
+        let sig = id.sign(b"original message");
+        let err = IdentityKey::verify(&id.public(), b"tampered message", &sig)
+            .expect_err("tampered verify must fail");
+        assert!(matches!(err, crate::error::CoreError::Identity(_)));
+    }
+
+    #[test]
+    fn verify_rejects_wrong_pubkey() {
+        let signer = IdentityKey::generate().unwrap();
+        let other = IdentityKey::generate().unwrap();
+        let sig = signer.sign(b"msg");
+        IdentityKey::verify(&other.public(), b"msg", &sig)
+            .expect_err("verify under wrong pubkey must fail");
     }
 }
