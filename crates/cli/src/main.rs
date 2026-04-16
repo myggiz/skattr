@@ -1,0 +1,143 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Myggiz AB
+
+//! `skattr` — the command-line client.
+//!
+//! All subcommands are thin wrappers over `skattr_core::Daemon`. In
+//! Phase 0 each subcommand acknowledges the request and prints a
+//! placeholder message; implementations land in Phase 1.
+
+#![forbid(unsafe_code)]
+#![warn(missing_docs)]
+
+use std::path::PathBuf;
+
+use anyhow::Result;
+use clap::{Parser, Subcommand};
+
+/// `skattr` command-line interface.
+#[derive(Debug, Parser)]
+#[command(
+    name = "skattr",
+    version,
+    about = "Skattr: metadata-resistant encrypted messaging over Tor.",
+    long_about = None,
+)]
+struct Cli {
+    /// Path to config file. Defaults to `~/.config/skattr/config.toml`.
+    #[arg(long, global = true)]
+    config: Option<PathBuf>,
+
+    /// JSON output (for scripting).
+    #[arg(long, global = true)]
+    json: bool,
+
+    /// Subcommand.
+    #[command(subcommand)]
+    cmd: Command,
+}
+
+/// Top-level subcommands.
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Generate a new identity and seed phrase.
+    Init,
+    /// Restore an identity from a BIP39 seed phrase.
+    Restore {
+        /// Space-separated seed phrase (quoted).
+        seed: String,
+    },
+    /// Start the daemon (Tor bootstrap + onion publish + accept loop).
+    Daemon {
+        /// Detach to a background process after startup.
+        #[arg(long)]
+        detach: bool,
+    },
+    /// Generate a single-use invite link.
+    Invite {
+        /// Render as a QR code (requires the `qr` feature, enabled by default).
+        #[arg(long)]
+        qr: bool,
+    },
+    /// Consume an invite link to add a contact.
+    Add {
+        /// `skattr://invite/v1#…` URL.
+        link: String,
+    },
+    /// List known contacts.
+    Contacts,
+    /// Send a text message to a contact.
+    Send {
+        /// Contact identifier (display name or hex prefix of identity pubkey).
+        contact: String,
+        /// Message body.
+        text: String,
+    },
+    /// Tail incoming messages.
+    Tail {
+        /// Only from this contact.
+        contact: Option<String>,
+    },
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "skattr_cli=info,skattr_core=info,warn".into()),
+        )
+        .init();
+
+    let cli = Cli::parse();
+    match cli.cmd {
+        Command::Init => init().await,
+        Command::Restore { seed } => restore(&seed).await,
+        Command::Daemon { detach } => daemon(detach).await,
+        Command::Invite { qr } => invite(qr).await,
+        Command::Add { link } => add(&link).await,
+        Command::Contacts => contacts().await,
+        Command::Send { contact, text } => send(&contact, &text).await,
+        Command::Tail { contact } => tail(contact.as_deref()).await,
+    }
+}
+
+async fn init() -> Result<()> {
+    println!("skattr init: not yet implemented (Phase 0 scaffolding).");
+    Ok(())
+}
+
+async fn restore(_seed: &str) -> Result<()> {
+    println!("skattr restore: not yet implemented.");
+    Ok(())
+}
+
+async fn daemon(_detach: bool) -> Result<()> {
+    println!("skattr daemon: not yet implemented.");
+    Ok(())
+}
+
+async fn invite(_qr: bool) -> Result<()> {
+    println!("skattr invite: not yet implemented.");
+    Ok(())
+}
+
+async fn add(_link: &str) -> Result<()> {
+    println!("skattr add: not yet implemented.");
+    Ok(())
+}
+
+async fn contacts() -> Result<()> {
+    println!("skattr contacts: not yet implemented.");
+    Ok(())
+}
+
+async fn send(_contact: &str, _text: &str) -> Result<()> {
+    println!("skattr send: not yet implemented.");
+    Ok(())
+}
+
+async fn tail(_contact: Option<&str>) -> Result<()> {
+    println!("skattr tail: not yet implemented.");
+    Ok(())
+}

@@ -1,0 +1,82 @@
+[package]
+name = "skattr-core"
+description = "Skattr protocol library: identity, transport, MLS, storage, delivery."
+license = "GPL-3.0-or-later"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+name = "skattr_core"
+
+[dependencies]
+# Async
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+
+# Crypto
+ed25519-dalek = { workspace = true }
+x25519-dalek = { workspace = true }
+chacha20poly1305 = { workspace = true }
+argon2 = { workspace = true }
+hkdf = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
+rand_core = { workspace = true }
+zeroize = { workspace = true }
+subtle = { workspace = true }
+
+# Encoding
+bip39 = { workspace = true }
+ciborium = { workspace = true }
+serde = { workspace = true }
+serde_bytes = { workspace = true }
+serde-big-array = { workspace = true }
+toml = { workspace = true }
+base32 = { workspace = true }
+base64 = { workspace = true }
+hex = { workspace = true }
+
+# Storage
+rusqlite = { workspace = true }
+age = { workspace = true }
+
+# Transport
+snow = { workspace = true }
+arti-client = { workspace = true }
+tor-hsservice = { workspace = true }
+tor-rtcompat = { workspace = true }
+
+# MLS
+openmls = { workspace = true }
+openmls_traits = { workspace = true }
+openmls_rust_crypto = { workspace = true }
+
+# Error / logging / misc
+thiserror = { workspace = true }
+tracing = { workspace = true }
+directories = { workspace = true }
+
+# Optional: QR rendering
+qrcode = { workspace = true, optional = true }
+# Optional: fuzzing harness support
+arbitrary = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+proptest = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+
+[features]
+default = ["qr"]
+qr = ["dep:qrcode"]
+fuzzing = ["dep:arbitrary"]
+test-harness = []
+
+[lints]
+workspace = true

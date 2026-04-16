@@ -1,0 +1,28 @@
+[package]
+name = "skattr-cli"
+description = "Skattr command-line client."
+license = "GPL-3.0-or-later"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "skattr"
+path = "src/main.rs"
+
+[dependencies]
+skattr-core = { path = "../core" }
+
+tokio = { workspace = true }
+futures = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+directories = { workspace = true }
+serde = { workspace = true }
+
+[lints]
+workspace = true

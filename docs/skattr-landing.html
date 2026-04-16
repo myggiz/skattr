@@ -1,0 +1,1198 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Skattr — A messenger that knows nothing about you</title>
+<meta name="description" content="Private messaging without the middleman. No phone number, no central server, no metadata harvesting. End-to-end encrypted conversations routed through Tor." />
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT@9..144,300..900,0..100&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+
+<style>
+:root {
+  --bg: #f2ede0;
+  --bg-alt: #ebe4d1;
+  --bg-deep: #1a1815;
+  --ink: #141414;
+  --ink-soft: #3a3a3a;
+  --ink-mute: #6b6b6b;
+  --rule: #141414;
+  --rule-soft: #c9c0a8;
+  --accent: #b84726;
+  --accent-deep: #8a3419;
+  --accent-soft: #e5d4c5;
+  --max: 1240px;
+  --gutter: clamp(1.25rem, 4vw, 3rem);
+  --serif: "Fraunces", Georgia, serif;
+  --sans: "Instrument Sans", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, monospace;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html { scroll-behavior: smooth; -webkit-font-smoothing: antialiased; }
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 17px;
+  line-height: 1.55;
+  font-feature-settings: "ss01", "ss02";
+  overflow-x: hidden;
+}
+
+a { color: inherit; text-decoration: none; }
+a:hover { color: var(--accent); }
+
+.wrap {
+  max-width: var(--max);
+  margin: 0 auto;
+  padding-left: var(--gutter);
+  padding-right: var(--gutter);
+}
+
+.mono { font-family: var(--mono); font-size: 0.88em; letter-spacing: -0.01em; }
+.serif { font-family: var(--serif); }
+.eyebrow {
+  font-family: var(--mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  color: var(--ink-mute);
+  font-weight: 500;
+}
+
+/* ============ NAV ============ */
+.nav {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  background: var(--bg);
+  border-bottom: 1px solid var(--rule);
+}
+.nav-inner {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 18px var(--gutter);
+  max-width: var(--max);
+  margin: 0 auto;
+}
+.brand {
+  display: flex; align-items: baseline; gap: 10px;
+  font-family: var(--serif);
+  font-weight: 500;
+  font-size: 22px;
+  letter-spacing: -0.02em;
+}
+.brand .dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--accent);
+  display: inline-block;
+  transform: translateY(-2px);
+}
+.brand .mark {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-mute);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  margin-left: 4px;
+}
+.nav-links {
+  display: flex; gap: 28px;
+  font-size: 14px;
+}
+.nav-links a { color: var(--ink-soft); }
+@media (max-width: 680px) {
+  .nav-links { display: none; }
+}
+
+/* ============ HERO ============ */
+.hero {
+  padding: clamp(70px, 12vw, 140px) 0 clamp(60px, 10vw, 110px);
+  border-bottom: 1px solid var(--rule);
+  position: relative;
+  overflow: hidden;
+}
+.hero-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 60px;
+  align-items: end;
+}
+@media (min-width: 900px) {
+  .hero-grid { grid-template-columns: 1.3fr 1fr; gap: 80px; }
+}
+.hero h1 {
+  font-family: var(--serif);
+  font-weight: 340;
+  font-size: clamp(44px, 8vw, 108px);
+  line-height: 0.96;
+  letter-spacing: -0.035em;
+  margin-top: 22px;
+  font-variation-settings: "SOFT" 30, "opsz" 120;
+}
+.hero h1 em {
+  font-style: italic;
+  color: var(--accent);
+  font-variation-settings: "SOFT" 100, "opsz" 120;
+  font-weight: 360;
+}
+.hero .sub {
+  font-size: clamp(17px, 1.6vw, 20px);
+  color: var(--ink-soft);
+  max-width: 48ch;
+  margin-top: 28px;
+  line-height: 1.5;
+}
+.hero-meta {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--ink-mute);
+  line-height: 1.7;
+}
+.hero-meta .row { display: flex; justify-content: space-between; border-bottom: 1px dashed var(--rule-soft); padding: 10px 0; }
+.hero-meta .row:last-child { border-bottom: none; }
+.hero-meta .row span:last-child { color: var(--ink); font-weight: 500; }
+
+.hero-cta {
+  display: flex; gap: 18px; align-items: center; flex-wrap: wrap;
+  margin-top: 44px;
+}
+.btn {
+  display: inline-flex; align-items: center; gap: 10px;
+  padding: 14px 22px;
+  font-family: var(--sans);
+  font-size: 15px;
+  font-weight: 500;
+  border: 1px solid var(--ink);
+  background: var(--ink);
+  color: var(--bg);
+  transition: background .15s, color .15s;
+  cursor: pointer;
+}
+.btn:hover { background: var(--accent); border-color: var(--accent); color: var(--bg); }
+.btn.ghost { background: transparent; color: var(--ink); }
+.btn.ghost:hover { background: var(--ink); color: var(--bg); }
+.btn .arr { font-family: var(--mono); }
+
+/* Animated marquee strip */
+.strip {
+  border-top: 1px solid var(--rule);
+  border-bottom: 1px solid var(--rule);
+  overflow: hidden;
+  background: var(--bg-alt);
+  font-family: var(--mono);
+  font-size: 13px;
+  white-space: nowrap;
+}
+.strip-inner {
+  display: inline-block;
+  padding: 12px 0;
+  animation: slide 52s linear infinite;
+}
+.strip span { padding: 0 36px; color: var(--ink-soft); }
+.strip span::before { content: "// "; color: var(--accent); }
+@keyframes slide { from { transform: translateX(0); } to { transform: translateX(-50%); } }
+
+/* ============ SECTIONS ============ */
+section { padding: clamp(80px, 10vw, 130px) 0; border-bottom: 1px solid var(--rule); }
+section h2 {
+  font-family: var(--serif);
+  font-weight: 340;
+  font-size: clamp(36px, 5vw, 64px);
+  line-height: 1.02;
+  letter-spacing: -0.03em;
+  margin-top: 14px;
+  max-width: 18ch;
+  font-variation-settings: "SOFT" 30, "opsz" 100;
+}
+section h2 em { font-style: italic; color: var(--accent); }
+.lead {
+  font-size: clamp(17px, 1.3vw, 19px);
+  color: var(--ink-soft);
+  max-width: 62ch;
+  margin-top: 26px;
+  line-height: 1.55;
+}
+
+/* ============ PILLARS ============ */
+.pillars { background: var(--bg); }
+.pillars-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0;
+  margin-top: 70px;
+  border-top: 1px solid var(--rule);
+}
+@media (min-width: 760px) { .pillars-grid { grid-template-columns: repeat(3, 1fr); } }
+
+.pillar {
+  border-bottom: 1px solid var(--rule);
+  padding: 44px 32px 48px 0;
+  position: relative;
+}
+@media (min-width: 760px) {
+  .pillar { border-bottom: none; border-right: 1px solid var(--rule); padding: 44px 36px 36px 36px; }
+  .pillar:first-child { padding-left: 0; }
+  .pillar:last-child { border-right: none; padding-right: 0; }
+}
+.pillar .num {
+  font-family: var(--mono); font-size: 11px; color: var(--accent);
+  letter-spacing: 0.12em; text-transform: uppercase;
+}
+.pillar h3 {
+  font-family: var(--serif);
+  font-size: 30px;
+  font-weight: 380;
+  letter-spacing: -0.02em;
+  margin-top: 18px;
+  line-height: 1.1;
+  font-variation-settings: "SOFT" 50;
+}
+.pillar p {
+  margin-top: 16px;
+  color: var(--ink-soft);
+  font-size: 15.5px;
+  line-height: 1.58;
+}
+
+/* ============ HOW IT WORKS ============ */
+.how { background: var(--bg-alt); }
+.diagram {
+  margin-top: 70px;
+  border: 1px solid var(--rule);
+  background: var(--bg);
+  padding: clamp(24px, 4vw, 56px);
+  font-family: var(--mono);
+  font-size: clamp(11px, 1.1vw, 13.5px);
+  line-height: 1.75;
+  overflow-x: auto;
+  white-space: pre;
+  color: var(--ink-soft);
+}
+.diagram .label {
+  color: var(--accent);
+  font-weight: 500;
+}
+.diagram .highlight {
+  background: var(--accent-soft);
+  color: var(--ink);
+  padding: 2px 4px;
+  font-weight: 500;
+}
+.diagram-caption {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 24px;
+  margin-top: 48px;
+}
+@media (min-width: 800px) { .diagram-caption { grid-template-columns: 1fr 1fr; gap: 60px; } }
+.diagram-caption h4 {
+  font-family: var(--serif); font-size: 22px; font-weight: 400;
+  letter-spacing: -0.01em; margin-bottom: 10px;
+}
+.diagram-caption p { color: var(--ink-soft); font-size: 15.5px; }
+
+/* ============ MATRIX ============ */
+.matrix { background: var(--bg); }
+.matrix-wrap {
+  margin-top: 60px;
+  border-top: 2px solid var(--rule);
+  border-bottom: 2px solid var(--rule);
+  overflow-x: auto;
+}
+table.compare {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 760px;
+}
+table.compare th, table.compare td {
+  text-align: left;
+  padding: 16px 14px;
+  border-bottom: 1px solid var(--rule-soft);
+  vertical-align: middle;
+  font-size: 14px;
+}
+table.compare thead th {
+  font-family: var(--mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--ink-mute);
+  font-weight: 500;
+  border-bottom: 1px solid var(--rule);
+  padding-top: 22px;
+  padding-bottom: 22px;
+  background: var(--bg);
+  vertical-align: bottom;
+}
+table.compare thead th.ours {
+  color: var(--accent);
+  position: relative;
+}
+table.compare thead th.ours::after {
+  content: "";
+  position: absolute;
+  inset: auto 8px 0 8px;
+  height: 3px;
+  background: var(--accent);
+}
+table.compare tbody th {
+  font-family: var(--sans);
+  font-weight: 500;
+  color: var(--ink);
+  font-size: 14.5px;
+  padding-left: 0;
+  width: 30%;
+}
+table.compare td {
+  text-align: center;
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--ink-soft);
+  white-space: nowrap;
+}
+table.compare td.ours {
+  background: var(--accent-soft);
+  color: var(--accent-deep);
+  font-weight: 500;
+}
+td .mark { font-size: 16px; display: inline-block; line-height: 1; }
+td .mark.yes { color: var(--accent); }
+td .mark.partial { color: var(--ink-soft); opacity: 0.7; }
+td .mark.no { color: var(--ink-mute); opacity: 0.4; }
+td .note { font-size: 11px; color: var(--ink-mute); display: block; margin-top: 2px; white-space: normal; }
+
+.matrix-legend {
+  display: flex; flex-wrap: wrap; gap: 32px;
+  margin-top: 32px;
+  font-family: var(--mono); font-size: 12px; color: var(--ink-mute);
+}
+.matrix-legend strong { color: var(--ink); margin-right: 8px; }
+
+.matrix-note {
+  margin-top: 30px;
+  font-size: 15px;
+  color: var(--ink-soft);
+  max-width: 72ch;
+  border-left: 2px solid var(--accent);
+  padding: 4px 0 4px 18px;
+  font-style: italic;
+  font-family: var(--serif);
+  font-size: 17px;
+  line-height: 1.55;
+}
+
+/* ============ CLAIMS ============ */
+.claims { background: var(--bg-alt); }
+.claims-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 48px;
+  margin-top: 70px;
+}
+@media (min-width: 900px) { .claims-grid { grid-template-columns: 1fr 1fr; gap: 70px; } }
+.claims-col h3 {
+  font-family: var(--serif); font-size: 30px; font-weight: 380;
+  letter-spacing: -0.02em; padding-bottom: 20px; border-bottom: 1px solid var(--rule);
+}
+.claims-col ul { list-style: none; margin-top: 26px; }
+.claims-col li {
+  padding: 18px 0;
+  border-bottom: 1px dashed var(--rule-soft);
+  display: grid;
+  grid-template-columns: 28px 1fr;
+  gap: 16px;
+  font-size: 15.5px;
+  line-height: 1.55;
+}
+.claims-col li:last-child { border-bottom: none; }
+.claims-col li .sym {
+  font-family: var(--mono); font-size: 14px; font-weight: 500;
+  color: var(--accent);
+  padding-top: 2px;
+}
+.claims-col.nope li .sym { color: var(--ink-mute); }
+.claims-col li strong { display: block; margin-bottom: 4px; font-weight: 600; }
+.claims-col li p { color: var(--ink-soft); margin: 0; }
+
+/* ============ TECH ============ */
+.tech { background: var(--bg); }
+.tech-grid {
+  display: grid; grid-template-columns: 1fr; gap: 60px;
+  margin-top: 70px;
+}
+@media (min-width: 900px) { .tech-grid { grid-template-columns: 1fr 1fr; gap: 80px; } }
+
+.stack {
+  border: 1px solid var(--rule);
+  padding: 0;
+}
+.stack dt {
+  font-family: var(--mono); font-size: 11px; text-transform: uppercase;
+  letter-spacing: 0.12em; color: var(--ink-mute);
+  padding: 16px 22px 4px;
+}
+.stack dd {
+  padding: 0 22px 18px;
+  font-size: 15px;
+  border-bottom: 1px solid var(--rule-soft);
+  color: var(--ink);
+  line-height: 1.5;
+}
+.stack dd:last-child { border-bottom: none; }
+.stack dd .v { font-family: var(--mono); font-weight: 500; color: var(--accent); }
+.stack dd small { color: var(--ink-mute); display: block; margin-top: 4px; font-size: 13px; }
+
+.principles { margin-top: 0; }
+.principles h3 {
+  font-family: var(--serif); font-size: 28px; font-weight: 380;
+  letter-spacing: -0.02em;
+}
+.principles p { margin-top: 18px; color: var(--ink-soft); font-size: 15.5px; }
+.principles .stamps {
+  display: flex; flex-wrap: wrap; gap: 10px; margin-top: 30px;
+}
+.stamp {
+  font-family: var(--mono); font-size: 11px; text-transform: uppercase;
+  letter-spacing: 0.08em; padding: 7px 12px;
+  border: 1px solid var(--ink); color: var(--ink);
+}
+
+/* ============ STATUS ============ */
+.status {
+  background: var(--bg-deep);
+  color: var(--bg);
+  border-bottom: none;
+  position: relative;
+  overflow: hidden;
+}
+.status::before {
+  content: "";
+  position: absolute; inset: 0;
+  background-image: radial-gradient(circle at 20% 30%, rgba(184,71,38,0.15), transparent 40%),
+                    radial-gradient(circle at 80% 70%, rgba(184,71,38,0.08), transparent 50%);
+  pointer-events: none;
+}
+.status-inner { position: relative; z-index: 1; }
+.status h2 { color: var(--bg); max-width: 16ch; }
+.status .lead { color: #c4beb1; max-width: 58ch; }
+.status .timeline {
+  display: grid; grid-template-columns: 1fr; gap: 0;
+  margin-top: 70px;
+  border-top: 1px solid rgba(255,255,255,0.2);
+}
+@media (min-width: 780px) { .status .timeline { grid-template-columns: repeat(4, 1fr); } }
+.phase {
+  padding: 26px 26px 30px 0;
+  border-bottom: 1px solid rgba(255,255,255,0.15);
+  position: relative;
+}
+@media (min-width: 780px) {
+  .phase { border-bottom: none; border-right: 1px solid rgba(255,255,255,0.15); padding: 30px 26px; }
+  .phase:first-child { padding-left: 0; }
+  .phase:last-child { border-right: none; padding-right: 0; }
+}
+.phase .n {
+  font-family: var(--mono); font-size: 11px; color: var(--accent);
+  letter-spacing: 0.1em;
+}
+.phase h4 {
+  font-family: var(--serif); font-size: 22px; font-weight: 400;
+  margin-top: 14px; letter-spacing: -0.01em;
+}
+.phase p {
+  color: #c4beb1; font-size: 14px; margin-top: 12px; line-height: 1.5;
+}
+.phase .dot {
+  display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+  background: var(--ink-mute); margin-right: 8px; vertical-align: middle;
+}
+.phase.current .dot {
+  background: var(--accent);
+  box-shadow: 0 0 0 0 var(--accent);
+  animation: pulse 2s infinite;
+}
+@keyframes pulse {
+  0% { box-shadow: 0 0 0 0 rgba(184,71,38,0.7); }
+  70% { box-shadow: 0 0 0 8px rgba(184,71,38,0); }
+  100% { box-shadow: 0 0 0 0 rgba(184,71,38,0); }
+}
+
+.status .follow {
+  display: grid; grid-template-columns: 1fr; gap: 18px; align-items: center;
+  margin-top: 70px;
+  padding-top: 50px;
+  border-top: 1px solid rgba(255,255,255,0.2);
+}
+@media (min-width: 720px) { .status .follow { grid-template-columns: 1fr auto; } }
+.status .follow h3 {
+  font-family: var(--serif); font-size: 28px; font-weight: 380;
+  letter-spacing: -0.02em;
+}
+.status .follow p { color: #c4beb1; margin-top: 8px; font-size: 15px; max-width: 48ch; }
+.status .btn { background: var(--accent); border-color: var(--accent); color: var(--bg); }
+.status .btn:hover { background: var(--bg); color: var(--ink); border-color: var(--bg); }
+
+/* ============ FOOTER ============ */
+footer {
+  background: var(--bg-deep);
+  color: #8a8374;
+  padding: 40px 0 50px;
+  font-size: 13px;
+  font-family: var(--mono);
+}
+.foot {
+  display: grid; grid-template-columns: 1fr; gap: 24px;
+  align-items: start;
+}
+@media (min-width: 780px) { .foot { grid-template-columns: 2fr 1fr 1fr 1fr; } }
+.foot h5 {
+  font-family: var(--mono); font-size: 10px; text-transform: uppercase;
+  letter-spacing: 0.14em; color: #645e50; margin-bottom: 14px; font-weight: 500;
+}
+.foot a { display: block; padding: 4px 0; color: #c4beb1; }
+.foot a:hover { color: var(--accent); }
+.foot .copy { color: #645e50; margin-top: 12px; line-height: 1.6; max-width: 38ch; }
+
+/* ============ reveal animations ============ */
+.reveal { opacity: 0; transform: translateY(24px); transition: opacity .8s ease, transform .8s ease; }
+.reveal.in { opacity: 1; transform: none; }
+.stagger > * { opacity: 0; transform: translateY(16px); transition: opacity .6s ease, transform .6s ease; }
+.stagger.in > * { opacity: 1; transform: none; }
+.stagger.in > *:nth-child(1) { transition-delay: 0ms; }
+.stagger.in > *:nth-child(2) { transition-delay: 90ms; }
+.stagger.in > *:nth-child(3) { transition-delay: 180ms; }
+.stagger.in > *:nth-child(4) { transition-delay: 270ms; }
+
+@media (prefers-reduced-motion: reduce) {
+  .reveal, .stagger > * { opacity: 1; transform: none; transition: none; }
+  .strip-inner { animation: none; }
+  .phase.current .dot { animation: none; }
+}
+</style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav class="nav">
+  <div class="nav-inner">
+    <a href="#" class="brand">
+      <span class="dot"></span>
+      Skattr
+      <span class="mark">v0 · draft</span>
+    </a>
+    <div class="nav-links">
+      <a href="#how">How it works</a>
+      <a href="#compare">Compare</a>
+      <a href="#tech">Technical</a>
+      <a href="#status">Status</a>
+    </div>
+  </div>
+</nav>
+
+<!-- HERO -->
+<header class="hero">
+  <div class="wrap hero-grid">
+    <div>
+      <div class="eyebrow">An open protocol · Desktop · Pre-alpha</div>
+      <h1 class="reveal">
+        A messenger<br/>
+        that knows <em>nothing</em><br/>
+        about you.
+      </h1>
+      <p class="sub reveal">
+        No phone number. No central server. No account database. Just end-to-end encrypted
+        conversations routed through Tor — designed to leave as little trace as possible.
+      </p>
+      <div class="hero-cta reveal">
+        <a href="#compare" class="btn">Compare to other apps <span class="arr">→</span></a>
+        <a href="#how" class="btn ghost">How it works</a>
+      </div>
+    </div>
+    <div class="hero-meta">
+      <div class="row"><span>Identity</span><span>Ed25519 keypair, on your device</span></div>
+      <div class="row"><span>Transport</span><span>Tor v3 onion services</span></div>
+      <div class="row"><span>Encryption</span><span>MLS · RFC 9420</span></div>
+      <div class="row"><span>Handshake</span><span>Noise_XK + PSK</span></div>
+      <div class="row"><span>Servers we run</span><span>Zero</span></div>
+      <div class="row"><span>Phone number</span><span>Not collected</span></div>
+      <div class="row"><span>Email</span><span>Not collected</span></div>
+      <div class="row"><span>Source</span><span>Open, auditable, reproducible</span></div>
+    </div>
+  </div>
+</header>
+
+<!-- MARQUEE -->
+<div class="strip">
+  <div class="strip-inner">
+    <span>no phone number</span><span>no account server</span><span>no metadata hoarding</span>
+    <span>no advertising</span><span>no tracking</span><span>no rent-seeking</span>
+    <span>no crypto token</span><span>no cloud sync of your contacts</span>
+    <span>no phone number</span><span>no account server</span><span>no metadata hoarding</span>
+    <span>no advertising</span><span>no tracking</span><span>no rent-seeking</span>
+    <span>no crypto token</span><span>no cloud sync of your contacts</span>
+  </div>
+</div>
+
+<!-- PILLARS -->
+<section class="pillars">
+  <div class="wrap">
+    <div class="eyebrow">The pitch, in three sentences</div>
+    <h2 class="reveal">Nothing to compromise. <em>Nothing</em> to subpoena. Nothing to harvest.</h2>
+
+    <div class="pillars-grid stagger">
+      <div class="pillar">
+        <div class="num">01 / Identity</div>
+        <h3>No account to compromise.</h3>
+        <p>
+          There's nothing to sign up for because there's no service to sign up to.
+          Your identity is a cryptographic key that lives on your device. If nobody
+          has your data, nobody can leak it.
+        </p>
+      </div>
+      <div class="pillar">
+        <div class="num">02 / Infrastructure</div>
+        <h3>No server to subpoena.</h3>
+        <p>
+          We don't run a central server. The architecture doesn't have one — it can't.
+          There's no single point to compel, compromise, deplatform, or shut down.
+          The protocol outlives the people running it.
+        </p>
+      </div>
+      <div class="pillar">
+        <div class="num">03 / Metadata</div>
+        <h3>No metadata to harvest.</h3>
+        <p>
+          Messages travel through Tor. Contact exchange happens out of band.
+          Even the infrastructure that helps deliver offline messages sees ciphertext
+          addressed to a hash — never people talking to people.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- HOW IT WORKS -->
+<section class="how" id="how">
+  <div class="wrap">
+    <div class="eyebrow">How it works</div>
+    <h2 class="reveal">A message's journey, <em>without</em> a middleman.</h2>
+    <p class="lead reveal">
+      When both parties are online, messages flow directly peer-to-peer over Tor.
+      When the recipient is offline, an optional mailbox — which you run, a friend runs,
+      or a volunteer runs — holds the ciphertext until they come back. No operator
+      ever sees contents, sender identity, or who the recipient really is.
+    </p>
+
+    <div class="diagram reveal">
+<span class="label">// both online — direct delivery</span>
+
+  <span class="highlight">You</span>                                                            <span class="highlight">Them</span>
+   │                                                               │
+   ├─── Tor circuit ─── .onion rendezvous ─── Tor circuit ─────────┤
+   │                                                               │
+   │   Noise_XK handshake    ◄──────────►   Noise_XK handshake     │
+   │                                                               │
+   │   MLS encrypted message ─────────────►   MLS decrypt           │
+   │                                    ◄─── ACK                   │
+
+
+<span class="label">// recipient offline — store &amp; forward via mailbox</span>
+
+  <span class="highlight">You</span>                    <span class="highlight">Mailbox</span>                                 <span class="highlight">Them</span>
+   │                        │                                       │
+   ├── Tor ────────────────►│   DEPOSIT { hash(them), ciphertext }  │
+   │                        │                                       │
+   │                        │◄────────── Tor ────────── FETCH ──────┤
+   │                        │            (authenticated by signing  │
+   │                        │             a per-session nonce)      │
+   │                        │                                       │
+   │                        │── ciphertext ────────────────────────►│
+
+  mailbox sees:  recipient_hash, ciphertext, timing
+  mailbox does not see:  sender identity, contents, recipient identity
+    </div>
+
+    <div class="diagram-caption">
+      <div>
+        <h4>What's encrypted, what isn't.</h4>
+        <p>
+          Message contents, group metadata, attachments, and reactions are all
+          sealed inside MLS before they leave your device. Only group members
+          can decrypt them — not the mailbox, not the network, not us.
+        </p>
+      </div>
+      <div>
+        <h4>What the mailbox actually sees.</h4>
+        <p>
+          A ciphertext blob and a recipient hash — no plaintext, no sender identity,
+          no social graph. Self-host your own on a Raspberry Pi and even that
+          limited visibility belongs to you.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- COMPARE -->
+<section class="matrix" id="compare">
+  <div class="wrap">
+    <div class="eyebrow">Where Skattr sits</div>
+    <h2 class="reveal">How it compares, <em>honestly</em>.</h2>
+    <p class="lead reveal">
+      Every private messenger is a set of tradeoffs. This table shows what each app
+      actually does — not marketing claims. We included the places other apps are
+      better than us, because you'll notice if we didn't.
+    </p>
+
+    <div class="matrix-wrap reveal">
+      <table class="compare">
+        <thead>
+          <tr>
+            <th></th>
+            <th class="ours">Skattr</th>
+            <th>Signal</th>
+            <th>Session</th>
+            <th>SimpleX</th>
+            <th>Briar</th>
+            <th>WhatsApp</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th>No phone number</th>
+            <td class="ours"><span class="mark yes">●</span></td>
+            <td><span class="mark no">○</span></td>
+            <td><span class="mark yes">●</span></td>
+            <td><span class="mark yes">●</span></td>
+            <td><span class="mark yes">●</span></td>
+            <td><span class="mark no">○</span></td>
+          </tr>
+          <tr>
+            <th>No central server<span class="note">No single company holds infrastructure you depend on</span></th>
+            <td class="ours"><span class="mark yes">●</span></td>
+            <td><span class="mark no">○</span></td>
+            <td><span class="mark partial">◐</span><span class="note">Decentralized node network</span></td>
+            <td><span class="mark partial">◐</span><span class="note">Relays run by SimpleX</span></td>
+            <td><span class="mark yes">●</span></td>
+            <td><span class="mark no">○</span></td>
+          </tr>
+          <tr>
+            <th>End-to-end encrypted</th>
+            <td class="ours"><span class="mark yes">●</span></td>
+            <td><span class="mark yes">●</span></td>
+            <td><span class="mark yes">●</span></td>
+            <td><span class="mark yes">●</span></td>
+            <td><span class="mark yes">●</span></td>
+            <td><span class="mark yes">●</span></td>
+          </tr>
+          <tr>
+            <th>Forward secrecy</th>
+            <td class="ours"><span class="mark yes">●</span><span class="note">MLS</span></td>
+            <td><span class="mark yes">●</span><span class="note">Double Ratchet</span></td>
+            <td><span class="mark no">○</span><span class="note">Dropped for offline</span></td>
+            <td><span class="mark yes">●</span></td>
+            <td><span class="mark yes">●</span></td>
+            <td><span class="mark yes">●</span><span class="note">Double Ratchet</span></td>
+          </tr>
+          <tr>
+            <th>Network-level anonymity<span class="note">Is your IP / traffic pattern protected?</span></th>
+            <td class="ours"><span class="mark yes">●</span><span class="note">Tor onion services</span></td>
+            <td><span class="mark no">○</span><span class="note">Direct to servers</span></td>
+            <td><span class="mark yes">●</span><span class="note">Onion routing</span></td>
+            <td><span class="mark partial">◐</span><span class="note">Tor optional</span></td>
+            <td><span class="mark yes">●</span><span class="note">Tor</span></td>
+            <td><span class="mark no">○</span></td>
+          </tr>
+          <tr>
+            <th>Offline delivery<span class="note">Works when only one party is online</span></th>
+            <td class="ours"><span class="mark yes">●</span></td>
+            <td><span class="mark yes">●</span></td>
+            <td><span class="mark yes">●</span></td>
+            <td><span class="mark yes">●</span></td>
+            <td><span class="mark no">○</span><span class="note">Both must be online</span></td>
+            <td><span class="mark yes">●</span></td>
+          </tr>
+          <tr>
+            <th>Open source</th>
+            <td class="ours"><span class="mark yes">●</span></td>
+            <td><span class="mark yes">●</span></td>
+            <td><span class="mark yes">●</span></td>
+            <td><span class="mark yes">●</span></td>
+            <td><span class="mark yes">●</span></td>
+            <td><span class="mark no">○</span><span class="note">Protocol only</span></td>
+          </tr>
+          <tr>
+            <th>Independently audited</th>
+            <td class="ours"><span class="mark no">○</span><span class="note">Planned pre-1.0</span></td>
+            <td><span class="mark yes">●</span></td>
+            <td><span class="mark yes">●</span></td>
+            <td><span class="mark yes">●</span></td>
+            <td><span class="mark yes">●</span></td>
+            <td><span class="mark yes">●</span><span class="note">Signal protocol</span></td>
+          </tr>
+          <tr>
+            <th>Self-hostable infrastructure</th>
+            <td class="ours"><span class="mark yes">●</span></td>
+            <td><span class="mark no">○</span></td>
+            <td><span class="mark no">○</span></td>
+            <td><span class="mark yes">●</span></td>
+            <td><span class="mark yes">●</span></td>
+            <td><span class="mark no">○</span></td>
+          </tr>
+          <tr>
+            <th>No cryptocurrency required</th>
+            <td class="ours"><span class="mark yes">●</span></td>
+            <td><span class="mark yes">●</span></td>
+            <td><span class="mark no">○</span><span class="note">Staked node model</span></td>
+            <td><span class="mark yes">●</span></td>
+            <td><span class="mark yes">●</span></td>
+            <td><span class="mark yes">●</span></td>
+          </tr>
+          <tr>
+            <th>Groups ≥ 10 members</th>
+            <td class="ours"><span class="mark yes">●</span><span class="note">Up to 50, MLS</span></td>
+            <td><span class="mark yes">●</span></td>
+            <td><span class="mark yes">●</span></td>
+            <td><span class="mark yes">●</span></td>
+            <td><span class="mark partial">◐</span><span class="note">Small groups</span></td>
+            <td><span class="mark yes">●</span></td>
+          </tr>
+          <tr>
+            <th>Desktop native</th>
+            <td class="ours"><span class="mark yes">●</span><span class="note">Primary platform</span></td>
+            <td><span class="mark partial">◐</span><span class="note">Linked to phone</span></td>
+            <td><span class="mark yes">●</span></td>
+            <td><span class="mark yes">●</span></td>
+            <td><span class="mark partial">◐</span></td>
+            <td><span class="mark partial">◐</span><span class="note">Web / linked</span></td>
+          </tr>
+          <tr>
+            <th>Mobile supported</th>
+            <td class="ours"><span class="mark no">○</span><span class="note">Post-1.0 goal</span></td>
+            <td><span class="mark yes">●</span></td>
+            <td><span class="mark yes">●</span></td>
+            <td><span class="mark yes">●</span></td>
+            <td><span class="mark yes">●</span><span class="note">Android only</span></td>
+            <td><span class="mark yes">●</span></td>
+          </tr>
+          <tr>
+            <th>Metadata hidden from infrastructure<span class="note">Who talks to whom, when, how much</span></th>
+            <td class="ours"><span class="mark yes">●</span><span class="note">Sealed sender + Tor</span></td>
+            <td><span class="mark partial">◐</span><span class="note">Sealed sender; servers see patterns</span></td>
+            <td><span class="mark yes">●</span></td>
+            <td><span class="mark yes">●</span><span class="note">Unidirectional queues</span></td>
+            <td><span class="mark yes">●</span></td>
+            <td><span class="mark no">○</span></td>
+          </tr>
+          <tr>
+            <th>Business model requires your data</th>
+            <td class="ours"><span class="mark no">○</span><span class="note">No business model needed</span></td>
+            <td><span class="mark no">○</span><span class="note">Donations / grants</span></td>
+            <td><span class="mark no">○</span><span class="note">Token</span></td>
+            <td><span class="mark no">○</span><span class="note">Donations / enterprise</span></td>
+            <td><span class="mark no">○</span><span class="note">Grants</span></td>
+            <td><span class="mark yes">●</span><span class="note">Meta ecosystem</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="matrix-legend">
+      <span><strong class="mono">●</strong> yes</span>
+      <span><strong class="mono">◐</strong> partial / with caveats</span>
+      <span><strong class="mono">○</strong> no</span>
+    </div>
+
+    <p class="matrix-note reveal">
+      Signal is an excellent app for most people. If "strong end-to-end encryption with a
+      mainstream UX" covers your threat model, use Signal — we're not trying to replace it.
+      Skattr is for the cases where "strong end-to-end encryption" isn't enough and you
+      need stronger metadata guarantees, no phone number tied to your identity, and no
+      central service in the loop.
+    </p>
+  </div>
+</section>
+
+<!-- CLAIMS -->
+<section class="claims">
+  <div class="wrap">
+    <div class="eyebrow">Trust, calibrated</div>
+    <h2 class="reveal">What we claim. What we <em>don't</em>.</h2>
+    <p class="lead reveal">
+      Privacy apps that overclaim age badly. Here's the honest split between what the
+      design actually guarantees and what remains your responsibility.
+    </p>
+
+    <div class="claims-grid">
+      <div class="claims-col">
+        <h3>What we claim</h3>
+        <ul>
+          <li>
+            <span class="sym">+</span>
+            <div>
+              <strong>Message contents stay between you and the recipient.</strong>
+              <p>End-to-end encrypted with MLS. Nothing in the middle — not the mailbox, not the network — ever sees plaintext.</p>
+            </div>
+          </li>
+          <li>
+            <span class="sym">+</span>
+            <div>
+              <strong>Network observers can't see who you're talking to.</strong>
+              <p>All traffic goes over Tor v3 onion services. Your IP doesn't leak to the recipient; theirs doesn't leak to you.</p>
+            </div>
+          </li>
+          <li>
+            <span class="sym">+</span>
+            <div>
+              <strong>No central service holds your identity or social graph.</strong>
+              <p>There is no central service. Identity is a keypair on your device. Contact discovery doesn't happen through anyone.</p>
+            </div>
+          </li>
+          <li>
+            <span class="sym">+</span>
+            <div>
+              <strong>Forward secrecy and post-compromise security.</strong>
+              <p>Past messages stay private even if keys are later compromised. Groups recover security after a member is removed.</p>
+            </div>
+          </li>
+          <li>
+            <span class="sym">+</span>
+            <div>
+              <strong>Open source and reproducibly built.</strong>
+              <p>Verify that the binary matches the public source, or build it yourself. Nothing hides in release artifacts.</p>
+            </div>
+          </li>
+        </ul>
+      </div>
+
+      <div class="claims-col nope">
+        <h3>What we don't claim</h3>
+        <ul>
+          <li>
+            <span class="sym">−</span>
+            <div>
+              <strong>We don't call it "anonymous."</strong>
+              <p>Your mailbox operator knows when you come online and how often. We say <em>metadata-minimizing</em> and <em>pseudonymous</em> — those we can defend.</p>
+            </div>
+          </li>
+          <li>
+            <span class="sym">−</span>
+            <div>
+              <strong>We don't protect against a compromised device.</strong>
+              <p>If someone has your unlocked laptop, they have your messages. We can help with panic-wipe and encrypted storage — we can't defeat physical access.</p>
+            </div>
+          </li>
+          <li>
+            <span class="sym">−</span>
+            <div>
+              <strong>Deletion is cooperative, not enforced.</strong>
+              <p>"Delete for everyone" works if the other client honors it. Like every other E2EE app, we can't reach into someone else's device.</p>
+            </div>
+          </li>
+          <li>
+            <span class="sym">−</span>
+            <div>
+              <strong>We're new and not yet audited.</strong>
+              <p>Pre-1.0 is experimental. An independent audit is scheduled before the first stable release. Until then, don't use this for anything that really matters.</p>
+            </div>
+          </li>
+          <li>
+            <span class="sym">−</span>
+            <div>
+              <strong>We're not trying to replace Signal for most people.</strong>
+              <p>Signal is mature, excellent, and right for most threat models. Skattr is for the cases where Signal isn't enough — not the cases where it already is.</p>
+            </div>
+          </li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- TECH -->
+<section class="tech" id="tech">
+  <div class="wrap">
+    <div class="eyebrow">For technical readers</div>
+    <h2 class="reveal">No novel crypto. <em>Standard</em> primitives, composed carefully.</h2>
+
+    <div class="tech-grid">
+      <dl class="stack reveal">
+        <dt>Identity</dt>
+        <dd>
+          <span class="v">Ed25519</span> keypairs, device-local, passphrase-encrypted at rest with <span class="v">Argon2id + XChaCha20-Poly1305</span>
+          <small>BIP39 seed phrase for recovery</small>
+        </dd>
+        <dt>Transport</dt>
+        <dd>
+          <span class="v">Tor v3</span> onion services via embedded <span class="v">Arti</span>
+          <small>No listening ports exposed to the clearnet</small>
+        </dd>
+        <dt>Authentication</dt>
+        <dd>
+          <span class="v">Noise_XK</span> with optional pre-shared key for first-contact MITM resistance
+          <small>Mutual authentication by identity key</small>
+        </dd>
+        <dt>Messaging</dt>
+        <dd>
+          <span class="v">MLS</span> (RFC 9420) with <span class="v">X25519 / AES-256-GCM / SHA-512 / Ed25519</span>
+          <small>Native group messaging up to 50 members</small>
+        </dd>
+        <dt>Offline delivery</dt>
+        <dd>
+          Signature-authenticated fetch from a <span class="v">mailbox</span> you choose
+          <small>Self-host, friend-host, or pick from a public directory</small>
+        </dd>
+        <dt>Implementation</dt>
+        <dd>
+          <span class="v">Rust</span>, built on <span class="v">OpenMLS</span>, <span class="v">snow</span>, <span class="v">arti-client</span>
+          <small>Memory-safe across the full stack</small>
+        </dd>
+        <dt>Desktop</dt>
+        <dd>
+          <span class="v">Linux · macOS · Windows</span> via Tauri 2
+          <small>Mobile is post-1.0; we'd rather do it right than do it early</small>
+        </dd>
+      </dl>
+
+      <div class="principles reveal">
+        <h3>Design rules we hold ourselves to.</h3>
+        <p>
+          Every decision in Skattr traces back to a short list of rules. When the rules conflict
+          with convenience, the rules win — because the convenience wouldn't matter if the
+          privacy properties didn't hold.
+        </p>
+        <p>
+          No custom cryptographic primitives. No "minor tweaks" to established protocols.
+          No features that require a central trusted party. No telemetry, ever. No dark
+          patterns, especially around security-critical flows like seed phrases and
+          contact exchange. Honest docs — including this page — about what the system
+          does and doesn't protect.
+        </p>
+        <div class="stamps">
+          <span class="stamp">MLS · RFC 9420</span>
+          <span class="stamp">Noise_XK</span>
+          <span class="stamp">Tor v3</span>
+          <span class="stamp">XChaCha20-Poly1305</span>
+          <span class="stamp">Ed25519</span>
+          <span class="stamp">Argon2id</span>
+          <span class="stamp">BIP39</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- STATUS -->
+<section class="status" id="status">
+  <div class="wrap status-inner">
+    <div class="eyebrow" style="color:#8a8374">Where we are</div>
+    <h2 class="reveal">Under construction. <em>Publicly.</em></h2>
+    <p class="lead reveal">
+      Skattr is in early development. The design is specified in public documents; the
+      implementation is in progress. There is no waitlist and no signup — the code and
+      docs are the product right now.
+    </p>
+
+    <div class="timeline">
+      <div class="phase current">
+        <span class="dot"></span>
+        <div class="n">Phase 0–1 · now</div>
+        <h4>Foundation & 1:1 messaging</h4>
+        <p>Identity, transport, Noise handshake, MLS sessions, invite links. CLI-first.</p>
+      </div>
+      <div class="phase">
+        <span class="dot"></span>
+        <div class="n">Phase 2–3</div>
+        <h4>Offline delivery & groups</h4>
+        <p>Mailbox protocol, desktop UI, group messaging up to 50 members, attachments.</p>
+      </div>
+      <div class="phase">
+        <span class="dot"></span>
+        <div class="n">Phase 4</div>
+        <h4>Hardening & audit</h4>
+        <p>External security audit, fuzzing, reproducible builds, beta program.</p>
+      </div>
+      <div class="phase">
+        <span class="dot"></span>
+        <div class="n">Phase 5</div>
+        <h4>Public 1.0</h4>
+        <p>Signed releases, update channel, bug bounty, long-term maintenance plan.</p>
+      </div>
+    </div>
+
+    <div class="follow">
+      <div>
+        <h3>Follow the work.</h3>
+        <p>Protocol specs, design docs, and code are all public. Pull requests and issues welcome.</p>
+      </div>
+      <a href="#" class="btn">Source &amp; docs <span class="arr">→</span></a>
+    </div>
+  </div>
+</section>
+
+<!-- FOOTER -->
+<footer>
+  <div class="wrap foot">
+    <div>
+      <h5>Skattr</h5>
+      <p class="copy">
+        A private messaging protocol and desktop client by <strong>Myggiz</strong>.<br/>
+        Licensed under GPLv3 (client) and AGPLv3 (mailbox).<br/>
+        © 2026 Myggiz AB — Open, free, and free of trackers.
+      </p>
+    </div>
+    <div>
+      <h5>Docs</h5>
+      <a href="#">Design spec</a>
+      <a href="#">Implementation plan</a>
+      <a href="#">Attachment spec</a>
+      <a href="#">Threat model</a>
+    </div>
+    <div>
+      <h5>Code</h5>
+      <a href="#">Core library</a>
+      <a href="#">Desktop client</a>
+      <a href="#">Mailbox server</a>
+      <a href="#">Releases</a>
+    </div>
+    <div>
+      <h5>Contact</h5>
+      <a href="#">security@</a>
+      <a href="#">Community chat</a>
+      <a href="#">Responsible disclosure</a>
+      <a href="#">GPG key</a>
+    </div>
+  </div>
+</footer>
+
+<script>
+(function() {
+  var io = new IntersectionObserver(function(entries) {
+    entries.forEach(function(e) {
+      if (e.isIntersecting) {
+        e.target.classList.add('in');
+        io.unobserve(e.target);
+      }
+    });
+  }, { threshold: 0.12, rootMargin: "0px 0px -40px 0px" });
+
+  document.querySelectorAll('.reveal, .stagger').forEach(function(el) { io.observe(el); });
+
+  // Trigger hero reveals immediately
+  setTimeout(function() {
+    document.querySelectorAll('.hero .reveal').forEach(function(el, i) {
+      setTimeout(function() { el.classList.add('in'); }, i * 120);
+    });
+  }, 80);
+})();
+</script>
+
+</body>
+</html>

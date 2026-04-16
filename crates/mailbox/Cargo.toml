@@ -1,0 +1,41 @@
+[package]
+name = "skattr-mailbox"
+description = "Skattr mailbox server: Tor-hosted offline delivery for encrypted blobs."
+license = "AGPL-3.0-or-later"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "skattr-mailbox"
+path = "src/main.rs"
+
+[dependencies]
+skattr-core = { path = "../core" }
+
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+
+serde = { workspace = true }
+toml = { workspace = true }
+ciborium = { workspace = true }
+
+rusqlite = { workspace = true }
+rand = { workspace = true }
+rand_core = { workspace = true }
+sha2 = { workspace = true }
+ed25519-dalek = { workspace = true }
+
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+directories = { workspace = true }
+
+[lints]
+workspace = true
