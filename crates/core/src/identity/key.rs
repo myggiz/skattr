@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Myggiz AB
 
+#![cfg_attr(test, allow(clippy::unwrap_used))]
+
 //! Ed25519 identity keys, public keys, and detached signatures.
 
 use core::fmt;
 
+use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -85,10 +88,8 @@ impl IdentityKey {
     /// Public half of the keypair.
     #[must_use]
     pub fn public(&self) -> PublicKey {
-        // Placeholder: real implementation computes Ed25519 public from secret.
-        // Kept as a deterministic stub so downstream signatures compile.
-        let _ = &self.secret;
-        todo!("compute Ed25519 public key from secret scalar")
+        let signing = SigningKey::from_bytes(&self.secret);
+        PublicKey(signing.verifying_key().to_bytes())
     }
 
     /// Sign an arbitrary message.
@@ -122,5 +123,26 @@ impl IdentityKey {
 impl fmt::Debug for IdentityKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("IdentityKey(<redacted>)")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn public_is_32_bytes_and_stable() {
+        let id = IdentityKey::generate().unwrap();
+        let pk1 = id.public();
+        let pk2 = id.public();
+        assert_eq!(pk1.0.len(), 32);
+        assert_eq!(pk1, pk2, "public() must be deterministic for the same secret");
+    }
+
+    #[test]
+    fn distinct_secrets_produce_distinct_pubkeys() {
+        let a = IdentityKey::generate().unwrap();
+        let b = IdentityKey::generate().unwrap();
+        assert_ne!(a.public(), b.public());
     }
 }
