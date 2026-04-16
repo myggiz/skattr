@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Myggiz AB
 
+#![cfg_attr(test, allow(clippy::unwrap_used))]
+
 //! Domain-separated key derivation helpers.
 //!
 //! Every HKDF use in Skattr passes a distinct `info` string so that
