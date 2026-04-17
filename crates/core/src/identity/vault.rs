@@ -99,6 +99,44 @@ pub(crate) struct VaultFile {
     pub ciphertext: Vec<u8>,
 }
 
+/// Durably write `vf` to `path`: serialize → tempfile → fsync tempfile →
+/// rename over target → fsync parent directory.
+///
+/// Renames on POSIX are atomic within a single filesystem, but durability
+/// against power loss additionally requires fsync on both the tempfile
+/// and the parent directory (so the directory entry's inode change is
+/// on platter before we report success).
+fn atomic_write_vault(path: &Path, vf: &VaultFile) -> Result<()> {
+    let mut buf = Vec::new();
+    ciborium::ser::into_writer(vf, &mut buf)
+        .map_err(|e| CoreError::CborEncode(e.to_string()))?;
+
+    let tmp_path = path.with_extension("vault.tmp");
+    {
+        let mut f = std::fs::File::create(&tmp_path)?;
+        use std::io::Write;
+        f.write_all(&buf)?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp_path, path)?;
+
+    // Fsync parent directory so the rename itself is durable.
+    if let Some(parent) = path.parent() {
+        // On Linux the directory must be opened read-only; on macOS
+        // File::open works too. Windows has no directory fsync — skip.
+        #[cfg(unix)]
+        {
+            let dir = std::fs::File::open(parent)?;
+            dir.sync_all()?;
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = parent; // suppress unused on non-unix
+        }
+    }
+    Ok(())
+}
+
 /// On-disk encrypted identity container.
 #[derive(Debug)]
 pub struct Vault {
@@ -150,14 +188,7 @@ impl Vault {
             ciphertext,
         };
 
-        let mut buf = Vec::new();
-        ciborium::ser::into_writer(&vf, &mut buf)
-            .map_err(|e| CoreError::CborEncode(e.to_string()))?;
-
-        // Atomic write: write to a sibling tempfile, then rename.
-        let tmp_path = path.with_extension("vault.tmp");
-        std::fs::write(&tmp_path, &buf)?;
-        std::fs::rename(&tmp_path, path)?;
+        atomic_write_vault(path, &vf)?;
 
         Ok(Self {
             path: path.to_path_buf(),
@@ -456,5 +487,15 @@ mod tests {
         assert!(matches!(err, crate::error::CoreError::Identity(_)));
         // File untouched: old passphrase still works.
         Vault::open(&path, "real").unwrap();
+    }
+
+    #[test]
+    fn no_tempfile_sidecar_after_create() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("id.vault");
+        let id = IdentityKey::generate().unwrap();
+        Vault::create(&path, id, "pw").unwrap();
+        let sidecar = path.with_extension("vault.tmp");
+        assert!(!sidecar.exists(), "tempfile sidecar must be gone after create");
     }
 }
