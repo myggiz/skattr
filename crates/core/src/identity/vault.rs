@@ -113,8 +113,7 @@ pub(crate) struct VaultFile {
 /// on platter before we report success).
 fn atomic_write_vault(path: &Path, vf: &VaultFile) -> Result<()> {
     let mut buf = Vec::new();
-    ciborium::ser::into_writer(vf, &mut buf)
-        .map_err(|e| CoreError::CborEncode(e.to_string()))?;
+    ciborium::ser::into_writer(vf, &mut buf).map_err(|e| CoreError::CborEncode(e.to_string()))?;
 
     let tmp_path = path.with_extension("vault.tmp");
     {
@@ -554,7 +553,10 @@ mod tests {
         let id = IdentityKey::generate().unwrap();
         Vault::create(&path, id, "pw").unwrap();
         let sidecar = path.with_extension("vault.tmp");
-        assert!(!sidecar.exists(), "tempfile sidecar must be gone after create");
+        assert!(
+            !sidecar.exists(),
+            "tempfile sidecar must be gone after create"
+        );
     }
 
     #[test]

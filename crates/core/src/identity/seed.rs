@@ -36,10 +36,7 @@ impl Seed {
             .map_err(|e| CoreError::Identity(format!("bip39 encode: {e}")))?;
         // The joined phrase lives on the heap; wipe it before drop.
         let phrase = zeroize::Zeroizing::new(m.to_string());
-        let words: Vec<String> = phrase
-            .split_whitespace()
-            .map(str::to_owned)
-            .collect();
+        let words: Vec<String> = phrase.split_whitespace().map(str::to_owned).collect();
         Ok(Mnemonic { words })
     }
 
