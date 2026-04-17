@@ -18,8 +18,8 @@
 use std::path::Path;
 
 use argon2::{Algorithm, Argon2, Params, Version};
-use chacha20poly1305::aead::{Aead, KeyInit, Payload};
-use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
+use chacha20poly1305::aead::{Aead, AeadInPlace, KeyInit, Payload};
+use chacha20poly1305::{Key, Tag, XChaCha20Poly1305, XNonce};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
@@ -216,41 +216,24 @@ impl Vault {
         let cipher = XChaCha20Poly1305::new(Key::from_slice(aead_key.as_ref()));
         let nonce = XNonce::from_slice(&vf.nonce);
 
-        let plaintext = cipher
-            .decrypt(
-                nonce,
-                Payload {
-                    msg: &vf.ciphertext,
-                    aad: VAULT_AAD,
-                },
-            )
-            .map_err(|_| {
-                CoreError::Identity(
-                    "aead decrypt failed (wrong passphrase or tampered vault)".into(),
-                )
-            })?;
+        // Decrypt in-place directly into a Zeroizing<[u8; 32]>. The wire
+        // format is `ct_body (32 bytes) || poly1305_tag (16 bytes)`; we
+        // split them explicitly so AEAD output never touches a Vec<u8>.
+        const POLY1305_TAG_LEN: usize = 16;
+        const PLAINTEXT_LEN: usize = 32;
+        if vf.ciphertext.len() != PLAINTEXT_LEN + POLY1305_TAG_LEN {
+            return Err(CoreError::Identity(
+                "ciphertext has unexpected length".into(),
+            ));
+        }
+        let (ct_body, tag_bytes) = vf.ciphertext.split_at(PLAINTEXT_LEN);
+        let tag = Tag::from_slice(tag_bytes);
 
-        // Move the plaintext into a Zeroizing-guarded fixed-size buffer before
-        // handing the bytes off to IdentityKey. Any copy the optimizer leaves
-        // on the stack is tied to this binding's drop.
-        let secret = {
-            if plaintext.len() != 32 {
-                // Zero the oversized Vec before bailing so no secret-ish bytes linger.
-                let mut p = plaintext;
-                use zeroize::Zeroize;
-                p.zeroize();
-                return Err(CoreError::Identity(
-                    "decrypted secret has unexpected length".into(),
-                ));
-            }
-            let mut buf = Zeroizing::new([0u8; 32]);
-            buf.copy_from_slice(&plaintext);
-            // Zero the Vec now that its contents are copied out.
-            let mut p = plaintext;
-            use zeroize::Zeroize;
-            p.zeroize();
-            buf
-        };
+        let mut secret = Zeroizing::new([0u8; 32]);
+        secret.copy_from_slice(ct_body);
+        cipher
+            .decrypt_in_place_detached(nonce, VAULT_AAD, secret.as_mut(), tag)
+            .map_err(|_| CoreError::Identity("verification failed".into()))?;
 
         Ok((
             Self {
@@ -557,6 +540,28 @@ mod tests {
             !sidecar.exists(),
             "tempfile sidecar must be gone after create"
         );
+    }
+
+    #[test]
+    fn open_rejects_wrong_length_ciphertext() {
+        // Synthesize a vault whose ciphertext is the wrong length. Must
+        // be rejected BEFORE attempting AEAD decrypt.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("bad_len.vault");
+        let id = IdentityKey::generate().unwrap();
+        Vault::create(&path, id, "pw").unwrap();
+
+        // Mutate the CBOR: strip two ciphertext bytes.
+        let bytes = std::fs::read(&path).unwrap();
+        let mut vf: VaultFile = ciborium::de::from_reader(&bytes[..]).unwrap();
+        vf.ciphertext.truncate(vf.ciphertext.len() - 2);
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&vf, &mut buf).unwrap();
+        std::fs::write(&path, buf).unwrap();
+
+        let err = Vault::open(&path, "pw")
+            .expect_err("truncated ciphertext must fail");
+        assert!(matches!(err, crate::error::CoreError::Identity(_)));
     }
 
     #[test]
