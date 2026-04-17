@@ -18,6 +18,9 @@
 use std::path::Path;
 
 use argon2::{Algorithm, Argon2, Params, Version};
+use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
@@ -101,8 +104,62 @@ pub struct Vault {
 
 impl Vault {
     /// Create a new vault at `path`, encrypting `identity` under `passphrase`.
-    pub fn create(_path: &Path, _identity: IdentityKey, _passphrase: &str) -> Result<Self> {
-        todo!("Task 10")
+    ///
+    /// Fails if the file already exists — callers must delete the old
+    /// vault first (explicit user intent).
+    pub fn create(path: &Path, identity: IdentityKey, passphrase: &str) -> Result<Self> {
+        if path.exists() {
+            return Err(CoreError::Identity(format!(
+                "vault already exists at {}",
+                path.display()
+            )));
+        }
+
+        let kdf = KdfParams::canonical();
+        let mut salt = [0u8; 16];
+        let mut nonce_bytes = [0u8; 24];
+        rand::rngs::OsRng.fill_bytes(&mut salt);
+        rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
+
+        let aead_key = derive_aead_key(passphrase, &salt, &kdf)?;
+        let cipher = XChaCha20Poly1305::new(Key::from_slice(aead_key.as_ref()));
+        let nonce = XNonce::from_slice(&nonce_bytes);
+
+        let secret_bytes = identity.into_bytes();
+        let ciphertext = cipher
+            .encrypt(
+                nonce,
+                Payload {
+                    msg: &secret_bytes,
+                    aad: VAULT_AAD,
+                },
+            )
+            .map_err(|_| CoreError::Identity("aead encrypt failed".into()))?;
+        // `secret_bytes` is [u8; 32]; explicitly zero before it falls out of scope.
+        {
+            use zeroize::Zeroize;
+            let mut s = secret_bytes;
+            s.zeroize();
+        }
+
+        let vf = VaultFile {
+            v: VAULT_VERSION,
+            kdf,
+            salt,
+            nonce: nonce_bytes,
+            ciphertext,
+        };
+
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&vf, &mut buf)
+            .map_err(|e| CoreError::CborEncode(e.to_string()))?;
+
+        // Atomic write: write to a sibling tempfile, then rename.
+        let tmp_path = path.with_extension("vault.tmp");
+        std::fs::write(&tmp_path, &buf)?;
+        std::fs::rename(&tmp_path, path)?;
+
+        Ok(Self { path: path.to_path_buf() })
     }
 
     /// Open an existing vault, decrypting with `passphrase`.
@@ -155,5 +212,25 @@ mod tests {
         let a = derive_aead_key("correct horse battery staple", &salt, &kdf).unwrap();
         let b = derive_aead_key("incorrect horse battery staple", &salt, &kdf).unwrap();
         assert_ne!(a.as_ref(), b.as_ref());
+    }
+
+    #[test]
+    fn create_writes_a_valid_cbor_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("identity.vault");
+        let id = IdentityKey::generate().unwrap();
+        let _vault = Vault::create(&path, id, "hunter2").unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let _parsed: VaultFile = ciborium::de::from_reader(&bytes[..]).unwrap();
+    }
+
+    #[test]
+    fn create_refuses_existing_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("exists.vault");
+        std::fs::write(&path, b"placeholder").unwrap();
+        let id = IdentityKey::generate().unwrap();
+        let err = Vault::create(&path, id, "pw").expect_err("must refuse to overwrite");
+        assert!(matches!(err, crate::error::CoreError::Identity(_)));
     }
 }
