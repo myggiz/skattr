@@ -303,4 +303,60 @@ mod tests {
         let err = Vault::open(&path, "pw").expect_err("unknown version must fail");
         assert!(matches!(err, crate::error::CoreError::Identity(_)));
     }
+
+    #[test]
+    fn any_ciphertext_bitflip_is_detected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("id.vault");
+        let id = IdentityKey::generate().unwrap();
+        Vault::create(&path, id, "pw").unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        let mut vf: VaultFile = ciborium::de::from_reader(&bytes[..]).unwrap();
+
+        // Flip the first ciphertext bit.
+        vf.ciphertext[0] ^= 0x01;
+
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&vf, &mut buf).unwrap();
+        std::fs::write(&path, buf).unwrap();
+
+        let err = Vault::open(&path, "pw").expect_err("bit-flip must fail");
+        assert!(matches!(err, crate::error::CoreError::Identity(_)));
+    }
+
+    #[test]
+    fn aad_mismatch_is_detected() {
+        // Synthesize a vault whose ciphertext was encrypted under a different AAD
+        // and verify it fails open. Easiest: build the VaultFile directly with an
+        // AEAD-encrypted blob that used the wrong AAD.
+        use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+        use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
+
+        let kdf = KdfParams::canonical();
+        let salt = [0xAA; 16];
+        let nonce_bytes = [0xBB; 24];
+        let aead_key = super::derive_aead_key("pw", &salt, &kdf).unwrap();
+        let cipher = XChaCha20Poly1305::new(Key::from_slice(aead_key.as_ref()));
+        let nonce = XNonce::from_slice(&nonce_bytes);
+        let ciphertext = cipher
+            .encrypt(nonce, Payload { msg: &[0u8; 32], aad: b"different-aad" })
+            .unwrap();
+
+        let vf = VaultFile {
+            v: VAULT_VERSION,
+            kdf,
+            salt,
+            nonce: nonce_bytes,
+            ciphertext,
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("bad_aad.vault");
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&vf, &mut buf).unwrap();
+        std::fs::write(&path, buf).unwrap();
+
+        let err = Vault::open(&path, "pw").expect_err("AAD mismatch must fail");
+        assert!(matches!(err, crate::error::CoreError::Identity(_)));
+    }
 }
