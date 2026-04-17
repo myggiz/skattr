@@ -160,6 +160,8 @@ fn read_passphrase(prompt: &str) -> Result<zeroize::Zeroizing<String>> {
 }
 
 async fn restore(seed_phrase: &str) -> Result<()> {
+    use anyhow::Context;
+
     let config = Config::defaults()?;
     std::fs::create_dir_all(&config.data_dir)?;
     let vault_path = config.data_dir.join("identity.vault");
@@ -171,8 +173,16 @@ async fn restore(seed_phrase: &str) -> Result<()> {
         );
     }
 
-    let mnemonic = Mnemonic::parse(seed_phrase);
-    let seed = Seed::from_mnemonic(&mnemonic)?;
+    // Parse the phrase through a Zeroizing copy so our local String
+    // does not linger. (The clap-owned argv slice is still exposed via
+    // /proc/<pid>/cmdline — users should avoid passing secrets on the
+    // command line; this is documented in the README.)
+    let mnemonic = {
+        let owned = zeroize::Zeroizing::new(seed_phrase.to_string());
+        Mnemonic::parse(&owned)
+    };
+    let seed = Seed::from_mnemonic(&mnemonic)
+        .context("invalid seed phrase (check word list and checksum)")?;
     let identity = IdentityKey::from_seed(&seed)?;
     let pubkey_hex = identity.public().to_hex();
 
