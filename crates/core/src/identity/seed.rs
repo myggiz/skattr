@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Myggiz AB
 
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
 //! BIP39 seed phrases and 32-byte seed material.
 //!
 //! The [`Seed`] is the user's root of trust. It is displayed to the user
@@ -9,7 +11,7 @@
 
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use crate::error::Result;
+use crate::error::{CoreError, Result};
 
 /// A 32-byte seed, used as HKDF input for identity key derivation.
 ///
@@ -30,8 +32,10 @@ impl Seed {
 
     /// Render as a BIP39 24-word mnemonic.
     pub fn to_mnemonic(&self) -> Result<Mnemonic> {
-        let _ = &self.bytes;
-        todo!("encode 32 bytes as BIP39 (wordlist=English)")
+        let m = bip39::Mnemonic::from_entropy_in(bip39::Language::English, &self.bytes)
+            .map_err(|e| CoreError::Identity(format!("bip39 encode: {e}")))?;
+        let words: Vec<String> = m.to_string().split_whitespace().map(str::to_owned).collect();
+        Ok(Mnemonic { words })
     }
 
     /// Recover a seed from a 24-word BIP39 mnemonic.
@@ -81,5 +85,28 @@ impl Mnemonic {
             .map(|w| w.to_ascii_lowercase())
             .collect();
         Self { words }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn to_mnemonic_yields_24_words() {
+        let seed = Seed::generate().unwrap();
+        let mnemonic = seed.to_mnemonic().unwrap();
+        assert_eq!(mnemonic.words().len(), 24, "32-byte seed → 24-word BIP39");
+    }
+
+    #[test]
+    fn known_vector_abandon_x23_art_yields_zero_seed() {
+        // BIP39 test vector: 23×"abandon" + "art" encodes 32 zero bytes.
+        let phrase = "abandon abandon abandon abandon abandon abandon abandon abandon \
+                      abandon abandon abandon abandon abandon abandon abandon abandon \
+                      abandon abandon abandon abandon abandon abandon abandon art";
+        let m = Mnemonic::parse(phrase);
+        let seed = Seed::from_mnemonic(&m).unwrap();
+        assert_eq!(seed.as_bytes(), &[0u8; 32]);
     }
 }
