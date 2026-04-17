@@ -30,12 +30,16 @@ const VAULT_AAD: &[u8] = b"skattr-vault-v1";
 
 /// Argon2id parameters baked into the vault file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct KdfParams {
     /// Memory cost in KiB.
+    #[serde(rename = "m_kib")]
     pub m_kib: u32,
     /// Iteration count (passes).
+    #[serde(rename = "t")]
     pub t: u32,
     /// Parallelism (lanes).
+    #[serde(rename = "p")]
     pub p: u32,
 }
 
@@ -48,16 +52,22 @@ impl KdfParams {
 
 /// CBOR wire form of the vault file.
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct VaultFile {
     /// Format version.
+    #[serde(rename = "v")]
     pub v: u8,
     /// KDF parameters that were used.
+    #[serde(rename = "kdf")]
     pub kdf: KdfParams,
     /// Per-vault Argon2id salt.
+    #[serde(rename = "salt")]
     pub salt: [u8; 16],
     /// XChaCha20-Poly1305 nonce (24 bytes).
+    #[serde(rename = "nonce")]
     pub nonce: [u8; 24],
     /// AEAD ciphertext of the 32-byte identity secret (with 16-byte tag).
+    #[serde(rename = "ciphertext")]
     pub ciphertext: Vec<u8>,
 }
 
