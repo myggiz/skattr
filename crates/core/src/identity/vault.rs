@@ -159,8 +159,42 @@ impl Vault {
     }
 
     /// Open an existing vault, decrypting with `passphrase`.
-    pub fn open(_path: &Path, _passphrase: &str) -> Result<(Self, IdentityKey)> {
-        todo!("Task 11")
+    pub fn open(path: &Path, passphrase: &str) -> Result<(Self, IdentityKey)> {
+        let bytes = std::fs::read(path)?;
+        let vf: VaultFile = ciborium::de::from_reader(&bytes[..])
+            .map_err(|e| CoreError::CborDecode(e.to_string()))?;
+
+        if vf.v != VAULT_VERSION {
+            return Err(CoreError::Identity(format!(
+                "unsupported vault version {} (expected {VAULT_VERSION})",
+                vf.v
+            )));
+        }
+
+        let aead_key = derive_aead_key(passphrase, &vf.salt, &vf.kdf)?;
+        let cipher = XChaCha20Poly1305::new(Key::from_slice(aead_key.as_ref()));
+        let nonce = XNonce::from_slice(&vf.nonce);
+
+        let plaintext = cipher
+            .decrypt(
+                nonce,
+                Payload {
+                    msg: &vf.ciphertext,
+                    aad: VAULT_AAD,
+                },
+            )
+            .map_err(|_| CoreError::Identity("aead decrypt failed (wrong passphrase or tampered vault)".into()))?;
+
+        let secret: [u8; 32] = plaintext
+            .as_slice()
+            .try_into()
+            .map_err(|_| CoreError::Identity("decrypted secret has unexpected length".into()))?;
+        // Zeroize the intermediate Vec.
+        let mut plaintext = plaintext;
+        use zeroize::Zeroize;
+        plaintext.zeroize();
+
+        Ok((Self { path: path.to_path_buf() }, IdentityKey::from_bytes(secret)))
     }
 
     /// Re-encrypt the vault under a new passphrase, atomically.
@@ -227,6 +261,46 @@ mod tests {
         std::fs::write(&path, b"placeholder").unwrap();
         let id = IdentityKey::generate().unwrap();
         let err = Vault::create(&path, id, "pw").expect_err("must refuse to overwrite");
+        assert!(matches!(err, crate::error::CoreError::Identity(_)));
+    }
+
+    #[test]
+    fn open_recovers_the_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("id.vault");
+        let id = IdentityKey::generate().unwrap();
+        let expected = id.public();
+        Vault::create(&path, id, "pw").unwrap();
+        let (_vault, opened) = Vault::open(&path, "pw").unwrap();
+        assert_eq!(opened.public(), expected);
+    }
+
+    #[test]
+    fn open_rejects_wrong_passphrase() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("id.vault");
+        let id = IdentityKey::generate().unwrap();
+        Vault::create(&path, id, "correct").unwrap();
+        let err = Vault::open(&path, "wrong").expect_err("wrong passphrase must fail");
+        assert!(matches!(err, crate::error::CoreError::Identity(_)));
+    }
+
+    #[test]
+    fn open_rejects_wrong_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("id.vault");
+        let id = IdentityKey::generate().unwrap();
+        Vault::create(&path, id, "pw").unwrap();
+
+        // Manually rewrite the file with v = 99.
+        let bytes = std::fs::read(&path).unwrap();
+        let mut vf: VaultFile = ciborium::de::from_reader(&bytes[..]).unwrap();
+        vf.v = 99;
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&vf, &mut buf).unwrap();
+        std::fs::write(&path, buf).unwrap();
+
+        let err = Vault::open(&path, "pw").expect_err("unknown version must fail");
         assert!(matches!(err, crate::error::CoreError::Identity(_)));
     }
 }
