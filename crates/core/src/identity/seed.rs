@@ -34,7 +34,11 @@ impl Seed {
     pub fn to_mnemonic(&self) -> Result<Mnemonic> {
         let m = bip39::Mnemonic::from_entropy_in(bip39::Language::English, &self.bytes)
             .map_err(|e| CoreError::Identity(format!("bip39 encode: {e}")))?;
-        let words: Vec<String> = m.to_string().split_whitespace().map(str::to_owned).collect();
+        let words: Vec<String> = m
+            .to_string()
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect();
         Ok(Mnemonic { words })
     }
 
@@ -124,7 +128,11 @@ mod tests {
             let seed = Seed::generate().unwrap();
             let mnemonic = seed.to_mnemonic().unwrap();
             let back = Seed::from_mnemonic(&mnemonic).unwrap();
-            assert_eq!(seed.as_bytes(), back.as_bytes(), "round-trip must be identity");
+            assert_eq!(
+                seed.as_bytes(),
+                back.as_bytes(),
+                "round-trip must be identity"
+            );
         }
     }
 
@@ -137,7 +145,9 @@ mod tests {
              abandon abandon abandon abandon abandon abandon abandon abandon \
              abandon abandon abandon abandon abandon abandon abandon abandon",
         );
-        let err = Seed::from_mnemonic(&bad).err().expect("bad checksum must fail");
+        let err = Seed::from_mnemonic(&bad)
+            .err()
+            .expect("bad checksum must fail");
         assert!(matches!(err, crate::error::CoreError::Identity(_)));
     }
 

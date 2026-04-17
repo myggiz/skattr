@@ -143,7 +143,10 @@ mod tests {
         let pk1 = id.public();
         let pk2 = id.public();
         assert_eq!(pk1.0.len(), 32);
-        assert_eq!(pk1, pk2, "public() must be deterministic for the same secret");
+        assert_eq!(
+            pk1, pk2,
+            "public() must be deterministic for the same secret"
+        );
     }
 
     #[test]

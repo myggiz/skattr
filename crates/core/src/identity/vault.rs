@@ -70,7 +70,11 @@ pub(crate) struct KdfParams {
 impl KdfParams {
     /// The canonical parameters (`m=64 MiB, t=3, p=4`).
     pub(crate) const fn canonical() -> Self {
-        Self { m_kib: 64 * 1024, t: 3, p: 4 }
+        Self {
+            m_kib: 64 * 1024,
+            t: 3,
+            p: 4,
+        }
     }
 }
 
@@ -155,7 +159,9 @@ impl Vault {
         std::fs::write(&tmp_path, &buf)?;
         std::fs::rename(&tmp_path, path)?;
 
-        Ok(Self { path: path.to_path_buf() })
+        Ok(Self {
+            path: path.to_path_buf(),
+        })
     }
 
     /// Open an existing vault, decrypting with `passphrase`.
@@ -183,7 +189,11 @@ impl Vault {
                     aad: VAULT_AAD,
                 },
             )
-            .map_err(|_| CoreError::Identity("aead decrypt failed (wrong passphrase or tampered vault)".into()))?;
+            .map_err(|_| {
+                CoreError::Identity(
+                    "aead decrypt failed (wrong passphrase or tampered vault)".into(),
+                )
+            })?;
 
         let secret: [u8; 32] = plaintext
             .as_slice()
@@ -194,7 +204,12 @@ impl Vault {
         use zeroize::Zeroize;
         plaintext.zeroize();
 
-        Ok((Self { path: path.to_path_buf() }, IdentityKey::from_bytes(secret)))
+        Ok((
+            Self {
+                path: path.to_path_buf(),
+            },
+            IdentityKey::from_bytes(secret),
+        ))
     }
 
     /// Re-encrypt the vault under a new passphrase.
@@ -229,7 +244,11 @@ mod tests {
     fn vault_file_cbor_roundtrips() {
         let v = VaultFile {
             v: VAULT_VERSION,
-            kdf: KdfParams { m_kib: 65536, t: 3, p: 4 },
+            kdf: KdfParams {
+                m_kib: 65536,
+                t: 3,
+                p: 4,
+            },
             salt: [0xA5; 16],
             nonce: [0x5A; 24],
             ciphertext: vec![1, 2, 3, 4, 5, 6, 7, 8],
@@ -358,7 +377,13 @@ mod tests {
         let cipher = XChaCha20Poly1305::new(Key::from_slice(aead_key.as_ref()));
         let nonce = XNonce::from_slice(&nonce_bytes);
         let ciphertext = cipher
-            .encrypt(nonce, Payload { msg: &[0u8; 32], aad: b"different-aad" })
+            .encrypt(
+                nonce,
+                Payload {
+                    msg: &[0u8; 32],
+                    aad: b"different-aad",
+                },
+            )
             .unwrap();
 
         let vf = VaultFile {
