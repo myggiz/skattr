@@ -258,24 +258,52 @@ impl Vault {
 
     /// Re-encrypt the vault under a new passphrase.
     ///
-    /// **Not crash-safe.** Between the old file's removal and the new file's
-    /// write there is a window where the vault does not exist on disk. A
-    /// crash in that window renders the vault unrecoverable without the
-    /// user's seed phrase.
+    /// Crash-safe: writes the new vault to a sidecar, fsyncs, then
+    /// renames over the existing path atomically. A crash at any point
+    /// either leaves the old vault intact (rename hasn't landed) or the
+    /// new one (rename has landed) — never neither.
     ///
     /// Takes `&mut self` to serialize concurrent rewrites at the API
     /// boundary — no `self` field is actually mutated; the mutation is
     /// on-disk.
-    // TODO(phase-1): switch to write-sidecar + atomic rename so a crash
-    // mid-rewrite leaves the old vault intact.
     pub fn change_passphrase(&mut self, old: &str, new: &str) -> Result<()> {
-        // Decrypt with the old passphrase first; if it fails, don't touch the file.
+        // Decrypt with the old passphrase first; if it fails, don't touch
+        // the file.
         let (_, identity) = Vault::open(&self.path, old)?;
-        // Delete the existing file so `create`'s "refuse to overwrite" guard
-        // doesn't trip. We have the plaintext identity in memory now; if anything
-        // below panics the vault is lost — caller must have a seed-phrase backup.
-        std::fs::remove_file(&self.path)?;
-        let _new = Vault::create(&self.path, identity, new)?;
+
+        // Rebuild a fresh VaultFile under the new passphrase, then write
+        // atomically over the existing path. Fresh salt + nonce per
+        // rewrite fall out of this flow.
+        let kdf = KdfParams::canonical();
+        let mut salt = [0u8; 16];
+        let mut nonce_bytes = [0u8; 24];
+        rand::rngs::OsRng.fill_bytes(&mut salt);
+        rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
+
+        let aead_key = derive_aead_key(new, &salt, &kdf)?;
+        let cipher = XChaCha20Poly1305::new(Key::from_slice(aead_key.as_ref()));
+        let nonce = XNonce::from_slice(&nonce_bytes);
+
+        let secret_bytes = Zeroizing::new(identity.into_bytes());
+        let ciphertext = cipher
+            .encrypt(
+                nonce,
+                Payload {
+                    msg: secret_bytes.as_ref(),
+                    aad: VAULT_AAD,
+                },
+            )
+            .map_err(|_| CoreError::Identity("aead encrypt failed".into()))?;
+
+        let vf = VaultFile {
+            v: VAULT_VERSION,
+            kdf,
+            salt,
+            nonce: nonce_bytes,
+            ciphertext,
+        };
+
+        atomic_write_vault(&self.path, &vf)?;
         Ok(())
     }
 }
@@ -497,5 +525,32 @@ mod tests {
         Vault::create(&path, id, "pw").unwrap();
         let sidecar = path.with_extension("vault.tmp");
         assert!(!sidecar.exists(), "tempfile sidecar must be gone after create");
+    }
+
+    #[test]
+    fn change_passphrase_survives_simulated_new_create_failure() {
+        // Simulate the "disk full during new-vault write" failure by pre-creating
+        // a busy/unwritable sidecar path before change_passphrase. The rename
+        // should fail cleanly and the OLD vault must still be openable.
+        //
+        // We approximate "unwritable sidecar" by pre-creating `.vault.tmp` as
+        // a directory — File::create will fail with IsADirectory on Unix.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("id.vault");
+        let id = IdentityKey::generate().unwrap();
+        let expected_pub = id.public();
+        Vault::create(&path, id, "old").unwrap();
+
+        // Block the sidecar path.
+        std::fs::create_dir(path.with_extension("vault.tmp")).unwrap();
+
+        let (mut vault, _) = Vault::open(&path, "old").unwrap();
+        let err = vault.change_passphrase("old", "new");
+        assert!(err.is_err(), "sidecar conflict must return Err");
+
+        // Unblock and verify the old vault is still intact.
+        std::fs::remove_dir(path.with_extension("vault.tmp")).unwrap();
+        let (_, opened) = Vault::open(&path, "old").unwrap();
+        assert_eq!(opened.public(), expected_pub);
     }
 }
