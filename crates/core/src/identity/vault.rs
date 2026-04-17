@@ -17,9 +17,11 @@
 
 use std::path::Path;
 
+use argon2::{Algorithm, Argon2, Params, Version};
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
-use crate::error::Result;
+use crate::error::{CoreError, Result};
 use crate::identity::IdentityKey;
 
 /// On-disk vault format version. Bumped only via an ADR.
@@ -27,6 +29,25 @@ pub const VAULT_VERSION: u8 = 1;
 
 /// AEAD associated-data binding the ciphertext to this exact format version.
 const VAULT_AAD: &[u8] = b"skattr-vault-v1";
+
+/// Run Argon2id on `passphrase` with `salt` and `kdf` params, producing a
+/// 32-byte AEAD key.
+///
+/// The returned buffer zeros on drop; callers must not stash the raw bytes.
+fn derive_aead_key(
+    passphrase: &str,
+    salt: &[u8; 16],
+    kdf: &KdfParams,
+) -> Result<Zeroizing<[u8; 32]>> {
+    let params = Params::new(kdf.m_kib, kdf.t, kdf.p, Some(32))
+        .map_err(|e| CoreError::Identity(format!("argon2 params: {e}")))?;
+    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    let mut out = Zeroizing::new([0u8; 32]);
+    argon2
+        .hash_password_into(passphrase.as_bytes(), salt, out.as_mut())
+        .map_err(|e| CoreError::Identity(format!("argon2 hash: {e}")))?;
+    Ok(out)
+}
 
 /// Argon2id parameters baked into the vault file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,5 +137,23 @@ mod tests {
         assert_eq!(back.salt, v.salt);
         assert_eq!(back.nonce, v.nonce);
         assert_eq!(back.ciphertext, v.ciphertext);
+    }
+
+    #[test]
+    fn argon2_derive_is_deterministic() {
+        let salt = [0x11; 16];
+        let kdf = KdfParams::canonical();
+        let a = derive_aead_key("correct horse battery staple", &salt, &kdf).unwrap();
+        let b = derive_aead_key("correct horse battery staple", &salt, &kdf).unwrap();
+        assert_eq!(a.as_ref(), b.as_ref());
+    }
+
+    #[test]
+    fn argon2_derive_is_passphrase_sensitive() {
+        let salt = [0x22; 16];
+        let kdf = KdfParams::canonical();
+        let a = derive_aead_key("correct horse battery staple", &salt, &kdf).unwrap();
+        let b = derive_aead_key("incorrect horse battery staple", &salt, &kdf).unwrap();
+        assert_ne!(a.as_ref(), b.as_ref());
     }
 }
