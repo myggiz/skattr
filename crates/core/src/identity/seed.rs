@@ -63,6 +63,14 @@ impl Seed {
     pub(crate) fn as_bytes(&self) -> &[u8; 32] {
         &self.bytes
     }
+
+    /// Construct from raw bytes — test-only. Production code must go
+    /// through `Seed::generate` or `Seed::from_mnemonic` so the entropy
+    /// source stays auditable.
+    #[cfg(test)]
+    pub(crate) fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self { bytes }
+    }
 }
 
 /// A BIP39 mnemonic sequence (typically 24 words).

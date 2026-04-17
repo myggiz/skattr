@@ -205,18 +205,17 @@ mod tests {
 
     #[test]
     fn from_seed_is_domain_separated_from_raw_bytes() {
-        // A seed with the same bytes as a raw secret must NOT produce the same
-        // keypair — if it did, we'd have accidentally skipped HKDF.
-        let bytes = zeroize::Zeroizing::new([0x42u8; 32]);
-        let raw_key = IdentityKey::from_bytes(bytes);
-        // Construct a Seed holding those same bytes. We can't use Seed::from_bytes
-        // (not public), but from_mnemonic on "abandon×24" gives a well-known seed;
-        // simpler: just verify that the HKDF label is actually mixed in by checking
-        // from_seed output length stays 32 (smoke test — the stronger property is
-        // covered by hkdf_is_domain_separated in derive.rs).
-        let seed = crate::identity::Seed::generate().unwrap();
+        // If HKDF were accidentally bypassed (e.g. someone rewrote from_seed
+        // as Self::from_bytes(seed.as_bytes().into())), this test would fail:
+        // the "raw-bytes" and "seed-derived" keys would coincide.
+        let bytes = [0x42u8; 32];
+        let raw_key = IdentityKey::from_bytes(zeroize::Zeroizing::new(bytes));
+        let seed = crate::identity::Seed::from_bytes(bytes);
         let derived = IdentityKey::from_seed(&seed).unwrap();
-        assert_eq!(derived.public().0.len(), 32);
-        drop(raw_key);
+        assert_ne!(
+            raw_key.public(),
+            derived.public(),
+            "from_seed must mix HKDF label; raw-bytes and seed-derived keys must differ"
+        );
     }
 }
