@@ -22,6 +22,9 @@ pub const INFO_IDENTITY_V1: &[u8] = b"skattr-identity-v1";
 /// Storage encryption key derivation: `HKDF(seed, "skattr-storage-v1")`.
 pub const INFO_STORAGE_V1: &[u8] = b"skattr-storage-v1";
 
+/// HS signing-key at-rest encryption: `HKDF(seed, "skattr-hs-storage-v1")`.
+pub const INFO_HS_STORAGE_V1: &[u8] = b"skattr-hs-storage-v1";
+
 /// Transport↔MLS binding: `HKDF(noise_handshake_hash, "skattr-binding-v1")`.
 pub const INFO_TRANSPORT_BINDING_V1: &[u8] = b"skattr-binding-v1";
 
