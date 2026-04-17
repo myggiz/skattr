@@ -125,22 +125,18 @@ impl Vault {
         let cipher = XChaCha20Poly1305::new(Key::from_slice(aead_key.as_ref()));
         let nonce = XNonce::from_slice(&nonce_bytes);
 
-        let secret_bytes = identity.into_bytes();
+        // `Zeroizing<[u8; 32]>` ensures the plaintext secret is wiped when this
+        // binding drops, even on an early-return error path.
+        let secret_bytes = Zeroizing::new(identity.into_bytes());
         let ciphertext = cipher
             .encrypt(
                 nonce,
                 Payload {
-                    msg: &secret_bytes,
+                    msg: secret_bytes.as_ref(),
                     aad: VAULT_AAD,
                 },
             )
             .map_err(|_| CoreError::Identity("aead encrypt failed".into()))?;
-        // `secret_bytes` is [u8; 32]; explicitly zero before it falls out of scope.
-        {
-            use zeroize::Zeroize;
-            let mut s = secret_bytes;
-            s.zeroize();
-        }
 
         let vf = VaultFile {
             v: VAULT_VERSION,
