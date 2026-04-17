@@ -10,10 +10,13 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use skattr_core::daemon::Config;
+use skattr_core::identity::{IdentityKey, Seed, Vault};
 
 /// `skattr` command-line interface.
 #[derive(Debug, Parser)]
@@ -103,8 +106,52 @@ async fn main() -> Result<()> {
 }
 
 async fn init() -> Result<()> {
-    println!("skattr init: not yet implemented (Phase 0 scaffolding).");
+    let config = Config::defaults().map_err(anyhow::Error::from)?;
+    std::fs::create_dir_all(&config.data_dir)?;
+    let vault_path = config.data_dir.join("identity.vault");
+
+    if vault_path.exists() {
+        anyhow::bail!(
+            "identity vault already exists at {}; refusing to overwrite",
+            vault_path.display()
+        );
+    }
+
+    let pw1 = read_passphrase("Choose a passphrase: ")?;
+    let pw2 = read_passphrase("Confirm passphrase: ")?;
+    if pw1 != pw2 {
+        anyhow::bail!("passphrases do not match");
+    }
+
+    let seed = Seed::generate().map_err(anyhow::Error::from)?;
+    let identity = IdentityKey::from_seed(&seed).map_err(anyhow::Error::from)?;
+    let pubkey_hex = identity.public().to_hex();
+
+    Vault::create(&vault_path, identity, &pw1).map_err(anyhow::Error::from)?;
+
+    let mnemonic = seed.to_mnemonic().map_err(anyhow::Error::from)?;
+    let phrase = mnemonic.words().join(" ");
+
+    println!();
+    println!("Identity created.");
+    println!("  public key: {pubkey_hex}");
+    println!("  vault:      {}", vault_path.display());
+    println!();
+    println!("RECOVERY SEED PHRASE — write this down, store it offline:");
+    println!();
+    println!("  {phrase}");
+    println!();
+    println!("If you lose this phrase AND the vault passphrase, your identity is");
+    println!("unrecoverable. We cannot reset it for you.");
     Ok(())
+}
+
+fn read_passphrase(prompt: &str) -> Result<String> {
+    print!("{prompt}");
+    io::stdout().flush()?;
+    let mut line = String::new();
+    io::stdin().lock().read_line(&mut line)?;
+    Ok(line.trim_end_matches(['\n', '\r']).to_string())
 }
 
 async fn restore(_seed: &str) -> Result<()> {
