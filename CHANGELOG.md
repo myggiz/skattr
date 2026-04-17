@@ -17,9 +17,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **Phase 0.B identity & crypto**: real Ed25519 keypair ops (`generate`, `public`, `sign`, `verify_strict`), BIP39 24-word mnemonic encode/decode, Argon2id (`m=64 MiB, t=3, p=4`) + XChaCha20-Poly1305 on-disk vault at `identity.vault` with AEAD-bound format version, HKDF-SHA256 helpers with domain-separated info labels.
 - `skattr init` — generates identity, prints 24-word recovery phrase, writes encrypted vault.
 - `skattr restore <seed>` — rebuilds identity from BIP39 phrase under a fresh passphrase.
-- `Vault::change_passphrase` — decrypt-old → rewrite-new with fresh salt/nonce (not atomic; see `TODO(phase-1)`).
+- `Vault::change_passphrase` — decrypt-old → rewrite-new with fresh salt/nonce (crash-safe via atomic rename after Phase 0.B hardening).
 - End-to-end round-trip integration test (`crates/core/tests/identity_roundtrip.rs`).
 - `proptest` round-trip coverage on Seed ↔ Mnemonic (256-case default, 10k with `PROPTEST_CASES`).
 - `crates/core/fuzz/vault_parser` cargo-fuzz harness asserting `Vault::open` never panics (requires nightly).
+- **Phase 0.B hardening:** atomic + fsync'd vault writes (`atomic_write_vault`); `Vault::change_passphrase` now crash-safe via tempfile → rename; `IdentityKey::from_bytes` takes `Zeroizing<[u8; 32]>`; mnemonic phrase/entropy intermediates zeroized; `verify()` returns a single opaque "verification failed" error for constant-time parity; `Mnemonic::from_words` normalizes like `parse`; CLI gains `--data-dir` override and zeroizes its argv seed copy; ADR-0004 pins passphrase byte contract; added tests for signature-byte tampering, Argon2 salt/param sensitivity, and a real `from_seed` domain-separation assertion.
 
 [Unreleased]: https://github.com/myggiz/skattr/compare/main...HEAD
