@@ -107,27 +107,40 @@ pub(crate) struct VaultFile {
 /// Durably write `vf` to `path`: serialize → tempfile → fsync tempfile →
 /// rename over target → fsync parent directory.
 ///
-/// Renames on POSIX are atomic within a single filesystem, but durability
-/// against power loss additionally requires fsync on both the tempfile
-/// and the parent directory (so the directory entry's inode change is
-/// on platter before we report success).
+/// On any failure after the tempfile is created, best-effort removes
+/// the `.vault.tmp` sidecar so a subsequent caller sees a clean
+/// filesystem.
 fn atomic_write_vault(path: &Path, vf: &VaultFile) -> Result<()> {
-    let mut buf = Vec::new();
-    ciborium::ser::into_writer(vf, &mut buf).map_err(|e| CoreError::CborEncode(e.to_string()))?;
-
     let tmp_path = path.with_extension("vault.tmp");
+    match atomic_write_vault_inner(path, &tmp_path, vf) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // Best-effort cleanup. If the sidecar is a directory (test
+            // scenario) or held by another process, this is a no-op —
+            // we don't care; the original error is what matters.
+            let _ = std::fs::remove_file(&tmp_path);
+            Err(e)
+        }
+    }
+}
+
+/// The actual write machinery, wrapped by `atomic_write_vault` for
+/// error-path cleanup.
+fn atomic_write_vault_inner(path: &Path, tmp_path: &Path, vf: &VaultFile) -> Result<()> {
+    let mut buf = Vec::new();
+    ciborium::ser::into_writer(vf, &mut buf)
+        .map_err(|e| CoreError::CborEncode(e.to_string()))?;
+
     {
-        let mut f = std::fs::File::create(&tmp_path)?;
+        let mut f = std::fs::File::create(tmp_path)?;
         use std::io::Write;
         f.write_all(&buf)?;
         f.sync_all()?;
     }
-    std::fs::rename(&tmp_path, path)?;
+    std::fs::rename(tmp_path, path)?;
 
     // Fsync parent directory so the rename itself is durable.
     if let Some(parent) = path.parent() {
-        // On Linux the directory must be opened read-only; on macOS
-        // File::open works too. Windows has no directory fsync — skip.
         #[cfg(unix)]
         {
             let dir = std::fs::File::open(parent)?;
@@ -135,7 +148,7 @@ fn atomic_write_vault(path: &Path, vf: &VaultFile) -> Result<()> {
         }
         #[cfg(not(unix))]
         {
-            let _ = parent; // suppress unused on non-unix
+            let _ = parent;
         }
     }
     Ok(())
@@ -562,5 +575,25 @@ mod tests {
         std::fs::remove_dir(path.with_extension("vault.tmp")).unwrap();
         let (_, opened) = Vault::open(&path, "old").unwrap();
         assert_eq!(opened.public(), expected_pub);
+    }
+
+    #[test]
+    fn create_overwrites_stale_sidecar() {
+        // A stale .vault.tmp from a prior failed attempt must not block
+        // a fresh Vault::create: the tempfile open truncates, and the
+        // subsequent rename consumes the sidecar. Post-condition: no
+        // .vault.tmp remains.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("id.vault");
+
+        std::fs::write(path.with_extension("vault.tmp"), b"stale").unwrap();
+
+        let id = IdentityKey::generate().unwrap();
+        Vault::create(&path, id, "pw").unwrap();
+
+        assert!(
+            !path.with_extension("vault.tmp").exists(),
+            "stale sidecar must not remain after successful create"
+        );
     }
 }
