@@ -195,20 +195,33 @@ impl Vault {
                 )
             })?;
 
-        let secret: [u8; 32] = plaintext
-            .as_slice()
-            .try_into()
-            .map_err(|_| CoreError::Identity("decrypted secret has unexpected length".into()))?;
-        // Zeroize the intermediate Vec.
-        let mut plaintext = plaintext;
-        use zeroize::Zeroize;
-        plaintext.zeroize();
+        // Move the plaintext into a Zeroizing-guarded fixed-size buffer before
+        // handing the bytes off to IdentityKey. Any copy the optimizer leaves
+        // on the stack is tied to this binding's drop.
+        let secret = {
+            if plaintext.len() != 32 {
+                // Zero the oversized Vec before bailing so no secret-ish bytes linger.
+                let mut p = plaintext;
+                use zeroize::Zeroize;
+                p.zeroize();
+                return Err(CoreError::Identity(
+                    "decrypted secret has unexpected length".into(),
+                ));
+            }
+            let mut buf = Zeroizing::new([0u8; 32]);
+            buf.copy_from_slice(&plaintext);
+            // Zero the Vec now that its contents are copied out.
+            let mut p = plaintext;
+            use zeroize::Zeroize;
+            p.zeroize();
+            buf
+        };
 
         Ok((
             Self {
                 path: path.to_path_buf(),
             },
-            IdentityKey::from_bytes(secret),
+            IdentityKey::from_bytes(*secret),
         ))
     }
 
