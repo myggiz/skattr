@@ -18,8 +18,8 @@
 use std::path::Path;
 
 use argon2::{Algorithm, Argon2, Params, Version};
-use chacha20poly1305::aead::{Aead, KeyInit, Payload};
-use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
+use chacha20poly1305::aead::{Aead, AeadInPlace, KeyInit, Payload};
+use chacha20poly1305::{Key, Tag, XChaCha20Poly1305, XNonce};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
@@ -107,27 +107,39 @@ pub(crate) struct VaultFile {
 /// Durably write `vf` to `path`: serialize → tempfile → fsync tempfile →
 /// rename over target → fsync parent directory.
 ///
-/// Renames on POSIX are atomic within a single filesystem, but durability
-/// against power loss additionally requires fsync on both the tempfile
-/// and the parent directory (so the directory entry's inode change is
-/// on platter before we report success).
+/// On any failure after the tempfile is created, best-effort removes
+/// the `.vault.tmp` sidecar so a subsequent caller sees a clean
+/// filesystem.
 fn atomic_write_vault(path: &Path, vf: &VaultFile) -> Result<()> {
+    let tmp_path = path.with_extension("vault.tmp");
+    match atomic_write_vault_inner(path, &tmp_path, vf) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // Best-effort cleanup. If the sidecar is a directory (test
+            // scenario) or held by another process, this is a no-op —
+            // we don't care; the original error is what matters.
+            let _ = std::fs::remove_file(&tmp_path);
+            Err(e)
+        }
+    }
+}
+
+/// The actual write machinery, wrapped by `atomic_write_vault` for
+/// error-path cleanup.
+fn atomic_write_vault_inner(path: &Path, tmp_path: &Path, vf: &VaultFile) -> Result<()> {
     let mut buf = Vec::new();
     ciborium::ser::into_writer(vf, &mut buf).map_err(|e| CoreError::CborEncode(e.to_string()))?;
 
-    let tmp_path = path.with_extension("vault.tmp");
     {
-        let mut f = std::fs::File::create(&tmp_path)?;
+        let mut f = std::fs::File::create(tmp_path)?;
         use std::io::Write;
         f.write_all(&buf)?;
         f.sync_all()?;
     }
-    std::fs::rename(&tmp_path, path)?;
+    std::fs::rename(tmp_path, path)?;
 
     // Fsync parent directory so the rename itself is durable.
     if let Some(parent) = path.parent() {
-        // On Linux the directory must be opened read-only; on macOS
-        // File::open works too. Windows has no directory fsync — skip.
         #[cfg(unix)]
         {
             let dir = std::fs::File::open(parent)?;
@@ -135,10 +147,45 @@ fn atomic_write_vault(path: &Path, vf: &VaultFile) -> Result<()> {
         }
         #[cfg(not(unix))]
         {
-            let _ = parent; // suppress unused on non-unix
+            let _ = parent;
         }
     }
     Ok(())
+}
+
+/// Encrypt the given identity under `passphrase`, producing a ready-to-write
+/// `VaultFile`. Fresh salt + nonce per call.
+///
+/// Private: called by `Vault::create` and `Vault::change_passphrase`.
+fn encrypt_identity(identity: IdentityKey, passphrase: &str) -> Result<VaultFile> {
+    let kdf = KdfParams::canonical();
+    let mut salt = [0u8; 16];
+    let mut nonce_bytes = [0u8; 24];
+    rand::rngs::OsRng.fill_bytes(&mut salt);
+    rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
+
+    let aead_key = derive_aead_key(passphrase, &salt, &kdf)?;
+    let cipher = XChaCha20Poly1305::new(Key::from_slice(aead_key.as_ref()));
+    let nonce = XNonce::from_slice(&nonce_bytes);
+
+    let secret_bytes = Zeroizing::new(identity.into_bytes());
+    let ciphertext = cipher
+        .encrypt(
+            nonce,
+            Payload {
+                msg: secret_bytes.as_ref(),
+                aad: VAULT_AAD,
+            },
+        )
+        .map_err(|_| CoreError::Identity("aead encrypt failed".into()))?;
+
+    Ok(VaultFile {
+        v: VAULT_VERSION,
+        kdf,
+        salt,
+        nonce: nonce_bytes,
+        ciphertext,
+    })
 }
 
 /// On-disk encrypted identity container.
@@ -161,37 +208,7 @@ impl Vault {
             )));
         }
 
-        let kdf = KdfParams::canonical();
-        let mut salt = [0u8; 16];
-        let mut nonce_bytes = [0u8; 24];
-        rand::rngs::OsRng.fill_bytes(&mut salt);
-        rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
-
-        let aead_key = derive_aead_key(passphrase, &salt, &kdf)?;
-        let cipher = XChaCha20Poly1305::new(Key::from_slice(aead_key.as_ref()));
-        let nonce = XNonce::from_slice(&nonce_bytes);
-
-        // `Zeroizing<[u8; 32]>` ensures the plaintext secret is wiped when this
-        // binding drops, even on an early-return error path.
-        let secret_bytes = Zeroizing::new(identity.into_bytes());
-        let ciphertext = cipher
-            .encrypt(
-                nonce,
-                Payload {
-                    msg: secret_bytes.as_ref(),
-                    aad: VAULT_AAD,
-                },
-            )
-            .map_err(|_| CoreError::Identity("aead encrypt failed".into()))?;
-
-        let vf = VaultFile {
-            v: VAULT_VERSION,
-            kdf,
-            salt,
-            nonce: nonce_bytes,
-            ciphertext,
-        };
-
+        let vf = encrypt_identity(identity, passphrase)?;
         atomic_write_vault(path, &vf)?;
 
         Ok(Self {
@@ -216,41 +233,24 @@ impl Vault {
         let cipher = XChaCha20Poly1305::new(Key::from_slice(aead_key.as_ref()));
         let nonce = XNonce::from_slice(&vf.nonce);
 
-        let plaintext = cipher
-            .decrypt(
-                nonce,
-                Payload {
-                    msg: &vf.ciphertext,
-                    aad: VAULT_AAD,
-                },
-            )
-            .map_err(|_| {
-                CoreError::Identity(
-                    "aead decrypt failed (wrong passphrase or tampered vault)".into(),
-                )
-            })?;
+        // Decrypt in-place directly into a Zeroizing<[u8; 32]>. The wire
+        // format is `ct_body (32 bytes) || poly1305_tag (16 bytes)`; we
+        // split them explicitly so AEAD output never touches a Vec<u8>.
+        const POLY1305_TAG_LEN: usize = 16;
+        const PLAINTEXT_LEN: usize = 32;
+        if vf.ciphertext.len() != PLAINTEXT_LEN + POLY1305_TAG_LEN {
+            return Err(CoreError::Identity(
+                "ciphertext has unexpected length".into(),
+            ));
+        }
+        let (ct_body, tag_bytes) = vf.ciphertext.split_at(PLAINTEXT_LEN);
+        let tag = Tag::from_slice(tag_bytes);
 
-        // Move the plaintext into a Zeroizing-guarded fixed-size buffer before
-        // handing the bytes off to IdentityKey. Any copy the optimizer leaves
-        // on the stack is tied to this binding's drop.
-        let secret = {
-            if plaintext.len() != 32 {
-                // Zero the oversized Vec before bailing so no secret-ish bytes linger.
-                let mut p = plaintext;
-                use zeroize::Zeroize;
-                p.zeroize();
-                return Err(CoreError::Identity(
-                    "decrypted secret has unexpected length".into(),
-                ));
-            }
-            let mut buf = Zeroizing::new([0u8; 32]);
-            buf.copy_from_slice(&plaintext);
-            // Zero the Vec now that its contents are copied out.
-            let mut p = plaintext;
-            use zeroize::Zeroize;
-            p.zeroize();
-            buf
-        };
+        let mut secret = Zeroizing::new([0u8; 32]);
+        secret.copy_from_slice(ct_body);
+        cipher
+            .decrypt_in_place_detached(nonce, VAULT_AAD, secret.as_mut(), tag)
+            .map_err(|_| CoreError::Identity("verification failed".into()))?;
 
         Ok((
             Self {
@@ -274,39 +274,7 @@ impl Vault {
         // Decrypt with the old passphrase first; if it fails, don't touch
         // the file.
         let (_, identity) = Vault::open(&self.path, old)?;
-
-        // Rebuild a fresh VaultFile under the new passphrase, then write
-        // atomically over the existing path. Fresh salt + nonce per
-        // rewrite fall out of this flow.
-        let kdf = KdfParams::canonical();
-        let mut salt = [0u8; 16];
-        let mut nonce_bytes = [0u8; 24];
-        rand::rngs::OsRng.fill_bytes(&mut salt);
-        rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
-
-        let aead_key = derive_aead_key(new, &salt, &kdf)?;
-        let cipher = XChaCha20Poly1305::new(Key::from_slice(aead_key.as_ref()));
-        let nonce = XNonce::from_slice(&nonce_bytes);
-
-        let secret_bytes = Zeroizing::new(identity.into_bytes());
-        let ciphertext = cipher
-            .encrypt(
-                nonce,
-                Payload {
-                    msg: secret_bytes.as_ref(),
-                    aad: VAULT_AAD,
-                },
-            )
-            .map_err(|_| CoreError::Identity("aead encrypt failed".into()))?;
-
-        let vf = VaultFile {
-            v: VAULT_VERSION,
-            kdf,
-            salt,
-            nonce: nonce_bytes,
-            ciphertext,
-        };
-
+        let vf = encrypt_identity(identity, new)?;
         atomic_write_vault(&self.path, &vf)?;
         Ok(())
     }
@@ -560,6 +528,27 @@ mod tests {
     }
 
     #[test]
+    fn open_rejects_wrong_length_ciphertext() {
+        // Synthesize a vault whose ciphertext is the wrong length. Must
+        // be rejected BEFORE attempting AEAD decrypt.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("bad_len.vault");
+        let id = IdentityKey::generate().unwrap();
+        Vault::create(&path, id, "pw").unwrap();
+
+        // Mutate the CBOR: strip two ciphertext bytes.
+        let bytes = std::fs::read(&path).unwrap();
+        let mut vf: VaultFile = ciborium::de::from_reader(&bytes[..]).unwrap();
+        vf.ciphertext.truncate(vf.ciphertext.len() - 2);
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&vf, &mut buf).unwrap();
+        std::fs::write(&path, buf).unwrap();
+
+        let err = Vault::open(&path, "pw").expect_err("truncated ciphertext must fail");
+        assert!(matches!(err, crate::error::CoreError::Identity(_)));
+    }
+
+    #[test]
     fn change_passphrase_survives_simulated_new_create_failure() {
         // Simulate the "disk full during new-vault write" failure by pre-creating
         // a busy/unwritable sidecar path before change_passphrase. The rename
@@ -584,5 +573,25 @@ mod tests {
         std::fs::remove_dir(path.with_extension("vault.tmp")).unwrap();
         let (_, opened) = Vault::open(&path, "old").unwrap();
         assert_eq!(opened.public(), expected_pub);
+    }
+
+    #[test]
+    fn create_overwrites_stale_sidecar() {
+        // A stale .vault.tmp from a prior failed attempt must not block
+        // a fresh Vault::create: the tempfile open truncates, and the
+        // subsequent rename consumes the sidecar. Post-condition: no
+        // .vault.tmp remains.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("id.vault");
+
+        std::fs::write(path.with_extension("vault.tmp"), b"stale").unwrap();
+
+        let id = IdentityKey::generate().unwrap();
+        Vault::create(&path, id, "pw").unwrap();
+
+        assert!(
+            !path.with_extension("vault.tmp").exists(),
+            "stale sidecar must not remain after successful create"
+        );
     }
 }
