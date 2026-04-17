@@ -102,12 +102,18 @@ impl IdentityKey {
     }
 
     /// Verify a signature against a pubkey. Constant-time, no panics.
+    ///
+    /// Both invalid-pubkey and bad-signature outcomes collapse to the
+    /// same opaque error to prevent a timing/error-text distinguisher
+    /// in auth paths that accept attacker-controlled pubkeys.
     pub fn verify(pubkey: &PublicKey, message: &[u8], signature: &Signature) -> Result<()> {
-        let vk = VerifyingKey::from_bytes(&pubkey.0)
-            .map_err(|e| CoreError::Identity(format!("invalid pubkey bytes: {e}")))?;
+        let vk = match VerifyingKey::from_bytes(&pubkey.0) {
+            Ok(v) => v,
+            Err(_) => return Err(CoreError::Identity("verification failed".into())),
+        };
         let sig = ed25519_dalek::Signature::from_bytes(&signature.0);
         vk.verify_strict(message, &sig)
-            .map_err(|_| CoreError::Identity("signature verification failed".into()))
+            .map_err(|_| CoreError::Identity("verification failed".into()))
     }
 
     /// Consume into raw secret bytes. Caller is responsible for zeroization.
