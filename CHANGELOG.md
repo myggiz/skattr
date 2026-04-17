@@ -14,5 +14,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - CLI subcommands (stubbed): `init`, `restore`, `daemon`, `invite`, `add`, `send`, `contacts`.
 - Architecture Decision Records 0001–0003.
 - `cargo-deny` and CI matrix across Linux/macOS/Windows.
+- **Phase 0.B identity & crypto**: real Ed25519 keypair ops (`generate`, `public`, `sign`, `verify_strict`), BIP39 24-word mnemonic encode/decode, Argon2id (`m=64 MiB, t=3, p=4`) + XChaCha20-Poly1305 on-disk vault at `identity.vault` with AEAD-bound format version, HKDF-SHA256 helpers with domain-separated info labels.
+- `skattr init` — generates identity, prints 24-word recovery phrase, writes encrypted vault.
+- `skattr restore <seed>` — rebuilds identity from BIP39 phrase under a fresh passphrase.
+- `Vault::change_passphrase` — decrypt-old → rewrite-new with fresh salt/nonce (not atomic; see `TODO(phase-1)`).
+- End-to-end round-trip integration test (`crates/core/tests/identity_roundtrip.rs`).
+- `proptest` round-trip coverage on Seed ↔ Mnemonic (256-case default, 10k with `PROPTEST_CASES`).
+- `crates/core/fuzz/vault_parser` cargo-fuzz harness asserting `Vault::open` never panics (requires nightly).
 
 [Unreleased]: https://github.com/myggiz/skattr/compare/main...HEAD

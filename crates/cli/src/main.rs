@@ -10,10 +10,13 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use skattr_core::daemon::Config;
+use skattr_core::identity::{IdentityKey, Mnemonic, Seed, Vault};
 
 /// `skattr` command-line interface.
 #[derive(Debug, Parser)]
@@ -103,12 +106,88 @@ async fn main() -> Result<()> {
 }
 
 async fn init() -> Result<()> {
-    println!("skattr init: not yet implemented (Phase 0 scaffolding).");
+    let config = Config::defaults()?;
+    std::fs::create_dir_all(&config.data_dir)?;
+    let vault_path = config.data_dir.join("identity.vault");
+
+    if vault_path.exists() {
+        anyhow::bail!(
+            "identity vault already exists at {}; refusing to overwrite",
+            vault_path.display()
+        );
+    }
+
+    let pw1 = read_passphrase("Choose a passphrase: ")?;
+    let pw2 = read_passphrase("Confirm passphrase: ")?;
+    if *pw1 != *pw2 {
+        anyhow::bail!("passphrases do not match");
+    }
+
+    let seed = Seed::generate()?;
+    let identity = IdentityKey::from_seed(&seed)?;
+    let pubkey_hex = identity.public().to_hex();
+
+    Vault::create(&vault_path, identity, pw1.as_str())?;
+
+    let mnemonic = seed.to_mnemonic()?;
+    let phrase = mnemonic.words().join(" ");
+
+    println!();
+    println!("Identity created.");
+    println!("  public key: {pubkey_hex}");
+    println!("  vault:      {}", vault_path.display());
+    println!();
+    println!("RECOVERY SEED PHRASE — write this down, store it offline:");
+    println!();
+    println!("  {phrase}");
+    println!();
+    println!("If you lose this phrase AND the vault passphrase, your identity is");
+    println!("unrecoverable. We cannot reset it for you.");
     Ok(())
 }
 
-async fn restore(_seed: &str) -> Result<()> {
-    println!("skattr restore: not yet implemented.");
+fn read_passphrase(prompt: &str) -> Result<zeroize::Zeroizing<String>> {
+    // TODO(phase-2): use rpassword to suppress terminal echo.
+    print!("{prompt}");
+    io::stdout().flush()?;
+    let mut line = zeroize::Zeroizing::new(String::new());
+    io::stdin().lock().read_line(&mut line)?;
+    // Trim trailing newline in-place.
+    while line.ends_with('\n') || line.ends_with('\r') {
+        line.pop();
+    }
+    Ok(line)
+}
+
+async fn restore(seed_phrase: &str) -> Result<()> {
+    let config = Config::defaults()?;
+    std::fs::create_dir_all(&config.data_dir)?;
+    let vault_path = config.data_dir.join("identity.vault");
+
+    if vault_path.exists() {
+        anyhow::bail!(
+            "identity vault already exists at {}; refusing to overwrite",
+            vault_path.display()
+        );
+    }
+
+    let mnemonic = Mnemonic::parse(seed_phrase);
+    let seed = Seed::from_mnemonic(&mnemonic)?;
+    let identity = IdentityKey::from_seed(&seed)?;
+    let pubkey_hex = identity.public().to_hex();
+
+    let pw1 = read_passphrase("Choose a new vault passphrase: ")?;
+    let pw2 = read_passphrase("Confirm passphrase: ")?;
+    if *pw1 != *pw2 {
+        anyhow::bail!("passphrases do not match");
+    }
+
+    Vault::create(&vault_path, identity, pw1.as_str())?;
+
+    println!();
+    println!("Identity restored.");
+    println!("  public key: {pubkey_hex}");
+    println!("  vault:      {}", vault_path.display());
     Ok(())
 }
 
