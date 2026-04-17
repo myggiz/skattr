@@ -84,7 +84,7 @@ impl IdentityKey {
     pub fn from_seed(seed: &crate::identity::Seed) -> Result<Self> {
         use crate::identity::derive::{hkdf_expand, INFO_IDENTITY_V1};
         let okm = hkdf_expand::<32>(seed.as_bytes(), INFO_IDENTITY_V1)?;
-        Ok(Self::from_bytes(*okm))
+        Ok(Self::from_bytes(okm))
     }
 
     /// Public half of the keypair.
@@ -120,10 +120,15 @@ impl IdentityKey {
         out
     }
 
-    /// Construct from raw secret bytes. Private: only callable from inside
-    /// the crate (vault open, seed derivation).
-    pub(crate) fn from_bytes(secret: [u8; 32]) -> Self {
-        Self { secret }
+    /// Construct from Zeroizing-wrapped secret bytes. Private: only
+    /// callable from inside the crate (vault open, seed derivation).
+    ///
+    /// Takes `Zeroizing<[u8; 32]>` (not bare `[u8; 32]`) so the caller's
+    /// guard drops after the move, leaving `self.secret` as the sole
+    /// un-wiped copy — which itself zeroes on drop via the struct's
+    /// `ZeroizeOnDrop` derive.
+    pub(crate) fn from_bytes(secret: zeroize::Zeroizing<[u8; 32]>) -> Self {
+        Self { secret: *secret }
     }
 }
 
@@ -191,10 +196,18 @@ mod tests {
     }
 
     #[test]
+    fn from_bytes_accepts_zeroizing() {
+        let mut buf = zeroize::Zeroizing::new([0u8; 32]);
+        buf[0] = 1;
+        let id = IdentityKey::from_bytes(buf);
+        assert_eq!(id.public().0.len(), 32);
+    }
+
+    #[test]
     fn from_seed_is_domain_separated_from_raw_bytes() {
         // A seed with the same bytes as a raw secret must NOT produce the same
         // keypair — if it did, we'd have accidentally skipped HKDF.
-        let bytes = [0x42u8; 32];
+        let bytes = zeroize::Zeroizing::new([0x42u8; 32]);
         let raw_key = IdentityKey::from_bytes(bytes);
         // Construct a Seed holding those same bytes. We can't use Seed::from_bytes
         // (not public), but from_mnemonic on "abandon×24" gives a well-known seed;

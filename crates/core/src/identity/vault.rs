@@ -252,7 +252,7 @@ impl Vault {
             Self {
                 path: path.to_path_buf(),
             },
-            IdentityKey::from_bytes(*secret),
+            IdentityKey::from_bytes(secret),
         ))
     }
 
