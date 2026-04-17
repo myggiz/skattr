@@ -197,7 +197,18 @@ impl Vault {
         Ok((Self { path: path.to_path_buf() }, IdentityKey::from_bytes(secret)))
     }
 
-    /// Re-encrypt the vault under a new passphrase, atomically.
+    /// Re-encrypt the vault under a new passphrase.
+    ///
+    /// **Not crash-safe.** Between the old file's removal and the new file's
+    /// write there is a window where the vault does not exist on disk. A
+    /// crash in that window renders the vault unrecoverable without the
+    /// user's seed phrase.
+    ///
+    /// Takes `&mut self` to serialize concurrent rewrites at the API
+    /// boundary — no `self` field is actually mutated; the mutation is
+    /// on-disk.
+    // TODO(phase-1): switch to write-sidecar + atomic rename so a crash
+    // mid-rewrite leaves the old vault intact.
     pub fn change_passphrase(&mut self, old: &str, new: &str) -> Result<()> {
         // Decrypt with the old passphrase first; if it fails, don't touch the file.
         let (_, identity) = Vault::open(&self.path, old)?;
