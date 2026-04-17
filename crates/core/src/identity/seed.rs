@@ -140,4 +140,16 @@ mod tests {
         let err = Seed::from_mnemonic(&bad).err().expect("bad checksum must fail");
         assert!(matches!(err, crate::error::CoreError::Identity(_)));
     }
+
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn prop_mnemonic_roundtrip(bytes in prop::array::uniform32(any::<u8>())) {
+            let seed = Seed { bytes };
+            let mnemonic = seed.to_mnemonic().unwrap();
+            let back = Seed::from_mnemonic(&mnemonic).unwrap();
+            prop_assert_eq!(seed.as_bytes(), back.as_bytes());
+        }
+    }
 }
