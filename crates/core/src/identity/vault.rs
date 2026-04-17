@@ -198,8 +198,15 @@ impl Vault {
     }
 
     /// Re-encrypt the vault under a new passphrase, atomically.
-    pub fn change_passphrase(&mut self, _old: &str, _new: &str) -> Result<()> {
-        todo!("Task 13")
+    pub fn change_passphrase(&mut self, old: &str, new: &str) -> Result<()> {
+        // Decrypt with the old passphrase first; if it fails, don't touch the file.
+        let (_, identity) = Vault::open(&self.path, old)?;
+        // Delete the existing file so `create`'s "refuse to overwrite" guard
+        // doesn't trip. We have the plaintext identity in memory now; if anything
+        // below panics the vault is lost — caller must have a seed-phrase backup.
+        std::fs::remove_file(&self.path)?;
+        let _new = Vault::create(&self.path, identity, new)?;
+        Ok(())
     }
 }
 
@@ -358,5 +365,47 @@ mod tests {
 
         let err = Vault::open(&path, "pw").expect_err("AAD mismatch must fail");
         assert!(matches!(err, crate::error::CoreError::Identity(_)));
+    }
+
+    #[test]
+    fn change_passphrase_rotates_salt_and_nonce() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("id.vault");
+        let id = IdentityKey::generate().unwrap();
+        let expected_pub = id.public();
+        Vault::create(&path, id, "old-pw").unwrap();
+
+        let before = std::fs::read(&path).unwrap();
+        let before_vf: VaultFile = ciborium::de::from_reader(&before[..]).unwrap();
+
+        let (mut vault, _) = Vault::open(&path, "old-pw").unwrap();
+        vault.change_passphrase("old-pw", "new-pw").unwrap();
+
+        let after = std::fs::read(&path).unwrap();
+        let after_vf: VaultFile = ciborium::de::from_reader(&after[..]).unwrap();
+
+        assert_ne!(before_vf.salt, after_vf.salt, "salt must rotate");
+        assert_ne!(before_vf.nonce, after_vf.nonce, "nonce must rotate");
+
+        // Old passphrase no longer works.
+        Vault::open(&path, "old-pw").expect_err("old passphrase must fail");
+        // New passphrase recovers the same identity.
+        let (_, opened) = Vault::open(&path, "new-pw").unwrap();
+        assert_eq!(opened.public(), expected_pub);
+    }
+
+    #[test]
+    fn change_passphrase_rejects_wrong_old() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("id.vault");
+        let id = IdentityKey::generate().unwrap();
+        Vault::create(&path, id, "real").unwrap();
+        let (mut vault, _) = Vault::open(&path, "real").unwrap();
+        let err = vault
+            .change_passphrase("bogus", "whatever")
+            .expect_err("must reject wrong old passphrase");
+        assert!(matches!(err, crate::error::CoreError::Identity(_)));
+        // File untouched: old passphrase still works.
+        Vault::open(&path, "real").unwrap();
     }
 }
