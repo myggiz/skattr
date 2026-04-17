@@ -16,6 +16,7 @@
 
 pub(crate) mod connection;
 pub(crate) mod frame;
+pub(crate) mod hs_key;
 pub(crate) mod listener;
 pub(crate) mod noise;
 pub(crate) mod tor;
