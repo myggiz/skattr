@@ -22,5 +22,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `proptest` round-trip coverage on Seed ↔ Mnemonic (256-case default, 10k with `PROPTEST_CASES`).
 - `crates/core/fuzz/vault_parser` cargo-fuzz harness asserting `Vault::open` never panics (requires nightly).
 - **Phase 0.B hardening:** atomic + fsync'd vault writes (`atomic_write_vault`); `Vault::change_passphrase` now crash-safe via tempfile → rename; `IdentityKey::from_bytes` takes `Zeroizing<[u8; 32]>`; mnemonic phrase/entropy intermediates zeroized; `verify()` returns a single opaque "verification failed" error for constant-time parity; `Mnemonic::from_words` normalizes like `parse`; CLI gains `--data-dir` override and zeroizes its argv seed copy; ADR-0004 pins passphrase byte contract; added tests for signature-byte tampering, Argon2 salt/param sensitivity, and a real `from_seed` domain-separation assertion.
+- **Phase 0.B cleanup:** `Vault::open` decrypts in-place via `AeadInPlace::decrypt_in_place_detached` into `Zeroizing<[u8; 32]>` — no Vec<u8> plaintext intermediate; `encrypt_identity` helper DRYs the vault-write path between `Vault::create` and `Vault::change_passphrase`; `atomic_write_vault` best-effort cleans up the `.vault.tmp` sidecar on error.
 
 [Unreleased]: https://github.com/myggiz/skattr/compare/main...HEAD
