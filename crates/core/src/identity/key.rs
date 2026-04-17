@@ -218,4 +218,16 @@ mod tests {
             "from_seed must mix HKDF label; raw-bytes and seed-derived keys must differ"
         );
     }
+
+    #[test]
+    fn verify_rejects_tampered_signature() {
+        let id = IdentityKey::generate().unwrap();
+        let msg = b"payload";
+        let mut sig = id.sign(msg);
+        // Flip the first byte of the signature's R component.
+        sig.0[0] ^= 0x01;
+        let err = IdentityKey::verify(&id.public(), msg, &sig)
+            .expect_err("tampered signature must fail verify_strict");
+        assert!(matches!(err, crate::error::CoreError::Identity(_)));
+    }
 }
