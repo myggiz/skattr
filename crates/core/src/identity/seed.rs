@@ -41,8 +41,16 @@ impl Seed {
     /// Recover a seed from a 24-word BIP39 mnemonic.
     ///
     /// Validates the checksum; returns an error on any malformed phrase.
-    pub fn from_mnemonic(_mnemonic: &Mnemonic) -> Result<Self> {
-        todo!("decode BIP39 with checksum validation")
+    pub fn from_mnemonic(mnemonic: &Mnemonic) -> Result<Self> {
+        let phrase = mnemonic.words.join(" ");
+        let m = bip39::Mnemonic::parse_in_normalized(bip39::Language::English, &phrase)
+            .map_err(|e| CoreError::Identity(format!("bip39 decode: {e}")))?;
+        let entropy = m.to_entropy();
+        let bytes: [u8; 32] = entropy
+            .as_slice()
+            .try_into()
+            .map_err(|_| CoreError::Identity("seed must be 32 bytes (24-word BIP39)".into()))?;
+        Ok(Self { bytes })
     }
 
     /// Borrow the raw seed bytes (crate-only: callers outside identity/ should
@@ -108,5 +116,28 @@ mod tests {
         let m = Mnemonic::parse(phrase);
         let seed = Seed::from_mnemonic(&m).unwrap();
         assert_eq!(seed.as_bytes(), &[0u8; 32]);
+    }
+
+    #[test]
+    fn mnemonic_roundtrip() {
+        for _ in 0..8 {
+            let seed = Seed::generate().unwrap();
+            let mnemonic = seed.to_mnemonic().unwrap();
+            let back = Seed::from_mnemonic(&mnemonic).unwrap();
+            assert_eq!(seed.as_bytes(), back.as_bytes(), "round-trip must be identity");
+        }
+    }
+
+    #[test]
+    fn from_mnemonic_rejects_bad_checksum() {
+        // All zeros would only checksum-valid if the last word were the magic "art";
+        // use 24 copies of "abandon" which fails the BIP39 checksum.
+        let bad = Mnemonic::parse(
+            "abandon abandon abandon abandon abandon abandon abandon abandon \
+             abandon abandon abandon abandon abandon abandon abandon abandon \
+             abandon abandon abandon abandon abandon abandon abandon abandon",
+        );
+        let err = Seed::from_mnemonic(&bad).err().expect("bad checksum must fail");
+        assert!(matches!(err, crate::error::CoreError::Identity(_)));
     }
 }
