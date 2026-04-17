@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Myggiz AB
 
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
 //! Passphrase-encrypted on-disk container for the identity private key.
 //!
 //! File format (CBOR):
@@ -15,36 +17,94 @@
 
 use std::path::Path;
 
+use serde::{Deserialize, Serialize};
+
 use crate::error::Result;
 use crate::identity::IdentityKey;
 
+/// On-disk vault format version. Bumped only via an ADR.
+pub const VAULT_VERSION: u8 = 1;
+
+/// AEAD associated-data binding the ciphertext to this exact format version.
+const VAULT_AAD: &[u8] = b"skattr-vault-v1";
+
+/// Argon2id parameters baked into the vault file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct KdfParams {
+    /// Memory cost in KiB.
+    pub m_kib: u32,
+    /// Iteration count (passes).
+    pub t: u32,
+    /// Parallelism (lanes).
+    pub p: u32,
+}
+
+impl KdfParams {
+    /// The canonical parameters (`m=64 MiB, t=3, p=4`).
+    pub(crate) const fn canonical() -> Self {
+        Self { m_kib: 64 * 1024, t: 3, p: 4 }
+    }
+}
+
+/// CBOR wire form of the vault file.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct VaultFile {
+    /// Format version.
+    pub v: u8,
+    /// KDF parameters that were used.
+    pub kdf: KdfParams,
+    /// Per-vault Argon2id salt.
+    pub salt: [u8; 16],
+    /// XChaCha20-Poly1305 nonce (24 bytes).
+    pub nonce: [u8; 24],
+    /// AEAD ciphertext of the 32-byte identity secret (with 16-byte tag).
+    pub ciphertext: Vec<u8>,
+}
+
 /// On-disk encrypted identity container.
-///
-/// Opaque type: all state is behind the file handle; callers interact
-/// via [`Vault::create`], [`Vault::open`], and [`Vault::change_passphrase`].
 #[derive(Debug)]
 pub struct Vault {
-    // Intentionally opaque. Fields are private and populated by the
-    // constructors below.
-    _private: (),
+    // Path we opened; used by change_passphrase to rewrite atomically.
+    path: std::path::PathBuf,
 }
 
 impl Vault {
     /// Create a new vault at `path`, encrypting `identity` under `passphrase`.
-    ///
-    /// Fails if the file already exists — callers must delete the old
-    /// vault first (explicit user intent).
     pub fn create(_path: &Path, _identity: IdentityKey, _passphrase: &str) -> Result<Self> {
-        todo!("Argon2id(passphrase) → XChaCha20-Poly1305 encrypt; write CBOR container")
+        todo!("Task 10")
     }
 
     /// Open an existing vault, decrypting with `passphrase`.
     pub fn open(_path: &Path, _passphrase: &str) -> Result<(Self, IdentityKey)> {
-        todo!("parse CBOR, Argon2id(passphrase), AEAD decrypt, return (Vault, IdentityKey)")
+        todo!("Task 11")
     }
 
     /// Re-encrypt the vault under a new passphrase, atomically.
     pub fn change_passphrase(&mut self, _old: &str, _new: &str) -> Result<()> {
-        todo!("decrypt with old, re-encrypt with new, swap file via temp + rename")
+        todo!("Task 13")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vault_file_cbor_roundtrips() {
+        let v = VaultFile {
+            v: VAULT_VERSION,
+            kdf: KdfParams { m_kib: 65536, t: 3, p: 4 },
+            salt: [0xA5; 16],
+            nonce: [0x5A; 24],
+            ciphertext: vec![1, 2, 3, 4, 5, 6, 7, 8],
+        };
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&v, &mut buf).unwrap();
+        let back: VaultFile = ciborium::de::from_reader(&buf[..]).unwrap();
+        assert_eq!(back.v, v.v);
+        assert_eq!(back.kdf.m_kib, v.kdf.m_kib);
+        assert_eq!(back.salt, v.salt);
+        assert_eq!(back.nonce, v.nonce);
+        assert_eq!(back.ciphertext, v.ciphertext);
     }
 }
