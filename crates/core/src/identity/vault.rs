@@ -128,8 +128,7 @@ fn atomic_write_vault(path: &Path, vf: &VaultFile) -> Result<()> {
 /// error-path cleanup.
 fn atomic_write_vault_inner(path: &Path, tmp_path: &Path, vf: &VaultFile) -> Result<()> {
     let mut buf = Vec::new();
-    ciborium::ser::into_writer(vf, &mut buf)
-        .map_err(|e| CoreError::CborEncode(e.to_string()))?;
+    ciborium::ser::into_writer(vf, &mut buf).map_err(|e| CoreError::CborEncode(e.to_string()))?;
 
     {
         let mut f = std::fs::File::create(tmp_path)?;
@@ -545,8 +544,7 @@ mod tests {
         ciborium::ser::into_writer(&vf, &mut buf).unwrap();
         std::fs::write(&path, buf).unwrap();
 
-        let err = Vault::open(&path, "pw")
-            .expect_err("truncated ciphertext must fail");
+        let err = Vault::open(&path, "pw").expect_err("truncated ciphertext must fail");
         assert!(matches!(err, crate::error::CoreError::Identity(_)));
     }
 
