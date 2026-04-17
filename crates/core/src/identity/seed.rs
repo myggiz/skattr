@@ -34,8 +34,9 @@ impl Seed {
     pub fn to_mnemonic(&self) -> Result<Mnemonic> {
         let m = bip39::Mnemonic::from_entropy_in(bip39::Language::English, &self.bytes)
             .map_err(|e| CoreError::Identity(format!("bip39 encode: {e}")))?;
-        let words: Vec<String> = m
-            .to_string()
+        // The joined phrase lives on the heap; wipe it before drop.
+        let phrase = zeroize::Zeroizing::new(m.to_string());
+        let words: Vec<String> = phrase
             .split_whitespace()
             .map(str::to_owned)
             .collect();
@@ -46,10 +47,10 @@ impl Seed {
     ///
     /// Validates the checksum; returns an error on any malformed phrase.
     pub fn from_mnemonic(mnemonic: &Mnemonic) -> Result<Self> {
-        let phrase = mnemonic.words.join(" ");
+        let phrase = zeroize::Zeroizing::new(mnemonic.words.join(" "));
         let m = bip39::Mnemonic::parse_in_normalized(bip39::Language::English, &phrase)
             .map_err(|e| CoreError::Identity(format!("bip39 decode: {e}")))?;
-        let entropy = m.to_entropy();
+        let entropy = zeroize::Zeroizing::new(m.to_entropy());
         let bytes: [u8; 32] = entropy
             .as_slice()
             .try_into()
