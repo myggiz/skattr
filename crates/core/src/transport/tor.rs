@@ -134,9 +134,25 @@ impl TorRuntime {
         todo!("Task 7")
     }
 
-    /// Gracefully shut down Arti. Implemented in Task 4.
+    /// Gracefully shut down Arti. Drops the TorClient (which stops its
+    /// background tasks) and cancels the status-forwarding task.
+    ///
+    /// Takes `self` so the runtime is truly consumed — downstream code
+    /// cannot accidentally hold a zombie handle.
     pub async fn shutdown(self) -> Result<()> {
-        todo!("Task 4")
+        // Notify subscribers that we're going down.
+        let _ = self.status_tx.send(TorStatus::Idle);
+
+        // Abort the status-forwarding task. It loops on the Arti event
+        // stream; without this, it would linger until the TorClient drop
+        // causes the stream to end.
+        self._status_task.abort();
+
+        // Drop the TorClient. Its Drop shuts down the underlying
+        // background tasks.
+        drop(self.client);
+
+        Ok(())
     }
 }
 
@@ -151,6 +167,18 @@ mod tests {
         let (tx, rx) = tokio::sync::watch::channel(TorStatus::Idle);
         drop(tx);
         assert_eq!(*rx.borrow(), TorStatus::Idle);
+    }
+
+    #[tokio::test]
+    #[ignore = "real network bootstrap + shutdown, run with --ignored"]
+    async fn bootstrap_then_shutdown_leaves_no_runaway_tasks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = TorConfig {
+            state_dir: tmp.path().to_path_buf(),
+            socks_port: None,
+        };
+        let rt = TorRuntime::bootstrap(cfg).await.expect("bootstrap");
+        rt.shutdown().await.expect("shutdown");
     }
 
     #[tokio::test]
