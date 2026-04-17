@@ -83,9 +83,15 @@ pub struct Mnemonic {
 }
 
 impl Mnemonic {
-    /// Build from an explicit list of words.
+    /// Build from an explicit list of words. Normalizes each entry to
+    /// lower-case and trims surrounding whitespace, matching the
+    /// behavior of `parse`.
     #[must_use]
     pub fn from_words(words: Vec<String>) -> Self {
+        let words = words
+            .into_iter()
+            .map(|w| w.trim().to_ascii_lowercase())
+            .collect();
         Self { words }
     }
 
@@ -169,6 +175,19 @@ mod tests {
             let mnemonic = seed.to_mnemonic().unwrap();
             let back = Seed::from_mnemonic(&mnemonic).unwrap();
             prop_assert_eq!(seed.as_bytes(), back.as_bytes());
+        }
+    }
+
+    #[test]
+    fn from_words_normalizes_whitespace_and_case() {
+        let raw = vec![
+            "ABANDON".to_string(),
+            " abandon".to_string(),
+            "abandon\t".to_string(),
+        ];
+        let m = Mnemonic::from_words(raw);
+        for w in m.words() {
+            assert_eq!(w, "abandon", "from_words must normalize");
         }
     }
 }
