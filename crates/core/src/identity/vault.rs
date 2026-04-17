@@ -141,6 +141,41 @@ fn atomic_write_vault(path: &Path, vf: &VaultFile) -> Result<()> {
     Ok(())
 }
 
+/// Encrypt the given identity under `passphrase`, producing a ready-to-write
+/// `VaultFile`. Fresh salt + nonce per call.
+///
+/// Private: called by `Vault::create` and `Vault::change_passphrase`.
+fn encrypt_identity(identity: IdentityKey, passphrase: &str) -> Result<VaultFile> {
+    let kdf = KdfParams::canonical();
+    let mut salt = [0u8; 16];
+    let mut nonce_bytes = [0u8; 24];
+    rand::rngs::OsRng.fill_bytes(&mut salt);
+    rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
+
+    let aead_key = derive_aead_key(passphrase, &salt, &kdf)?;
+    let cipher = XChaCha20Poly1305::new(Key::from_slice(aead_key.as_ref()));
+    let nonce = XNonce::from_slice(&nonce_bytes);
+
+    let secret_bytes = Zeroizing::new(identity.into_bytes());
+    let ciphertext = cipher
+        .encrypt(
+            nonce,
+            Payload {
+                msg: secret_bytes.as_ref(),
+                aad: VAULT_AAD,
+            },
+        )
+        .map_err(|_| CoreError::Identity("aead encrypt failed".into()))?;
+
+    Ok(VaultFile {
+        v: VAULT_VERSION,
+        kdf,
+        salt,
+        nonce: nonce_bytes,
+        ciphertext,
+    })
+}
+
 /// On-disk encrypted identity container.
 #[derive(Debug)]
 pub struct Vault {
@@ -161,37 +196,7 @@ impl Vault {
             )));
         }
 
-        let kdf = KdfParams::canonical();
-        let mut salt = [0u8; 16];
-        let mut nonce_bytes = [0u8; 24];
-        rand::rngs::OsRng.fill_bytes(&mut salt);
-        rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
-
-        let aead_key = derive_aead_key(passphrase, &salt, &kdf)?;
-        let cipher = XChaCha20Poly1305::new(Key::from_slice(aead_key.as_ref()));
-        let nonce = XNonce::from_slice(&nonce_bytes);
-
-        // `Zeroizing<[u8; 32]>` ensures the plaintext secret is wiped when this
-        // binding drops, even on an early-return error path.
-        let secret_bytes = Zeroizing::new(identity.into_bytes());
-        let ciphertext = cipher
-            .encrypt(
-                nonce,
-                Payload {
-                    msg: secret_bytes.as_ref(),
-                    aad: VAULT_AAD,
-                },
-            )
-            .map_err(|_| CoreError::Identity("aead encrypt failed".into()))?;
-
-        let vf = VaultFile {
-            v: VAULT_VERSION,
-            kdf,
-            salt,
-            nonce: nonce_bytes,
-            ciphertext,
-        };
-
+        let vf = encrypt_identity(identity, passphrase)?;
         atomic_write_vault(path, &vf)?;
 
         Ok(Self {
@@ -257,39 +262,7 @@ impl Vault {
         // Decrypt with the old passphrase first; if it fails, don't touch
         // the file.
         let (_, identity) = Vault::open(&self.path, old)?;
-
-        // Rebuild a fresh VaultFile under the new passphrase, then write
-        // atomically over the existing path. Fresh salt + nonce per
-        // rewrite fall out of this flow.
-        let kdf = KdfParams::canonical();
-        let mut salt = [0u8; 16];
-        let mut nonce_bytes = [0u8; 24];
-        rand::rngs::OsRng.fill_bytes(&mut salt);
-        rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
-
-        let aead_key = derive_aead_key(new, &salt, &kdf)?;
-        let cipher = XChaCha20Poly1305::new(Key::from_slice(aead_key.as_ref()));
-        let nonce = XNonce::from_slice(&nonce_bytes);
-
-        let secret_bytes = Zeroizing::new(identity.into_bytes());
-        let ciphertext = cipher
-            .encrypt(
-                nonce,
-                Payload {
-                    msg: secret_bytes.as_ref(),
-                    aad: VAULT_AAD,
-                },
-            )
-            .map_err(|_| CoreError::Identity("aead encrypt failed".into()))?;
-
-        let vf = VaultFile {
-            v: VAULT_VERSION,
-            kdf,
-            salt,
-            nonce: nonce_bytes,
-            ciphertext,
-        };
-
+        let vf = encrypt_identity(identity, new)?;
         atomic_write_vault(&self.path, &vf)?;
         Ok(())
     }
