@@ -31,6 +31,11 @@ struct Cli {
     #[arg(long, global = true)]
     config: Option<PathBuf>,
 
+    /// Override the data directory (vault + daemon state). Defaults to
+    /// the XDG data dir.
+    #[arg(long, global = true)]
+    data_dir: Option<PathBuf>,
+
     /// JSON output (for scripting).
     #[arg(long, global = true)]
     json: bool,
@@ -94,8 +99,8 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     match cli.cmd {
-        Command::Init => init().await,
-        Command::Restore { seed } => restore(&seed).await,
+        Command::Init => init(cli.data_dir.as_deref()).await,
+        Command::Restore { seed } => restore(&seed, cli.data_dir.as_deref()).await,
         Command::Daemon { detach } => daemon(detach).await,
         Command::Invite { qr } => invite(qr).await,
         Command::Add { link } => add(&link).await,
@@ -105,10 +110,17 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn init() -> Result<()> {
-    let config = Config::defaults()?;
-    std::fs::create_dir_all(&config.data_dir)?;
-    let vault_path = config.data_dir.join("identity.vault");
+fn effective_data_dir(override_dir: Option<&std::path::Path>) -> Result<PathBuf> {
+    if let Some(d) = override_dir {
+        return Ok(d.to_path_buf());
+    }
+    Ok(Config::defaults()?.data_dir)
+}
+
+async fn init(data_dir_override: Option<&std::path::Path>) -> Result<()> {
+    let data_dir = effective_data_dir(data_dir_override)?;
+    std::fs::create_dir_all(&data_dir)?;
+    let vault_path = data_dir.join("identity.vault");
 
     if vault_path.exists() {
         anyhow::bail!(
@@ -159,10 +171,12 @@ fn read_passphrase(prompt: &str) -> Result<zeroize::Zeroizing<String>> {
     Ok(line)
 }
 
-async fn restore(seed_phrase: &str) -> Result<()> {
-    let config = Config::defaults()?;
-    std::fs::create_dir_all(&config.data_dir)?;
-    let vault_path = config.data_dir.join("identity.vault");
+async fn restore(seed_phrase: &str, data_dir_override: Option<&std::path::Path>) -> Result<()> {
+    use anyhow::Context;
+
+    let data_dir = effective_data_dir(data_dir_override)?;
+    std::fs::create_dir_all(&data_dir)?;
+    let vault_path = data_dir.join("identity.vault");
 
     if vault_path.exists() {
         anyhow::bail!(
@@ -171,8 +185,16 @@ async fn restore(seed_phrase: &str) -> Result<()> {
         );
     }
 
-    let mnemonic = Mnemonic::parse(seed_phrase);
-    let seed = Seed::from_mnemonic(&mnemonic)?;
+    // Parse the phrase through a Zeroizing copy so our local String
+    // does not linger. (The clap-owned argv slice is still exposed via
+    // /proc/<pid>/cmdline — users should avoid passing secrets on the
+    // command line; this is documented in the README.)
+    let mnemonic = {
+        let owned = zeroize::Zeroizing::new(seed_phrase.to_string());
+        Mnemonic::parse(&owned)
+    };
+    let seed = Seed::from_mnemonic(&mnemonic)
+        .context("invalid seed phrase (check word list and checksum)")?;
     let identity = IdentityKey::from_seed(&seed)?;
     let pubkey_hex = identity.public().to_hex();
 

@@ -84,7 +84,7 @@ impl IdentityKey {
     pub fn from_seed(seed: &crate::identity::Seed) -> Result<Self> {
         use crate::identity::derive::{hkdf_expand, INFO_IDENTITY_V1};
         let okm = hkdf_expand::<32>(seed.as_bytes(), INFO_IDENTITY_V1)?;
-        Ok(Self::from_bytes(*okm))
+        Ok(Self::from_bytes(okm))
     }
 
     /// Public half of the keypair.
@@ -102,12 +102,18 @@ impl IdentityKey {
     }
 
     /// Verify a signature against a pubkey. Constant-time, no panics.
+    ///
+    /// Both invalid-pubkey and bad-signature outcomes collapse to the
+    /// same opaque error to prevent a timing/error-text distinguisher
+    /// in auth paths that accept attacker-controlled pubkeys.
     pub fn verify(pubkey: &PublicKey, message: &[u8], signature: &Signature) -> Result<()> {
-        let vk = VerifyingKey::from_bytes(&pubkey.0)
-            .map_err(|e| CoreError::Identity(format!("invalid pubkey bytes: {e}")))?;
+        let vk = match VerifyingKey::from_bytes(&pubkey.0) {
+            Ok(v) => v,
+            Err(_) => return Err(CoreError::Identity("verification failed".into())),
+        };
         let sig = ed25519_dalek::Signature::from_bytes(&signature.0);
         vk.verify_strict(message, &sig)
-            .map_err(|_| CoreError::Identity("signature verification failed".into()))
+            .map_err(|_| CoreError::Identity("verification failed".into()))
     }
 
     /// Consume into raw secret bytes. Caller is responsible for zeroization.
@@ -120,10 +126,15 @@ impl IdentityKey {
         out
     }
 
-    /// Construct from raw secret bytes. Private: only callable from inside
-    /// the crate (vault open, seed derivation).
-    pub(crate) fn from_bytes(secret: [u8; 32]) -> Self {
-        Self { secret }
+    /// Construct from Zeroizing-wrapped secret bytes. Private: only
+    /// callable from inside the crate (vault open, seed derivation).
+    ///
+    /// Takes `Zeroizing<[u8; 32]>` (not bare `[u8; 32]`) so the caller's
+    /// guard drops after the move, leaving `self.secret` as the sole
+    /// un-wiped copy — which itself zeroes on drop via the struct's
+    /// `ZeroizeOnDrop` derive.
+    pub(crate) fn from_bytes(secret: zeroize::Zeroizing<[u8; 32]>) -> Self {
+        Self { secret: *secret }
     }
 }
 
@@ -191,19 +202,38 @@ mod tests {
     }
 
     #[test]
+    fn from_bytes_accepts_zeroizing() {
+        let mut buf = zeroize::Zeroizing::new([0u8; 32]);
+        buf[0] = 1;
+        let id = IdentityKey::from_bytes(buf);
+        assert_eq!(id.public().0.len(), 32);
+    }
+
+    #[test]
     fn from_seed_is_domain_separated_from_raw_bytes() {
-        // A seed with the same bytes as a raw secret must NOT produce the same
-        // keypair — if it did, we'd have accidentally skipped HKDF.
+        // If HKDF were accidentally bypassed (e.g. someone rewrote from_seed
+        // as Self::from_bytes(seed.as_bytes().into())), this test would fail:
+        // the "raw-bytes" and "seed-derived" keys would coincide.
         let bytes = [0x42u8; 32];
-        let raw_key = IdentityKey::from_bytes(bytes);
-        // Construct a Seed holding those same bytes. We can't use Seed::from_bytes
-        // (not public), but from_mnemonic on "abandon×24" gives a well-known seed;
-        // simpler: just verify that the HKDF label is actually mixed in by checking
-        // from_seed output length stays 32 (smoke test — the stronger property is
-        // covered by hkdf_is_domain_separated in derive.rs).
-        let seed = crate::identity::Seed::generate().unwrap();
+        let raw_key = IdentityKey::from_bytes(zeroize::Zeroizing::new(bytes));
+        let seed = crate::identity::Seed::from_bytes(bytes);
         let derived = IdentityKey::from_seed(&seed).unwrap();
-        assert_eq!(derived.public().0.len(), 32);
-        drop(raw_key);
+        assert_ne!(
+            raw_key.public(),
+            derived.public(),
+            "from_seed must mix HKDF label; raw-bytes and seed-derived keys must differ"
+        );
+    }
+
+    #[test]
+    fn verify_rejects_tampered_signature() {
+        let id = IdentityKey::generate().unwrap();
+        let msg = b"payload";
+        let mut sig = id.sign(msg);
+        // Flip the first byte of the signature's R component.
+        sig.0[0] ^= 0x01;
+        let err = IdentityKey::verify(&id.public(), msg, &sig)
+            .expect_err("tampered signature must fail verify_strict");
+        assert!(matches!(err, crate::error::CoreError::Identity(_)));
     }
 }

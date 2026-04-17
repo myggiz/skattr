@@ -34,11 +34,9 @@ impl Seed {
     pub fn to_mnemonic(&self) -> Result<Mnemonic> {
         let m = bip39::Mnemonic::from_entropy_in(bip39::Language::English, &self.bytes)
             .map_err(|e| CoreError::Identity(format!("bip39 encode: {e}")))?;
-        let words: Vec<String> = m
-            .to_string()
-            .split_whitespace()
-            .map(str::to_owned)
-            .collect();
+        // The joined phrase lives on the heap; wipe it before drop.
+        let phrase = zeroize::Zeroizing::new(m.to_string());
+        let words: Vec<String> = phrase.split_whitespace().map(str::to_owned).collect();
         Ok(Mnemonic { words })
     }
 
@@ -46,10 +44,10 @@ impl Seed {
     ///
     /// Validates the checksum; returns an error on any malformed phrase.
     pub fn from_mnemonic(mnemonic: &Mnemonic) -> Result<Self> {
-        let phrase = mnemonic.words.join(" ");
+        let phrase = zeroize::Zeroizing::new(mnemonic.words.join(" "));
         let m = bip39::Mnemonic::parse_in_normalized(bip39::Language::English, &phrase)
             .map_err(|e| CoreError::Identity(format!("bip39 decode: {e}")))?;
-        let entropy = m.to_entropy();
+        let entropy = zeroize::Zeroizing::new(m.to_entropy());
         let bytes: [u8; 32] = entropy
             .as_slice()
             .try_into()
@@ -61,6 +59,14 @@ impl Seed {
     /// go through HKDF derivation, not the raw seed).
     pub(crate) fn as_bytes(&self) -> &[u8; 32] {
         &self.bytes
+    }
+
+    /// Construct from raw bytes — test-only. Production code must go
+    /// through `Seed::generate` or `Seed::from_mnemonic` so the entropy
+    /// source stays auditable.
+    #[cfg(test)]
+    pub(crate) fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self { bytes }
     }
 }
 
@@ -74,9 +80,15 @@ pub struct Mnemonic {
 }
 
 impl Mnemonic {
-    /// Build from an explicit list of words.
+    /// Build from an explicit list of words. Normalizes each entry to
+    /// lower-case and trims surrounding whitespace, matching the
+    /// behavior of `parse`.
     #[must_use]
     pub fn from_words(words: Vec<String>) -> Self {
+        let words = words
+            .into_iter()
+            .map(|w| w.trim().to_ascii_lowercase())
+            .collect();
         Self { words }
     }
 
@@ -160,6 +172,19 @@ mod tests {
             let mnemonic = seed.to_mnemonic().unwrap();
             let back = Seed::from_mnemonic(&mnemonic).unwrap();
             prop_assert_eq!(seed.as_bytes(), back.as_bytes());
+        }
+    }
+
+    #[test]
+    fn from_words_normalizes_whitespace_and_case() {
+        let raw = vec![
+            "ABANDON".to_string(),
+            " abandon".to_string(),
+            "abandon\t".to_string(),
+        ];
+        let m = Mnemonic::from_words(raw);
+        for w in m.words() {
+            assert_eq!(w, "abandon", "from_words must normalize");
         }
     }
 }

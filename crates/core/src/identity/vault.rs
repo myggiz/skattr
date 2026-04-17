@@ -37,6 +37,11 @@ const VAULT_AAD: &[u8] = b"skattr-vault-v1";
 /// 32-byte AEAD key.
 ///
 /// The returned buffer zeros on drop; callers must not stash the raw bytes.
+///
+/// **Passphrase bytes are used verbatim** — no Unicode normalization is
+/// applied. ASCII passphrases are recommended; non-ASCII entries will not
+/// round-trip across OSes with different default Unicode forms. See
+/// `docs/adr/0004-passphrase-normalization.md`.
 fn derive_aead_key(
     passphrase: &str,
     salt: &[u8; 16],
@@ -99,6 +104,43 @@ pub(crate) struct VaultFile {
     pub ciphertext: Vec<u8>,
 }
 
+/// Durably write `vf` to `path`: serialize → tempfile → fsync tempfile →
+/// rename over target → fsync parent directory.
+///
+/// Renames on POSIX are atomic within a single filesystem, but durability
+/// against power loss additionally requires fsync on both the tempfile
+/// and the parent directory (so the directory entry's inode change is
+/// on platter before we report success).
+fn atomic_write_vault(path: &Path, vf: &VaultFile) -> Result<()> {
+    let mut buf = Vec::new();
+    ciborium::ser::into_writer(vf, &mut buf).map_err(|e| CoreError::CborEncode(e.to_string()))?;
+
+    let tmp_path = path.with_extension("vault.tmp");
+    {
+        let mut f = std::fs::File::create(&tmp_path)?;
+        use std::io::Write;
+        f.write_all(&buf)?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp_path, path)?;
+
+    // Fsync parent directory so the rename itself is durable.
+    if let Some(parent) = path.parent() {
+        // On Linux the directory must be opened read-only; on macOS
+        // File::open works too. Windows has no directory fsync — skip.
+        #[cfg(unix)]
+        {
+            let dir = std::fs::File::open(parent)?;
+            dir.sync_all()?;
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = parent; // suppress unused on non-unix
+        }
+    }
+    Ok(())
+}
+
 /// On-disk encrypted identity container.
 #[derive(Debug)]
 pub struct Vault {
@@ -150,14 +192,7 @@ impl Vault {
             ciphertext,
         };
 
-        let mut buf = Vec::new();
-        ciborium::ser::into_writer(&vf, &mut buf)
-            .map_err(|e| CoreError::CborEncode(e.to_string()))?;
-
-        // Atomic write: write to a sibling tempfile, then rename.
-        let tmp_path = path.with_extension("vault.tmp");
-        std::fs::write(&tmp_path, &buf)?;
-        std::fs::rename(&tmp_path, path)?;
+        atomic_write_vault(path, &vf)?;
 
         Ok(Self {
             path: path.to_path_buf(),
@@ -221,30 +256,58 @@ impl Vault {
             Self {
                 path: path.to_path_buf(),
             },
-            IdentityKey::from_bytes(*secret),
+            IdentityKey::from_bytes(secret),
         ))
     }
 
     /// Re-encrypt the vault under a new passphrase.
     ///
-    /// **Not crash-safe.** Between the old file's removal and the new file's
-    /// write there is a window where the vault does not exist on disk. A
-    /// crash in that window renders the vault unrecoverable without the
-    /// user's seed phrase.
+    /// Crash-safe: writes the new vault to a sidecar, fsyncs, then
+    /// renames over the existing path atomically. A crash at any point
+    /// either leaves the old vault intact (rename hasn't landed) or the
+    /// new one (rename has landed) — never neither.
     ///
     /// Takes `&mut self` to serialize concurrent rewrites at the API
     /// boundary — no `self` field is actually mutated; the mutation is
     /// on-disk.
-    // TODO(phase-1): switch to write-sidecar + atomic rename so a crash
-    // mid-rewrite leaves the old vault intact.
     pub fn change_passphrase(&mut self, old: &str, new: &str) -> Result<()> {
-        // Decrypt with the old passphrase first; if it fails, don't touch the file.
+        // Decrypt with the old passphrase first; if it fails, don't touch
+        // the file.
         let (_, identity) = Vault::open(&self.path, old)?;
-        // Delete the existing file so `create`'s "refuse to overwrite" guard
-        // doesn't trip. We have the plaintext identity in memory now; if anything
-        // below panics the vault is lost — caller must have a seed-phrase backup.
-        std::fs::remove_file(&self.path)?;
-        let _new = Vault::create(&self.path, identity, new)?;
+
+        // Rebuild a fresh VaultFile under the new passphrase, then write
+        // atomically over the existing path. Fresh salt + nonce per
+        // rewrite fall out of this flow.
+        let kdf = KdfParams::canonical();
+        let mut salt = [0u8; 16];
+        let mut nonce_bytes = [0u8; 24];
+        rand::rngs::OsRng.fill_bytes(&mut salt);
+        rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
+
+        let aead_key = derive_aead_key(new, &salt, &kdf)?;
+        let cipher = XChaCha20Poly1305::new(Key::from_slice(aead_key.as_ref()));
+        let nonce = XNonce::from_slice(&nonce_bytes);
+
+        let secret_bytes = Zeroizing::new(identity.into_bytes());
+        let ciphertext = cipher
+            .encrypt(
+                nonce,
+                Payload {
+                    msg: secret_bytes.as_ref(),
+                    aad: VAULT_AAD,
+                },
+            )
+            .map_err(|_| CoreError::Identity("aead encrypt failed".into()))?;
+
+        let vf = VaultFile {
+            v: VAULT_VERSION,
+            kdf,
+            salt,
+            nonce: nonce_bytes,
+            ciphertext,
+        };
+
+        atomic_write_vault(&self.path, &vf)?;
         Ok(())
     }
 }
@@ -456,5 +519,70 @@ mod tests {
         assert!(matches!(err, crate::error::CoreError::Identity(_)));
         // File untouched: old passphrase still works.
         Vault::open(&path, "real").unwrap();
+    }
+
+    #[test]
+    fn argon2_derive_is_salt_sensitive() {
+        let kdf = KdfParams::canonical();
+        let a = derive_aead_key("pw", &[0x11; 16], &kdf).unwrap();
+        let b = derive_aead_key("pw", &[0x22; 16], &kdf).unwrap();
+        assert_ne!(a.as_ref(), b.as_ref());
+    }
+
+    #[test]
+    fn argon2_derive_is_params_sensitive() {
+        let salt = [0x33; 16];
+        let a = derive_aead_key("pw", &salt, &KdfParams::canonical()).unwrap();
+        let b = derive_aead_key(
+            "pw",
+            &salt,
+            &KdfParams {
+                m_kib: 64 * 1024,
+                t: 4, // vs canonical 3
+                p: 4,
+            },
+        )
+        .unwrap();
+        assert_ne!(a.as_ref(), b.as_ref());
+    }
+
+    #[test]
+    fn no_tempfile_sidecar_after_create() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("id.vault");
+        let id = IdentityKey::generate().unwrap();
+        Vault::create(&path, id, "pw").unwrap();
+        let sidecar = path.with_extension("vault.tmp");
+        assert!(
+            !sidecar.exists(),
+            "tempfile sidecar must be gone after create"
+        );
+    }
+
+    #[test]
+    fn change_passphrase_survives_simulated_new_create_failure() {
+        // Simulate the "disk full during new-vault write" failure by pre-creating
+        // a busy/unwritable sidecar path before change_passphrase. The rename
+        // should fail cleanly and the OLD vault must still be openable.
+        //
+        // We approximate "unwritable sidecar" by pre-creating `.vault.tmp` as
+        // a directory — File::create will fail with IsADirectory on Unix.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("id.vault");
+        let id = IdentityKey::generate().unwrap();
+        let expected_pub = id.public();
+        Vault::create(&path, id, "old").unwrap();
+
+        // Block the sidecar path.
+        std::fs::create_dir(path.with_extension("vault.tmp")).unwrap();
+
+        let (mut vault, _) = Vault::open(&path, "old").unwrap();
+        let err = vault.change_passphrase("old", "new");
+        assert!(err.is_err(), "sidecar conflict must return Err");
+
+        // Unblock and verify the old vault is still intact.
+        std::fs::remove_dir(path.with_extension("vault.tmp")).unwrap();
+        let (_, opened) = Vault::open(&path, "old").unwrap();
+        assert_eq!(opened.public(), expected_pub);
     }
 }
