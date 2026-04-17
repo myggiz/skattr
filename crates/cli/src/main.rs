@@ -106,7 +106,7 @@ async fn main() -> Result<()> {
 }
 
 async fn init() -> Result<()> {
-    let config = Config::defaults().map_err(anyhow::Error::from)?;
+    let config = Config::defaults()?;
     std::fs::create_dir_all(&config.data_dir)?;
     let vault_path = config.data_dir.join("identity.vault");
 
@@ -119,17 +119,17 @@ async fn init() -> Result<()> {
 
     let pw1 = read_passphrase("Choose a passphrase: ")?;
     let pw2 = read_passphrase("Confirm passphrase: ")?;
-    if pw1 != pw2 {
+    if *pw1 != *pw2 {
         anyhow::bail!("passphrases do not match");
     }
 
-    let seed = Seed::generate().map_err(anyhow::Error::from)?;
-    let identity = IdentityKey::from_seed(&seed).map_err(anyhow::Error::from)?;
+    let seed = Seed::generate()?;
+    let identity = IdentityKey::from_seed(&seed)?;
     let pubkey_hex = identity.public().to_hex();
 
-    Vault::create(&vault_path, identity, &pw1).map_err(anyhow::Error::from)?;
+    Vault::create(&vault_path, identity, pw1.as_str())?;
 
-    let mnemonic = seed.to_mnemonic().map_err(anyhow::Error::from)?;
+    let mnemonic = seed.to_mnemonic()?;
     let phrase = mnemonic.words().join(" ");
 
     println!();
@@ -146,12 +146,17 @@ async fn init() -> Result<()> {
     Ok(())
 }
 
-fn read_passphrase(prompt: &str) -> Result<String> {
+fn read_passphrase(prompt: &str) -> Result<zeroize::Zeroizing<String>> {
+    // TODO(phase-2): use rpassword to suppress terminal echo.
     print!("{prompt}");
     io::stdout().flush()?;
-    let mut line = String::new();
+    let mut line = zeroize::Zeroizing::new(String::new());
     io::stdin().lock().read_line(&mut line)?;
-    Ok(line.trim_end_matches(['\n', '\r']).to_string())
+    // Trim trailing newline in-place.
+    while line.ends_with('\n') || line.ends_with('\r') {
+        line.pop();
+    }
+    Ok(line)
 }
 
 async fn restore(_seed: &str) -> Result<()> {
