@@ -37,6 +37,11 @@ const VAULT_AAD: &[u8] = b"skattr-vault-v1";
 /// 32-byte AEAD key.
 ///
 /// The returned buffer zeros on drop; callers must not stash the raw bytes.
+///
+/// **Passphrase bytes are used verbatim** — no Unicode normalization is
+/// applied. ASCII passphrases are recommended; non-ASCII entries will not
+/// round-trip across OSes with different default Unicode forms. See
+/// `docs/adr/0004-passphrase-normalization.md`.
 fn derive_aead_key(
     passphrase: &str,
     salt: &[u8; 16],
