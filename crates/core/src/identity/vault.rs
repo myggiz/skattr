@@ -518,6 +518,31 @@ mod tests {
     }
 
     #[test]
+    fn argon2_derive_is_salt_sensitive() {
+        let kdf = KdfParams::canonical();
+        let a = derive_aead_key("pw", &[0x11; 16], &kdf).unwrap();
+        let b = derive_aead_key("pw", &[0x22; 16], &kdf).unwrap();
+        assert_ne!(a.as_ref(), b.as_ref());
+    }
+
+    #[test]
+    fn argon2_derive_is_params_sensitive() {
+        let salt = [0x33; 16];
+        let a = derive_aead_key("pw", &salt, &KdfParams::canonical()).unwrap();
+        let b = derive_aead_key(
+            "pw",
+            &salt,
+            &KdfParams {
+                m_kib: 64 * 1024,
+                t: 4, // vs canonical 3
+                p: 4,
+            },
+        )
+        .unwrap();
+        assert_ne!(a.as_ref(), b.as_ref());
+    }
+
+    #[test]
     fn no_tempfile_sidecar_after_create() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("id.vault");
