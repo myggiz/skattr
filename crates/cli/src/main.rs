@@ -265,14 +265,14 @@ async fn daemon(detach: bool, data_dir_override: Option<&std::path::Path>) -> Re
     println!("Tor ready. Publishing onion service\u{2026}");
 
     let hs_key_path = data_dir.join("hs.key.age");
-    let onion = rt.publish_onion(&hs_key_path, &seed, "skattr-daemon").await?;
+    let onion = rt
+        .publish_onion(&hs_key_path, &seed, "skattr-daemon")
+        .await?;
     println!();
     println!("Listening on: {onion}:1");
     println!("Ctrl-C to shut down.");
 
-    tokio::signal::ctrl_c()
-        .await
-        .map_err(anyhow::Error::from)?;
+    tokio::signal::ctrl_c().await.map_err(anyhow::Error::from)?;
 
     println!();
     println!("Shutting down\u{2026}");

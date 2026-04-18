@@ -4383,6 +4383,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml 0.8.23",
+ "tor-cell",
  "tor-hscrypto",
  "tor-hsservice",
  "tor-llcrypto",

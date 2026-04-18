@@ -34,11 +34,7 @@ async fn two_daemons_echo_bytes_over_tor() {
 
     let seed_a = Seed::generate().unwrap();
     let onion = rt_a
-        .publish_onion(
-            &tmp_a.path().join("hs.key.age"),
-            &seed_a,
-            "skattr-exit-a",
-        )
+        .publish_onion(&tmp_a.path().join("hs.key.age"), &seed_a, "skattr-exit-a")
         .await
         .expect("A: publish");
     eprintln!("A listening on: {onion}");
