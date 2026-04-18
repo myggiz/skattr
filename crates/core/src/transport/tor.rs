@@ -143,15 +143,11 @@ impl TorRuntime {
     /// path plus seed reload the same key, so the published `.onion`
     /// address is stable across restarts.
     ///
-    /// Arti 0.41 ships with a `launch_onion_service_with_hsid` experimental
-    /// API that inserts an externally-provided [`HsIdKeypair`] into the
-    /// keystore (under `hss/<nickname>/ks_hs_id`) before launching. On
-    /// first launch we use that. On subsequent launches Arti's keystore
-    /// already holds a key under the nickname; the experimental API refuses
-    /// to overwrite it (that is the correct semantics — overwriting would
-    /// rotate the `.onion`), so we fall back to plain
-    /// [`TorClient::launch_onion_service`] which uses the already-present
-    /// key. Either way the result is the same 32-byte Ed25519 identity.
+    /// Before launching, the seed-derived [`HsIdKeypair`] is injected into
+    /// Arti's primary keystore via [`inject_hs_secret`], which probes first
+    /// and skips the insert when a key is already present (the "subsequent
+    /// run, same state_dir" path). Either way [`TorClient::launch_onion_service`]
+    /// picks up the stored key and the resulting `.onion` address is stable.
     ///
     /// Returns the `.onion` address (56 base32 chars + `.onion`).
     ///
@@ -167,27 +163,20 @@ impl TorRuntime {
         // persist, or decrypt from disk under the seed.
         let hs_secret = crate::transport::hs_key::load_or_create(hs_key_path, seed)?;
 
-        // 2. Build an HsIdKeypair from that secret. The conversion is:
-        //     SigningKey::from_bytes(seed32)
-        //       → ExpandedKeypair::from(&Keypair)  (SHA-512 expansion)
-        //       → HsIdKeypair::from(expanded)      (derive_more::From)
-        let id_keypair = hs_id_keypair_from_secret(&hs_secret);
-
         let nickname_parsed = nickname
             .parse::<tor_hsservice::HsNickname>()
             .map_err(|e| CoreError::Transport(format!("invalid HS nickname '{nickname}': {e}")))?;
 
         let config = tor_hsservice::config::OnionServiceConfigBuilder::default()
-            .nickname(nickname_parsed)
+            .nickname(nickname_parsed.clone())
             .build()
             .map_err(|e| CoreError::Transport(format!("HS config: {e}")))?;
 
-        // 3. Launch. Try the "inject key" path first; if the keymgr already
-        // holds a matching entry, Arti returns a keystore error and we fall
-        // back to the plain launch path (which reuses the existing entry).
-        // The two launch calls return slightly different opaque stream types,
-        // so we box-pin each branch to unify them.
-        let config_clone = config.clone();
+        // 3. Inject the HS identity key into Arti's keystore (probe-before-
+        // insert: no-op if the key is already present), then launch the
+        // onion service using the stored key.
+        inject_hs_secret(&self.client, &nickname_parsed, &hs_secret)?;
+
         let (svc, rend_stream): (
             Arc<tor_hsservice::RunningOnionService>,
             std::pin::Pin<
@@ -195,30 +184,12 @@ impl TorRuntime {
             >,
         ) = match self
             .client
-            .launch_onion_service_with_hsid(config, id_keypair)
+            .launch_onion_service(config)
+            .map_err(|e| CoreError::Transport(format!("HS launch: {e}")))?
         {
-            Ok(Some((svc, stream))) => (svc, Box::pin(stream)),
-            Ok(None) => {
+            Some((svc, stream)) => (svc, Box::pin(stream)),
+            None => {
                 return Err(CoreError::Transport("HS disabled in config".into()));
-            }
-            Err(e) if is_key_already_exists_error(&e) => {
-                tracing::debug!(
-                    "HS key already present in Arti keystore under nickname; \
-                     reusing existing entry"
-                );
-                match self
-                    .client
-                    .launch_onion_service(config_clone)
-                    .map_err(|e| CoreError::Transport(format!("HS launch (reuse): {e}")))?
-                {
-                    Some((svc, stream)) => (svc, Box::pin(stream)),
-                    None => {
-                        return Err(CoreError::Transport("HS disabled in config".into()));
-                    }
-                }
-            }
-            Err(e) => {
-                return Err(CoreError::Transport(format!("HS launch: {e}")));
             }
         };
 
@@ -308,27 +279,49 @@ fn hs_id_keypair_from_secret(
     tor_hscrypto::pk::HsIdKeypair::from(expanded)
 }
 
-/// Best-effort detection of the `KeyAlreadyExists` error returned when we
-/// try to re-inject an HS identity key that Arti's keystore already holds.
+/// Inject a seed-derived HS identity keypair into Arti's primary keystore,
+/// using a probe-before-insert pattern to avoid depending on error-message
+/// wording.
 ///
-/// Arti's public error type doesn't expose the inner `tor_keymgr::Error`
-/// variant directly, so we match on the error chain's debug representation.
-/// This is fragile if upstream renames the variant, but the fallback path
-/// (plain `launch_onion_service`) is only taken when the injection call
-/// already failed for *some* reason — in the worst case we'd surface the
-/// original error a moment later from the plain launch path, which is the
-/// desired behaviour.
-fn is_key_already_exists_error(err: &arti_client::Error) -> bool {
-    // The `tor_keymgr::Error::KeyAlreadyExists` variant is rendered as
-    // "key already exists" in the `Display` chain.
-    let mut msg = String::new();
-    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(err);
-    while let Some(e) = source {
-        use std::fmt::Write as _;
-        let _ = write!(&mut msg, "{e}; ");
-        source = e.source();
+/// If a keypair for `nickname` is already present (the "subsequent run,
+/// same state_dir" path), the existing entry is left untouched and we
+/// return `Ok(())` immediately — the caller will then launch the service
+/// using the stored key, yielding the same `.onion` address as the first run.
+///
+/// If the slot is empty, the derived keypair is inserted fresh.
+fn inject_hs_secret(
+    client: &TorClient<TokioRustlsRuntime>,
+    nickname: &tor_hsservice::HsNickname,
+    secret: &crate::transport::hs_key::HsSecretBytes,
+) -> Result<()> {
+    let spec = tor_hsservice::HsIdKeypairSpecifier::new(nickname.clone());
+
+    let keymgr = client
+        .keymgr()
+        .map_err(|e| CoreError::Transport(format!("keymgr unavailable: {e}")))?;
+
+    // Probe the keymgr BEFORE inserting: if an HS identity keypair for
+    // this nickname already exists, launch_onion_service will pick it up
+    // and our seed-derived key is intentionally ignored.
+    match keymgr.get::<tor_hscrypto::pk::HsIdKeypair>(&spec) {
+        Ok(Some(_)) => {
+            tracing::debug!(
+                "HS key already present in Arti keystore under nickname; \
+                 reusing existing entry"
+            );
+            return Ok(());
+        }
+        Ok(None) => { /* slot empty — proceed to insert below */ }
+        Err(e) => {
+            return Err(CoreError::Transport(format!("keymgr get: {e}")));
+        }
     }
-    msg.to_lowercase().contains("already exists")
+
+    let kp = hs_id_keypair_from_secret(secret);
+    keymgr
+        .insert(kp, &spec, arti_client::KeystoreSelector::Primary, false)
+        .map_err(|e| CoreError::Transport(format!("keymgr insert: {e}")))?;
+    Ok(())
 }
 
 #[cfg(test)]
