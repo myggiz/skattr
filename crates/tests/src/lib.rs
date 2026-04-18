@@ -11,6 +11,9 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+#[cfg(test)]
+mod arti_echo;
+
 use std::time::Duration;
 
 use tempfile::TempDir;

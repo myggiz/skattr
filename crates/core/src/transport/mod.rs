@@ -23,5 +23,5 @@ pub mod tor;
 
 pub(crate) use connection::AuthenticatedConnection;
 pub(crate) use frame::{Frame, FrameCodec, FrameType};
-pub(crate) use listener::OnionListener;
+pub use listener::OnionListener;
 pub(crate) use tor::{TorRuntime, TorStatus};
