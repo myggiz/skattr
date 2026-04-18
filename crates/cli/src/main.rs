@@ -214,7 +214,6 @@ async fn restore(seed_phrase: &str, data_dir_override: Option<&std::path::Path>)
 }
 
 async fn daemon(detach: bool, data_dir_override: Option<&std::path::Path>) -> Result<()> {
-    use skattr_core::identity::Seed;
     use skattr_core::transport::tor::{TorConfig, TorRuntime};
 
     if detach {
@@ -233,28 +232,13 @@ async fn daemon(detach: bool, data_dir_override: Option<&std::path::Path>) -> Re
     }
 
     let pw = read_passphrase("Vault passphrase: ")?;
-    let (_vault, _identity) = Vault::open(&vault_path, pw.as_str())?;
-    // Identity is only used here to prove the passphrase; the storage
-    // seed (below) is what keys non-identity at-rest material. We drop
-    // the identity explicitly to signal that.
-    drop(_identity);
+    let (_vault, identity) = Vault::open(&vault_path, pw.as_str())?;
 
-    // Load or create the storage seed. This is a 32-byte value used to
-    // derive at-rest encryption keys for daemon state (HS key, and later
-    // the SQLite database). It is distinct from the BIP39 identity seed.
-    let storage_seed_path = data_dir.join("storage-seed");
-    let seed = if storage_seed_path.exists() {
-        let bytes = std::fs::read(&storage_seed_path)?;
-        let arr: [u8; 32] = bytes
-            .as_slice()
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("storage-seed has wrong length"))?;
-        skattr_core::identity::Seed::from_storage_bytes(arr)
-    } else {
-        let seed = Seed::generate()?;
-        std::fs::write(&storage_seed_path, seed.as_bytes_for_storage())?;
-        seed
-    };
+    // Derive the storage seed from the identity secret via HKDF. This
+    // means the same BIP39 mnemonic → same storage seed → same HS key
+    // → same .onion address, so `skattr restore` recovers the full
+    // network identity, not just the cryptographic identity.
+    let seed = skattr_core::identity::derive::derive_storage_seed(identity)?;
 
     println!("Bootstrapping Tor\u{2026}");
     let cfg = TorConfig {
