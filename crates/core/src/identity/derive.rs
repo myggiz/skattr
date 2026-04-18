@@ -58,7 +58,9 @@ pub fn derive_storage_seed(
 ) -> crate::error::Result<crate::identity::Seed> {
     let identity_secret = Zeroizing::new(identity.into_bytes());
     let storage_seed_bytes = hkdf_expand::<32>(identity_secret.as_ref(), INFO_STORAGE_SEED_V1)?;
-    Ok(crate::identity::Seed::from_storage_bytes(*storage_seed_bytes))
+    Ok(crate::identity::Seed::from_storage_bytes(
+        *storage_seed_bytes,
+    ))
 }
 
 #[cfg(test)]
