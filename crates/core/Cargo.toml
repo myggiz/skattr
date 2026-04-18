@@ -49,6 +49,7 @@ age = { workspace = true }
 # Transport
 snow = { workspace = true }
 arti-client = { workspace = true }
+tor-cell = { workspace = true }
 tor-hsservice = { workspace = true }
 tor-hscrypto = { workspace = true }
 tor-llcrypto = { workspace = true }
