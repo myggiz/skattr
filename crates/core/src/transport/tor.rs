@@ -251,9 +251,17 @@ impl TorRuntime {
         self.rend_requests.take()
     }
 
-    /// Dial an outbound connection. Implemented in Task 7.
-    pub async fn connect(&self, _onion: &str, _port: u16) -> Result<arti_client::DataStream> {
-        todo!("Task 7")
+    /// Dial an outbound connection to `<onion>:<port>`.
+    ///
+    /// Returns a `DataStream` implementing `AsyncRead + AsyncWrite`.
+    /// Caller is responsible for the Noise handshake (see
+    /// `transport::connection::AuthenticatedConnection`).
+    pub async fn connect(&self, onion: &str, port: u16) -> Result<arti_client::DataStream> {
+        let target = format!("{onion}:{port}");
+        self.client
+            .connect(target.as_str())
+            .await
+            .map_err(|e| CoreError::Transport(format!("connect {target}: {e}")))
     }
 
     /// Gracefully shut down Arti. Drops the TorClient (which stops its
@@ -381,5 +389,59 @@ mod tests {
             "onion address should be v3 format: {onion}"
         );
         rt.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    #[ignore = "real network bootstrap + HS publish + dial, ~2-5 min, run with --ignored"]
+    async fn local_publish_then_dial_echoes_bytes() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let tmp_a = tempfile::tempdir().unwrap();
+        let tmp_b = tempfile::tempdir().unwrap();
+
+        // Daemon A: bootstrap + publish.
+        let mut rt_a = TorRuntime::bootstrap(TorConfig {
+            state_dir: tmp_a.path().to_path_buf(),
+            socks_port: None,
+        })
+        .await
+        .expect("A: bootstrap");
+        let seed_a = crate::identity::Seed::generate().unwrap();
+        let onion = rt_a
+            .publish_onion(&tmp_a.path().join("hs.key.age"), &seed_a, "skattr-echo-a")
+            .await
+            .expect("A: publish");
+
+        // Take the rend_requests and run an accept loop that echoes bytes.
+        let rend_requests = rt_a
+            .rend_requests_take()
+            .expect("rend_requests must be populated after publish");
+        let mut listener = crate::transport::OnionListener::spawn(rend_requests, 8);
+        let echo_task = tokio::spawn(async move {
+            if let Some(mut stream) = listener.accepted.recv().await {
+                let mut buf = [0u8; 32];
+                let n = stream.read(&mut buf).await.expect("A: read");
+                stream.write_all(&buf[..n]).await.expect("A: echo");
+                let _ = stream.shutdown().await;
+            }
+        });
+
+        // Daemon B: bootstrap + dial.
+        let rt_b = TorRuntime::bootstrap(TorConfig {
+            state_dir: tmp_b.path().to_path_buf(),
+            socks_port: None,
+        })
+        .await
+        .expect("B: bootstrap");
+
+        let mut stream = rt_b.connect(&onion, 1).await.expect("B: connect");
+        stream.write_all(b"hello skattr").await.expect("B: write");
+        let mut buf = [0u8; 32];
+        let n = stream.read(&mut buf).await.expect("B: read");
+        assert_eq!(&buf[..n], b"hello skattr");
+
+        let _ = echo_task.await;
+        rt_a.shutdown().await.expect("A: shutdown");
+        rt_b.shutdown().await.expect("B: shutdown");
     }
 }
