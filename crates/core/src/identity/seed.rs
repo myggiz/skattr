@@ -61,6 +61,15 @@ impl Seed {
         &self.bytes
     }
 
+    /// Construct from raw bytes for at-rest derivation uses (not BIP39).
+    /// Used by `identity::derive::derive_storage_seed` to wrap HKDF output
+    /// into a `Seed` for passing to the HS key layer. This is distinct from
+    /// the BIP39 identity seed.
+    #[must_use]
+    pub(crate) fn from_storage_bytes(bytes: [u8; 32]) -> Self {
+        Self { bytes }
+    }
+
     /// Construct from raw bytes — test-only. Production code must go
     /// through `Seed::generate` or `Seed::from_mnemonic` so the entropy
     /// source stays auditable.

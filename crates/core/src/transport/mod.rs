@@ -16,11 +16,12 @@
 
 pub(crate) mod connection;
 pub(crate) mod frame;
+pub(crate) mod hs_key;
 pub(crate) mod listener;
 pub(crate) mod noise;
-pub(crate) mod tor;
+pub mod tor;
 
 pub(crate) use connection::AuthenticatedConnection;
 pub(crate) use frame::{Frame, FrameCodec, FrameType};
-pub(crate) use listener::OnionListener;
+pub use listener::OnionListener;
 pub(crate) use tor::{TorRuntime, TorStatus};

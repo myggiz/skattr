@@ -42,6 +42,6 @@ pub(crate) mod delivery;
 pub(crate) mod mailbox;
 pub(crate) mod mls;
 pub(crate) mod storage;
-pub(crate) mod transport;
+pub mod transport;
 
 pub use error::{CoreError, Result};

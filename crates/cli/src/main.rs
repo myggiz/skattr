@@ -101,7 +101,7 @@ async fn main() -> Result<()> {
     match cli.cmd {
         Command::Init => init(cli.data_dir.as_deref()).await,
         Command::Restore { seed } => restore(&seed, cli.data_dir.as_deref()).await,
-        Command::Daemon { detach } => daemon(detach).await,
+        Command::Daemon { detach } => daemon(detach, cli.data_dir.as_deref()).await,
         Command::Invite { qr } => invite(qr).await,
         Command::Add { link } => add(&link).await,
         Command::Contacts => contacts().await,
@@ -213,8 +213,54 @@ async fn restore(seed_phrase: &str, data_dir_override: Option<&std::path::Path>)
     Ok(())
 }
 
-async fn daemon(_detach: bool) -> Result<()> {
-    println!("skattr daemon: not yet implemented.");
+async fn daemon(detach: bool, data_dir_override: Option<&std::path::Path>) -> Result<()> {
+    use skattr_core::transport::tor::{TorConfig, TorRuntime};
+
+    if detach {
+        anyhow::bail!("--detach is not yet supported; run in foreground for Phase 0.C");
+    }
+
+    let data_dir = effective_data_dir(data_dir_override)?;
+    std::fs::create_dir_all(&data_dir)?;
+    let vault_path = data_dir.join("identity.vault");
+
+    if !vault_path.exists() {
+        anyhow::bail!(
+            "no identity vault at {}; run `skattr init` first",
+            vault_path.display()
+        );
+    }
+
+    let pw = read_passphrase("Vault passphrase: ")?;
+    let (_vault, identity) = Vault::open(&vault_path, pw.as_str())?;
+
+    // Derive the storage seed from the identity secret via HKDF. This
+    // means the same BIP39 mnemonic → same storage seed → same HS key
+    // → same .onion address, so `skattr restore` recovers the full
+    // network identity, not just the cryptographic identity.
+    let seed = skattr_core::identity::derive::derive_storage_seed(identity)?;
+
+    println!("Bootstrapping Tor\u{2026}");
+    let cfg = TorConfig {
+        state_dir: data_dir.join("arti"),
+        socks_port: None,
+    };
+    let mut rt = TorRuntime::bootstrap(cfg).await?;
+    println!("Tor ready. Publishing onion service\u{2026}");
+
+    let hs_key_path = data_dir.join("hs.key.age");
+    let onion = rt
+        .publish_onion(&hs_key_path, &seed, "skattr-daemon")
+        .await?;
+    println!();
+    println!("Listening on: {onion}:1");
+    println!("Ctrl-C to shut down.");
+
+    tokio::signal::ctrl_c().await.map_err(anyhow::Error::from)?;
+
+    println!();
+    println!("Shutting down\u{2026}");
+    rt.shutdown().await?;
     Ok(())
 }
 

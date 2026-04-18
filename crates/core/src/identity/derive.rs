@@ -22,11 +22,20 @@ pub const INFO_IDENTITY_V1: &[u8] = b"skattr-identity-v1";
 /// Storage encryption key derivation: `HKDF(seed, "skattr-storage-v1")`.
 pub const INFO_STORAGE_V1: &[u8] = b"skattr-storage-v1";
 
+/// HS signing-key at-rest encryption: `HKDF(seed, "skattr-hs-storage-v1")`.
+pub const INFO_HS_STORAGE_V1: &[u8] = b"skattr-hs-storage-v1";
+
 /// Transport↔MLS binding: `HKDF(noise_handshake_hash, "skattr-binding-v1")`.
 pub const INFO_TRANSPORT_BINDING_V1: &[u8] = b"skattr-binding-v1";
 
 /// Invite PSK expansion: `HKDF(invite_psk, "skattr-invite-psk-v1")`.
 pub const INFO_INVITE_PSK_V1: &[u8] = b"skattr-invite-psk-v1";
+
+/// Daemon storage-seed derivation from the identity secret:
+/// `HKDF(identity_secret, "skattr-storage-seed-v1")`. The storage seed
+/// is used as the base for further at-rest encryption derivations
+/// (HS key, SQLite DB) — it is NOT the BIP39 identity seed.
+pub const INFO_STORAGE_SEED_V1: &[u8] = b"skattr-storage-seed-v1";
 
 /// Expand `ikm` into `OUT` bytes of output, bound to `info`.
 ///
@@ -37,6 +46,21 @@ pub fn hkdf_expand<const OUT: usize>(ikm: &[u8], info: &[u8]) -> Result<Zeroizin
     hk.expand(info, okm.as_mut())
         .map_err(|e| CoreError::Identity(format!("hkdf expand: {e}")))?;
     Ok(okm)
+}
+
+/// Derive the daemon storage seed from an identity key via HKDF.
+///
+/// Public entry point used by the CLI's daemon handler. Encapsulates
+/// access to the identity's raw secret bytes so callers outside the
+/// `core` crate don't need direct access.
+pub fn derive_storage_seed(
+    identity: crate::identity::IdentityKey,
+) -> crate::error::Result<crate::identity::Seed> {
+    let identity_secret = Zeroizing::new(identity.into_bytes());
+    let storage_seed_bytes = hkdf_expand::<32>(identity_secret.as_ref(), INFO_STORAGE_SEED_V1)?;
+    Ok(crate::identity::Seed::from_storage_bytes(
+        *storage_seed_bytes,
+    ))
 }
 
 #[cfg(test)]
