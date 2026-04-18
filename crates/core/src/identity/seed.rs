@@ -61,6 +61,23 @@ impl Seed {
         &self.bytes
     }
 
+    /// Construct from raw bytes for at-rest storage uses (not BIP39).
+    /// Production path: the daemon persists a 32-byte storage seed next
+    /// to the vault to key non-identity derivations (HS key, storage
+    /// DB). This is distinct from the BIP39 identity seed.
+    #[must_use]
+    pub fn from_storage_bytes(bytes: [u8; 32]) -> Self {
+        Self { bytes }
+    }
+
+    /// Dump the raw seed bytes for on-disk persistence. Caller must
+    /// store these at an appropriately protected path (inside the
+    /// data_dir, permissions 0600 on Unix).
+    #[must_use]
+    pub fn as_bytes_for_storage(&self) -> [u8; 32] {
+        self.bytes
+    }
+
     /// Construct from raw bytes — test-only. Production code must go
     /// through `Seed::generate` or `Seed::from_mnemonic` so the entropy
     /// source stays auditable.
