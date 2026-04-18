@@ -70,6 +70,19 @@ age = { version = "0.11", features = ["armor"] }
 
 # Tor / Noise — pinned to the newest published versions at workspace bootstrap.
 # These APIs move fast; revisit every phase exit.
+# `experimental-api` and `onion-service-cli-extra` are unstable upstream
+# features (flagged with `__is_experimental`). They may break between
+# minor Arti releases. Used ONLY for:
+#   experimental-api:
+#     - (historic) TorClient::launch_onion_service_with_hsid — no longer
+#       called after the Phase 0.C cleanup; kept enabled because some
+#       transitively-used APIs also ride this flag.
+#   onion-service-cli-extra:
+#     - TorClient::keymgr (transport/tor.rs, inject_hs_secret) — for
+#       the "slot already exists?" probe before we insert our seed-
+#       derived HS key.
+# On every Arti version bump, re-audit these usages. Grep command:
+#   rg 'keymgr|_with_hsid|launch_onion_service' crates/core
 arti-client = { version = "0.41", default-features = false, features = ["tokio", "rustls", "onion-service-client", "onion-service-service", "experimental-api", "onion-service-cli-extra"] }
 tor-cell = "0.41"
 tor-hsservice = "0.41"
