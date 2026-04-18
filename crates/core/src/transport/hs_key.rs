@@ -105,9 +105,7 @@ fn load(path: &Path, seed: &Seed) -> Result<HsSecretBytes> {
     // different-format file at the expected path).
     let mut tail = [0u8; 1];
     if reader.read(&mut tail).unwrap_or(0) > 0 {
-        return Err(CoreError::Transport(
-            "hs key has unexpected length".into(),
-        ));
+        return Err(CoreError::Transport("hs key has unexpected length".into()));
     }
 
     Ok(buf)

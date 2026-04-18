@@ -9,6 +9,7 @@
 //! downstream code.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use arti_client::config::TorClientConfigBuilder;
 use arti_client::{TorClient, TorClientConfig};
@@ -45,6 +46,14 @@ pub struct TorRuntime {
     status_tx: watch::Sender<TorStatus>,
     /// Ownership anchor for the background status-forwarding task.
     _status_task: tokio::task::JoinHandle<()>,
+    /// The currently-published onion service, if any. Dropped on shutdown.
+    hs_service: Option<Arc<tor_hsservice::RunningOnionService>>,
+    /// The rendezvous-request stream for the currently-published service.
+    /// Taken out exactly once via [`TorRuntime::rend_requests_take`] and
+    /// forwarded to the Noise listener loop.
+    rend_requests: Option<
+        std::pin::Pin<Box<dyn futures::Stream<Item = tor_hsservice::RendRequest> + Send + Sync>>,
+    >,
 }
 
 impl TorRuntime {
@@ -109,6 +118,8 @@ impl TorRuntime {
             client,
             status_tx,
             _status_task: status_task,
+            hs_service: None,
+            rend_requests: None,
         })
     }
 
@@ -124,9 +135,120 @@ impl TorRuntime {
         &self.client
     }
 
-    /// Publish a v3 onion service. Implemented in Task 5.
-    pub async fn publish_onion(&self, _hs_key_path: PathBuf) -> Result<String> {
-        todo!("Task 5")
+    /// Publish a v3 onion service using the HS key at `hs_key_path`.
+    ///
+    /// If the file does not exist, a fresh HS key is generated and
+    /// persisted age-encrypted under a seed-derived storage key (see
+    /// [`crate::transport::hs_key`]). Subsequent calls with the same
+    /// path plus seed reload the same key, so the published `.onion`
+    /// address is stable across restarts.
+    ///
+    /// Arti 0.41 ships with a `launch_onion_service_with_hsid` experimental
+    /// API that inserts an externally-provided [`HsIdKeypair`] into the
+    /// keystore (under `hss/<nickname>/ks_hs_id`) before launching. On
+    /// first launch we use that. On subsequent launches Arti's keystore
+    /// already holds a key under the nickname; the experimental API refuses
+    /// to overwrite it (that is the correct semantics — overwriting would
+    /// rotate the `.onion`), so we fall back to plain
+    /// [`TorClient::launch_onion_service`] which uses the already-present
+    /// key. Either way the result is the same 32-byte Ed25519 identity.
+    ///
+    /// Returns the `.onion` address (56 base32 chars + `.onion`).
+    ///
+    /// `&mut self` so the service handle + rend stream can be stored on
+    /// the runtime for the duration of its lifetime.
+    pub async fn publish_onion(
+        &mut self,
+        hs_key_path: &std::path::Path,
+        seed: &crate::identity::Seed,
+        nickname: &str,
+    ) -> Result<String> {
+        // 1. Materialize the 32-byte Ed25519 secret — either generate-and-
+        // persist, or decrypt from disk under the seed.
+        let hs_secret = crate::transport::hs_key::load_or_create(hs_key_path, seed)?;
+
+        // 2. Build an HsIdKeypair from that secret. The conversion is:
+        //     SigningKey::from_bytes(seed32)
+        //       → ExpandedKeypair::from(&Keypair)  (SHA-512 expansion)
+        //       → HsIdKeypair::from(expanded)      (derive_more::From)
+        let id_keypair = hs_id_keypair_from_secret(&hs_secret);
+
+        let nickname_parsed = nickname
+            .parse::<tor_hsservice::HsNickname>()
+            .map_err(|e| CoreError::Transport(format!("invalid HS nickname '{nickname}': {e}")))?;
+
+        let config = tor_hsservice::config::OnionServiceConfigBuilder::default()
+            .nickname(nickname_parsed)
+            .build()
+            .map_err(|e| CoreError::Transport(format!("HS config: {e}")))?;
+
+        // 3. Launch. Try the "inject key" path first; if the keymgr already
+        // holds a matching entry, Arti returns a keystore error and we fall
+        // back to the plain launch path (which reuses the existing entry).
+        // The two launch calls return slightly different opaque stream types,
+        // so we box-pin each branch to unify them.
+        let config_clone = config.clone();
+        let (svc, rend_stream): (
+            Arc<tor_hsservice::RunningOnionService>,
+            std::pin::Pin<
+                Box<dyn futures::Stream<Item = tor_hsservice::RendRequest> + Send + Sync>,
+            >,
+        ) = match self
+            .client
+            .launch_onion_service_with_hsid(config, id_keypair)
+        {
+            Ok(Some((svc, stream))) => (svc, Box::pin(stream)),
+            Ok(None) => {
+                return Err(CoreError::Transport("HS disabled in config".into()));
+            }
+            Err(e) if is_key_already_exists_error(&e) => {
+                tracing::debug!(
+                    "HS key already present in Arti keystore under nickname; \
+                     reusing existing entry"
+                );
+                match self
+                    .client
+                    .launch_onion_service(config_clone)
+                    .map_err(|e| CoreError::Transport(format!("HS launch (reuse): {e}")))?
+                {
+                    Some((svc, stream)) => (svc, Box::pin(stream)),
+                    None => {
+                        return Err(CoreError::Transport("HS disabled in config".into()));
+                    }
+                }
+            }
+            Err(e) => {
+                return Err(CoreError::Transport(format!("HS launch: {e}")));
+            }
+        };
+
+        // `HsId` deliberately does not implement `Display` — `safelog`
+        // requires opting in via `DisplayRedacted`. We want the un-redacted
+        // `${base32}.onion` form so callers can share it with contacts.
+        let onion = svc
+            .onion_address()
+            .map(|id| {
+                use safelog::DisplayRedacted as _;
+                id.display_unredacted().to_string()
+            })
+            .ok_or_else(|| CoreError::Transport("HS has no address after launch".into()))?;
+
+        self.hs_service = Some(svc);
+        self.rend_requests = Some(rend_stream);
+
+        Ok(onion)
+    }
+
+    /// Take ownership of the rendezvous-request stream from the currently-
+    /// published onion service. Called exactly once per publish by the
+    /// Noise listener loop.
+    #[must_use]
+    pub fn rend_requests_take(
+        &mut self,
+    ) -> Option<
+        std::pin::Pin<Box<dyn futures::Stream<Item = tor_hsservice::RendRequest> + Send + Sync>>,
+    > {
+        self.rend_requests.take()
     }
 
     /// Dial an outbound connection. Implemented in Task 7.
@@ -148,12 +270,57 @@ impl TorRuntime {
         // causes the stream to end.
         self._status_task.abort();
 
+        // Drop the onion service first, if we published one. Its Drop stops
+        // publishing and closes the rendezvous circuits.
+        drop(self.rend_requests);
+        drop(self.hs_service);
+
         // Drop the TorClient. Its Drop shuts down the underlying
         // background tasks.
         drop(self.client);
 
         Ok(())
     }
+}
+
+/// Build an Arti `HsIdKeypair` from our 32-byte Ed25519 secret.
+///
+/// The same 32 bytes always map to the same `HsId` (and therefore the
+/// same `.onion` address), because the SHA-512 expansion and the
+/// `PublicKey::from(&secret)` derivation are both deterministic.
+fn hs_id_keypair_from_secret(
+    secret32: &zeroize::Zeroizing<[u8; 32]>,
+) -> tor_hscrypto::pk::HsIdKeypair {
+    use tor_llcrypto::pk::ed25519;
+    // `ed25519::Keypair` is a re-export of `ed25519_dalek::SigningKey`.
+    // `SigningKey::from_bytes` is infallible (never panics; accepts any
+    // 32 bytes — Ed25519 has no weak-key check on the seed).
+    let dalek_kp = ed25519::Keypair::from_bytes(secret32);
+    let expanded = ed25519::ExpandedKeypair::from(&dalek_kp);
+    tor_hscrypto::pk::HsIdKeypair::from(expanded)
+}
+
+/// Best-effort detection of the `KeyAlreadyExists` error returned when we
+/// try to re-inject an HS identity key that Arti's keystore already holds.
+///
+/// Arti's public error type doesn't expose the inner `tor_keymgr::Error`
+/// variant directly, so we match on the error chain's debug representation.
+/// This is fragile if upstream renames the variant, but the fallback path
+/// (plain `launch_onion_service`) is only taken when the injection call
+/// already failed for *some* reason — in the worst case we'd surface the
+/// original error a moment later from the plain launch path, which is the
+/// desired behaviour.
+fn is_key_already_exists_error(err: &arti_client::Error) -> bool {
+    // The `tor_keymgr::Error::KeyAlreadyExists` variant is rendered as
+    // "key already exists" in the `Display` chain.
+    let mut msg = String::new();
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(err);
+    while let Some(e) = source {
+        use std::fmt::Write as _;
+        let _ = write!(&mut msg, "{e}; ");
+        source = e.source();
+    }
+    msg.to_lowercase().contains("already exists")
 }
 
 #[cfg(test)]
@@ -191,6 +358,28 @@ mod tests {
         };
         let rt = TorRuntime::bootstrap(cfg).await.expect("bootstrap");
         assert_eq!(*rt.status().borrow(), TorStatus::Ready);
+        rt.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    #[ignore = "real network bootstrap + HS publish, run with --ignored"]
+    async fn publish_onion_returns_valid_address() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = TorConfig {
+            state_dir: tmp.path().to_path_buf(),
+            socks_port: None,
+        };
+        let mut rt = TorRuntime::bootstrap(cfg).await.expect("bootstrap");
+        let seed = crate::identity::Seed::generate().unwrap();
+        let hs_key_path = tmp.path().join("hs.key.age");
+        let onion = rt
+            .publish_onion(&hs_key_path, &seed, "skattr-test")
+            .await
+            .expect("publish");
+        assert!(
+            onion.ends_with(".onion") && onion.len() > 50,
+            "onion address should be v3 format: {onion}"
+        );
         rt.shutdown().await.expect("shutdown");
     }
 }
