@@ -14,8 +14,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use skattr_core::identity::Seed;
-use skattr_core::transport::tor::{TorConfig, TorRuntime};
-use skattr_core::transport::OnionListener;
+use skattr_core::test_exports::{OnionListener, TorConfig, TorRuntime};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Create a tempdir with 0700 permissions — Arti 0.41 refuses to open

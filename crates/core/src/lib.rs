@@ -42,6 +42,14 @@ pub(crate) mod delivery;
 pub(crate) mod mailbox;
 pub(crate) mod mls;
 pub(crate) mod storage;
-pub mod transport;
+pub(crate) mod transport;
 
 pub use error::{CoreError, Result};
+
+/// Re-exports for integration tests. Gated on the `test-harness`
+/// feature so only tests with the feature enabled can reach these
+/// items — **not** part of the stable public API.
+#[cfg(feature = "test-harness")]
+pub mod test_exports {
+    pub use crate::transport::{OnionListener, TorConfig, TorRuntime, TorStatus};
+}

@@ -19,9 +19,21 @@ pub(crate) mod frame;
 pub(crate) mod hs_key;
 pub(crate) mod listener;
 pub(crate) mod noise;
-pub mod tor;
+pub(crate) mod tor;
 
 pub(crate) use connection::AuthenticatedConnection;
 pub(crate) use frame::{Frame, FrameCodec, FrameType};
-pub use listener::OnionListener;
+
+// Under `test-harness` the items need a `pub` path so `lib.rs::test_exports`
+// can re-export them. The `transport` module itself is `pub(crate)`, so these
+// `pub use` items are still invisible outside the crate — the effective
+// visibility is capped by the module. This is intentional.
+#[cfg(not(feature = "test-harness"))]
+pub(crate) use listener::OnionListener;
+#[cfg(not(feature = "test-harness"))]
 pub(crate) use tor::{TorRuntime, TorStatus};
+
+#[cfg(feature = "test-harness")]
+pub use listener::OnionListener;
+#[cfg(feature = "test-harness")]
+pub use tor::{TorConfig, TorRuntime, TorStatus};
