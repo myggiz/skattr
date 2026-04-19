@@ -18,10 +18,8 @@ pub(crate) mod contacts;
 pub(crate) mod groups;
 pub(crate) mod mailboxes;
 pub(crate) mod messages;
+pub(crate) mod migrations;
 pub(crate) mod outbox;
 pub(crate) mod pool;
 
 pub(crate) use pool::Pool;
-
-/// Initial migration text, applied to a fresh database.
-pub(crate) const MIGRATION_0001_INIT: &str = include_str!("migrations/0001_init.sql");
