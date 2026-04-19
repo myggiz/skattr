@@ -3,12 +3,17 @@
 
 //! Daemon struct: owns all long-lived handles.
 
-use tokio::sync::broadcast;
+use std::path::Path;
+
+use tokio::sync::{broadcast, oneshot};
 
 use crate::daemon::commands::{Command, CommandResult};
 use crate::daemon::config::Config;
 use crate::daemon::events::Event;
 use crate::error::Result;
+use crate::identity::derive::derive_storage_seed;
+use crate::identity::vault::Vault;
+use crate::transport::tor::{TorConfig, TorRuntime};
 
 /// Capacity of the daemon's broadcast event channel.
 ///
@@ -46,5 +51,49 @@ impl Daemon {
     /// Graceful shutdown: cancel tasks, flush outbox, stop Tor.
     pub async fn shutdown(self) -> Result<()> {
         todo!("cancel tokens, await tasks, flush storage, stop Arti")
+    }
+}
+
+impl Daemon {
+    /// Run the Phase 0.C daemon: unlock the vault, derive the storage
+    /// seed, bootstrap Tor, publish the onion service, signal readiness
+    /// with the `.onion` address, then await a caller-supplied shutdown
+    /// future. Returns `Ok(())` after a graceful shutdown.
+    ///
+    /// `ready` fires as soon as the onion is published — the caller can
+    /// print the banner while this future continues to hold the runtime.
+    ///
+    /// This is the public entry point the CLI calls; subsequent phases
+    /// extend it with the MLS session manager, outbox, mailbox poller,
+    /// etc.
+    pub async fn run(
+        data_dir: &Path,
+        passphrase: &zeroize::Zeroizing<String>,
+        ready: oneshot::Sender<String>,
+        shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+    ) -> Result<()> {
+        std::fs::create_dir_all(data_dir)?;
+        let vault_path = data_dir.join("identity.vault");
+        let (_vault, identity) = Vault::open(&vault_path, passphrase.as_str())?;
+        let seed = derive_storage_seed(identity)?;
+
+        let cfg = TorConfig {
+            state_dir: data_dir.join("arti"),
+            socks_port: None,
+        };
+        let mut rt = TorRuntime::bootstrap(cfg).await?;
+
+        let hs_key_path = data_dir.join("hs.key.age");
+        let onion = rt
+            .publish_onion(&hs_key_path, &seed, "skattr-daemon")
+            .await?;
+
+        // If the receiver was dropped, there's no reader — that's fine,
+        // proceed to listen until shutdown.
+        let _ = ready.send(onion);
+
+        shutdown.await;
+        rt.shutdown().await?;
+        Ok(())
     }
 }

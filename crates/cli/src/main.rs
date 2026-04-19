@@ -214,7 +214,7 @@ async fn restore(seed_phrase: &str, data_dir_override: Option<&std::path::Path>)
 }
 
 async fn daemon(detach: bool, data_dir_override: Option<&std::path::Path>) -> Result<()> {
-    use skattr_core::transport::tor::{TorConfig, TorRuntime};
+    use skattr_core::daemon::Daemon;
 
     if detach {
         anyhow::bail!("--detach is not yet supported; run in foreground for Phase 0.C");
@@ -232,35 +232,36 @@ async fn daemon(detach: bool, data_dir_override: Option<&std::path::Path>) -> Re
     }
 
     let pw = read_passphrase("Vault passphrase: ")?;
-    let (_vault, identity) = Vault::open(&vault_path, pw.as_str())?;
-
-    // Derive the storage seed from the identity secret via HKDF. This
-    // means the same BIP39 mnemonic → same storage seed → same HS key
-    // → same .onion address, so `skattr restore` recovers the full
-    // network identity, not just the cryptographic identity.
-    let seed = skattr_core::identity::derive::derive_storage_seed(identity)?;
 
     println!("Bootstrapping Tor\u{2026}");
-    let cfg = TorConfig {
-        state_dir: data_dir.join("arti"),
-        socks_port: None,
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let shutdown_fut = async {
+        let _ = tokio::signal::ctrl_c().await;
     };
-    let mut rt = TorRuntime::bootstrap(cfg).await?;
-    println!("Tor ready. Publishing onion service\u{2026}");
 
-    let hs_key_path = data_dir.join("hs.key.age");
-    let onion = rt
-        .publish_onion(&hs_key_path, &seed, "skattr-daemon")
-        .await?;
+    // Move the Zeroizing<String> passphrase by value into the spawned
+    // task — it drops (and wipes) when Daemon::run returns.
+    let data_dir_owned = data_dir.clone();
+    let daemon_fut =
+        tokio::spawn(
+            async move { Daemon::run(&data_dir_owned, &pw, ready_tx, shutdown_fut).await },
+        );
+
+    // Wait for the daemon to signal readiness.
+    let onion = ready_rx
+        .await
+        .map_err(|_| anyhow::anyhow!("daemon exited before becoming ready"))?;
     println!();
     println!("Listening on: {onion}:1");
     println!("Ctrl-C to shut down.");
 
-    tokio::signal::ctrl_c().await.map_err(anyhow::Error::from)?;
+    // Block until the daemon future returns (SIGINT + graceful shutdown).
+    daemon_fut
+        .await
+        .map_err(|e| anyhow::anyhow!("daemon join: {e}"))??;
 
     println!();
-    println!("Shutting down\u{2026}");
-    rt.shutdown().await?;
+    println!("Shutdown complete.");
     Ok(())
 }
 

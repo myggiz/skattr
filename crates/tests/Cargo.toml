@@ -13,7 +13,7 @@ publish = false
 path = "src/lib.rs"
 
 [dependencies]
-skattr-core = { path = "../core" }
+skattr-core = { path = "../core", features = ["test-harness"] }
 
 tokio = { workspace = true }
 tempfile = { workspace = true }

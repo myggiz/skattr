@@ -14,15 +14,28 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use skattr_core::identity::Seed;
-use skattr_core::transport::tor::{TorConfig, TorRuntime};
-use skattr_core::transport::OnionListener;
+use skattr_core::test_exports::{OnionListener, TorConfig, TorRuntime};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+/// Create a tempdir with 0700 permissions — Arti 0.41 refuses to open
+/// a `state_dir` that's group- or world-readable.
+fn arti_friendly_tempdir() -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(tmp.path()).unwrap().permissions();
+        perms.set_mode(0o700);
+        std::fs::set_permissions(tmp.path(), perms).unwrap();
+    }
+    tmp
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "real Tor network; ~3-10 min; run with --ignored"]
 async fn two_daemons_echo_bytes_over_tor() {
-    let tmp_a = tempfile::tempdir().unwrap();
-    let tmp_b = tempfile::tempdir().unwrap();
+    let tmp_a = arti_friendly_tempdir();
+    let tmp_b = arti_friendly_tempdir();
 
     // Daemon A.
     let mut rt_a = TorRuntime::bootstrap(TorConfig {
