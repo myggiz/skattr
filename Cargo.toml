@@ -67,6 +67,8 @@ hex = "0.4"
 # Constrained by arti-dirmgr: rusqlite >=0.36,<0.39 (verified 2026-04).
 rusqlite = { version = "0.38", features = ["bundled"] }
 age = { version = "0.11", features = ["armor"] }
+tar = "0.4"
+flate2 = "1"
 
 # Tor / Noise — pinned to the newest published versions at workspace bootstrap.
 # These APIs move fast; revisit every phase exit.

@@ -37,6 +37,10 @@ pub const INFO_INVITE_PSK_V1: &[u8] = b"skattr-invite-psk-v1";
 /// (HS key, SQLite DB) — it is NOT the BIP39 identity seed.
 pub const INFO_STORAGE_SEED_V1: &[u8] = b"skattr-storage-seed-v1";
 
+/// Backup archive at-rest encryption:
+/// `HKDF(storage_seed, "skattr-backup-v1")`.
+pub const INFO_BACKUP_V1: &[u8] = b"skattr-backup-v1";
+
 /// Expand `ikm` into `OUT` bytes of output, bound to `info`.
 ///
 /// Uses HKDF-SHA256 with an empty salt (inputs are already high-entropy).
