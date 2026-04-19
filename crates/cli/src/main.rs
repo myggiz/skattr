@@ -242,9 +242,10 @@ async fn daemon(detach: bool, data_dir_override: Option<&std::path::Path>) -> Re
     // Move the Zeroizing<String> passphrase by value into the spawned
     // task — it drops (and wipes) when Daemon::run returns.
     let data_dir_owned = data_dir.clone();
-    let daemon_fut = tokio::spawn(async move {
-        Daemon::run(&data_dir_owned, &pw, ready_tx, shutdown_fut).await
-    });
+    let daemon_fut =
+        tokio::spawn(
+            async move { Daemon::run(&data_dir_owned, &pw, ready_tx, shutdown_fut).await },
+        );
 
     // Wait for the daemon to signal readiness.
     let onion = ready_rx
