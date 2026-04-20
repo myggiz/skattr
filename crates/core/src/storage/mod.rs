@@ -21,5 +21,6 @@ pub(crate) mod messages;
 pub(crate) mod migrations;
 pub(crate) mod outbox;
 pub(crate) mod pool;
+pub(crate) mod seen_messages;
 
 pub(crate) use pool::Pool;
