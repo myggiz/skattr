@@ -14,6 +14,7 @@
 //! [`crate::identity::derive::INFO_STORAGE_V1`]). Migrations are
 //! `include_str!`'d from `migrations/`.
 
+pub(crate) mod backup;
 pub(crate) mod contacts;
 pub(crate) mod groups;
 pub(crate) mod mailboxes;
