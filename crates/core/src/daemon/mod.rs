@@ -9,6 +9,7 @@
 //! interact with it by submitting [`Command`]s and subscribing to
 //! [`Event`]s — intentionally the same narrow interface for both.
 
+pub mod backup;
 pub mod commands;
 pub mod config;
 pub mod events;
