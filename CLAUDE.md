@@ -4,9 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository state
 
-**Phase 0 is complete** — all five workstreams (0.A scaffold, 0.B
-identity & crypto, 0.C Arti integration, 0.D storage layer, 0.E
-documentation baseline) have shipped and are merged to master.
+**Phase 0 is complete and Phase 1.A (frame codec) is done.** Phase 0
+shipped all five workstreams (0.A scaffold, 0.B identity & crypto, 0.C
+Arti integration, 0.D storage layer, 0.E documentation baseline).
+Phase 1.A added `transport::frame::FrameCodec` (length-prefix + type
+byte + typed payload, 10 variants, `tokio_util::codec::Decoder` + `Encoder`
+traits) with unit, proptest, and cargo-fuzz coverage.
 
 `crates/core/src/identity/` is fully implemented (Ed25519, BIP39,
 Argon2id + XChaCha20-Poly1305 vault, HKDF). `crates/core/src/transport/{tor,
@@ -27,9 +30,11 @@ passing. Phase 0 exit criterion (two daemons echo bytes over Tor)
 is exercised by `crates/tests/src/arti_echo.rs`, `#[ignore]`-gated
 (run with `cargo test -p skattr-tests --release -- --ignored`).
 
-Phase 1 is next: MLS message exchange, outbox delivery, invite links,
-and the session manager wiring that ties transport + mls + storage
-together. The bootstrap prompt remains authoritative for file
+Phase 1 continues with 1.B Noise_XK handshake, then 1.C MLS 2-member
+groups, 1.D invite + contact, 1.E delivery semantics, 1.F CLI
+integration, 1.G message storage & search — see
+`docs/superpowers/specs/2026-04-21-phase-1-decomposition.md` for the
+full Phase 1 split. The bootstrap prompt remains authoritative for file
 layout, module boundaries, type signatures, and visibility rules —
 match it exactly.
 
