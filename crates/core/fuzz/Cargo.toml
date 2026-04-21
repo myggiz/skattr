@@ -11,12 +11,21 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-skattr-core = { path = ".." }
+skattr-core = { path = "..", features = ["test-harness"] }
 tempfile = "3"
+bytes = "1"
+tokio-util = { version = "0.7", features = ["codec"] }
 
 [[bin]]
 name = "vault_parser"
 path = "fuzz_targets/vault_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "frame_decoder"
+path = "fuzz_targets/frame_decoder.rs"
 test = false
 doc = false
 bench = false
