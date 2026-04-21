@@ -610,4 +610,30 @@ mod tests {
         );
         assert!(init_r.is_err() || resp_r.is_err(), "both must not succeed");
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn handshake_times_out_after_window() {
+        let (init_io, _resp_io) = tokio::io::duplex(4096);
+        // Keep _resp_io alive so the duplex doesn't get EOF'd — the
+        // initiator should block on reading msg2 until the timer fires.
+        let _keepalive = _resp_io;
+
+        let responder_pub =
+            IdentityKey::from_bytes(Zeroizing::new([0x11u8; 32])).noise_static_public();
+        let initiator = IdentityKey::from_bytes(Zeroizing::new([0x22u8; 32]));
+
+        let handle = tokio::spawn(async move {
+            handshake_initiator(init_io, &initiator, &responder_pub, None).await
+        });
+
+        // Advance virtual time past the timeout window.
+        tokio::time::advance(HANDSHAKE_TIMEOUT + std::time::Duration::from_secs(1)).await;
+
+        let result = handle.await.expect("task must not panic");
+        match result {
+            Err(CoreError::Transport(s)) => assert_eq!(s, "handshake: timeout"),
+            Err(other) => panic!("expected Transport(timeout), got {other:?}"),
+            Ok(_) => panic!("expected timeout, got Ok"),
+        }
+    }
 }
