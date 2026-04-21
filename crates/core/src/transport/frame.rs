@@ -513,4 +513,60 @@ mod tests {
         let err = codec.decode(&mut buf).expect_err("Bye with payload must error");
         assert!(matches!(err, CoreError::Frame(_)));
     }
+
+    #[test]
+    fn decode_returns_none_on_partial_length_prefix() {
+        let mut buf = BytesMut::from(&[0u8, 0, 0][..]); // only 3 of 4 bytes
+        let mut codec = FrameCodec::new();
+        assert!(codec.decode(&mut buf).unwrap().is_none());
+        assert_eq!(buf.len(), 3, "buffer must not be consumed");
+    }
+
+    #[test]
+    fn decode_returns_none_on_partial_payload() {
+        // length = 5 (1 type + 4 payload), type = 0x01, only 2 payload bytes.
+        let mut buf = BytesMut::new();
+        buf.extend_from_slice(&5u32.to_be_bytes());
+        buf.extend_from_slice(&[0x01, 0xAA, 0xBB]);
+        let mut codec = FrameCodec::new();
+        assert!(codec.decode(&mut buf).unwrap().is_none());
+        assert_eq!(
+            buf.len(),
+            7,
+            "buffer must not be consumed on insufficient payload"
+        );
+    }
+
+    #[test]
+    fn decode_two_frames_concat() {
+        // Encode a Ping and a Bye into the same buffer; decode should
+        // yield each in turn.
+        let mut codec = FrameCodec::new();
+        let mut buf = BytesMut::new();
+        codec.encode(Frame::Ping, &mut buf).unwrap();
+        codec.encode(Frame::Bye, &mut buf).unwrap();
+
+        let first = codec.decode(&mut buf).unwrap().expect("first frame");
+        assert!(matches!(first, Frame::Ping));
+        let second = codec.decode(&mut buf).unwrap().expect("second frame");
+        assert!(matches!(second, Frame::Bye));
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn decode_resumes_after_needing_more_bytes() {
+        // Feed the length prefix alone, then the rest.
+        let mut codec = FrameCodec::new();
+        let mut full = BytesMut::new();
+        codec.encode(Frame::Pong, &mut full).unwrap();
+
+        let mut staged = BytesMut::new();
+        staged.extend_from_slice(&full[..2]);
+        assert!(codec.decode(&mut staged).unwrap().is_none());
+
+        staged.extend_from_slice(&full[2..]);
+        let frame = codec.decode(&mut staged).unwrap().expect("frame arrives");
+        assert!(matches!(frame, Frame::Pong));
+        assert!(staged.is_empty());
+    }
 }
