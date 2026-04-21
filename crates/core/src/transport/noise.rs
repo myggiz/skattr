@@ -21,12 +21,16 @@
 
 use std::time::Duration;
 
-use tokio::io::{AsyncRead, AsyncWrite};
+use futures::{SinkExt, StreamExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio_util::codec::Framed;
 use zeroize::Zeroizing;
 
-use crate::error::Result;
+use crate::error::{CoreError, Result};
 use crate::identity::IdentityKey;
+use crate::identity::derive::{hkdf_expand, INFO_TRANSPORT_BINDING_V1};
 use crate::transport::connection::AuthenticatedConnection;
+use crate::transport::frame::{Frame, FrameCodec};
 
 /// Base Noise pattern string (no PSK modifier).
 pub(crate) const NOISE_PATTERN: &str = "Noise_XK_25519_ChaChaPoly_BLAKE2s";
@@ -59,6 +63,244 @@ pub struct HandshakeOutcome {
     pub h_transport: Zeroizing<[u8; 32]>,
 }
 
+/// Max size of a single Noise message payload buffer. Noise itself
+/// caps messages at 65535 bytes; we use this for both send and recv
+/// scratch buffers during the handshake.
+const NOISE_SCRATCH: usize = 65535;
+
+fn map_snow<E: std::fmt::Display>(kind: &str, e: E) -> CoreError {
+    CoreError::Transport(format!("handshake: {kind}: {e}"))
+}
+
+/// Pick the Noise pattern name based on whether a PSK is in use.
+/// `psk3` modifier engages when a PSK is supplied on both sides.
+fn pattern_for(psk: Option<&[u8; 32]>) -> &'static str {
+    if psk.is_some() {
+        NOISE_PATTERN_PSK3
+    } else {
+        NOISE_PATTERN
+    }
+}
+
+/// Build a `snow::HandshakeState` with optional PSK wiring.
+fn build_handshake(
+    identity: &IdentityKey,
+    remote_static: Option<&[u8; 32]>,
+    invite_psk: Option<&[u8; 32]>,
+    initiator: bool,
+) -> Result<snow::HandshakeState> {
+    let pattern = pattern_for(invite_psk);
+    let params: snow::params::NoiseParams = pattern
+        .parse()
+        .map_err(|e| map_snow("builder", e))?;
+    let secret = identity.noise_static_secret();
+    let mut builder = snow::Builder::new(params).local_private_key(secret.as_ref());
+    if let Some(rs) = remote_static {
+        builder = builder.remote_public_key(rs);
+    }
+    if let Some(psk) = invite_psk {
+        builder = builder.psk(3, psk);
+    }
+    let state = if initiator {
+        builder.build_initiator()
+    } else {
+        builder.build_responder()
+    }
+    .map_err(|e| map_snow("builder", e))?;
+    Ok(state)
+}
+
+async fn do_initiator<S>(
+    mut stream: S,
+    identity: &IdentityKey,
+    peer_static_x25519: &[u8; 32],
+    invite_psk: Option<&[u8; 32]>,
+) -> Result<(AuthenticatedConnection<S>, HandshakeOutcome)>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    // 1-byte version preamble.
+    stream
+        .write_all(&[PROTOCOL_VERSION])
+        .await
+        .map_err(|e| map_snow("stream", e))?;
+    stream.flush().await.map_err(|e| map_snow("stream", e))?;
+
+    let mut handshake = build_handshake(identity, Some(peer_static_x25519), invite_psk, true)?;
+    let mut framed = Framed::new(stream, FrameCodec::new());
+
+    // msg1 → write, wrap in NoiseInit.
+    let mut buf = vec![0u8; NOISE_SCRATCH];
+    let n = handshake
+        .write_message(&[], &mut buf)
+        .map_err(|e| map_snow("authentication failed", e))?;
+    framed
+        .send(Frame::NoiseInit(buf[..n].to_vec()))
+        .await
+        .map_err(|e| map_snow("malformed", e))?;
+
+    // msg2 ← read NoiseResp.
+    let frame = framed
+        .next()
+        .await
+        .ok_or_else(|| CoreError::Transport("handshake: stream closed".into()))?
+        .map_err(|e| map_snow("malformed", e))?;
+    let msg2 = match frame {
+        Frame::NoiseResp(p) => p,
+        other => {
+            return Err(CoreError::Transport(format!(
+                "handshake: malformed: unexpected frame type 0x{:02X}",
+                frame_type_byte(&other)
+            )));
+        }
+    };
+    let mut in_buf = vec![0u8; NOISE_SCRATCH];
+    handshake
+        .read_message(&msg2, &mut in_buf)
+        .map_err(|e| map_snow("authentication failed", e))?;
+
+    // msg3 → write, wrap in NoiseInit (direction-based reuse).
+    let n = handshake
+        .write_message(&[], &mut buf)
+        .map_err(|e| map_snow("authentication failed", e))?;
+    framed
+        .send(Frame::NoiseInit(buf[..n].to_vec()))
+        .await
+        .map_err(|e| map_snow("malformed", e))?;
+
+    finish_handshake(handshake, framed).await
+}
+
+async fn do_responder<S>(
+    mut stream: S,
+    identity: &IdentityKey,
+    invite_psk: Option<&[u8; 32]>,
+) -> Result<(AuthenticatedConnection<S>, HandshakeOutcome)>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    // Read + validate the 1-byte preamble.
+    let mut ver = [0u8; 1];
+    stream
+        .read_exact(&mut ver)
+        .await
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::UnexpectedEof => {
+                CoreError::Transport("handshake: stream closed".into())
+            }
+            _ => map_snow("stream", e),
+        })?;
+    if ver[0] != PROTOCOL_VERSION {
+        return Err(CoreError::Transport(format!(
+            "handshake: unsupported version: {:#04x}",
+            ver[0]
+        )));
+    }
+
+    let mut handshake = build_handshake(identity, None, invite_psk, false)?;
+    let mut framed = Framed::new(stream, FrameCodec::new());
+
+    // msg1 ← read NoiseInit.
+    let frame = framed
+        .next()
+        .await
+        .ok_or_else(|| CoreError::Transport("handshake: stream closed".into()))?
+        .map_err(|e| map_snow("malformed", e))?;
+    let msg1 = match frame {
+        Frame::NoiseInit(p) => p,
+        other => {
+            return Err(CoreError::Transport(format!(
+                "handshake: malformed: unexpected frame type 0x{:02X}",
+                frame_type_byte(&other)
+            )));
+        }
+    };
+    let mut in_buf = vec![0u8; NOISE_SCRATCH];
+    handshake
+        .read_message(&msg1, &mut in_buf)
+        .map_err(|e| map_snow("authentication failed", e))?;
+
+    // msg2 → write NoiseResp.
+    let mut buf = vec![0u8; NOISE_SCRATCH];
+    let n = handshake
+        .write_message(&[], &mut buf)
+        .map_err(|e| map_snow("authentication failed", e))?;
+    framed
+        .send(Frame::NoiseResp(buf[..n].to_vec()))
+        .await
+        .map_err(|e| map_snow("malformed", e))?;
+
+    // msg3 ← read NoiseInit.
+    let frame = framed
+        .next()
+        .await
+        .ok_or_else(|| CoreError::Transport("handshake: stream closed".into()))?
+        .map_err(|e| map_snow("malformed", e))?;
+    let msg3 = match frame {
+        Frame::NoiseInit(p) => p,
+        other => {
+            return Err(CoreError::Transport(format!(
+                "handshake: malformed: unexpected frame type 0x{:02X}",
+                frame_type_byte(&other)
+            )));
+        }
+    };
+    handshake
+        .read_message(&msg3, &mut in_buf)
+        .map_err(|e| map_snow("authentication failed", e))?;
+
+    finish_handshake(handshake, framed).await
+}
+
+async fn finish_handshake<S>(
+    handshake: snow::HandshakeState,
+    framed: Framed<S, FrameCodec>,
+) -> Result<(AuthenticatedConnection<S>, HandshakeOutcome)>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    // Handshake hash is 32 bytes for BLAKE2s.
+    let hh = handshake.get_handshake_hash().to_vec();
+    let h_transport = hkdf_expand::<32>(&hh, INFO_TRANSPORT_BINDING_V1)?;
+
+    // Peer's X25519 static public is what snow cached during msg3 (initiator)
+    // or msg3 decryption (responder). Snow exposes it via
+    // `get_remote_static`.
+    let peer_x25519_slice = handshake
+        .get_remote_static()
+        .ok_or_else(|| CoreError::Transport("handshake: builder: missing remote static".into()))?;
+    let mut peer_x25519 = [0u8; 32];
+    peer_x25519.copy_from_slice(peer_x25519_slice);
+
+    let transport = handshake
+        .into_transport_mode()
+        .map_err(|e| map_snow("builder", e))?;
+
+    let outcome = HandshakeOutcome {
+        peer_x25519,
+        h_transport: h_transport.clone(),
+    };
+    let conn = AuthenticatedConnection::new(peer_x25519, h_transport, framed, transport);
+    Ok((conn, outcome))
+}
+
+/// Extract the on-wire type byte from a `Frame` — used only for error
+/// reporting when the handshake sees an unexpected frame type.
+fn frame_type_byte(f: &Frame) -> u8 {
+    match f {
+        Frame::NoiseInit(_) => 0x01,
+        Frame::NoiseResp(_) => 0x02,
+        Frame::MlsWelcome(_) => 0x03,
+        Frame::MlsCommit(_) => 0x04,
+        Frame::MlsApp(_) => 0x05,
+        Frame::Ack(_) => 0x06,
+        Frame::Ping => 0x07,
+        Frame::Pong => 0x08,
+        Frame::Bye => 0x09,
+        Frame::Error { .. } => 0x0A,
+    }
+}
+
 /// Drive the initiator side of Noise_XK over `stream`.
 ///
 /// Writes the 1-byte version preamble, then the -e / -e, ee, s, es /
@@ -67,15 +309,20 @@ pub struct HandshakeOutcome {
 /// [`AuthenticatedConnection`] wrapping `stream` plus a
 /// [`HandshakeOutcome`].
 pub async fn handshake_initiator<S>(
-    _stream: S,
-    _identity: &IdentityKey,
-    _peer_static_x25519: &[u8; 32],
-    _invite_psk: Option<&[u8; 32]>,
+    stream: S,
+    identity: &IdentityKey,
+    peer_static_x25519: &[u8; 32],
+    invite_psk: Option<&[u8; 32]>,
 ) -> Result<(AuthenticatedConnection<S>, HandshakeOutcome)>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {
-    todo!("drive snow HandshakeState as initiator with optional psk3 + outer timeout")
+    tokio::time::timeout(
+        HANDSHAKE_TIMEOUT,
+        do_initiator(stream, identity, peer_static_x25519, invite_psk),
+    )
+    .await
+    .map_err(|_| CoreError::Transport("handshake: timeout".into()))?
 }
 
 /// Drive the responder side of Noise_XK over `stream`.
@@ -85,12 +332,71 @@ where
 /// wrapping `stream` plus a [`HandshakeOutcome`]. Identity resolution
 /// (X25519 → Ed25519 → ContactCard) is the caller's responsibility.
 pub async fn handshake_responder<S>(
-    _stream: S,
-    _identity: &IdentityKey,
-    _invite_psk: Option<&[u8; 32]>,
+    stream: S,
+    identity: &IdentityKey,
+    invite_psk: Option<&[u8; 32]>,
 ) -> Result<(AuthenticatedConnection<S>, HandshakeOutcome)>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {
-    todo!("drive snow HandshakeState as responder with optional psk3 + outer timeout")
+    tokio::time::timeout(
+        HANDSHAKE_TIMEOUT,
+        do_responder(stream, identity, invite_psk),
+    )
+    .await
+    .map_err(|_| CoreError::Transport("handshake: timeout".into()))?
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use crate::identity::IdentityKey;
+    use zeroize::Zeroizing;
+
+    /// Drive both sides of a no-PSK handshake over a tokio duplex
+    /// and return both outcomes.
+    async fn run_pair(
+        initiator: IdentityKey,
+        responder: IdentityKey,
+        init_psk: Option<[u8; 32]>,
+        resp_psk: Option<[u8; 32]>,
+    ) -> (
+        Result<(AuthenticatedConnection<tokio::io::DuplexStream>, HandshakeOutcome)>,
+        Result<(AuthenticatedConnection<tokio::io::DuplexStream>, HandshakeOutcome)>,
+    ) {
+        let (init_io, resp_io) = tokio::io::duplex(16 * 1024);
+        let responder_pub = responder.noise_static_public();
+
+        let init_fut = async move {
+            let psk_ref = init_psk.as_ref().map(|p| p as &[u8; 32]);
+            handshake_initiator(init_io, &initiator, &responder_pub, psk_ref).await
+        };
+        let resp_fut = async move {
+            let psk_ref = resp_psk.as_ref().map(|p| p as &[u8; 32]);
+            handshake_responder(resp_io, &responder, psk_ref).await
+        };
+
+        tokio::join!(init_fut, resp_fut)
+    }
+
+    #[tokio::test]
+    async fn happy_path_no_psk() {
+        let initiator = IdentityKey::from_bytes(Zeroizing::new([0x11u8; 32]));
+        let responder = IdentityKey::from_bytes(Zeroizing::new([0x22u8; 32]));
+        let init_pub = initiator.noise_static_public();
+        let resp_pub = responder.noise_static_public();
+
+        let (init_r, resp_r) = run_pair(initiator, responder, None, None).await;
+        let (_init_conn, init_out) = init_r.expect("initiator handshake must succeed");
+        let (_resp_conn, resp_out) = resp_r.expect("responder handshake must succeed");
+
+        // Each side sees the other's X25519 static pub.
+        assert_eq!(init_out.peer_x25519, resp_pub, "initiator sees responder");
+        assert_eq!(resp_out.peer_x25519, init_pub, "responder sees initiator");
+
+        // Both sides derive the same binding hash.
+        assert_eq!(*init_out.h_transport, *resp_out.h_transport);
+        assert_ne!(*init_out.h_transport, [0u8; 32], "must not be all-zero");
+    }
 }
