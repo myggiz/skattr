@@ -111,7 +111,12 @@ impl Encoder<Frame> for FrameCodec {
             Frame::Pong => (0x08, Vec::new()),
             Frame::Bye => (0x09, Vec::new()),
             Frame::Ack(id) => (0x06, id.to_vec()),
-            _ => todo!("remaining variants land in Task 3/4"),
+            Frame::NoiseInit(p) => (0x01, p),
+            Frame::NoiseResp(p) => (0x02, p),
+            Frame::MlsWelcome(p) => (0x03, p),
+            Frame::MlsCommit(p) => (0x04, p),
+            Frame::MlsApp(p) => (0x05, p),
+            _ => todo!("Error variant lands in Task 4"),
         };
 
         let length = 1 + payload.len();
@@ -168,5 +173,40 @@ mod tests {
         assert_eq!(&buf[..4], &[0, 0, 0, 17]);
         assert_eq!(buf[4], 0x06);
         assert_eq!(&buf[5..], &id);
+    }
+
+    #[test]
+    fn encode_noise_init_wraps_payload_with_length_and_type01() {
+        let payload = b"hello-noise".to_vec();
+        let buf = enc(Frame::NoiseInit(payload.clone()));
+        let length = 1 + payload.len();
+        let expected_len_bytes = u32::try_from(length).unwrap().to_be_bytes();
+        assert_eq!(&buf[..4], expected_len_bytes);
+        assert_eq!(buf[4], 0x01);
+        assert_eq!(&buf[5..], &payload[..]);
+    }
+
+    #[test]
+    fn encode_noise_resp_uses_type02() {
+        let buf = enc(Frame::NoiseResp(vec![0xAA, 0xBB]));
+        assert_eq!(&buf[..], &[0, 0, 0, 3, 0x02, 0xAA, 0xBB]);
+    }
+
+    #[test]
+    fn encode_mls_welcome_uses_type03() {
+        let buf = enc(Frame::MlsWelcome(vec![0x11]));
+        assert_eq!(&buf[..], &[0, 0, 0, 2, 0x03, 0x11]);
+    }
+
+    #[test]
+    fn encode_mls_commit_uses_type04() {
+        let buf = enc(Frame::MlsCommit(vec![0x22]));
+        assert_eq!(&buf[..], &[0, 0, 0, 2, 0x04, 0x22]);
+    }
+
+    #[test]
+    fn encode_mls_app_uses_type05() {
+        let buf = enc(Frame::MlsApp(vec![0x33]));
+        assert_eq!(&buf[..], &[0, 0, 0, 2, 0x05, 0x33]);
     }
 }
