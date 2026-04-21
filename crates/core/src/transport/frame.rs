@@ -132,6 +132,17 @@ impl Decoder for FrameCodec {
         let payload = src.split_to(payload_len);
 
         let frame = match type_byte {
+            0x06 => {
+                if payload.len() != 16 {
+                    return Err(CoreError::Frame(format!(
+                        "Ack payload must be 16 bytes, got {}",
+                        payload.len()
+                    )));
+                }
+                let mut id = [0u8; 16];
+                id.copy_from_slice(&payload);
+                Frame::Ack(id)
+            }
             0x07 => {
                 if !payload.is_empty() {
                     return Err(CoreError::Frame(
@@ -329,5 +340,26 @@ mod tests {
     #[test]
     fn decode_bye_round_trips() {
         assert!(matches!(round_trip(Frame::Bye), Frame::Bye));
+    }
+
+    #[test]
+    fn decode_ack_round_trips() {
+        let id = [0xCD; 16];
+        match round_trip(Frame::Ack(id)) {
+            Frame::Ack(got) => assert_eq!(got, id),
+            other => panic!("expected Ack, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_ack_rejects_wrong_payload_length() {
+        // Hand-craft bytes: length = 9 (1 type + 8 payload), type 0x06, 8 random bytes.
+        let mut buf = BytesMut::new();
+        buf.extend_from_slice(&9u32.to_be_bytes());
+        buf.extend_from_slice(&[0x06]);
+        buf.extend_from_slice(&[0; 8]);
+        let mut codec = FrameCodec::new();
+        let err = codec.decode(&mut buf).expect_err("must reject wrong-size ack");
+        assert!(matches!(err, CoreError::Frame(_)));
     }
 }
