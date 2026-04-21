@@ -22,7 +22,10 @@ pub(crate) mod noise;
 pub(crate) mod tor;
 
 pub(crate) use connection::AuthenticatedConnection;
-pub(crate) use frame::{Frame, FrameCodec, FrameType};
+#[cfg(not(feature = "test-harness"))]
+pub(crate) use frame::{Frame, FrameCodec, FrameType, MAX_FRAME_SIZE};
+#[cfg(feature = "test-harness")]
+pub use frame::{Frame, FrameCodec, FrameType, MAX_FRAME_SIZE};
 
 // Under `test-harness` the items need a `pub` path so `lib.rs::test_exports`
 // can re-export them. The `transport` module itself is `pub(crate)`, so these

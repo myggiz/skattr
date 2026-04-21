@@ -23,7 +23,7 @@ pub enum CoreError {
     #[error("identity: {0}")]
     Identity(String),
 
-    /// Transport-layer problem (Tor, Noise, framing).
+    /// Transport-layer problem (Tor, Noise).
     #[error("transport: {0}")]
     Transport(String),
 
@@ -50,6 +50,10 @@ pub enum CoreError {
     /// Storage / migration / serialization problem.
     #[error("storage: {0}")]
     Storage(String),
+
+    /// Frame codec (length-prefix, type byte, payload parse) problem.
+    #[error("frame codec: {0}")]
+    Frame(String),
 
     /// Configuration problem (bad TOML, missing directory, etc.).
     #[error("config: {0}")]
