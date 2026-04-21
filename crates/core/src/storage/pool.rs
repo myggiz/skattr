@@ -33,7 +33,7 @@ use crate::identity::derive::{hkdf_expand, INFO_STORAGE_V1};
 use crate::identity::Seed;
 
 /// SQLite connection pool. Single writer, WAL mode.
-pub(crate) struct Pool {
+pub struct Pool {
     conn: Mutex<rusqlite::Connection>,
     encrypted_path: PathBuf,
     working_path: PathBuf,
@@ -44,7 +44,7 @@ pub(crate) struct Pool {
 
 impl Pool {
     /// Open (or create) the storage DB under `data_dir`, keyed by `seed`.
-    pub(crate) fn open(data_dir: &Path, seed: &Seed) -> Result<Self> {
+    pub fn open(data_dir: &Path, seed: &Seed) -> Result<Self> {
         std::fs::create_dir_all(data_dir)?;
         let encrypted_path = data_dir.join("skattr.sqlite.age");
         let working_path = data_dir.join("skattr.sqlite");
@@ -117,7 +117,7 @@ impl Pool {
 
     /// Graceful shutdown: close the connection, encrypt plaintext →
     /// ciphertext, remove the plaintext file.
-    pub(crate) fn close(self) -> Result<()> {
+    pub fn close(self) -> Result<()> {
         let conn = self.conn.into_inner().map_err(|_| {
             CoreError::Storage("pool mutex poisoned during close".into())
         })?;

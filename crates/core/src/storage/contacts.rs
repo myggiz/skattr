@@ -11,17 +11,18 @@ use crate::identity::PublicKey;
 use crate::storage::Pool;
 
 /// Contact CRUD operations, plus onion-address history for each contact.
-pub(crate) struct ContactRepo<'p> {
+pub struct ContactRepo<'p> {
     pool: &'p Pool,
 }
 
 impl<'p> ContactRepo<'p> {
-    pub(crate) fn new(pool: &'p Pool) -> Self {
+    /// Construct a new `ContactRepo` backed by `pool`.
+    pub fn new(pool: &'p Pool) -> Self {
         Self { pool }
     }
 
     /// Upsert a contact (add if new, update display name if existing).
-    pub(crate) fn upsert(&self, contact: &Contact) -> Result<()> {
+    pub fn upsert(&self, contact: &Contact) -> Result<()> {
         self.pool.with_mut(|c| {
             c.execute(
                 "INSERT INTO contacts (identity_pubkey, display_name, added_at) \
@@ -43,7 +44,7 @@ impl<'p> ContactRepo<'p> {
     /// Note: the `card` field is NOT loaded here — ContactCards are
     /// stored separately (Phase 1 wiring). For Phase 0.D we return
     /// contact metadata only with `card: None`.
-    pub(crate) fn get(&self, identity: &PublicKey) -> Result<Option<Contact>> {
+    pub fn get(&self, identity: &PublicKey) -> Result<Option<Contact>> {
         self.pool.with(|c| {
             let result = c.query_row(
                 "SELECT display_name, added_at FROM contacts WHERE identity_pubkey = ?1",

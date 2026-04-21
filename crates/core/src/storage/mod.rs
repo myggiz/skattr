@@ -24,4 +24,20 @@ pub(crate) mod outbox;
 pub(crate) mod pool;
 pub(crate) mod seen_messages;
 
+// Under `test-harness` the items need a `pub` path so `lib.rs::test_exports`
+// can re-export them. The `storage` module itself is `pub(crate)`, so these
+// `pub use` items are still invisible outside the crate — the effective
+// visibility is capped by the module. This is intentional.
+#[cfg(not(feature = "test-harness"))]
 pub(crate) use pool::Pool;
+#[cfg(not(feature = "test-harness"))]
+pub(crate) use contacts::ContactRepo;
+#[cfg(not(feature = "test-harness"))]
+pub(crate) use messages::MessageRepo;
+
+#[cfg(feature = "test-harness")]
+pub use pool::Pool;
+#[cfg(feature = "test-harness")]
+pub use contacts::ContactRepo;
+#[cfg(feature = "test-harness")]
+pub use messages::MessageRepo;

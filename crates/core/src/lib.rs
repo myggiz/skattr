@@ -52,4 +52,6 @@ pub use error::{CoreError, Result};
 #[cfg(feature = "test-harness")]
 pub mod test_exports {
     pub use crate::transport::{OnionListener, TorConfig, TorRuntime, TorStatus};
+    // Phase 0.D additions:
+    pub use crate::storage::{ContactRepo, MessageRepo, Pool};
 }

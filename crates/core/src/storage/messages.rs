@@ -15,7 +15,7 @@ use crate::storage::Pool;
 
 /// A stored message row.
 #[derive(Debug, Clone)]
-pub(crate) struct StoredMessage {
+pub struct StoredMessage {
     pub id: i64,
     pub group_id: Vec<u8>,
     pub sender: Vec<u8>,
@@ -25,17 +25,19 @@ pub(crate) struct StoredMessage {
     pub delivered_at: Option<i64>,
 }
 
-pub(crate) struct MessageRepo<'p> {
+/// Message history CRUD operations.
+pub struct MessageRepo<'p> {
     pool: &'p Pool,
 }
 
 impl<'p> MessageRepo<'p> {
-    pub(crate) fn new(pool: &'p Pool) -> Self {
+    /// Construct a new `MessageRepo` backed by `pool`.
+    pub fn new(pool: &'p Pool) -> Self {
         Self { pool }
     }
 
     /// Insert a message and return its rowid.
-    pub(crate) fn insert(
+    pub fn insert(
         &self,
         group_id: &[u8],
         sender: &[u8],
@@ -62,7 +64,7 @@ impl<'p> MessageRepo<'p> {
     }
 
     /// Most-recent-first list of messages in a group.
-    pub(crate) fn recent(&self, group_id: &[u8], limit: usize) -> Result<Vec<StoredMessage>> {
+    pub fn recent(&self, group_id: &[u8], limit: usize) -> Result<Vec<StoredMessage>> {
         self.pool.with(|c| {
             let mut stmt = c
                 .prepare(
