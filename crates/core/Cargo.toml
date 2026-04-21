@@ -45,6 +45,8 @@ hex = { workspace = true }
 # Storage
 rusqlite = { workspace = true }
 age = { workspace = true }
+tar = { workspace = true }
+flate2 = { workspace = true }
 
 # Transport
 snow = { workspace = true }

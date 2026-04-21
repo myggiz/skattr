@@ -55,6 +55,18 @@ enum Command {
         /// Space-separated seed phrase (quoted).
         seed: String,
     },
+    /// Export a portable backup of identity + storage + HS key to FILE.
+    Backup {
+        /// Destination archive path.
+        file: PathBuf,
+    },
+    /// Restore identity + storage + HS key from a backup archive.
+    RestoreBackup {
+        /// BIP39 mnemonic (quoted space-separated words).
+        seed: String,
+        /// Source archive path.
+        file: PathBuf,
+    },
     /// Start the daemon (Tor bootstrap + onion publish + accept loop).
     Daemon {
         /// Detach to a background process after startup.
@@ -101,6 +113,10 @@ async fn main() -> Result<()> {
     match cli.cmd {
         Command::Init => init(cli.data_dir.as_deref()).await,
         Command::Restore { seed } => restore(&seed, cli.data_dir.as_deref()).await,
+        Command::Backup { file } => backup(&file, cli.data_dir.as_deref()).await,
+        Command::RestoreBackup { seed, file } => {
+            restore_backup(&seed, &file, cli.data_dir.as_deref()).await
+        }
         Command::Daemon { detach } => daemon(detach, cli.data_dir.as_deref()).await,
         Command::Invite { qr } => invite(qr).await,
         Command::Add { link } => add(&link).await,
@@ -210,6 +226,59 @@ async fn restore(seed_phrase: &str, data_dir_override: Option<&std::path::Path>)
     println!("Identity restored.");
     println!("  public key: {pubkey_hex}");
     println!("  vault:      {}", vault_path.display());
+    Ok(())
+}
+
+async fn backup(
+    out_file: &std::path::Path,
+    data_dir_override: Option<&std::path::Path>,
+) -> Result<()> {
+    use skattr_core::daemon::backup::export_backup;
+    use skattr_core::identity::derive::derive_storage_seed;
+
+    let data_dir = effective_data_dir(data_dir_override)?;
+    let vault_path = data_dir.join("identity.vault");
+    if !vault_path.exists() {
+        anyhow::bail!(
+            "no identity vault at {}; nothing to back up",
+            vault_path.display()
+        );
+    }
+
+    let pw = read_passphrase("Vault passphrase: ")?;
+    let (_vault, identity) = Vault::open(&vault_path, pw.as_str())?;
+    let seed = derive_storage_seed(identity)?;
+
+    export_backup(&data_dir, out_file, &seed)?;
+    println!("Backup written to {}", out_file.display());
+    Ok(())
+}
+
+async fn restore_backup(
+    seed_phrase: &str,
+    archive_file: &std::path::Path,
+    data_dir_override: Option<&std::path::Path>,
+) -> Result<()> {
+    use anyhow::Context;
+    use skattr_core::daemon::backup::import_backup;
+    use skattr_core::identity::derive::derive_storage_seed;
+
+    let data_dir = effective_data_dir(data_dir_override)?;
+
+    // Parse the mnemonic through a Zeroizing copy.
+    let mnemonic = {
+        let owned = zeroize::Zeroizing::new(seed_phrase.to_string());
+        Mnemonic::parse(&owned)
+    };
+    let identity_seed = Seed::from_mnemonic(&mnemonic)
+        .context("invalid seed phrase (check word list and checksum)")?;
+    let identity = IdentityKey::from_seed(&identity_seed)?;
+    let storage_seed = derive_storage_seed(identity)?;
+
+    import_backup(archive_file, &data_dir, &storage_seed)?;
+    println!("Restored from {}", archive_file.display());
+    println!("Data at: {}", data_dir.display());
+    println!("Run `skattr daemon` to bring the identity online.");
     Ok(())
 }
 
