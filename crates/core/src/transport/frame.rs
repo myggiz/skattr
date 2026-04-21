@@ -102,8 +102,66 @@ impl Decoder for FrameCodec {
     type Item = Frame;
     type Error = CoreError;
 
-    fn decode(&mut self, _src: &mut bytes::BytesMut) -> Result<Option<Frame>> {
-        todo!("parse u32 BE length, check MAX_FRAME_SIZE, switch on type byte")
+    fn decode(&mut self, src: &mut bytes::BytesMut) -> Result<Option<Frame>> {
+        if src.len() < 4 {
+            return Ok(None);
+        }
+
+        let mut len_bytes = [0u8; 4];
+        len_bytes.copy_from_slice(&src[0..4]);
+        let length = u32::from_be_bytes(len_bytes) as usize;
+
+        if length == 0 {
+            return Err(CoreError::Frame("zero-length frame".into()));
+        }
+        if length > MAX_FRAME_SIZE {
+            return Err(CoreError::Frame(format!(
+                "frame too large: {length} bytes"
+            )));
+        }
+        if src.len() < 4 + length {
+            return Ok(None);
+        }
+
+        // Consume length prefix.
+        let _ = src.split_to(4);
+        // Consume type byte.
+        let type_byte = src[0];
+        let _ = src.split_to(1);
+        let payload_len = length - 1;
+        let payload = src.split_to(payload_len);
+
+        let frame = match type_byte {
+            0x07 => {
+                if !payload.is_empty() {
+                    return Err(CoreError::Frame(
+                        "Ping must have empty payload".into(),
+                    ));
+                }
+                Frame::Ping
+            }
+            0x08 => {
+                if !payload.is_empty() {
+                    return Err(CoreError::Frame(
+                        "Pong must have empty payload".into(),
+                    ));
+                }
+                Frame::Pong
+            }
+            0x09 => {
+                if !payload.is_empty() {
+                    return Err(CoreError::Frame("Bye must have empty payload".into()));
+                }
+                Frame::Bye
+            }
+            other => {
+                return Err(CoreError::Frame(format!(
+                    "unknown or not-yet-handled frame type 0x{other:02X}"
+                )));
+            }
+        };
+
+        Ok(Some(frame))
     }
 }
 
@@ -249,5 +307,27 @@ mod tests {
             .encode(Frame::MlsApp(too_big), &mut buf)
             .expect_err("oversize must error");
         assert!(matches!(err, CoreError::Frame(_)));
+    }
+
+    fn round_trip(f: Frame) -> Frame {
+        let mut codec = FrameCodec::new();
+        let mut buf = BytesMut::new();
+        codec.encode(f, &mut buf).unwrap();
+        codec.decode(&mut buf).unwrap().unwrap()
+    }
+
+    #[test]
+    fn decode_ping_round_trips() {
+        assert!(matches!(round_trip(Frame::Ping), Frame::Ping));
+    }
+
+    #[test]
+    fn decode_pong_round_trips() {
+        assert!(matches!(round_trip(Frame::Pong), Frame::Pong));
+    }
+
+    #[test]
+    fn decode_bye_round_trips() {
+        assert!(matches!(round_trip(Frame::Bye), Frame::Bye));
     }
 }
