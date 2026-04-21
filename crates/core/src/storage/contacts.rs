@@ -109,7 +109,12 @@ impl<'p> ContactRepo<'p> {
 
     /// Record a new onion address for a contact. Does NOT mark the old
     /// one stale — that's an explicit call to `mark_current`.
-    pub(crate) fn add_onion(&self, identity: &PublicKey, address: &str, seen_at: i64) -> Result<()> {
+    pub(crate) fn add_onion(
+        &self,
+        identity: &PublicKey,
+        address: &str,
+        seen_at: i64,
+    ) -> Result<()> {
         self.pool.with_mut(|c| {
             c.execute(
                 "INSERT INTO onion_addresses (contact_id, address, seen_at, is_current) \

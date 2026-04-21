@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Myggiz AB
 
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::err_expect))]
+#![cfg_attr(
+    test,
+    allow(clippy::unwrap_used, clippy::expect_used, clippy::err_expect)
+)]
 
 //! Portable backup of the three at-rest encrypted files.
 //!

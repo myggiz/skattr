@@ -77,8 +77,14 @@ mod tests {
         let repo = SeenMessagesRepo::new(&pool);
         let sender = [0xAA; 32];
         let mid = [0x01; 16];
-        assert!(repo.insert(&sender, &mid, 100).unwrap(), "first insert is new");
-        assert!(!repo.insert(&sender, &mid, 200).unwrap(), "second insert is dup");
+        assert!(
+            repo.insert(&sender, &mid, 100).unwrap(),
+            "first insert is new"
+        );
+        assert!(
+            !repo.insert(&sender, &mid, 200).unwrap(),
+            "second insert is dup"
+        );
     }
 
     #[test]

@@ -37,12 +37,7 @@ impl<'p> MessageRepo<'p> {
     }
 
     /// Insert a message and return its rowid.
-    pub fn insert(
-        &self,
-        group_id: &[u8],
-        sender: &[u8],
-        envelope: &Envelope,
-    ) -> Result<i64> {
+    pub fn insert(&self, group_id: &[u8], sender: &[u8], envelope: &Envelope) -> Result<i64> {
         let body = envelope.encode()?;
         let kind = match &envelope.kind {
             crate::envelope::Kind::Text { .. } => "text",
@@ -169,8 +164,10 @@ mod tests {
         let repo = MessageRepo::new(&pool);
         let g1 = [0x11; 32];
         let g2 = [0x22; 32];
-        repo.insert(&g1, &[0u8; 32], &sample_envelope("g1")).unwrap();
-        repo.insert(&g2, &[0u8; 32], &sample_envelope("g2")).unwrap();
+        repo.insert(&g1, &[0u8; 32], &sample_envelope("g1"))
+            .unwrap();
+        repo.insert(&g2, &[0u8; 32], &sample_envelope("g2"))
+            .unwrap();
         assert_eq!(repo.recent(&g1, 10).unwrap().len(), 1);
         assert_eq!(repo.recent(&g2, 10).unwrap().len(), 1);
     }

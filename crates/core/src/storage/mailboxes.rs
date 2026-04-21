@@ -29,9 +29,7 @@ impl MailboxRole {
         match s {
             "mine" => Ok(MailboxRole::Mine),
             "theirs" => Ok(MailboxRole::Theirs),
-            other => Err(CoreError::Storage(format!(
-                "unknown mailbox role: {other}"
-            ))),
+            other => Err(CoreError::Storage(format!("unknown mailbox role: {other}"))),
         }
     }
 }
@@ -90,7 +88,8 @@ mod tests {
         let pool = Pool::in_memory();
         let repo = MailboxRepo::new(&pool);
         repo.insert("mine-a.onion", MailboxRole::Mine, 100).unwrap();
-        repo.insert("theirs-a.onion", MailboxRole::Theirs, 200).unwrap();
+        repo.insert("theirs-a.onion", MailboxRole::Theirs, 200)
+            .unwrap();
         repo.insert("mine-b.onion", MailboxRole::Mine, 300).unwrap();
 
         let mine = repo.list(MailboxRole::Mine).unwrap();
@@ -114,7 +113,8 @@ mod tests {
         let pool = Pool::in_memory();
         let repo = MailboxRepo::new(&pool);
         repo.insert("multi.onion", MailboxRole::Mine, 100).unwrap();
-        repo.insert("multi.onion", MailboxRole::Theirs, 200).unwrap();
+        repo.insert("multi.onion", MailboxRole::Theirs, 200)
+            .unwrap();
         repo.remove("multi.onion", MailboxRole::Mine).unwrap();
         assert_eq!(repo.list(MailboxRole::Mine).unwrap().len(), 0);
         assert_eq!(repo.list(MailboxRole::Theirs).unwrap().len(), 1);

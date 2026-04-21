@@ -29,15 +29,15 @@ pub(crate) mod seen_messages;
 // `pub use` items are still invisible outside the crate — the effective
 // visibility is capped by the module. This is intentional.
 #[cfg(not(feature = "test-harness"))]
-pub(crate) use pool::Pool;
-#[cfg(not(feature = "test-harness"))]
 pub(crate) use contacts::ContactRepo;
 #[cfg(not(feature = "test-harness"))]
 pub(crate) use messages::MessageRepo;
+#[cfg(not(feature = "test-harness"))]
+pub(crate) use pool::Pool;
 
-#[cfg(feature = "test-harness")]
-pub use pool::Pool;
 #[cfg(feature = "test-harness")]
 pub use contacts::ContactRepo;
 #[cfg(feature = "test-harness")]
 pub use messages::MessageRepo;
+#[cfg(feature = "test-harness")]
+pub use pool::Pool;

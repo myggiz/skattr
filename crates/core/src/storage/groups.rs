@@ -19,8 +19,8 @@ impl<'p> MlsGroupRepo<'p> {
 
     /// Save or update the serialized MLS state for a group.
     pub(crate) fn put(&self, group_id: &[u8], state_blob: &[u8], epoch: u64) -> Result<()> {
-        let epoch_i = i64::try_from(epoch)
-            .map_err(|_| CoreError::Storage("epoch overflows i64".into()))?;
+        let epoch_i =
+            i64::try_from(epoch).map_err(|_| CoreError::Storage("epoch overflows i64".into()))?;
         self.pool.with_mut(|c| {
             c.execute(
                 "INSERT INTO mls_groups (group_id, state_blob, epoch) VALUES (?1, ?2, ?3) \

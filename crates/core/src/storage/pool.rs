@@ -118,9 +118,10 @@ impl Pool {
     /// Graceful shutdown: close the connection, encrypt plaintext →
     /// ciphertext, remove the plaintext file.
     pub fn close(self) -> Result<()> {
-        let conn = self.conn.into_inner().map_err(|_| {
-            CoreError::Storage("pool mutex poisoned during close".into())
-        })?;
+        let conn = self
+            .conn
+            .into_inner()
+            .map_err(|_| CoreError::Storage("pool mutex poisoned during close".into()))?;
         drop(conn);
 
         encrypt_db(&self.working_path, &self.encrypted_path, &self.passphrase)?;

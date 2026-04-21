@@ -229,7 +229,10 @@ async fn restore(seed_phrase: &str, data_dir_override: Option<&std::path::Path>)
     Ok(())
 }
 
-async fn backup(out_file: &std::path::Path, data_dir_override: Option<&std::path::Path>) -> Result<()> {
+async fn backup(
+    out_file: &std::path::Path,
+    data_dir_override: Option<&std::path::Path>,
+) -> Result<()> {
     use skattr_core::daemon::backup::export_backup;
     use skattr_core::identity::derive::derive_storage_seed;
 
