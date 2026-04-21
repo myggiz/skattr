@@ -4,7 +4,12 @@
 
 Skattr is a desktop-first, metadata-resistant, end-to-end encrypted messenger built on Tor v3 onion services and MLS (RFC 9420). It has no phone number, no email signup, and no central account server. Identity is a keypair backed by a BIP39 seed phrase.
 
-**Status: Phase 0 (foundations).** The project scaffold is in place; most functionality is stubbed (`todo!()`). See [ARCHITECTURE.md](ARCHITECTURE.md) and [`docs/`](docs/) for the full design.
+**Status: Phase 0 complete.** Identity, at-rest encryption, Arti
+integration, and storage all land. `skattr daemon` bootstraps Tor,
+publishes a v3 onion service, and accepts inbound streams. Phase 1
+(MLS message exchange, outbox delivery, invite links) is next. See
+[ARCHITECTURE.md](ARCHITECTURE.md) and [`docs/`](docs/) for the full
+design.
 
 ## What Skattr is
 
@@ -21,21 +26,51 @@ Skattr is a desktop-first, metadata-resistant, end-to-end encrypted messenger bu
 - Not mobile in v1. Mobile is post-1.0 at the earliest.
 - Not "anonymous" — your contacts know who you are. It's metadata-resistant, not identity-destroying.
 
-## Building from source
+## What works now (end of Phase 0)
 
-Requirements: Rust stable (see [`rust-toolchain.toml`](rust-toolchain.toml)), a C toolchain (for `rusqlite` bundled SQLite), and `pkg-config` + OpenSSL headers on Linux.
+- Create and restore a BIP39-backed identity (`skattr init` /
+  `skattr restore`).
+- Encrypted at-rest storage for identity, HS key, message database.
+- Bootstrap Tor via embedded Arti, publish a v3 onion service with
+  a seed-derived address.
+- Byte-level inbound accept loop (`OnionListener`).
+- Backup / restore of the full state as a portable archive.
+
+## What doesn't work yet
+
+- Sending actual messages (Phase 1 — MLS + delivery layer).
+- Invite links, contact management beyond storage plumbing
+  (Phase 1).
+- Offline delivery via mailbox server (Phase 2).
+- Desktop UI (Phase 2 — Tauri).
+- Group chat (Phase 3).
+
+## Quickstart (desktop, Linux/macOS)
+
+Requirements: Rust stable (see `rust-toolchain.toml`), a C toolchain,
+and internet access on first run for Arti's consensus download.
 
 ```bash
-cargo build --workspace
-cargo test  --workspace
-cargo clippy --all-targets -- -D warnings
+git clone https://github.com/myggiz/skattr
+cd skattr
+cargo build --workspace --release
+
+# Generate an identity. Record the 24-word seed phrase on screen.
+cargo run -p skattr-cli --release -- init
+
+# Start the daemon. Prints the .onion address once Tor is ready.
+# Ctrl-C to stop.
+cargo run -p skattr-cli --release -- daemon
+
+# Back up everything (identity + HS key + DB) to a single file.
+cargo run -p skattr-cli --release -- backup ~/skattr-backup.age
+
+# Full recovery from seed phrase + backup on a clean machine:
+cargo run -p skattr-cli --release -- restore-backup "word1 ... word24" ~/skattr-backup.age
 ```
 
-Run the CLI:
-
-```bash
-cargo run -p skattr-cli -- --help
-```
+See [`docs/OPERATIONS.md`](docs/OPERATIONS.md) for the full
+developer guide.
 
 ## Layout
 
