@@ -274,6 +274,13 @@ where
         .into_transport_mode()
         .map_err(|e| map_snow("builder", e))?;
 
+    // h_transport lives in two places briefly: the HandshakeOutcome
+    // (so 1.C can inject it as external PSK into the first MLS Commit)
+    // and the AuthenticatedConnection (so `h_transport()` can return
+    // a reference after the outcome is consumed). Both copies zeroize
+    // on drop. When 1.C lands, the outcome's copy will typically be
+    // consumed immediately and dropped, leaving the connection's copy
+    // as the sole live instance.
     let outcome = HandshakeOutcome {
         peer_x25519,
         h_transport: h_transport.clone(),
