@@ -61,4 +61,15 @@ pub mod test_exports {
         handshake_initiator, handshake_responder, AuthenticatedConnection, HandshakeOutcome,
         HANDSHAKE_TIMEOUT,
     };
+
+    /// Test-only helper: convert an `IdentityKey` to its X25519 static
+    /// public key for use as `peer_static_x25519` in
+    /// `handshake_initiator`. Integration tests cannot reach
+    /// `IdentityKey::noise_static_public` directly because it is
+    /// `pub(crate)`; this wrapper is gated on `feature = "test-harness"`
+    /// so the production API stays narrow.
+    #[must_use]
+    pub fn noise_public_of(id: &crate::identity::IdentityKey) -> [u8; 32] {
+        id.noise_static_public()
+    }
 }
