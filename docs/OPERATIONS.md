@@ -70,7 +70,7 @@ Ctrl-C to shut down.
 
 The `.onion` address is derived from your identity seed, so restoring
 from the BIP39 mnemonic reproduces the same address (see
-[recovery](#recovery)).
+[recovery](#backup-and-recovery)).
 
 ### Running two daemons on the same machine
 
