@@ -115,9 +115,7 @@ impl Decoder for FrameCodec {
             return Err(CoreError::Frame("zero-length frame".into()));
         }
         if length > MAX_FRAME_SIZE {
-            return Err(CoreError::Frame(format!(
-                "frame too large: {length} bytes"
-            )));
+            return Err(CoreError::Frame(format!("frame too large: {length} bytes")));
         }
         if src.len() < 4 + length {
             return Ok(None);
@@ -158,17 +156,13 @@ impl Decoder for FrameCodec {
             }
             0x07 => {
                 if !payload.is_empty() {
-                    return Err(CoreError::Frame(
-                        "Ping must have empty payload".into(),
-                    ));
+                    return Err(CoreError::Frame("Ping must have empty payload".into()));
                 }
                 Frame::Ping
             }
             0x08 => {
                 if !payload.is_empty() {
-                    return Err(CoreError::Frame(
-                        "Pong must have empty payload".into(),
-                    ));
+                    return Err(CoreError::Frame("Pong must have empty payload".into()));
                 }
                 Frame::Pong
             }
@@ -221,6 +215,8 @@ impl Encoder<Frame> for FrameCodec {
         }
 
         dst.reserve(4 + length);
+        // SAFETY: length <= MAX_FRAME_SIZE (16 MiB) which is well within u32::MAX.
+        #[allow(clippy::unwrap_used)]
         dst.extend_from_slice(&u32::try_from(length).unwrap().to_be_bytes());
         dst.put_u8(type_byte);
         dst.extend_from_slice(&payload);
@@ -229,7 +225,7 @@ impl Encoder<Frame> for FrameCodec {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use bytes::BytesMut;
@@ -372,7 +368,9 @@ mod tests {
         buf.extend_from_slice(&[0x06]);
         buf.extend_from_slice(&[0; 8]);
         let mut codec = FrameCodec::new();
-        let err = codec.decode(&mut buf).expect_err("must reject wrong-size ack");
+        let err = codec
+            .decode(&mut buf)
+            .expect_err("must reject wrong-size ack");
         assert!(matches!(err, CoreError::Frame(_)));
     }
 
@@ -500,7 +498,9 @@ mod tests {
         buf.extend_from_slice(&2u32.to_be_bytes());
         buf.extend_from_slice(&[0x08, 0xFF]);
         let mut codec = FrameCodec::new();
-        let err = codec.decode(&mut buf).expect_err("Pong with payload must error");
+        let err = codec
+            .decode(&mut buf)
+            .expect_err("Pong with payload must error");
         assert!(matches!(err, CoreError::Frame(_)));
     }
 
@@ -510,7 +510,9 @@ mod tests {
         buf.extend_from_slice(&2u32.to_be_bytes());
         buf.extend_from_slice(&[0x09, 0xFF]);
         let mut codec = FrameCodec::new();
-        let err = codec.decode(&mut buf).expect_err("Bye with payload must error");
+        let err = codec
+            .decode(&mut buf)
+            .expect_err("Bye with payload must error");
         assert!(matches!(err, CoreError::Frame(_)));
     }
 

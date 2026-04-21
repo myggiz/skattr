@@ -27,10 +27,7 @@ fn arb_frame() -> impl Strategy<Value = Frame> {
         Just(Frame::Ping),
         Just(Frame::Pong),
         Just(Frame::Bye),
-        (any::<u16>(), "\\PC{0,256}").prop_map(|(code, message)| Frame::Error {
-            code,
-            message,
-        }),
+        (any::<u16>(), "\\PC{0,256}").prop_map(|(code, message)| Frame::Error { code, message }),
     ]
 }
 
