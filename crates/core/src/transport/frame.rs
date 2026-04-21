@@ -84,6 +84,27 @@ pub enum Frame {
     },
 }
 
+impl Frame {
+    /// The wire-format type byte for this frame — the same value that
+    /// [`FrameCodec::encode`] writes. Useful for error reporting when a
+    /// frame is rejected by its consumer.
+    #[must_use]
+    pub(crate) fn frame_type(&self) -> FrameType {
+        match self {
+            Frame::NoiseInit(_) => FrameType::NoiseInit,
+            Frame::NoiseResp(_) => FrameType::NoiseResp,
+            Frame::MlsWelcome(_) => FrameType::MlsWelcome,
+            Frame::MlsCommit(_) => FrameType::MlsCommit,
+            Frame::MlsApp(_) => FrameType::MlsApp,
+            Frame::Ack(_) => FrameType::Ack,
+            Frame::Ping => FrameType::Ping,
+            Frame::Pong => FrameType::Pong,
+            Frame::Bye => FrameType::Bye,
+            Frame::Error { .. } => FrameType::Error,
+        }
+    }
+}
+
 /// `tokio_util::codec` encoder/decoder for [`Frame`]s.
 #[derive(Debug, Default)]
 pub struct FrameCodec {

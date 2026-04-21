@@ -148,7 +148,7 @@ where
         other => {
             return Err(CoreError::Transport(format!(
                 "handshake: malformed: unexpected frame type 0x{:02X}",
-                frame_type_byte(&other)
+                other.frame_type() as u8
             )));
         }
     };
@@ -209,7 +209,7 @@ where
         other => {
             return Err(CoreError::Transport(format!(
                 "handshake: malformed: unexpected frame type 0x{:02X}",
-                frame_type_byte(&other)
+                other.frame_type() as u8
             )));
         }
     };
@@ -239,7 +239,7 @@ where
         other => {
             return Err(CoreError::Transport(format!(
                 "handshake: malformed: unexpected frame type 0x{:02X}",
-                frame_type_byte(&other)
+                other.frame_type() as u8
             )));
         }
     };
@@ -280,23 +280,6 @@ where
     };
     let conn = AuthenticatedConnection::new(peer_x25519, h_transport, framed, transport);
     Ok((conn, outcome))
-}
-
-/// Extract the on-wire type byte from a `Frame` — used only for error
-/// reporting when the handshake sees an unexpected frame type.
-fn frame_type_byte(f: &Frame) -> u8 {
-    match f {
-        Frame::NoiseInit(_) => 0x01,
-        Frame::NoiseResp(_) => 0x02,
-        Frame::MlsWelcome(_) => 0x03,
-        Frame::MlsCommit(_) => 0x04,
-        Frame::MlsApp(_) => 0x05,
-        Frame::Ack(_) => 0x06,
-        Frame::Ping => 0x07,
-        Frame::Pong => 0x08,
-        Frame::Bye => 0x09,
-        Frame::Error { .. } => 0x0A,
-    }
 }
 
 /// Drive the initiator side of Noise_XK over `stream`.
