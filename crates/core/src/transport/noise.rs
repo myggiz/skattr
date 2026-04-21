@@ -495,4 +495,89 @@ mod tests {
         assert!(init_r.is_err(), "initiator must fail under unilateral PSK");
         assert!(resp_r.is_err(), "responder must fail under unilateral PSK");
     }
+
+    #[tokio::test]
+    async fn responder_rejects_wrong_version_byte() {
+        use tokio::io::AsyncWriteExt;
+
+        let (mut init_io, resp_io) = tokio::io::duplex(4096);
+        let responder = IdentityKey::from_bytes(Zeroizing::new([0xBBu8; 32]));
+
+        // Skip the real initiator — write a bogus version byte directly.
+        let writer = tokio::spawn(async move {
+            init_io.write_all(&[0x02u8]).await.unwrap();
+            init_io.flush().await.unwrap();
+            // Keep the stream alive until the responder has read the byte.
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        });
+
+        let resp_err = handshake_responder(resp_io, &responder, None)
+            .await
+            .err()
+            .expect("responder must reject 0x02");
+
+        writer.await.unwrap();
+
+        match resp_err {
+            CoreError::Transport(s) => assert!(
+                s.starts_with("handshake: unsupported version: 0x02"),
+                "got: {s}"
+            ),
+            other => panic!("expected CoreError::Transport, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn responder_rejects_unexpected_first_frame_type() {
+        use tokio::io::AsyncWriteExt;
+
+        let (mut init_io, resp_io) = tokio::io::duplex(4096);
+        let responder = IdentityKey::from_bytes(Zeroizing::new([0xCCu8; 32]));
+
+        // Proper version byte + a Ping frame (type 0x07 — wrong for a
+        // handshake start).
+        let writer = tokio::spawn(async move {
+            init_io.write_all(&[PROTOCOL_VERSION]).await.unwrap();
+            // length=1, type=0x07 (Ping).
+            init_io.write_all(&1u32.to_be_bytes()).await.unwrap();
+            init_io.write_all(&[0x07u8]).await.unwrap();
+            init_io.flush().await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        });
+
+        let resp_err = handshake_responder(resp_io, &responder, None)
+            .await
+            .err()
+            .expect("responder must reject non-NoiseInit first frame");
+
+        writer.await.unwrap();
+
+        match resp_err {
+            CoreError::Transport(s) => assert!(
+                s.starts_with("handshake: malformed: unexpected frame type 0x07"),
+                "got: {s}"
+            ),
+            other => panic!("expected CoreError::Transport, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn responder_rejects_stream_closed_before_preamble() {
+        let (init_io, resp_io) = tokio::io::duplex(4096);
+        let responder = IdentityKey::from_bytes(Zeroizing::new([0xDDu8; 32]));
+
+        // Drop init_io without writing anything — responder's
+        // read_exact sees UnexpectedEof immediately.
+        drop(init_io);
+
+        let resp_err = handshake_responder(resp_io, &responder, None)
+            .await
+            .err()
+            .expect("responder must fail on EOF");
+
+        match resp_err {
+            CoreError::Transport(s) => assert!(s == "handshake: stream closed", "got: {s}"),
+            other => panic!("expected CoreError::Transport, got {other:?}"),
+        }
+    }
 }
