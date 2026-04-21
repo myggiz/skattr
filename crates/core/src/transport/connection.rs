@@ -23,7 +23,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::codec::Framed;
 use zeroize::Zeroizing;
 
-use crate::error::Result;
+use crate::error::{CoreError, Result};
 use crate::transport::frame::{Frame, FrameCodec};
 
 /// A Noise-protected, framed stream to a peer whose X25519 static
@@ -75,18 +75,96 @@ where
 
     /// Encrypt `frame` under the Noise transport cipher and send the
     /// resulting ciphertext as a single `Frame::MlsApp` on the wire.
-    pub async fn send(&mut self, _frame: Frame) -> Result<()> {
-        todo!("encode inner frame, snow::TransportState::write_message, wrap in MlsApp")
+    pub async fn send(&mut self, frame: Frame) -> Result<()> {
+        use futures::SinkExt as _;
+        use tokio_util::codec::Encoder as _;
+
+        // Encode the inner frame into a scratch buffer.
+        let mut inner = bytes::BytesMut::new();
+        let mut codec = FrameCodec::new();
+        codec.encode(frame, &mut inner)?;
+
+        // Noise payload cap (65535) minus ChaChaPoly tag (16) = 65519.
+        // FrameCodec enforces 16 MiB so the inner could in principle be
+        // larger; for 1.B's scope — Ping/Pong/Bye/small MlsApp — inner
+        // stays well under 65 KiB. Larger payloads land in 1.E with a
+        // chunked send path.
+        const NOISE_MAX_OUTER: usize = 65519;
+        if inner.len() > NOISE_MAX_OUTER {
+            return Err(CoreError::Transport(format!(
+                "send: inner frame too large for single Noise message: {} bytes",
+                inner.len()
+            )));
+        }
+
+        let mut cipher = vec![0u8; inner.len() + 16];
+        let n = self
+            .transport
+            .write_message(&inner, &mut cipher)
+            .map_err(|e| CoreError::Transport(format!("send: {e}")))?;
+        cipher.truncate(n);
+
+        self.framed
+            .send(Frame::MlsApp(cipher))
+            .await
+            .map_err(|e| CoreError::Transport(format!("send: {e}")))?;
+        Ok(())
     }
 
     /// Read the next `Frame::MlsApp`, decrypt its payload, and decode
     /// the inner [`Frame`]. Returns `Ok(None)` on clean EOF.
     pub async fn recv(&mut self) -> Result<Option<Frame>> {
-        todo!("StreamExt::next, unwrap MlsApp, TransportState::read_message, decode inner")
+        use futures::StreamExt as _;
+        use tokio_util::codec::Decoder as _;
+
+        let next = match self.framed.next().await {
+            None => return Ok(None),
+            Some(Ok(f)) => f,
+            Some(Err(e)) => return Err(e),
+        };
+
+        let cipher = match next {
+            Frame::MlsApp(bytes) => bytes,
+            other => {
+                return Err(CoreError::Transport(format!(
+                    "recv: expected MlsApp, got type 0x{:02X}",
+                    other.frame_type() as u8
+                )));
+            }
+        };
+
+        let mut clear = vec![0u8; cipher.len()];
+        let n = self
+            .transport
+            .read_message(&cipher, &mut clear)
+            .map_err(|e| CoreError::Transport(format!("recv: authentication failed: {e}")))?;
+        clear.truncate(n);
+
+        // Decode the inner frame using a fresh FrameCodec.
+        let mut codec = FrameCodec::new();
+        let mut buf = bytes::BytesMut::from(&clear[..]);
+        match codec.decode(&mut buf)? {
+            Some(inner) => {
+                if !buf.is_empty() {
+                    return Err(CoreError::Transport(
+                        "recv: inner frame left trailing bytes".into(),
+                    ));
+                }
+                Ok(Some(inner))
+            }
+            None => Err(CoreError::Transport(
+                "recv: inner frame was incomplete".into(),
+            )),
+        }
     }
 
     /// Graceful close: send `Frame::Bye`, flush, drop the stream.
-    pub async fn close(self) -> Result<()> {
-        todo!("self.send(Frame::Bye), then drop framed")
+    /// Errors on the Bye send are swallowed — close is best-effort and
+    /// the caller is about to drop the connection anyway.
+    pub async fn close(mut self) -> Result<()> {
+        let _ = self.send(Frame::Bye).await;
+        use futures::SinkExt as _;
+        let _ = self.framed.close().await;
+        Ok(())
     }
 }

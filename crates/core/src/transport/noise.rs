@@ -611,6 +611,45 @@ mod tests {
         assert!(init_r.is_err() || resp_r.is_err(), "both must not succeed");
     }
 
+    #[tokio::test]
+    async fn send_recv_round_trip_post_handshake() {
+        let initiator = IdentityKey::from_bytes(Zeroizing::new([0xF1u8; 32]));
+        let responder = IdentityKey::from_bytes(Zeroizing::new([0xF2u8; 32]));
+        let responder_pub = responder.noise_static_public();
+
+        let (init_io, resp_io) = tokio::io::duplex(16 * 1024);
+        let init_fut =
+            async move { handshake_initiator(init_io, &initiator, &responder_pub, None).await };
+        let resp_fut = async move { handshake_responder(resp_io, &responder, None).await };
+        let (init_r, resp_r) = tokio::join!(init_fut, resp_fut);
+        let (mut init_conn, _init_out) = init_r.unwrap();
+        let (mut resp_conn, _resp_out) = resp_r.unwrap();
+
+        // Round-trip a Ping from initiator → responder.
+        init_conn
+            .send(crate::transport::frame::Frame::Ping)
+            .await
+            .unwrap();
+        let received = resp_conn.recv().await.unwrap().expect("one frame expected");
+        assert!(matches!(received, crate::transport::frame::Frame::Ping));
+
+        // And a Pong in the other direction.
+        resp_conn
+            .send(crate::transport::frame::Frame::Pong)
+            .await
+            .unwrap();
+        let received = init_conn.recv().await.unwrap().expect("one frame expected");
+        assert!(matches!(received, crate::transport::frame::Frame::Pong));
+
+        // And a Bye that both sides observe cleanly via close → recv.
+        init_conn.close().await.unwrap();
+        let after = resp_conn.recv().await.unwrap();
+        match after {
+            Some(crate::transport::frame::Frame::Bye) => {}
+            other => panic!("expected Bye after close, got {other:?}"),
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn handshake_times_out_after_window() {
         let (init_io, _resp_io) = tokio::io::duplex(4096);
