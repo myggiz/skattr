@@ -580,4 +580,34 @@ mod tests {
             other => panic!("expected CoreError::Transport, got {other:?}"),
         }
     }
+
+    #[tokio::test]
+    async fn wrong_peer_static_fails_authentication() {
+        let initiator = IdentityKey::from_bytes(Zeroizing::new([0xE1u8; 32]));
+        let responder = IdentityKey::from_bytes(Zeroizing::new([0xE2u8; 32]));
+        let bogus_responder_pub = [0x00u8; 32]; // All-zero X25519 pub.
+
+        let (init_io, resp_io) = tokio::io::duplex(16 * 1024);
+        let init_fut = async move {
+            handshake_initiator(init_io, &initiator, &bogus_responder_pub, None).await
+        };
+        let resp_fut = async move { handshake_responder(resp_io, &responder, None).await };
+        let (init_r, resp_r) = tokio::join!(init_fut, resp_fut);
+
+        // At least one side must surface an authentication failure.
+        // (The initiator may succeed in writing msg1 and only fail when
+        // msg2 comes back mangled, or may fail on msg3 encryption; the
+        // responder is guaranteed to fail on msg1 or msg3 decrypt.)
+        let any_auth_fail = [&init_r, &resp_r].iter().any(|r| match r {
+            Err(CoreError::Transport(s)) => {
+                s.starts_with("handshake: authentication failed") || s == "handshake: stream closed"
+            }
+            _ => false,
+        });
+        assert!(
+            any_auth_fail,
+            "expected at least one side to fail with authentication failed / stream closed"
+        );
+        assert!(init_r.is_err() || resp_r.is_err(), "both must not succeed");
+    }
 }
