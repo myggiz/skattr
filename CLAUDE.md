@@ -4,7 +4,34 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository state
 
-**Phase 0.B (identity & crypto), Phase 0.C (Arti integration), and Phase 0.D (storage layer) are complete.** `crates/core/src/identity/` is fully implemented (Ed25519, BIP39, Argon2id + XChaCha20-Poly1305 vault, HKDF). `crates/core/src/transport/tor.rs` + `hs_key.rs` + `listener.rs` wire `arti-client` 0.41 + `tor-hsservice` 0.41 end-to-end. `crates/core/src/storage/` has a real `rusqlite` + `age` `Pool` (key derived from identity seed), a migrations runner, seven typed repos (contacts + onion_addresses, messages, mls_groups, outbox, mailboxes, seen_messages), transactions wrapper, and portable backup export/import. `skattr init` / `skattr restore <seed>` / `skattr daemon` / `skattr backup <file>` / `skattr restore-backup <seed> <file>` / `--data-dir <path>` all work. The daemon is driven by `Daemon::run(data_dir, &Zeroizing<String>, ready_tx, shutdown_fut)` — the CLI is a thin wrapper. `transport` and `storage` are `pub(crate)`; integration tests reach internals via `skattr_core::test_exports` gated on the `test-harness` feature. Cargo-fuzz harness for `Vault::open` in place. All four crates compile, `cargo clippy -D warnings` / `cargo test` / `cargo fmt --check` are green — 77+ unit + integration tests passing. Phase 0 exit criterion (two daemons echo bytes over Tor) is exercised by `crates/tests/src/arti_echo.rs`, `#[ignore]`-gated — run with `cargo test -p skattr-tests --release -- --ignored`. ADRs 0001-0005 committed. Only remaining Phase 0 workstream is 0.E (Documentation baseline: threat model v0, OPERATIONS.md). When filling in further stubs, the bootstrap prompt remains authoritative for file layout, module boundaries, type signatures, and visibility rules — match it exactly.
+**Phase 0 is complete** — all five workstreams (0.A scaffold, 0.B
+identity & crypto, 0.C Arti integration, 0.D storage layer, 0.E
+documentation baseline) have shipped and are merged to master.
+
+`crates/core/src/identity/` is fully implemented (Ed25519, BIP39,
+Argon2id + XChaCha20-Poly1305 vault, HKDF). `crates/core/src/transport/{tor,
+hs_key, listener}.rs` wire `arti-client` 0.41 + `tor-hsservice` 0.41
+end-to-end. `crates/core/src/storage/` has a real `rusqlite` + `age`
+`Pool`, a migrations runner, seven typed repos, transactions wrapper,
+and portable backup export/import. `docs/` has a v0 threat model,
+an operations guide, and refreshed ARCHITECTURE.md with a
+"send one message" data-flow trace.
+
+The daemon is driven by `Daemon::run(data_dir, &Zeroizing<String>,
+ready_tx, shutdown_fut)` — the CLI is a thin wrapper. `transport`
+and `storage` are both `pub(crate)`; integration tests reach
+internals via `skattr_core::test_exports` gated on the `test-harness`
+feature. All four crates compile, `cargo clippy -D warnings` / `cargo
+test` / `cargo fmt --check` are green — 77+ unit + integration tests
+passing. Phase 0 exit criterion (two daemons echo bytes over Tor)
+is exercised by `crates/tests/src/arti_echo.rs`, `#[ignore]`-gated
+(run with `cargo test -p skattr-tests --release -- --ignored`).
+
+Phase 1 is next: MLS message exchange, outbox delivery, invite links,
+and the session manager wiring that ties transport + mls + storage
+together. The bootstrap prompt remains authoritative for file
+layout, module boundaries, type signatures, and visibility rules —
+match it exactly.
 
 ## Authoritative docs (read these first)
 
