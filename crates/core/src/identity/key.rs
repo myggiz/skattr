@@ -279,7 +279,11 @@ mod tests {
         // 31 set, bit 7 of byte 31 cleared.
         assert_eq!(a[0] & 0b0000_0111, 0, "byte 0 low 3 bits must be zero");
         assert_eq!(a[31] & 0b1000_0000, 0, "byte 31 high bit must be zero");
-        assert_eq!(a[31] & 0b0100_0000, 0b0100_0000, "byte 31 bit 6 must be set");
+        assert_eq!(
+            a[31] & 0b0100_0000,
+            0b0100_0000,
+            "byte 31 bit 6 must be set"
+        );
     }
 
     #[test]

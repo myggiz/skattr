@@ -27,8 +27,8 @@ use tokio_util::codec::Framed;
 use zeroize::Zeroizing;
 
 use crate::error::{CoreError, Result};
-use crate::identity::IdentityKey;
 use crate::identity::derive::{hkdf_expand, INFO_TRANSPORT_BINDING_V1};
+use crate::identity::IdentityKey;
 use crate::transport::connection::AuthenticatedConnection;
 use crate::transport::frame::{Frame, FrameCodec};
 
@@ -90,9 +90,7 @@ fn build_handshake(
     initiator: bool,
 ) -> Result<snow::HandshakeState> {
     let pattern = pattern_for(invite_psk);
-    let params: snow::params::NoiseParams = pattern
-        .parse()
-        .map_err(|e| map_snow("builder", e))?;
+    let params: snow::params::NoiseParams = pattern.parse().map_err(|e| map_snow("builder", e))?;
     let secret = identity.noise_static_secret();
     let mut builder = snow::Builder::new(params).local_private_key(secret.as_ref());
     if let Some(rs) = remote_static {
@@ -362,8 +360,14 @@ mod tests {
         init_psk: Option<[u8; 32]>,
         resp_psk: Option<[u8; 32]>,
     ) -> (
-        Result<(AuthenticatedConnection<tokio::io::DuplexStream>, HandshakeOutcome)>,
-        Result<(AuthenticatedConnection<tokio::io::DuplexStream>, HandshakeOutcome)>,
+        Result<(
+            AuthenticatedConnection<tokio::io::DuplexStream>,
+            HandshakeOutcome,
+        )>,
+        Result<(
+            AuthenticatedConnection<tokio::io::DuplexStream>,
+            HandshakeOutcome,
+        )>,
     ) {
         let (init_io, resp_io) = tokio::io::duplex(16 * 1024);
         let responder_pub = responder.noise_static_public();

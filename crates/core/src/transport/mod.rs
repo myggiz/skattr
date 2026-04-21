@@ -36,9 +36,7 @@ pub(crate) use noise::{
     handshake_initiator, handshake_responder, HandshakeOutcome, HANDSHAKE_TIMEOUT,
 };
 #[cfg(feature = "test-harness")]
-pub use noise::{
-    handshake_initiator, handshake_responder, HandshakeOutcome, HANDSHAKE_TIMEOUT,
-};
+pub use noise::{handshake_initiator, handshake_responder, HandshakeOutcome, HANDSHAKE_TIMEOUT};
 
 // Under `test-harness` the items need a `pub` path so `lib.rs::test_exports`
 // can re-export them. The `transport` module itself is `pub(crate)`, so these
