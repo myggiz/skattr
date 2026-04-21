@@ -449,4 +449,68 @@ mod tests {
             .expect_err("must reject malformed CBOR");
         assert!(matches!(err, CoreError::Frame(_)));
     }
+
+    #[test]
+    fn decode_zero_length_rejected() {
+        let mut buf = BytesMut::new();
+        buf.extend_from_slice(&[0, 0, 0, 0]);
+        let mut codec = FrameCodec::new();
+        let err = codec.decode(&mut buf).expect_err("zero length must error");
+        assert!(matches!(err, CoreError::Frame(_)));
+    }
+
+    #[test]
+    fn decode_oversized_length_rejected() {
+        let mut buf = BytesMut::new();
+        let oversized = u32::try_from(MAX_FRAME_SIZE + 1).unwrap();
+        buf.extend_from_slice(&oversized.to_be_bytes());
+        // Do NOT push a payload; the length check short-circuits before reading.
+        let mut codec = FrameCodec::new();
+        let err = codec.decode(&mut buf).expect_err("oversized must error");
+        assert!(matches!(err, CoreError::Frame(_)));
+    }
+
+    #[test]
+    fn decode_unknown_type_rejected() {
+        // length = 1 (type only), type = 0x20 (reserved).
+        let mut buf = BytesMut::new();
+        buf.extend_from_slice(&1u32.to_be_bytes());
+        buf.extend_from_slice(&[0x20]);
+        let mut codec = FrameCodec::new();
+        let err = codec.decode(&mut buf).expect_err("unknown type must error");
+        assert!(matches!(err, CoreError::Frame(_)));
+    }
+
+    #[test]
+    fn decode_ping_with_payload_rejected() {
+        // length = 2 (1 type + 1 payload), type = 0x07, payload = one byte.
+        let mut buf = BytesMut::new();
+        buf.extend_from_slice(&2u32.to_be_bytes());
+        buf.extend_from_slice(&[0x07, 0xFF]);
+        let mut codec = FrameCodec::new();
+        let err = codec
+            .decode(&mut buf)
+            .expect_err("Ping with payload must error");
+        assert!(matches!(err, CoreError::Frame(_)));
+    }
+
+    #[test]
+    fn decode_pong_with_payload_rejected() {
+        let mut buf = BytesMut::new();
+        buf.extend_from_slice(&2u32.to_be_bytes());
+        buf.extend_from_slice(&[0x08, 0xFF]);
+        let mut codec = FrameCodec::new();
+        let err = codec.decode(&mut buf).expect_err("Pong with payload must error");
+        assert!(matches!(err, CoreError::Frame(_)));
+    }
+
+    #[test]
+    fn decode_bye_with_payload_rejected() {
+        let mut buf = BytesMut::new();
+        buf.extend_from_slice(&2u32.to_be_bytes());
+        buf.extend_from_slice(&[0x09, 0xFF]);
+        let mut codec = FrameCodec::new();
+        let err = codec.decode(&mut buf).expect_err("Bye with payload must error");
+        assert!(matches!(err, CoreError::Frame(_)));
+    }
 }
