@@ -56,4 +56,8 @@ pub mod test_exports {
     pub use crate::storage::{ContactRepo, MessageRepo, Pool};
     // Phase 1.A additions:
     pub use crate::transport::{Frame, FrameCodec, FrameType, MAX_FRAME_SIZE};
+    // Phase 1.B additions:
+    pub use crate::transport::{
+        handshake_initiator, handshake_responder, AuthenticatedConnection, HandshakeOutcome,
+    };
 }
