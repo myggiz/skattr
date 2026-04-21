@@ -116,6 +116,46 @@ impl IdentityKey {
             .map_err(|_| CoreError::Identity("verification failed".into()))
     }
 
+    /// Derive the X25519 static secret used by Noise_XK.
+    ///
+    /// Matches libsodium's `crypto_sign_ed25519_sk_to_curve25519`:
+    /// SHA-512 of the Ed25519 seed, truncate to 32 bytes, apply the
+    /// X25519 clamp. Returns `Zeroizing<[u8; 32]>` so callers cannot
+    /// accidentally leak the secret on stack unwind.
+    pub(crate) fn noise_static_secret(&self) -> zeroize::Zeroizing<[u8; 32]> {
+        use sha2::{Digest, Sha512};
+        use zeroize::Zeroize as _;
+
+        // `Sha512::digest` returns a `GenericArray<u8, U64>` which is
+        // auto-zeroized via the `hash` crate's ZeroizeOnDrop impl for
+        // `Output`. We still force a scrub on the intermediate copy
+        // below in case of future API drift.
+        let mut full: [u8; 64] = Sha512::digest(self.secret).into();
+        let mut out = zeroize::Zeroizing::new([0u8; 32]);
+        out.copy_from_slice(&full[..32]);
+
+        // Scrub the full-length intermediate now that we have what we need.
+        full.zeroize();
+
+        // X25519 clamp.
+        out[0] &= 248;
+        out[31] &= 127;
+        out[31] |= 64;
+        out
+    }
+
+    /// The X25519 public key matching [`Self::noise_static_secret`].
+    ///
+    /// Computed from our own Ed25519 verifying key via the
+    /// Edwards-Y → Montgomery-U map — *not* via
+    /// `PublicKey::from(StaticSecret)` on the derived secret. Both
+    /// routes yield bitwise-equal output; we use the public-key path
+    /// because it avoids re-hashing the seed.
+    pub(crate) fn noise_static_public(&self) -> [u8; 32] {
+        let signing = SigningKey::from_bytes(&self.secret);
+        ed25519_pub_to_x25519(&signing.verifying_key())
+    }
+
     /// Consume into raw secret bytes. Caller is responsible for zeroization.
     ///
     /// This is only used by the vault on encrypted save; avoid calling
@@ -142,6 +182,24 @@ impl fmt::Debug for IdentityKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("IdentityKey(<redacted>)")
     }
+}
+
+/// Convert a peer's Ed25519 verifying key (the identity pubkey carried
+/// in ContactCards and invites) into its X25519 public key for Noise
+/// DH. Uses the Edwards-Y → Montgomery-U birational map — a standard,
+/// lossless morphism between the two forms of the underlying curve25519
+/// group.
+///
+/// Used by the contact layer when it needs to dial an X25519-shaped
+/// peer whose identity is stored as Ed25519. Kept `pub(crate)` so
+/// higher layers must go through a typed wrapper (e.g. ContactCard →
+/// handshake dial) rather than converting raw bytes everywhere.
+pub(crate) fn ed25519_pub_to_x25519(pk: &VerifyingKey) -> [u8; 32] {
+    // `VerifyingKey::to_montgomery()` is stable public API in
+    // ed25519-dalek 2.x and internally calls the curve25519-dalek
+    // birational map. `MontgomeryPoint::to_bytes()` yields the
+    // little-endian U coordinate — exactly what Noise expects.
+    pk.to_montgomery().to_bytes()
 }
 
 #[cfg(test)]
@@ -210,6 +268,32 @@ mod tests {
     }
 
     #[test]
+    fn noise_static_secret_is_deterministic_and_clamped() {
+        let seed = zeroize::Zeroizing::new([0x42u8; 32]);
+        let id = IdentityKey::from_bytes(seed);
+        let a = id.noise_static_secret();
+        let b = id.noise_static_secret();
+        assert_eq!(*a, *b, "same identity must produce same X25519 secret");
+
+        // X25519 clamping: low 3 bits of byte 0 cleared, bit 6 of byte
+        // 31 set, bit 7 of byte 31 cleared.
+        assert_eq!(a[0] & 0b0000_0111, 0, "byte 0 low 3 bits must be zero");
+        assert_eq!(a[31] & 0b1000_0000, 0, "byte 31 high bit must be zero");
+        assert_eq!(
+            a[31] & 0b0100_0000,
+            0b0100_0000,
+            "byte 31 bit 6 must be set"
+        );
+    }
+
+    #[test]
+    fn distinct_identities_produce_distinct_noise_secrets() {
+        let a = IdentityKey::from_bytes(zeroize::Zeroizing::new([0x01u8; 32]));
+        let b = IdentityKey::from_bytes(zeroize::Zeroizing::new([0x02u8; 32]));
+        assert_ne!(*a.noise_static_secret(), *b.noise_static_secret());
+    }
+
+    #[test]
     fn from_seed_is_domain_separated_from_raw_bytes() {
         // If HKDF were accidentally bypassed (e.g. someone rewrote from_seed
         // as Self::from_bytes(seed.as_bytes().into())), this test would fail:
@@ -235,5 +319,44 @@ mod tests {
         let err = IdentityKey::verify(&id.public(), msg, &sig)
             .expect_err("tampered signature must fail verify_strict");
         assert!(matches!(err, crate::error::CoreError::Identity(_)));
+    }
+
+    #[test]
+    fn noise_static_public_matches_x25519_dalek_derivation() {
+        // For any identity, the X25519 public key derived by applying
+        // the Edwards → Montgomery map to the Ed25519 pubkey must match
+        // the X25519 public key derived by running `x25519-dalek` on
+        // the output of `noise_static_secret`. If these diverge, the
+        // Noise handshake will silently fail to authenticate.
+        let id = IdentityKey::from_bytes(zeroize::Zeroizing::new([0x7Fu8; 32]));
+
+        let from_pub = id.noise_static_public();
+
+        let sk = x25519_dalek::StaticSecret::from(*id.noise_static_secret());
+        let from_sk: [u8; 32] = x25519_dalek::PublicKey::from(&sk).to_bytes();
+
+        assert_eq!(
+            from_pub, from_sk,
+            "noise_static_public (Edwards->Montgomery of Ed25519 pub) must match \
+             x25519-dalek(PublicKey::from(StaticSecret::from(noise_static_secret)))"
+        );
+    }
+
+    #[test]
+    fn ed25519_pub_to_x25519_matches_method() {
+        let id = IdentityKey::from_bytes(zeroize::Zeroizing::new([0xAA; 32]));
+        let vk = ed25519_dalek::VerifyingKey::from_bytes(&id.public().0).unwrap();
+        let via_free_fn = super::ed25519_pub_to_x25519(&vk);
+        assert_eq!(via_free_fn, id.noise_static_public());
+    }
+
+    #[test]
+    fn ed25519_pub_to_x25519_is_deterministic() {
+        let id = IdentityKey::from_bytes(zeroize::Zeroizing::new([0x55; 32]));
+        let vk = ed25519_dalek::VerifyingKey::from_bytes(&id.public().0).unwrap();
+        assert_eq!(
+            super::ed25519_pub_to_x25519(&vk),
+            super::ed25519_pub_to_x25519(&vk)
+        );
     }
 }
