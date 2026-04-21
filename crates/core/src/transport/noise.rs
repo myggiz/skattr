@@ -414,4 +414,85 @@ mod tests {
         // And that the two sides' h_transport agree.
         assert_eq!(*init_out.h_transport, *resp_out.h_transport);
     }
+
+    #[tokio::test]
+    async fn happy_path_with_matching_psk() {
+        let initiator = IdentityKey::from_bytes(Zeroizing::new([0x55u8; 32]));
+        let responder = IdentityKey::from_bytes(Zeroizing::new([0x66u8; 32]));
+        let psk = [0xEEu8; 32];
+
+        let (init_r, resp_r) = run_pair(initiator, responder, Some(psk), Some(psk)).await;
+        let (_ic, init_out) = init_r.expect("initiator ok");
+        let (_rc, resp_out) = resp_r.expect("responder ok");
+
+        assert_eq!(*init_out.h_transport, *resp_out.h_transport);
+        // PSK path must produce a DIFFERENT h_transport than the no-PSK
+        // path would for the same identities, because snow mixes the
+        // PSK into the handshake hash.
+        let (no_psk_init, _no_psk_resp) = run_pair(
+            IdentityKey::from_bytes(Zeroizing::new([0x55u8; 32])),
+            IdentityKey::from_bytes(Zeroizing::new([0x66u8; 32])),
+            None,
+            None,
+        )
+        .await;
+        let (_, no_psk_out) = no_psk_init.expect("no-psk also ok");
+        assert_ne!(
+            *init_out.h_transport, *no_psk_out.h_transport,
+            "PSK must be mixed into the handshake hash"
+        );
+    }
+
+    #[tokio::test]
+    async fn psk_mismatch_fails_with_authentication_failed() {
+        let initiator = IdentityKey::from_bytes(Zeroizing::new([0x77u8; 32]));
+        let responder = IdentityKey::from_bytes(Zeroizing::new([0x88u8; 32]));
+
+        let (init_r, resp_r) =
+            run_pair(initiator, responder, Some([0xAAu8; 32]), Some([0xBBu8; 32])).await;
+
+        // In Noise_XKpsk3 the PSK is applied at msg3.  The responder reads
+        // msg3 with the wrong PSK and fails with a MAC error — guaranteed.
+        // The initiator writes msg3 (mixing in its own PSK) and calls
+        // into_transport_mode() before the responder has had a chance to
+        // reject: snow accepts the write unconditionally, so the initiator
+        // may see either success or a "stream closed" error depending on
+        // scheduling.  We therefore only assert the responder side.
+        let resp_err = resp_r
+            .err()
+            .expect("responder must fail with mismatched PSK");
+        match resp_err {
+            CoreError::Transport(s) => assert!(
+                s.starts_with("handshake: authentication failed")
+                    || s == "handshake: stream closed",
+                "unexpected responder error message: {s}"
+            ),
+            other => panic!("expected CoreError::Transport for responder, got {other:?}"),
+        }
+
+        // If the initiator did fail, its error must also be a Transport variant.
+        if let Err(init_err) = init_r {
+            match init_err {
+                CoreError::Transport(s) => assert!(
+                    s.starts_with("handshake: authentication failed")
+                        || s == "handshake: stream closed",
+                    "unexpected initiator error message: {s}"
+                ),
+                other => panic!("expected CoreError::Transport for initiator, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn unilateral_psk_fails() {
+        // Initiator has PSK, responder doesn't → patterns don't match
+        // → msg1 parse / msg3 decrypt fails on the responder.
+        let initiator = IdentityKey::from_bytes(Zeroizing::new([0x99u8; 32]));
+        let responder = IdentityKey::from_bytes(Zeroizing::new([0xAAu8; 32]));
+
+        let (init_r, resp_r) = run_pair(initiator, responder, Some([0xCCu8; 32]), None).await;
+
+        assert!(init_r.is_err(), "initiator must fail under unilateral PSK");
+        assert!(resp_r.is_err(), "responder must fail under unilateral PSK");
+    }
 }
