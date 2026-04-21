@@ -14,9 +14,16 @@
 //! `length` covers `type + payload`. Maximum frame size is 16 MiB;
 //! oversized frames are rejected and close the connection.
 
+use serde::{Deserialize, Serialize};
 use tokio_util::codec::{Decoder, Encoder};
 
 use crate::error::{CoreError, Result};
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ErrorPayload {
+    code: u16,
+    message: String,
+}
 
 /// Hard cap on frame size (16 MiB).
 pub const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
@@ -116,7 +123,12 @@ impl Encoder<Frame> for FrameCodec {
             Frame::MlsWelcome(p) => (0x03, p),
             Frame::MlsCommit(p) => (0x04, p),
             Frame::MlsApp(p) => (0x05, p),
-            _ => todo!("Error variant lands in Task 4"),
+            Frame::Error { code, message } => {
+                let mut buf = Vec::new();
+                ciborium::into_writer(&ErrorPayload { code, message }, &mut buf)
+                    .map_err(|e| CoreError::Frame(format!("encode Error: {e}")))?;
+                (0x0A, buf)
+            }
         };
 
         let length = 1 + payload.len();
@@ -208,5 +220,34 @@ mod tests {
     fn encode_mls_app_uses_type05() {
         let buf = enc(Frame::MlsApp(vec![0x33]));
         assert_eq!(&buf[..], &[0, 0, 0, 2, 0x05, 0x33]);
+    }
+
+    #[test]
+    fn encode_error_uses_type0a_and_cbor_payload() {
+        let buf = enc(Frame::Error {
+            code: 42,
+            message: "bad".into(),
+        });
+        // Decode the payload back with ciborium to confirm it's valid CBOR
+        // and matches what we passed in.
+        let payload = &buf[5..]; // skip 4-byte length + 1 type byte
+        let decoded: ErrorPayload =
+            ciborium::from_reader(payload).expect("payload must be valid CBOR");
+        assert_eq!(decoded.code, 42);
+        assert_eq!(decoded.message, "bad");
+        assert_eq!(buf[4], 0x0A); // type byte
+    }
+
+    #[test]
+    fn encode_rejects_oversized_payload() {
+        // MAX_FRAME_SIZE - 1 bytes fit; MAX_FRAME_SIZE bytes as payload
+        // push length (1 + MAX_FRAME_SIZE) past MAX_FRAME_SIZE.
+        let too_big = vec![0u8; MAX_FRAME_SIZE];
+        let mut codec = FrameCodec::new();
+        let mut buf = BytesMut::new();
+        let err = codec
+            .encode(Frame::MlsApp(too_big), &mut buf)
+            .expect_err("oversize must error");
+        assert!(matches!(err, CoreError::Frame(_)));
     }
 }
