@@ -59,5 +59,6 @@ pub mod test_exports {
     // Phase 1.B additions:
     pub use crate::transport::{
         handshake_initiator, handshake_responder, AuthenticatedConnection, HandshakeOutcome,
+        HANDSHAKE_TIMEOUT,
     };
 }

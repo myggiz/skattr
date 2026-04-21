@@ -3,6 +3,8 @@
 
 //! A handshake-complete bidirectional connection to an authenticated peer.
 
+use std::marker::PhantomData;
+
 use tokio::sync::mpsc;
 
 use crate::error::Result;
@@ -15,16 +17,21 @@ use crate::transport::frame::Frame;
 /// Produced by the [`super::listener::OnionListener`] on inbound
 /// connections and by the sender's dial path on outbound connections.
 /// Owns the underlying Tor stream and the Noise transport cipher state.
-pub struct AuthenticatedConnection {
+///
+/// The `S` type parameter will be the underlying `AsyncRead + AsyncWrite`
+/// stream (e.g. Arti's `DataStream`). Replaced in Task 5 with real fields.
+pub struct AuthenticatedConnection<S> {
     /// Verified peer identity pubkey.
     pub peer: PublicKey,
     /// Outbound frame channel, drained by a background writer task.
     pub outbound: mpsc::Sender<Frame>,
     /// Inbound frame channel, produced by a background reader task.
     pub inbound: mpsc::Receiver<Frame>,
+    /// Placeholder for the underlying stream type until Task 5 wires it.
+    _stream: PhantomData<S>,
 }
 
-impl AuthenticatedConnection {
+impl<S> AuthenticatedConnection<S> {
     /// Send a frame to the peer.
     pub async fn send(&self, _frame: Frame) -> Result<()> {
         todo!("push into outbound; surface send errors")

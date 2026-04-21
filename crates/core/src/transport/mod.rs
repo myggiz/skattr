@@ -32,9 +32,13 @@ pub(crate) use frame::{Frame, FrameCodec, FrameType, MAX_FRAME_SIZE};
 pub use frame::{Frame, FrameCodec, FrameType, MAX_FRAME_SIZE};
 
 #[cfg(not(feature = "test-harness"))]
-pub(crate) use noise::{handshake_initiator, handshake_responder, HandshakeOutcome};
+pub(crate) use noise::{
+    handshake_initiator, handshake_responder, HandshakeOutcome, HANDSHAKE_TIMEOUT,
+};
 #[cfg(feature = "test-harness")]
-pub use noise::{handshake_initiator, handshake_responder, HandshakeOutcome};
+pub use noise::{
+    handshake_initiator, handshake_responder, HandshakeOutcome, HANDSHAKE_TIMEOUT,
+};
 
 // Under `test-harness` the items need a `pub` path so `lib.rs::test_exports`
 // can re-export them. The `transport` module itself is `pub(crate)`, so these
