@@ -132,6 +132,11 @@ impl Decoder for FrameCodec {
         let payload = src.split_to(payload_len);
 
         let frame = match type_byte {
+            0x01 => Frame::NoiseInit(payload.to_vec()),
+            0x02 => Frame::NoiseResp(payload.to_vec()),
+            0x03 => Frame::MlsWelcome(payload.to_vec()),
+            0x04 => Frame::MlsCommit(payload.to_vec()),
+            0x05 => Frame::MlsApp(payload.to_vec()),
             0x06 => {
                 if payload.len() != 16 {
                     return Err(CoreError::Frame(format!(
@@ -361,5 +366,50 @@ mod tests {
         let mut codec = FrameCodec::new();
         let err = codec.decode(&mut buf).expect_err("must reject wrong-size ack");
         assert!(matches!(err, CoreError::Frame(_)));
+    }
+
+    #[test]
+    fn decode_noise_init_round_trips() {
+        let payload = b"init-payload".to_vec();
+        match round_trip(Frame::NoiseInit(payload.clone())) {
+            Frame::NoiseInit(got) => assert_eq!(got, payload),
+            other => panic!("expected NoiseInit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_noise_resp_round_trips() {
+        let payload = b"resp-payload".to_vec();
+        match round_trip(Frame::NoiseResp(payload.clone())) {
+            Frame::NoiseResp(got) => assert_eq!(got, payload),
+            other => panic!("expected NoiseResp, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_mls_welcome_round_trips() {
+        let payload = vec![0x11, 0x22, 0x33];
+        match round_trip(Frame::MlsWelcome(payload.clone())) {
+            Frame::MlsWelcome(got) => assert_eq!(got, payload),
+            other => panic!("expected MlsWelcome, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_mls_commit_round_trips() {
+        let payload = vec![0xAA, 0xBB];
+        match round_trip(Frame::MlsCommit(payload.clone())) {
+            Frame::MlsCommit(got) => assert_eq!(got, payload),
+            other => panic!("expected MlsCommit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_mls_app_round_trips() {
+        let payload = vec![0x01; 1000];
+        match round_trip(Frame::MlsApp(payload.clone())) {
+            Frame::MlsApp(got) => assert_eq!(got, payload),
+            other => panic!("expected MlsApp, got {other:?}"),
+        }
     }
 }
