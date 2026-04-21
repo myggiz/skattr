@@ -148,6 +148,14 @@ impl Decoder for FrameCodec {
                 id.copy_from_slice(&payload);
                 Frame::Ack(id)
             }
+            0x0A => {
+                let parsed: ErrorPayload = ciborium::from_reader(&payload[..])
+                    .map_err(|e| CoreError::Frame(format!("Error payload CBOR: {e}")))?;
+                Frame::Error {
+                    code: parsed.code,
+                    message: parsed.message,
+                }
+            }
             0x07 => {
                 if !payload.is_empty() {
                     return Err(CoreError::Frame(
@@ -411,5 +419,34 @@ mod tests {
             Frame::MlsApp(got) => assert_eq!(got, payload),
             other => panic!("expected MlsApp, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn decode_error_round_trips() {
+        let f = Frame::Error {
+            code: 0x0042,
+            message: "auth failed".into(),
+        };
+        match round_trip(f) {
+            Frame::Error { code, message } => {
+                assert_eq!(code, 0x0042);
+                assert_eq!(message, "auth failed");
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_error_rejects_malformed_cbor() {
+        // length = 4 (1 type + 3 payload), type = 0x0A, payload = garbage bytes.
+        let mut buf = BytesMut::new();
+        buf.extend_from_slice(&4u32.to_be_bytes());
+        buf.extend_from_slice(&[0x0A]);
+        buf.extend_from_slice(&[0xFF, 0xFF, 0xFF]);
+        let mut codec = FrameCodec::new();
+        let err = codec
+            .decode(&mut buf)
+            .expect_err("must reject malformed CBOR");
+        assert!(matches!(err, CoreError::Frame(_)));
     }
 }
