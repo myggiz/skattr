@@ -116,6 +116,34 @@ impl IdentityKey {
             .map_err(|_| CoreError::Identity("verification failed".into()))
     }
 
+    /// Derive the X25519 static secret used by Noise_XK.
+    ///
+    /// Matches libsodium's `crypto_sign_ed25519_sk_to_curve25519`:
+    /// SHA-512 of the Ed25519 seed, truncate to 32 bytes, apply the
+    /// X25519 clamp. Returns `Zeroizing<[u8; 32]>` so callers cannot
+    /// accidentally leak the secret on stack unwind.
+    pub(crate) fn noise_static_secret(&self) -> zeroize::Zeroizing<[u8; 32]> {
+        use sha2::{Digest, Sha512};
+        use zeroize::Zeroize as _;
+
+        // `Sha512::digest` returns a `GenericArray<u8, U64>` which is
+        // auto-zeroized via the `hash` crate's ZeroizeOnDrop impl for
+        // `Output`. We still force a scrub on the intermediate copy
+        // below in case of future API drift.
+        let mut full: [u8; 64] = Sha512::digest(self.secret).into();
+        let mut out = zeroize::Zeroizing::new([0u8; 32]);
+        out.copy_from_slice(&full[..32]);
+
+        // Scrub the full-length intermediate now that we have what we need.
+        full.zeroize();
+
+        // X25519 clamp.
+        out[0] &= 248;
+        out[31] &= 127;
+        out[31] |= 64;
+        out
+    }
+
     /// Consume into raw secret bytes. Caller is responsible for zeroization.
     ///
     /// This is only used by the vault on encrypted save; avoid calling
@@ -207,6 +235,28 @@ mod tests {
         buf[0] = 1;
         let id = IdentityKey::from_bytes(buf);
         assert_eq!(id.public().0.len(), 32);
+    }
+
+    #[test]
+    fn noise_static_secret_is_deterministic_and_clamped() {
+        let seed = zeroize::Zeroizing::new([0x42u8; 32]);
+        let id = IdentityKey::from_bytes(seed);
+        let a = id.noise_static_secret();
+        let b = id.noise_static_secret();
+        assert_eq!(*a, *b, "same identity must produce same X25519 secret");
+
+        // X25519 clamping: low 3 bits of byte 0 cleared, bit 6 of byte
+        // 31 set, bit 7 of byte 31 cleared.
+        assert_eq!(a[0] & 0b0000_0111, 0, "byte 0 low 3 bits must be zero");
+        assert_eq!(a[31] & 0b1000_0000, 0, "byte 31 high bit must be zero");
+        assert_eq!(a[31] & 0b0100_0000, 0b0100_0000, "byte 31 bit 6 must be set");
+    }
+
+    #[test]
+    fn distinct_identities_produce_distinct_noise_secrets() {
+        let a = IdentityKey::from_bytes(zeroize::Zeroizing::new([0x01u8; 32]));
+        let b = IdentityKey::from_bytes(zeroize::Zeroizing::new([0x02u8; 32]));
+        assert_ne!(*a.noise_static_secret(), *b.noise_static_secret());
     }
 
     #[test]
