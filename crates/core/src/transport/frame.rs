@@ -103,7 +103,70 @@ impl Decoder for FrameCodec {
 impl Encoder<Frame> for FrameCodec {
     type Error = CoreError;
 
-    fn encode(&mut self, _item: Frame, _dst: &mut bytes::BytesMut) -> Result<()> {
-        todo!("write u32 BE length prefix, type byte, payload")
+    fn encode(&mut self, item: Frame, dst: &mut bytes::BytesMut) -> Result<()> {
+        use bytes::BufMut as _;
+
+        let (type_byte, payload): (u8, Vec<u8>) = match item {
+            Frame::Ping => (0x07, Vec::new()),
+            Frame::Pong => (0x08, Vec::new()),
+            Frame::Bye => (0x09, Vec::new()),
+            Frame::Ack(id) => (0x06, id.to_vec()),
+            _ => todo!("remaining variants land in Task 3/4"),
+        };
+
+        let length = 1 + payload.len();
+        if length > MAX_FRAME_SIZE {
+            return Err(CoreError::Frame(format!(
+                "encoded frame too large: {length} bytes"
+            )));
+        }
+
+        dst.reserve(4 + length);
+        dst.extend_from_slice(&u32::try_from(length).unwrap().to_be_bytes());
+        dst.put_u8(type_byte);
+        dst.extend_from_slice(&payload);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use bytes::BytesMut;
+    use tokio_util::codec::{Decoder, Encoder};
+
+    fn enc(frame: Frame) -> BytesMut {
+        let mut codec = FrameCodec::new();
+        let mut buf = BytesMut::new();
+        codec.encode(frame, &mut buf).unwrap();
+        buf
+    }
+
+    #[test]
+    fn encode_ping_is_length1_type07() {
+        let buf = enc(Frame::Ping);
+        assert_eq!(&buf[..], &[0, 0, 0, 1, 0x07]);
+    }
+
+    #[test]
+    fn encode_pong_is_length1_type08() {
+        assert_eq!(&enc(Frame::Pong)[..], &[0, 0, 0, 1, 0x08]);
+    }
+
+    #[test]
+    fn encode_bye_is_length1_type09() {
+        assert_eq!(&enc(Frame::Bye)[..], &[0, 0, 0, 1, 0x09]);
+    }
+
+    #[test]
+    fn encode_ack_is_length17_type06_plus_16_bytes() {
+        let id = [0xAB; 16];
+        let buf = enc(Frame::Ack(id));
+        // 4-byte length (17) + 1 type byte + 16 payload = 21 bytes total
+        assert_eq!(buf.len(), 21);
+        assert_eq!(&buf[..4], &[0, 0, 0, 17]);
+        assert_eq!(buf[4], 0x06);
+        assert_eq!(&buf[5..], &id);
     }
 }
