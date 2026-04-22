@@ -136,6 +136,19 @@ fn sha256(bytes: &[u8]) -> [u8; 32] {
     arr
 }
 
+/// Public entry points for the `test-harness` feature.
+#[cfg(feature = "test-harness")]
+impl KeyPackage {
+    /// Public alias for [`KeyPackage::generate`] under `test-harness`.
+    pub fn test_generate(
+        identity: &IdentityKey,
+        provider: &MlsProvider,
+        kp_repo: &KeyPackageRepo<'_>,
+    ) -> Result<Self> {
+        Self::generate(identity, provider, kp_repo)
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {

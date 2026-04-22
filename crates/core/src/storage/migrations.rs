@@ -76,13 +76,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fresh_db_runs_migrations_to_v1() {
+    fn fresh_db_runs_migrations_to_latest() {
         let mut conn = rusqlite::Connection::open_in_memory().unwrap();
         apply(&mut conn).unwrap();
         let v: u32 = conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 1);
+        // Update this constant whenever a new migration is added.
+        let expected = ALL_MIGRATIONS.iter().map(|m| m.version).max().unwrap();
+        assert_eq!(v, expected);
     }
 
     #[test]
@@ -91,11 +93,12 @@ mod tests {
         apply(&mut conn).unwrap();
         apply(&mut conn).unwrap();
         apply(&mut conn).unwrap();
-        // Row count in schema_version should still be 1.
+        // Row count in schema_version should equal the number of migrations.
         let rows: u32 = conn
             .query_row("SELECT COUNT(*) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(rows, 1);
+        let expected = u32::try_from(ALL_MIGRATIONS.len()).unwrap();
+        assert_eq!(rows, expected);
     }
 
     #[test]

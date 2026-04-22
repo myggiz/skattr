@@ -11,12 +11,21 @@
 use crate::error::{CoreError, Result};
 use crate::storage::Pool;
 
+/// Repository for MLS KeyPackages.
 pub struct KeyPackageRepo<'p> {
     pool: &'p Pool,
 }
 
 impl<'p> KeyPackageRepo<'p> {
     pub(crate) fn new(pool: &'p Pool) -> Self {
+        Self { pool }
+    }
+
+    /// Test-harness constructor accessible from outside the crate via
+    /// `test_exports`. Identical to `new`; the separate name avoids
+    /// widening `new` itself.
+    #[cfg(feature = "test-harness")]
+    pub fn new_for_test(pool: &'p Pool) -> Self {
         Self { pool }
     }
 

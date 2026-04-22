@@ -32,4 +32,6 @@ pub use group::{CommitBytes, Group, GroupId, WelcomeBytes};
 #[cfg(feature = "test-harness")]
 pub use key_package::KeyPackage;
 #[cfg(feature = "test-harness")]
+pub use provider::MlsProvider;
+#[cfg(feature = "test-harness")]
 pub use state_machine::GroupState;

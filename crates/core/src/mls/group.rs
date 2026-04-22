@@ -339,16 +339,19 @@ impl Group {
         }))
     }
 
+    /// Returns the group identifier.
     #[must_use]
     pub fn id(&self) -> &GroupId {
         &self.id
     }
 
+    /// Returns the current MLS epoch number.
     #[must_use]
     pub fn epoch(&self) -> u64 {
         self.inner.epoch().as_u64()
     }
 
+    /// Returns the current group state.
     #[must_use]
     pub fn state(&self) -> &GroupState {
         &self.state
@@ -395,6 +398,60 @@ fn register_external_psk(provider: &MlsProvider, psk: &[u8; 32]) -> Result<PreSh
         .store(provider.as_openmls(), psk)
         .map_err(|e| CoreError::Mls(format!("mls: psk register: {e:?}")))?;
     Ok(psk_id)
+}
+
+/// Public entry points for the `test-harness` feature — allow integration
+/// tests in `crates/tests` to drive a `Group` end-to-end without exposing
+/// the full API to production callers.
+#[cfg(feature = "test-harness")]
+impl Group {
+    /// Public alias for [`Group::create_solo`] under `test-harness`.
+    pub fn test_create_solo(
+        identity: &IdentityKey,
+        psk: Option<&[u8; 32]>,
+        provider: MlsProvider,
+    ) -> Result<Self> {
+        Self::create_solo(identity, psk, provider)
+    }
+
+    /// Public alias for [`Group::add_member`] under `test-harness`.
+    pub fn test_add_member(
+        &mut self,
+        invitee_kp: &KeyPackage,
+        psk: Option<&[u8; 32]>,
+    ) -> Result<(WelcomeBytes, CommitBytes)> {
+        self.add_member(invitee_kp, psk)
+    }
+
+    /// Public alias for [`Group::join_from_welcome`] under `test-harness`.
+    pub fn test_join_from_welcome(
+        identity: &IdentityKey,
+        welcome: &[u8],
+        psk: Option<&[u8; 32]>,
+        provider: MlsProvider,
+    ) -> Result<Self> {
+        Self::join_from_welcome(identity, welcome, psk, provider)
+    }
+
+    /// Public alias for [`Group::encrypt`] under `test-harness`.
+    pub fn test_encrypt(&mut self, envelope: &crate::envelope::Envelope) -> Result<Vec<u8>> {
+        self.encrypt(envelope)
+    }
+
+    /// Public alias for [`Group::decrypt`] under `test-harness`.
+    pub fn test_decrypt(&mut self, ciphertext: &[u8]) -> Result<crate::envelope::Envelope> {
+        self.decrypt(ciphertext)
+    }
+
+    /// Public alias for [`Group::save`] under `test-harness`.
+    pub fn test_save(&self, repo: &MlsGroupRepo<'_>) -> Result<()> {
+        self.save(repo)
+    }
+
+    /// Public alias for [`Group::load`] under `test-harness`.
+    pub fn test_load(group_id: &GroupId, repo: &MlsGroupRepo<'_>) -> Result<Option<Self>> {
+        Self::load(group_id, repo)
+    }
 }
 
 #[cfg(test)]
