@@ -49,7 +49,7 @@ fn decode_b64url(s: &str) -> Option<Vec<u8>> {
 }
 
 /// Content that the inviter signs. Deliberately excludes the signature.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct InviteLinkBody {
     /// Inviter's long-term Ed25519 identity.
     pub identity: PublicKey,
@@ -62,6 +62,21 @@ pub struct InviteLinkBody {
     pub psk: [u8; 32],
     /// Unix timestamp (seconds) after which the invite is invalid.
     pub expires_at: i64,
+}
+
+impl std::fmt::Debug for InviteLinkBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InviteLinkBody")
+            .field("identity", &self.identity)
+            .field("onion", &self.onion)
+            .field(
+                "key_package",
+                &format_args!("<{} bytes>", self.key_package.len()),
+            )
+            .field("psk", &"<redacted>")
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 /// Parsed + verified invite link.
@@ -239,7 +254,7 @@ impl InviteLink {
     pub fn to_url(&self) -> Result<String> {
         let id = encode_b32(&self.body.identity.0);
         let kp = encode_b64url(&self.body.key_package);
-        let psk = encode_b64url(&self.body.psk);
+        let psk = encode_b64url(&self.psk.0);
         let sig = encode_b64url(&self.signature.0);
         Ok(format!(
             "{prefix}id={id}&onion={onion}&kp={kp}&psk={psk}&exp={exp}&sig={sig}",
@@ -592,5 +607,27 @@ mod tests {
         let kp_repo = KeyPackageRepo::new(&pool);
         let invite = make_invite();
         assert!(!invite.is_consumed(&kp_repo).unwrap());
+    }
+
+    #[test]
+    fn to_url_after_from_url_round_trips_psk_from_guard() {
+        let inviter = IdentityKey::generate().unwrap();
+        let original = InviteLink::generate(
+            &inviter,
+            "a.onion".into(),
+            fixed_kp(),
+            [0x77; 32],
+            3600,
+            1_000_000,
+        )
+        .unwrap();
+        let url1 = original.to_url().unwrap();
+
+        // Parse, then re-emit. The PSK lives in the guard after from_url;
+        // to_url must pick it up from there, not from the (zeroed) body.
+        let parsed = InviteLink::from_url(&url1, 1_000_500).unwrap();
+        let url2 = parsed.to_url().unwrap();
+
+        assert_eq!(url1, url2, "to_url must be idempotent across from_url");
     }
 }
