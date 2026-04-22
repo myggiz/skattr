@@ -1,3 +1,6 @@
+-- SPDX-License-Identifier: GPL-3.0-or-later
+-- Copyright (C) 2026 Myggiz AB
+--
 -- skattr schema migration 0003: contact cards
 --
 -- Stores verified ContactCards per contact, keyed by (contact_id, version).
