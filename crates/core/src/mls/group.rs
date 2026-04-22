@@ -4,6 +4,7 @@
 //! Thin wrapper over `openmls::group::MlsGroup`.
 
 use openmls::prelude::*;
+use tls_codec::Serialize as _;
 
 use crate::envelope::Envelope;
 use crate::error::{CoreError, Result};
@@ -66,10 +67,46 @@ impl Group {
 
     pub(crate) fn add_member(
         &mut self,
-        _invitee_kp: &KeyPackage,
+        invitee_kp: &KeyPackage,
         _psk: Option<&[u8; 32]>,
     ) -> Result<(WelcomeBytes, CommitBytes)> {
-        todo!("Task 6")
+        // Guard against 3rd member (2-member only for 1.C).
+        if self.inner.members().count() >= 2 {
+            return Err(CoreError::Mls("mls: add_member: already 2-member".into()));
+        }
+
+        // PSK proposal lands in Task 9; skipped here.
+
+        let signer = load_signer(&self.provider, &own_public_key(&self.inner)?)?;
+
+        // OpenMLS 0.8.1 returns (commit, welcome, group_info).
+        let (commit_out, welcome_out, _group_info) = self
+            .inner
+            .add_members(
+                self.provider.as_openmls(),
+                &signer,
+                &[invitee_kp.as_openmls().clone()],
+            )
+            .map_err(|e| CoreError::Mls(format!("mls: add_members: {e:?}")))?;
+
+        // Merge the staged Commit *before* shipping — 2-member has no
+        // conflicting proposal source. Phase 2's PendingCommit state
+        // removes this eager-merge.
+        self.inner
+            .merge_pending_commit(self.provider.as_openmls())
+            .map_err(|e| CoreError::Mls(format!("mls: merge_pending_commit: {e:?}")))?;
+
+        let welcome_bytes = welcome_out
+            .tls_serialize_detached()
+            .map_err(|e| CoreError::Mls(format!("mls: welcome serialize: {e}")))?;
+        let commit_bytes = commit_out
+            .tls_serialize_detached()
+            .map_err(|e| CoreError::Mls(format!("mls: commit serialize: {e}")))?;
+
+        self.state = GroupState::Active {
+            epoch: self.inner.epoch().as_u64(),
+        };
+        Ok((welcome_bytes, commit_bytes))
     }
 
     pub(crate) fn join_from_welcome(
@@ -141,6 +178,30 @@ impl Group {
     }
 }
 
+/// Re-materialize the `SignatureKeyPair` stored in this provider by
+/// public key. OpenMLS state-advancing calls require a `&impl Signer`;
+/// we reconstruct it from storage rather than threading a long-lived
+/// reference through `Group`.
+fn load_signer(
+    provider: &MlsProvider,
+    public_key: &[u8],
+) -> Result<openmls_basic_credential::SignatureKeyPair> {
+    openmls_basic_credential::SignatureKeyPair::read(
+        provider.as_openmls().storage(),
+        public_key,
+        openmls::prelude::SignatureScheme::ED25519,
+    )
+    .ok_or_else(|| CoreError::Mls("mls: load_signer: missing signer".into()))
+}
+
+/// Extract our own signature public key from the group.
+fn own_public_key(group: &openmls::group::MlsGroup) -> Result<Vec<u8>> {
+    let own_leaf = group
+        .own_leaf_node()
+        .ok_or_else(|| CoreError::Mls("mls: own_public_key: no own leaf".into()))?;
+    Ok(own_leaf.signature_key().as_slice().to_vec())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -199,5 +260,25 @@ mod tests {
             CoreError::Mls(s) => assert!(s.starts_with("mls: load") || s.starts_with("mls:")),
             other => panic!("expected CoreError::Mls, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn add_member_emits_welcome_and_commit_and_bumps_epoch_to_1() {
+        let pool = Pool::in_memory();
+        let kp_repo = crate::storage::KeyPackageRepo::new(&pool);
+
+        let alice_id = alice();
+        let bob_id = IdentityKey::generate().unwrap();
+        let bob_provider = MlsProvider::new();
+        let bob_kp = KeyPackage::generate(&bob_id, &bob_provider, &kp_repo).unwrap();
+
+        let mut alice = Group::create_solo(&alice_id, None).unwrap();
+        assert_eq!(alice.epoch(), 0);
+
+        let (welcome, commit) = alice.add_member(&bob_kp, None).unwrap();
+        assert!(!welcome.is_empty());
+        assert!(!commit.is_empty());
+        assert_eq!(alice.epoch(), 1);
+        assert!(matches!(alice.state(), GroupState::Active { epoch: 1 }));
     }
 }
