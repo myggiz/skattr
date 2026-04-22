@@ -3,8 +3,9 @@
 
 //! Thin wrapper over `openmls::group::MlsGroup`.
 
+use openmls::group::{MlsGroupJoinConfig, StagedWelcome};
 use openmls::prelude::*;
-use tls_codec::Serialize as _;
+use tls_codec::{Deserialize as _, Serialize as _};
 
 use crate::envelope::Envelope;
 use crate::error::{CoreError, Result};
@@ -36,8 +37,11 @@ pub struct Group {
 
 impl Group {
     /// Create a fresh single-member group.
-    pub(crate) fn create_solo(identity: &IdentityKey, _psk: Option<&[u8; 32]>) -> Result<Self> {
-        let provider = MlsProvider::new();
+    pub(crate) fn create_solo(
+        identity: &IdentityKey,
+        _psk: Option<&[u8; 32]>,
+        provider: MlsProvider,
+    ) -> Result<Self> {
         let signer = signer_from_identity(identity, &provider)?;
         let cwk = credential_with_key(identity, &signer);
 
@@ -110,11 +114,52 @@ impl Group {
     }
 
     pub(crate) fn join_from_welcome(
-        _identity: &IdentityKey,
-        _welcome: &[u8],
+        identity: &IdentityKey,
+        welcome: &[u8],
         _psk: Option<&[u8; 32]>,
+        provider: MlsProvider,
     ) -> Result<Self> {
-        todo!("Task 7")
+        // Ensure the signer is registered in this provider so OpenMLS can
+        // verify our own leaf in later ops. The signer may already be stored
+        // if KeyPackage::generate was called with the same provider — ignore
+        // the "already present" error and proceed.
+        let _ = signer_from_identity(identity, &provider);
+
+        let welcome_msg = MlsMessageIn::tls_deserialize_exact(welcome)
+            .map_err(|e| CoreError::Mls(format!("mls: welcome deserialize: {e}")))?;
+        let welcome_inner = match welcome_msg.extract() {
+            MlsMessageBodyIn::Welcome(w) => w,
+            _ => return Err(CoreError::Mls("mls: welcome: wrong message type".into())),
+        };
+
+        // Note: welcome_inner.ciphersuite() is pub(crate) in openmls 0.8.1 and
+        // cannot be accessed externally. Ciphersuite is validated implicitly by
+        // StagedWelcome::new_from_welcome rejecting unknown suites.
+
+        let join_config = MlsGroupJoinConfig::builder()
+            .use_ratchet_tree_extension(true)
+            .build();
+
+        let staged = StagedWelcome::new_from_welcome(
+            provider.as_openmls(),
+            &join_config,
+            welcome_inner,
+            None,
+        )
+        .map_err(|e| CoreError::Mls(format!("mls: welcome process: {e:?}")))?;
+
+        let inner = staged
+            .into_group(provider.as_openmls())
+            .map_err(|e| CoreError::Mls(format!("mls: welcome into_group: {e:?}")))?;
+
+        let gid = GroupId(inner.group_id().to_vec());
+        let epoch = inner.epoch().as_u64();
+        Ok(Self {
+            id: gid,
+            state: GroupState::Active { epoch },
+            provider,
+            inner,
+        })
     }
 
     pub(crate) fn encrypt(&mut self, _envelope: &Envelope) -> Result<Vec<u8>> {
@@ -215,7 +260,7 @@ mod tests {
     #[test]
     fn create_solo_is_active_at_epoch_0() {
         let id = alice();
-        let g = Group::create_solo(&id, None).unwrap();
+        let g = Group::create_solo(&id, None, MlsProvider::new()).unwrap();
         assert_eq!(g.epoch(), 0);
         assert!(matches!(g.state(), GroupState::Active { epoch: 0 }));
         assert!(!g.id().0.is_empty(), "group id must be set");
@@ -227,7 +272,7 @@ mod tests {
         let repo = MlsGroupRepo::new(&pool);
         let id = alice();
 
-        let g = Group::create_solo(&id, None).unwrap();
+        let g = Group::create_solo(&id, None, MlsProvider::new()).unwrap();
         let gid = g.id().clone();
         g.save(&repo).unwrap();
 
@@ -272,7 +317,7 @@ mod tests {
         let bob_provider = MlsProvider::new();
         let bob_kp = KeyPackage::generate(&bob_id, &bob_provider, &kp_repo).unwrap();
 
-        let mut alice = Group::create_solo(&alice_id, None).unwrap();
+        let mut alice = Group::create_solo(&alice_id, None, MlsProvider::new()).unwrap();
         assert_eq!(alice.epoch(), 0);
 
         let (welcome, commit) = alice.add_member(&bob_kp, None).unwrap();
@@ -280,5 +325,25 @@ mod tests {
         assert!(!commit.is_empty());
         assert_eq!(alice.epoch(), 1);
         assert!(matches!(alice.state(), GroupState::Active { epoch: 1 }));
+    }
+
+    #[test]
+    fn join_from_welcome_lands_at_epoch_1_with_matching_group_id() {
+        let pool = Pool::in_memory();
+        let kp_repo = crate::storage::KeyPackageRepo::new(&pool);
+
+        let alice_id = alice();
+        let bob_id = IdentityKey::generate().unwrap();
+        let bob_provider = MlsProvider::new();
+        let bob_kp = KeyPackage::generate(&bob_id, &bob_provider, &kp_repo).unwrap();
+
+        let mut alice = Group::create_solo(&alice_id, None, MlsProvider::new()).unwrap();
+        let (welcome, _commit) = alice.add_member(&bob_kp, None).unwrap();
+
+        let bob = Group::join_from_welcome(&bob_id, &welcome, None, bob_provider).unwrap();
+
+        assert_eq!(bob.epoch(), 1);
+        assert_eq!(bob.id(), alice.id(), "both sides see the same group id");
+        assert!(matches!(bob.state(), GroupState::Active { epoch: 1 }));
     }
 }
