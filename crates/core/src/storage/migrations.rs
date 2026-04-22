@@ -22,10 +22,16 @@ struct Migration {
     sql: &'static str,
 }
 
-const ALL_MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    sql: include_str!("migrations/0001_init.sql"),
-}];
+const ALL_MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        sql: include_str!("migrations/0001_init.sql"),
+    },
+    Migration {
+        version: 2,
+        sql: include_str!("migrations/0002_key_packages.sql"),
+    },
+];
 
 /// Apply all pending migrations in order. Idempotent — re-running does
 /// nothing if `schema_version` is already at the latest version.
