@@ -5,6 +5,7 @@
 
 use openmls::group::{MlsGroupJoinConfig, StagedWelcome};
 use openmls::prelude::*;
+use openmls::prelude::{ProcessedMessageContent, ProtocolMessage};
 use tls_codec::{Deserialize as _, Serialize as _};
 
 use crate::envelope::Envelope;
@@ -162,12 +163,70 @@ impl Group {
         })
     }
 
-    pub(crate) fn encrypt(&mut self, _envelope: &Envelope) -> Result<Vec<u8>> {
-        todo!("Task 8")
+    pub(crate) fn encrypt(&mut self, envelope: &Envelope) -> Result<Vec<u8>> {
+        if !self.state.can_send() {
+            return Err(CoreError::Mls(format!(
+                "mls: encrypt: invalid state {:?}",
+                self.state
+            )));
+        }
+
+        let signer = load_signer(&self.provider, &own_public_key(&self.inner)?)?;
+        let plaintext = envelope.encode()?;
+
+        let out = self
+            .inner
+            .create_message(self.provider.as_openmls(), &signer, &plaintext)
+            .map_err(|e| CoreError::Mls(format!("mls: encrypt: {e:?}")))?;
+
+        out.tls_serialize_detached()
+            .map_err(|e| CoreError::Mls(format!("mls: encrypt: serialize: {e}")))
     }
 
-    pub(crate) fn decrypt(&mut self, _ciphertext: &[u8]) -> Result<Envelope> {
-        todo!("Task 8")
+    pub(crate) fn decrypt(&mut self, ciphertext: &[u8]) -> Result<Envelope> {
+        if !self.state.can_send() {
+            return Err(CoreError::Mls(format!(
+                "mls: decrypt: invalid state {:?}",
+                self.state
+            )));
+        }
+
+        let msg_in = MlsMessageIn::tls_deserialize_exact(ciphertext)
+            .map_err(|e| CoreError::Mls(format!("mls: decrypt: deserialize: {e}")))?;
+        let protocol_message: ProtocolMessage = match msg_in.extract() {
+            MlsMessageBodyIn::PrivateMessage(pm) => pm.into(),
+            MlsMessageBodyIn::PublicMessage(pm) => pm.into(),
+            _ => {
+                return Err(CoreError::Mls(
+                    "mls: decrypt: unsupported message type".into(),
+                ))
+            }
+        };
+
+        let processed = self
+            .inner
+            .process_message(self.provider.as_openmls(), protocol_message)
+            .map_err(|e| CoreError::Mls(format!("mls: authentication failed: {e:?}")))?;
+
+        let plaintext_bytes = match processed.into_content() {
+            ProcessedMessageContent::ApplicationMessage(app) => app.into_bytes(),
+            ProcessedMessageContent::StagedCommitMessage(_) => {
+                return Err(CoreError::Mls(
+                    "mls: decrypt: received Commit on encrypt path — route to process_incoming_commit"
+                        .into(),
+                ));
+            }
+            ProcessedMessageContent::ProposalMessage(_) => {
+                return Err(CoreError::Mls("mls: decrypt: received Proposal".into()));
+            }
+            ProcessedMessageContent::ExternalJoinProposalMessage(_) => {
+                return Err(CoreError::Mls(
+                    "mls: decrypt: received ExternalJoinProposal".into(),
+                ));
+            }
+        };
+
+        Envelope::decode(&plaintext_bytes)
     }
 
     pub(crate) fn process_incoming_commit(&mut self, _commit: &[u8]) -> Result<()> {
@@ -345,5 +404,46 @@ mod tests {
         assert_eq!(bob.epoch(), 1);
         assert_eq!(bob.id(), alice.id(), "both sides see the same group id");
         assert!(matches!(bob.state(), GroupState::Active { epoch: 1 }));
+    }
+
+    fn pair_no_psk() -> (Group, Group) {
+        let pool = Pool::in_memory();
+        let kp_repo = crate::storage::KeyPackageRepo::new(&pool);
+        let alice_id = alice();
+        let bob_id = IdentityKey::generate().unwrap();
+        let bob_provider = MlsProvider::new();
+        let bob_kp = KeyPackage::generate(&bob_id, &bob_provider, &kp_repo).unwrap();
+        let mut alice = Group::create_solo(&alice_id, None, MlsProvider::new()).unwrap();
+        let (welcome, _commit) = alice.add_member(&bob_kp, None).unwrap();
+        let bob = Group::join_from_welcome(&bob_id, &welcome, None, bob_provider).unwrap();
+        (alice, bob)
+    }
+
+    fn test_envelope(text: &str) -> Envelope {
+        use crate::envelope::{Kind, MessageId};
+        Envelope {
+            v: 1,
+            id: MessageId::generate(),
+            ts: 0,
+            reply_to: None,
+            kind: Kind::Text {
+                body: text.to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn bidirectional_encrypt_decrypt() {
+        let (mut alice, mut bob) = pair_no_psk();
+
+        let msg_a = test_envelope("hi from alice");
+        let ct_a = alice.encrypt(&msg_a).unwrap();
+        let got_a = bob.decrypt(&ct_a).unwrap();
+        assert_eq!(format!("{got_a:?}"), format!("{msg_a:?}"));
+
+        let msg_b = test_envelope("hi from bob");
+        let ct_b = bob.encrypt(&msg_b).unwrap();
+        let got_b = alice.decrypt(&ct_b).unwrap();
+        assert_eq!(format!("{got_b:?}"), format!("{msg_b:?}"));
     }
 }
