@@ -43,7 +43,7 @@ pub(crate) fn receive(
     seen: &SeenMessagesRepo<'_>,
     messages: &MessageRepo<'_>,
 ) -> Result<ReceiveOutcome> {
-    if (envelope.ts - now_ms).abs() > REPLAY_WINDOW_MS {
+    if envelope.ts.saturating_sub(now_ms).saturating_abs() > REPLAY_WINDOW_MS {
         return Ok(ReceiveOutcome::Rejected(format!(
             "ts outside ±1h window: envelope ts={}, now={}",
             envelope.ts, now_ms
