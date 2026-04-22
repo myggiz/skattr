@@ -15,6 +15,22 @@ use crate::identity::PublicKey;
 use crate::transport::connection::AuthenticatedConnection;
 use crate::transport::frame::Frame;
 
+/// Control messages sent by the hub to a running peer actor.
+pub(crate) enum PeerCtrl<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    /// Replace the actor's current `AuthenticatedConnection` with a new
+    /// one (typically because the hub received an inbound dial from
+    /// this peer while an older outbound conn was live). The old conn
+    /// is closed, pending-ACK oneshots are drained (caller's outbox
+    /// rows will be retried), and the new conn takes over.
+    ReplaceConn(Box<AuthenticatedConnection<S>>),
+    /// Graceful stop. Drain pending and exit.
+    #[allow(dead_code)]
+    Shutdown,
+}
+
 /// One outbound delivery, submitted by the hub.
 pub(crate) struct DeliveryJob {
     pub(crate) message_id: MessageId,
@@ -58,6 +74,25 @@ impl PeerConnection {
         })
     }
 
+    /// Production spawner: the hub creates an actor cold (no conn) and
+    /// provides job + control channels plus an optional inbound-MLS
+    /// dispatcher. The actor starts receiving a fresh conn via
+    /// `PeerCtrl::ReplaceConn` sent by the hub immediately after spawn.
+    pub(crate) fn spawn<S>(
+        peer: PublicKey,
+        jobs: mpsc::Receiver<DeliveryJob>,
+        ctrl: mpsc::Receiver<PeerCtrl<S>>,
+        pool: std::sync::Arc<crate::storage::Pool>,
+        inbound: Option<std::sync::Arc<dyn InboundDispatch>>,
+    ) -> PeerHandle
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        tokio::spawn(async move {
+            let _ = full_run::<S>(peer, None, jobs, ctrl, pool, inbound).await;
+        })
+    }
+
     /// Test-only full-actor constructor: retry tick + keepalive + idle
     /// close are all active, driven by `tokio::time`. `inbound` is
     /// optional so Task 8's retry test can pass `None` (the responder
@@ -74,7 +109,8 @@ impl PeerConnection {
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         tokio::spawn(async move {
-            let _ = full_run(peer, Some(*conn), jobs, pool, inbound).await;
+            let (_ctrl_tx, ctrl_rx) = mpsc::channel::<PeerCtrl<S>>(4);
+            let _ = full_run(peer, Some(*conn), jobs, ctrl_rx, pool, inbound).await;
         })
     }
 }
@@ -150,6 +186,7 @@ async fn full_run<S>(
     peer: PublicKey,
     mut conn: Option<AuthenticatedConnection<S>>,
     mut jobs: mpsc::Receiver<DeliveryJob>,
+    mut ctrl: mpsc::Receiver<PeerCtrl<S>>,
     pool: std::sync::Arc<crate::storage::Pool>,
     inbound: Option<std::sync::Arc<dyn InboundDispatch>>,
 ) -> Result<()>
@@ -229,6 +266,18 @@ where
                         let _ = c.send(Frame::Ping).await;
                     }
                     awaiting_pong_since.get_or_insert_with(tokio::time::Instant::now);
+                }
+            }
+            c = ctrl.recv() => {
+                match c {
+                    Some(PeerCtrl::ReplaceConn(new_conn)) => {
+                        if let Some(old) = conn.take() { let _ = old.close().await; }
+                        drain_pending(&mut pending);
+                        conn = Some(*new_conn);
+                        last_traffic = tokio::time::Instant::now();
+                        awaiting_pong_since = None;
+                    }
+                    Some(PeerCtrl::Shutdown) | None => break,
                 }
             }
             frame = async {
