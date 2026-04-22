@@ -8,7 +8,7 @@
 use crate::error::{CoreError, Result};
 use crate::storage::Pool;
 
-pub(crate) struct MlsGroupRepo<'p> {
+pub struct MlsGroupRepo<'p> {
     pool: &'p Pool,
 }
 

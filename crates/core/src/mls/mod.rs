@@ -3,20 +3,33 @@
 
 //! MLS (RFC 9420) integration.
 //!
-//! We use OpenMLS with a single, locked ciphersuite (see [`ciphersuite`]).
-//! Internally the module wraps `openmls::MlsGroup` and persists its
-//! opaque state blobs through [`crate::storage::groups`]. Group lifecycle
-//! is driven by an explicit [`state_machine::GroupState`] so that
-//! inconsistent states become unrepresentable rather than silently
-//! silently corrupting MLS internals.
+//! We use OpenMLS with a single locked ciphersuite (see [`ciphersuite`]).
+//! Internally the module wraps `openmls::group::MlsGroup` and persists
+//! its opaque state blobs through [`crate::storage::groups::MlsGroupRepo`].
+//! Group lifecycle is driven by an explicit [`state_machine::GroupState`]
+//! so that inconsistent states become unrepresentable rather than silently
+//! corrupting MLS internals.
 
 pub(crate) mod ciphersuite;
-pub(crate) mod commit;
 pub(crate) mod group;
-pub(crate) mod keystore;
+pub(crate) mod key_package;
+pub(crate) mod provider;
 pub(crate) mod state_machine;
-pub(crate) mod welcome;
 
+#[cfg(not(feature = "test-harness"))]
 pub(crate) use ciphersuite::CIPHERSUITE;
-pub(crate) use group::Group;
+#[cfg(not(feature = "test-harness"))]
+pub(crate) use group::{CommitBytes, Group, GroupId, WelcomeBytes};
+#[cfg(not(feature = "test-harness"))]
+pub(crate) use key_package::KeyPackage;
+#[cfg(not(feature = "test-harness"))]
 pub(crate) use state_machine::GroupState;
+
+#[cfg(feature = "test-harness")]
+pub use ciphersuite::CIPHERSUITE;
+#[cfg(feature = "test-harness")]
+pub use group::{CommitBytes, Group, GroupId, WelcomeBytes};
+#[cfg(feature = "test-harness")]
+pub use key_package::KeyPackage;
+#[cfg(feature = "test-harness")]
+pub use state_machine::GroupState;
