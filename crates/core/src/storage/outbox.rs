@@ -93,11 +93,7 @@ impl<'p> OutboxRepo<'p> {
 
     /// Delete the outbox row for `(target, message_id)`. Returns
     /// `true` if a row was removed.
-    pub(crate) fn ack_by_message_id(
-        &self,
-        target: &[u8],
-        message_id: &[u8; 16],
-    ) -> Result<bool> {
+    pub(crate) fn ack_by_message_id(&self, target: &[u8], message_id: &[u8; 16]) -> Result<bool> {
         self.pool.with_mut(|c| {
             let n = c
                 .execute(
@@ -131,7 +127,9 @@ mod tests {
     fn insert_fresh_returns_some_rowid() {
         let pool = Pool::in_memory();
         let repo = OutboxRepo::new(&pool);
-        let rowid = repo.insert(&[0x01; 32], &[0xAA; 16], b"payload", 1000).unwrap();
+        let rowid = repo
+            .insert(&[0x01; 32], &[0xAA; 16], b"payload", 1000)
+            .unwrap();
         assert!(rowid.expect("fresh insert returns Some(rowid)") > 0);
     }
 
@@ -139,10 +137,17 @@ mod tests {
     fn insert_duplicate_returns_none() {
         let pool = Pool::in_memory();
         let repo = OutboxRepo::new(&pool);
-        let first = repo.insert(&[0x01; 32], &[0xAA; 16], b"payload", 1000).unwrap();
+        let first = repo
+            .insert(&[0x01; 32], &[0xAA; 16], b"payload", 1000)
+            .unwrap();
         assert!(first.is_some(), "first insert must return Some");
-        let again = repo.insert(&[0x01; 32], &[0xAA; 16], b"payload", 1000).unwrap();
-        assert!(again.is_none(), "duplicate (target, message_id) must return None");
+        let again = repo
+            .insert(&[0x01; 32], &[0xAA; 16], b"payload", 1000)
+            .unwrap();
+        assert!(
+            again.is_none(),
+            "duplicate (target, message_id) must return None"
+        );
     }
 
     #[test]
@@ -151,15 +156,23 @@ mod tests {
         let repo = OutboxRepo::new(&pool);
         let a = repo.insert(&[0x01; 32], &[0xAA; 16], b"p", 1000).unwrap();
         let b = repo.insert(&[0x02; 32], &[0xAA; 16], b"p", 1000).unwrap();
-        assert!(a.is_some() && b.is_some(), "unique is (target, message_id), not message_id alone");
+        assert!(
+            a.is_some() && b.is_some(),
+            "unique is (target, message_id), not message_id alone"
+        );
     }
 
     #[test]
     fn due_returns_past_with_message_id_and_skips_future() {
         let pool = Pool::in_memory();
         let repo = OutboxRepo::new(&pool);
-        let rid = repo.insert(&[0xAA; 32], &[0x11; 16], b"past", 100).unwrap().unwrap();
-        let _ = repo.insert(&[0xBB; 32], &[0x22; 16], b"future", 9999).unwrap();
+        let rid = repo
+            .insert(&[0xAA; 32], &[0x11; 16], b"past", 100)
+            .unwrap()
+            .unwrap();
+        let _ = repo
+            .insert(&[0xBB; 32], &[0x22; 16], b"future", 9999)
+            .unwrap();
         let due = repo.due(500, 10).unwrap();
         assert_eq!(due.len(), 1);
         let (id, target, payload, mid, attempts) = &due[0];
@@ -192,7 +205,10 @@ mod tests {
     fn reschedule_increments_attempts_and_bumps_next_retry_at() {
         let pool = Pool::in_memory();
         let repo = OutboxRepo::new(&pool);
-        let rid = repo.insert(&[0xCC; 32], &[0x77; 16], b"retry", 100).unwrap().unwrap();
+        let rid = repo
+            .insert(&[0xCC; 32], &[0x77; 16], b"retry", 100)
+            .unwrap()
+            .unwrap();
         repo.reschedule(rid, 200).unwrap();
         repo.reschedule(rid, 300).unwrap();
         let due = repo.due(999, 10).unwrap();

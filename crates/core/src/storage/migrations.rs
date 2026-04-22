@@ -136,7 +136,10 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(idx_count, 1, "unique index idx_outbox_target_message_id must exist");
+        assert_eq!(
+            idx_count, 1,
+            "unique index idx_outbox_target_message_id must exist"
+        );
 
         // schema_version is at 4
         let v: u32 = conn
