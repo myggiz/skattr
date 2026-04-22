@@ -31,6 +31,10 @@ const ALL_MIGRATIONS: &[Migration] = &[
         version: 2,
         sql: include_str!("migrations/0002_key_packages.sql"),
     },
+    Migration {
+        version: 3,
+        sql: include_str!("migrations/0003_contact_cards.sql"),
+    },
 ];
 
 /// Apply all pending migrations in order. Idempotent — re-running does
@@ -106,8 +110,9 @@ mod tests {
         let mut conn = rusqlite::Connection::open_in_memory().unwrap();
         apply(&mut conn).unwrap();
         for table in [
-            "identity",
+            "contact_cards",
             "contacts",
+            "identity",
             "key_packages",
             "mailboxes",
             "messages",
