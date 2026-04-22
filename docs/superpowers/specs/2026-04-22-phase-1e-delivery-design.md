@@ -27,7 +27,7 @@ Out of scope (owned by later sub-projects):
 | # | Decision | Rationale |
 |---|----------|-----------|
 | D1 | Per-peer actor task per live peer, owning `Option<AuthenticatedConnection<DataStream>>` | `AuthenticatedConnection` is not split-readable; one task owning both halves avoids locking and gives per-peer ordering for free |
-| D2 | ACK correlation = in-memory `HashMap<MessageId, oneshot::Sender>` on the actor, with outbox as retry source-of-truth | Gives the daemon a prompt `Event::Delivered(id)` while still surviving actor/conn restart via the persisted outbox |
+| D2 | ACK correlation = in-memory `HashMap<MessageId, oneshot::Sender>` on the actor, with outbox as retry source-of-truth | Gives the daemon a prompt `Event::DeliveryStatusChanged { status: Delivered, .. }` while still surviving actor/conn restart via the persisted outbox |
 | D3 | Kill-mid-message test uses `tokio::io::duplex` + a `KillableStream<S>` wrapper, runs in CI on every build; a separate `#[ignore]`d real-Tor smoke test lives alongside `arti_echo.rs` | Duplex test is fast and exercises every layer above raw bytes; Tor test costs little to keep and catches Tor-specific regressions |
 | D4 | Migration 0004 adds `message_id BLOB NOT NULL` + `UNIQUE(target, message_id)` to `outbox` | Idempotent enqueue and ACK-by-id without a separate correlation table |
 | D5 | Direct-only delivery; no mailbox fallback in 1.E | Phase 2 owns offline delivery |
@@ -94,7 +94,7 @@ Module layout:
 3. `OutboxRepo::insert(target=bob, message_id=MID, payload=ciphertext, next_retry_at=now)`. Idempotent: duplicate `(target, MID)` returns the existing rowid without re-insert (`INSERT … ON CONFLICT DO NOTHING`).
 4. `DeliveryHub::send(bob, MID, ciphertext) → oneshot<Result<()>>`. Hub looks up or spawns the per-peer actor, forwards a `DeliveryJob { message_id, ciphertext, ack_tx }`.
 5. Actor: ensure conn (dial + handshake if `None`); `conn.send(Frame::MlsApp(ciphertext))`; store `ack_tx` in `pending_acks[MID]`.
-6. On inbound `Frame::Ack(MID)`: remove from `pending_acks`, fire `ack_tx`, `OutboxRepo::ack_by_message_id(bob, MID)`, emit `Event::Delivered(MID)`.
+6. On inbound `Frame::Ack(MID)`: remove from `pending_acks`, fire `ack_tx`, `OutboxRepo::ack_by_message_id(bob, MID)`, emit `Event::DeliveryStatusChanged { message: MID, status: DeliveryStatus::Delivered }`.
 
 ### 4.2 Retry tick
 
@@ -311,7 +311,7 @@ Test body:
 3. `kill_switch.kill()` before Bob's ACK reaches Alice.
 4. Assert: Alice outbox row for `MID` present; Bob `messages` count for this sender — may be 0 or 1; `seen_messages` matches `messages`.
 5. Rebuild the duplex pair (replace transports on both daemons via `test_exports::swap_transport`), wait for fresh handshake + retry tick.
-6. Assert: Alice outbox row gone; Bob's `messages` count == 1; `Event::Delivered(MID)` observed on Alice's broadcast channel.
+6. Assert: Alice outbox row gone; Bob's `messages` count == 1; an `Event::DeliveryStatusChanged { message: MID, status: DeliveryStatus::Delivered }` event observed on Alice's broadcast channel.
 
 Second test variant in the same file: `kill_before_any_frame_sent` — flip kill switch before Alice writes any frame. Retry tick dials fresh, delivers, Bob `messages` count == 1.
 
@@ -326,7 +326,7 @@ Second test variant in the same file: `kill_before_any_frame_sent` — flip kill
 |-----------------------|-----------|
 | Outbox | unit (delivery::outbox) + golden migration + both integration tests |
 | Exponential backoff | unit (delivery::backoff) |
-| ACK handling | integration (`Event::Delivered` fires after retry-redelivery) + peer unit |
+| ACK handling | integration (`DeliveryStatusChanged { status: Delivered }` fires after retry-redelivery) + peer unit |
 | Receiver dedup | integration (`messages` row count stays at 1 on re-delivery) + receiver unit |
 | Connection pool | peer unit (idle close, reconnect) + hub unit (actor spawn/route) + integration uses same path |
 | Kill-mid-message → reconnect → delivered | `delivery_kill_mid_message.rs` |
@@ -342,7 +342,7 @@ Second test variant in the same file: `kill_before_any_frame_sent` — flip kill
 ## 9. Non-goals
 
 - No mailbox deposit.
-- No CLI surface (sends are only reachable via `Daemon::execute` once 1.F lands; 1.E exposes `Daemon::send` as a `pub(crate)` method for tests).
+- No CLI surface. `Daemon::execute(Command::Send { .. })` is not wired in 1.E — 1.F owns the Command plumbing. 1.E adds a `pub(crate) async fn Daemon::send(&self, peer, envelope)` plus a matching `test_exports::send(daemon, peer, envelope)` shim (gated on the `test-harness` feature) so integration tests in `crates/tests/` can trigger delivery.
 - No per-message size limits beyond the 16 MiB frame cap and the 64 KiB Envelope cap already established by 1.A / the decomposition doc.
 - No group-chat fan-out; 1.C locks 2-member-only and 1.E inherits that.
 - No delivery status persisted across daemon restart beyond "is in outbox" / "is not in outbox". Phase 1.G revisits.
