@@ -613,4 +613,59 @@ mod tests {
         let got = bob.decrypt(&ct).unwrap();
         assert_eq!(format!("{got:?}"), format!("{env:?}"));
     }
+
+    #[test]
+    fn add_member_rejects_when_already_2_member() {
+        let pool = Pool::in_memory();
+        let kp_repo = crate::storage::KeyPackageRepo::new(&pool);
+        let (mut alice, _bob) = pair_no_psk();
+
+        let charlie_id = IdentityKey::generate().unwrap();
+        let charlie_provider = MlsProvider::new();
+        let charlie_kp = KeyPackage::generate(&charlie_id, &charlie_provider, &kp_repo).unwrap();
+
+        let err = match alice.add_member(&charlie_kp, None) {
+            Ok(_) => panic!("must reject 3rd"),
+            Err(e) => e,
+        };
+        match err {
+            CoreError::Mls(s) => assert!(s.contains("already 2-member"), "got: {s}"),
+            other => panic!("expected CoreError::Mls, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn encrypt_rejects_corrupt_state() {
+        let (mut alice, _bob) = pair_no_psk();
+        // Force corrupt state directly (private field access via the
+        // same module).
+        alice.state = GroupState::Corrupt {
+            reason: "forced for test".into(),
+        };
+        let env = test_envelope("should fail");
+        let err = match alice.encrypt(&env) {
+            Ok(_) => panic!("corrupt must reject"),
+            Err(e) => e,
+        };
+        match err {
+            CoreError::Mls(s) => assert!(s.starts_with("mls: encrypt: invalid state")),
+            other => panic!("expected CoreError::Mls, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn advance_epoch_rejects_corrupt_state() {
+        let (mut alice, _bob) = pair_no_psk();
+        alice.state = GroupState::Corrupt {
+            reason: "forced".into(),
+        };
+        let err = match alice.advance_epoch() {
+            Ok(_) => panic!("corrupt must reject"),
+            Err(e) => e,
+        };
+        match err {
+            CoreError::Mls(s) => assert!(s.starts_with("mls: advance_epoch: invalid state")),
+            other => panic!("expected CoreError::Mls, got {other:?}"),
+        }
+    }
 }
