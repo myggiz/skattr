@@ -35,6 +35,10 @@ const ALL_MIGRATIONS: &[Migration] = &[
         version: 3,
         sql: include_str!("migrations/0003_contact_cards.sql"),
     },
+    Migration {
+        version: 4,
+        sql: include_str!("migrations/0004_outbox_message_id.sql"),
+    },
 ];
 
 /// Apply all pending migrations in order. Idempotent — re-running does
@@ -103,6 +107,42 @@ mod tests {
             .unwrap();
         let expected = u32::try_from(ALL_MIGRATIONS.len()).unwrap();
         assert_eq!(rows, expected);
+    }
+
+    #[test]
+    fn migration_0004_adds_message_id_column_and_unique_index() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        apply(&mut conn).unwrap();
+
+        // message_id column present on outbox
+        let cols: Vec<String> = conn
+            .prepare("PRAGMA table_info('outbox')")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .map(std::result::Result::unwrap)
+            .collect();
+        assert!(
+            cols.iter().any(|c| c == "message_id"),
+            "migration 0004 must add message_id column; got {cols:?}"
+        );
+
+        // Unique index present
+        let idx_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type = 'index' AND name = 'idx_outbox_target_message_id'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx_count, 1, "unique index idx_outbox_target_message_id must exist");
+
+        // schema_version is at 4
+        let v: u32 = conn
+            .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 4);
     }
 
     #[test]
