@@ -16,7 +16,7 @@ use crate::transport::connection::AuthenticatedConnection;
 use crate::transport::frame::Frame;
 
 /// Control messages sent by the hub to a running peer actor.
-pub(crate) enum PeerCtrl<S>
+pub enum PeerCtrl<S>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -32,9 +32,11 @@ where
 }
 
 /// One outbound delivery, submitted by the hub.
-pub(crate) struct DeliveryJob {
-    pub(crate) message_id: MessageId,
-    pub(crate) ciphertext: Vec<u8>,
+pub struct DeliveryJob {
+    /// Application-level message id, used for ACK correlation.
+    pub message_id: MessageId,
+    /// Opaque MLS ciphertext payload to deliver.
+    pub ciphertext: Vec<u8>,
     /// Fires `Ok(())` on successful ACK, `Err(())` if the ack path is
     /// torn down (conn dropped, actor cancelled). The hub translates
     /// `Err(())` into "row stays in outbox for retry."
@@ -48,14 +50,16 @@ pub(crate) type PeerHandle = JoinHandle<()>;
 /// Inbound-MLS dispatch strategy, injected per peer actor. See Task 8
 /// preamble for the rationale — keeps `openmls` out of the actor
 /// and keeps tests that don't need real MLS trivially easy to write.
-pub(crate) trait InboundDispatch: Send + Sync + 'static {
+pub trait InboundDispatch: Send + Sync + 'static {
+    /// Decrypt and ingest an inbound MLS ciphertext from `peer`.
+    /// Returns the `MessageId` on success (for ACK) or `None` on failure.
     fn dispatch(&self, peer: PublicKey, ciphertext: &[u8]) -> Option<MessageId>;
 }
 
 /// Per-peer actor. Owns an `Option<AuthenticatedConnection<S>>`, a
 /// pending-ACK map, and drives retry tick, keepalive, idle close, and
 /// inbound-MLS dispatch.
-pub(crate) struct PeerConnection;
+pub struct PeerConnection;
 
 impl PeerConnection {
     /// Test-only constructor (Task 7): a minimal actor with no outbox
@@ -78,7 +82,7 @@ impl PeerConnection {
     /// provides job + control channels plus an optional inbound-MLS
     /// dispatcher. The actor starts receiving a fresh conn via
     /// `PeerCtrl::ReplaceConn` sent by the hub immediately after spawn.
-    pub(crate) fn spawn<S>(
+    pub fn spawn<S>(
         peer: PublicKey,
         jobs: mpsc::Receiver<DeliveryJob>,
         ctrl: mpsc::Receiver<PeerCtrl<S>>,

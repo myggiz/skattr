@@ -16,11 +16,11 @@ use crate::storage::seen_messages::SeenMessagesRepo;
 
 /// Replay window: an envelope whose `ts` is more than ±1 h from the
 /// local clock is rejected with no ACK. Millis.
-pub(crate) const REPLAY_WINDOW_MS: i64 = 60 * 60 * 1000;
+pub const REPLAY_WINDOW_MS: i64 = 60 * 60 * 1000;
 
 /// Outcome of processing an incoming envelope.
 #[derive(Debug, Clone)]
-pub(crate) enum ReceiveOutcome {
+pub enum ReceiveOutcome {
     /// Fresh message persisted; caller should surface to UI and send an ACK.
     New(Envelope),
     /// We've already seen `(sender, message_id)`; caller should still send
@@ -35,7 +35,7 @@ pub(crate) enum ReceiveOutcome {
 /// Does not perform MLS decryption — callers have already run
 /// `Group::decrypt` on the ciphertext. Pure side effects on
 /// `seen_messages` and `messages`.
-pub(crate) fn receive(
+pub fn receive(
     sender: &PublicKey,
     group_id: &[u8],
     envelope: Envelope,
@@ -59,7 +59,7 @@ pub(crate) fn receive(
 
 /// Build an ACK frame payload for `message_id`.
 #[must_use]
-pub(crate) fn build_ack(message_id: MessageId) -> MessageId {
+pub fn build_ack(message_id: MessageId) -> MessageId {
     message_id
 }
 

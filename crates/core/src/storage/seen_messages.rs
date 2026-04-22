@@ -14,19 +14,22 @@
 use crate::error::{CoreError, Result};
 use crate::storage::Pool;
 
-pub(crate) struct SeenMessagesRepo<'p> {
+/// Repository for tracking which `(sender, message_id)` pairs have been seen,
+/// for receiver-side deduplication with a sliding 24-hour TTL window.
+pub struct SeenMessagesRepo<'p> {
     pool: &'p Pool,
 }
 
 impl<'p> SeenMessagesRepo<'p> {
-    pub(crate) fn new(pool: &'p Pool) -> Self {
+    /// Create a new `SeenMessagesRepo` backed by the given `Pool`.
+    pub fn new(pool: &'p Pool) -> Self {
         Self { pool }
     }
 
     /// Mark a message as seen. Returns `true` if this is new (insert
     /// succeeded) or `false` if we've already seen it (PRIMARY KEY
     /// conflict).
-    pub(crate) fn insert(&self, sender: &[u8], message_id: &[u8], seen_at: i64) -> Result<bool> {
+    pub fn insert(&self, sender: &[u8], message_id: &[u8], seen_at: i64) -> Result<bool> {
         self.pool.with_mut(|c| {
             let changed = c
                 .execute(
@@ -40,7 +43,7 @@ impl<'p> SeenMessagesRepo<'p> {
     }
 
     /// Has this (sender, message_id) been seen?
-    pub(crate) fn contains(&self, sender: &[u8], message_id: &[u8]) -> Result<bool> {
+    pub fn contains(&self, sender: &[u8], message_id: &[u8]) -> Result<bool> {
         self.pool.with(|c| {
             let count: i64 = c
                 .query_row(
@@ -54,7 +57,7 @@ impl<'p> SeenMessagesRepo<'p> {
     }
 
     /// Delete rows with `seen_at < cutoff`. Returns the number removed.
-    pub(crate) fn sweep_older_than(&self, cutoff: i64) -> Result<u64> {
+    pub fn sweep_older_than(&self, cutoff: i64) -> Result<u64> {
         self.pool.with_mut(|c| {
             let n = c
                 .execute(

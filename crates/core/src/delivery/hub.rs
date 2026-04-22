@@ -35,7 +35,9 @@ where
     ctrl: mpsc::Sender<PeerCtrl<S>>,
 }
 
-pub(crate) struct DeliveryHub<S>
+/// Daemon-scoped delivery router. Routes outbound sends and inbound
+/// post-handshake connections to per-peer `PeerConnection` actor tasks.
+pub struct DeliveryHub<S>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -53,7 +55,7 @@ where
     /// outbound-only tests where the responder echoes `Frame::Ack`
     /// directly; real-MLS deployments must use
     /// [`DeliveryHub::new_with_inbound`] instead.
-    pub(crate) fn new(pool: Arc<Pool>) -> Self {
+    pub fn new(pool: Arc<Pool>) -> Self {
         Self::new_with_inbound_inner(pool, None)
     }
 
@@ -61,7 +63,7 @@ where
     /// `dispatch`. The integration test builds an `MlsInboundDispatch`
     /// that wraps `Group::decrypt` + `receiver::receive` for the one
     /// peer it cares about.
-    pub(crate) fn new_with_inbound(pool: Arc<Pool>, dispatch: Arc<dyn InboundDispatch>) -> Self {
+    pub fn new_with_inbound(pool: Arc<Pool>, dispatch: Arc<dyn InboundDispatch>) -> Self {
         Self::new_with_inbound_inner(pool, Some(dispatch))
     }
 
@@ -87,7 +89,7 @@ where
     }
 
     /// Submit a job for `peer`. Spawns the peer actor on first use.
-    pub(crate) async fn send(
+    pub async fn send(
         &self,
         peer: PublicKey,
         message_id: MessageId,
@@ -108,7 +110,7 @@ where
     /// Install a post-handshake `AuthenticatedConnection` for `peer`.
     /// If an actor already exists for this peer, its current conn is
     /// replaced. Otherwise a fresh actor is spawned with the conn.
-    pub(crate) async fn ingest(&self, peer: PublicKey, conn: AuthenticatedConnection<S>) {
+    pub async fn ingest(&self, peer: PublicKey, conn: AuthenticatedConnection<S>) {
         let mut peers = self.peers.lock().await;
         if let Some(ch) = peers.get(&peer) {
             let _ = ch.ctrl.send(PeerCtrl::ReplaceConn(Box::new(conn))).await;

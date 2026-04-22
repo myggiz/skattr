@@ -18,26 +18,27 @@ use crate::storage::Pool;
 
 /// A pending outbound delivery.
 #[derive(Debug, Clone)]
-pub(crate) struct OutboxEntry {
+pub struct OutboxEntry {
     /// Row id (rowid in SQLite).
-    pub(crate) id: i64,
+    pub id: i64,
     /// Intended recipient.
-    pub(crate) target: PublicKey,
+    pub target: PublicKey,
     /// Opaque encrypted payload (MLS ciphertext already wrapped).
-    pub(crate) payload: Vec<u8>,
+    pub payload: Vec<u8>,
     /// Application message id, for ACK correlation.
-    pub(crate) message_id: MessageId,
+    pub message_id: MessageId,
     /// Retry attempt count (0 on first enqueue).
-    pub(crate) attempts: u32,
+    pub attempts: u32,
 }
 
 /// Borrowed view over the outbox backed by a `Pool`.
-pub(crate) struct Outbox<'p> {
+pub struct Outbox<'p> {
     repo: OutboxRepo<'p>,
 }
 
 impl<'p> Outbox<'p> {
-    pub(crate) fn new(pool: &'p Pool) -> Self {
+    /// Create a new `Outbox` backed by the given `Pool`.
+    pub fn new(pool: &'p Pool) -> Self {
         Self {
             repo: OutboxRepo::new(pool),
         }
@@ -46,7 +47,7 @@ impl<'p> Outbox<'p> {
     /// Enqueue a fresh `(target, message_id, payload)` tuple with
     /// `next_retry_at = now`. Returns `Ok(Some(rowid))` on fresh
     /// insert, `Ok(None)` if `(target, message_id)` is already present.
-    pub(crate) fn enqueue(
+    pub fn enqueue(
         &self,
         target: &PublicKey,
         message_id: MessageId,
@@ -57,19 +58,19 @@ impl<'p> Outbox<'p> {
     }
 
     /// Entries whose `next_retry_at` has passed, up to `max`.
-    pub(crate) fn due(&self, now: i64, max: usize) -> Result<Vec<OutboxEntry>> {
+    pub fn due(&self, now: i64, max: usize) -> Result<Vec<OutboxEntry>> {
         let rows = self.repo.due(now, max)?;
         Ok(rows.into_iter().map(row_to_entry).collect())
     }
 
     /// Delete the `(target, message_id)` row. Returns `true` if a row
     /// was removed.
-    pub(crate) fn ack(&self, target: &PublicKey, message_id: MessageId) -> Result<bool> {
+    pub fn ack(&self, target: &PublicKey, message_id: MessageId) -> Result<bool> {
         self.repo.ack_by_message_id(&target.0, &message_id.0)
     }
 
     /// Bump `attempts` and set `next_retry_at = now + backoff(attempts_now)`.
-    pub(crate) fn reschedule(&self, id: i64, attempts_now: u32, now: i64) -> Result<()> {
+    pub fn reschedule(&self, id: i64, attempts_now: u32, now: i64) -> Result<()> {
         let delay = backoff(attempts_now);
         let next_retry_at =
             now.saturating_add(i64::try_from(delay.as_millis()).unwrap_or(i64::MAX));
