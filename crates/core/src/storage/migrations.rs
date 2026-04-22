@@ -22,10 +22,16 @@ struct Migration {
     sql: &'static str,
 }
 
-const ALL_MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    sql: include_str!("migrations/0001_init.sql"),
-}];
+const ALL_MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        sql: include_str!("migrations/0001_init.sql"),
+    },
+    Migration {
+        version: 2,
+        sql: include_str!("migrations/0002_key_packages.sql"),
+    },
+];
 
 /// Apply all pending migrations in order. Idempotent — re-running does
 /// nothing if `schema_version` is already at the latest version.
@@ -70,13 +76,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fresh_db_runs_migrations_to_v1() {
+    fn fresh_db_runs_migrations_to_latest() {
         let mut conn = rusqlite::Connection::open_in_memory().unwrap();
         apply(&mut conn).unwrap();
         let v: u32 = conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 1);
+        // Update this constant whenever a new migration is added.
+        let expected = ALL_MIGRATIONS.iter().map(|m| m.version).max().unwrap();
+        assert_eq!(v, expected);
     }
 
     #[test]
@@ -85,11 +93,12 @@ mod tests {
         apply(&mut conn).unwrap();
         apply(&mut conn).unwrap();
         apply(&mut conn).unwrap();
-        // Row count in schema_version should still be 1.
+        // Row count in schema_version should equal the number of migrations.
         let rows: u32 = conn
             .query_row("SELECT COUNT(*) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(rows, 1);
+        let expected = u32::try_from(ALL_MIGRATIONS.len()).unwrap();
+        assert_eq!(rows, expected);
     }
 
     #[test]
@@ -99,11 +108,12 @@ mod tests {
         for table in [
             "identity",
             "contacts",
-            "onion_addresses",
-            "mls_groups",
-            "messages",
-            "outbox",
+            "key_packages",
             "mailboxes",
+            "messages",
+            "mls_groups",
+            "onion_addresses",
+            "outbox",
             "seen_messages",
         ] {
             let exists: i64 = conn

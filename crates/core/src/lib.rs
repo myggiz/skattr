@@ -61,6 +61,9 @@ pub mod test_exports {
         handshake_initiator, handshake_responder, AuthenticatedConnection, HandshakeOutcome,
         HANDSHAKE_TIMEOUT,
     };
+    // Phase 1.C additions:
+    pub use crate::mls::{Group, GroupId, GroupState, KeyPackage, MlsProvider};
+    pub use crate::storage::{KeyPackageRepo, MlsGroupRepo};
 
     /// Test-only helper: convert an `IdentityKey` to its X25519 static
     /// public key for use as `peer_static_x25519` in

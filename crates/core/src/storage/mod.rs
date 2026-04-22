@@ -17,6 +17,7 @@
 pub(crate) mod backup;
 pub(crate) mod contacts;
 pub(crate) mod groups;
+pub(crate) mod key_packages;
 pub(crate) mod mailboxes;
 pub(crate) mod messages;
 pub(crate) mod migrations;
@@ -31,12 +32,20 @@ pub(crate) mod seen_messages;
 #[cfg(not(feature = "test-harness"))]
 pub(crate) use contacts::ContactRepo;
 #[cfg(not(feature = "test-harness"))]
+pub(crate) use groups::MlsGroupRepo;
+#[cfg(not(feature = "test-harness"))]
+pub(crate) use key_packages::KeyPackageRepo;
+#[cfg(not(feature = "test-harness"))]
 pub(crate) use messages::MessageRepo;
 #[cfg(not(feature = "test-harness"))]
 pub(crate) use pool::Pool;
 
 #[cfg(feature = "test-harness")]
 pub use contacts::ContactRepo;
+#[cfg(feature = "test-harness")]
+pub use groups::MlsGroupRepo;
+#[cfg(feature = "test-harness")]
+pub use key_packages::KeyPackageRepo;
 #[cfg(feature = "test-harness")]
 pub use messages::MessageRepo;
 #[cfg(feature = "test-harness")]

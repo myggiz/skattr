@@ -8,17 +8,19 @@
 use crate::error::{CoreError, Result};
 use crate::storage::Pool;
 
-pub(crate) struct MlsGroupRepo<'p> {
+/// Repository for MLS group state blobs.
+pub struct MlsGroupRepo<'p> {
     pool: &'p Pool,
 }
 
 impl<'p> MlsGroupRepo<'p> {
-    pub(crate) fn new(pool: &'p Pool) -> Self {
+    /// Construct a repo bound to the given `pool`.
+    pub fn new(pool: &'p Pool) -> Self {
         Self { pool }
     }
 
     /// Save or update the serialized MLS state for a group.
-    pub(crate) fn put(&self, group_id: &[u8], state_blob: &[u8], epoch: u64) -> Result<()> {
+    pub fn put(&self, group_id: &[u8], state_blob: &[u8], epoch: u64) -> Result<()> {
         let epoch_i =
             i64::try_from(epoch).map_err(|_| CoreError::Storage("epoch overflows i64".into()))?;
         self.pool.with_mut(|c| {
@@ -34,7 +36,7 @@ impl<'p> MlsGroupRepo<'p> {
     }
 
     /// Load the serialized state for a group. None if unknown.
-    pub(crate) fn get(&self, group_id: &[u8]) -> Result<Option<Vec<u8>>> {
+    pub fn get(&self, group_id: &[u8]) -> Result<Option<Vec<u8>>> {
         self.pool.with(|c| {
             let result = c.query_row(
                 "SELECT state_blob FROM mls_groups WHERE group_id = ?1",

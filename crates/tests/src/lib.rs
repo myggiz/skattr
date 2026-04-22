@@ -13,6 +13,8 @@
 
 #[cfg(test)]
 mod arti_echo;
+#[cfg(test)]
+mod mls_pair;
 
 use std::time::Duration;
 
