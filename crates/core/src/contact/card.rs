@@ -71,8 +71,20 @@ impl ContactCard {
     /// Verify the Ed25519 signature + expiry. On success returns the
     /// body's `identity` (the caller typically cross-checks against a
     /// known contact).
-    pub fn verify(&self, _now: i64) -> Result<PublicKey> {
-        todo!("Task 6")
+    pub fn verify(&self, now: i64) -> Result<PublicKey> {
+        if now > self.body.expires_at {
+            return Err(crate::error::CoreError::Contact(
+                "contact: card: expired".into(),
+            ));
+        }
+        IdentityKey::verify_cbor(&self.body.identity, &self.body, &self.signature).map_err(
+            |_| {
+                crate::error::CoreError::Contact(
+                    "contact: card: signature verification failed".into(),
+                )
+            },
+        )?;
+        Ok(self.body.identity)
     }
 }
 
@@ -100,5 +112,74 @@ mod tests {
         assert!(card.body.mailboxes.is_empty());
         assert_eq!(card.body.onion.len(), 62); // 56-char onion + ".onion"
         assert_eq!(card.signature.0.len(), 64);
+    }
+
+    fn fresh_card(version: u64, expires_at: i64, signer: &IdentityKey) -> ContactCard {
+        ContactCard::sign(
+            signer,
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.onion".into(),
+            Vec::new(),
+            version,
+            (expires_at - 1_000_000).max(1) as u64,
+            1_000_000,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn verify_returns_identity_on_valid_card() {
+        let signer = IdentityKey::generate().unwrap();
+        let card = fresh_card(1, 1_003_600, &signer);
+        let got = card.verify(1_000_000).unwrap();
+        assert_eq!(got, signer.public());
+    }
+
+    #[test]
+    fn verify_rejects_expired() {
+        let signer = IdentityKey::generate().unwrap();
+        let card = fresh_card(1, 1_003_600, &signer);
+        let err = card.verify(1_003_601).expect_err("must reject expired");
+        match err {
+            crate::error::CoreError::Contact(s) => assert!(s.contains("expired"), "got: {s}"),
+            other => panic!("expected Contact, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_rejects_tampered_signature() {
+        let signer = IdentityKey::generate().unwrap();
+        let mut card = fresh_card(1, 1_003_600, &signer);
+        card.signature.0[0] ^= 0xFF;
+        let err = card.verify(1_000_000).expect_err("tampered");
+        match err {
+            crate::error::CoreError::Contact(s) => {
+                assert!(s.contains("signature verification failed"), "got: {s}");
+            }
+            crate::error::CoreError::Identity(s) => {
+                assert!(s.contains("verification failed"), "got: {s}");
+            }
+            other => panic!("expected Contact/Identity, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_rejects_wrong_signer() {
+        let signer = IdentityKey::generate().unwrap();
+        let other = IdentityKey::generate().unwrap();
+        let mut card = fresh_card(1, 1_003_600, &signer);
+        // Replace the body's identity with the other signer's pubkey —
+        // signature was made with `signer`, so verification under
+        // `other.public()` must fail.
+        card.body.identity = other.public();
+        let err = card.verify(1_000_000).expect_err("wrong signer");
+        match err {
+            crate::error::CoreError::Contact(s) => {
+                assert!(s.contains("signature verification failed"), "got: {s}");
+            }
+            crate::error::CoreError::Identity(s) => {
+                assert!(s.contains("verification failed"), "got: {s}");
+            }
+            other => panic!("expected Contact/Identity, got {other:?}"),
+        }
     }
 }
