@@ -8,8 +8,6 @@
 //! scans for `next_retry_at <= now` and attempts delivery; on ACK the
 //! row is removed. See design §1.5 and the Phase 1 delivery workstream.
 
-use std::time::Duration;
-
 use crate::envelope::MessageId;
 use crate::error::Result;
 use crate::identity::PublicKey;
@@ -29,14 +27,6 @@ pub struct OutboxEntry {
     pub attempts: u32,
     /// Unix timestamp when we may next attempt delivery.
     pub next_retry_at: i64,
-}
-
-/// Compute the next backoff interval for a failed delivery.
-///
-/// 1s → 2s → 4s → … → 5 min cap, with random jitter to avoid thundering herds.
-#[must_use]
-pub fn backoff(_attempts: u32) -> Duration {
-    todo!("base = 1s << attempts, cap at 5min, +/- 25% jitter")
 }
 
 /// Persisted outbox interface.
