@@ -102,9 +102,16 @@ pub(crate) fn signer_from_identity(
     identity: &IdentityKey,
     provider: &MlsProvider,
 ) -> Result<SignatureKeyPair> {
-    let secret_bytes = identity.ed25519_seed().to_vec();
+    let seed_guard = identity.ed25519_seed();
+    let secret_bytes = zeroize::Zeroizing::new(seed_guard.to_vec());
     let public_bytes = identity.public().0.to_vec();
-    let signer = SignatureKeyPair::from_raw(SignatureScheme::ED25519, secret_bytes, public_bytes);
+    // `from_raw` takes `Vec<u8>` by value; the `secret_bytes` Zeroizing
+    // guard covers the lifetime up to the move into SignatureKeyPair.
+    let signer = SignatureKeyPair::from_raw(
+        SignatureScheme::ED25519,
+        secret_bytes.to_vec(),
+        public_bytes,
+    );
     signer
         .store(provider.as_openmls().storage())
         .map_err(|e| CoreError::Mls(format!("mls: signer store: {e:?}")))?;

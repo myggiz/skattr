@@ -108,11 +108,12 @@ mod tests {
         for table in [
             "identity",
             "contacts",
-            "onion_addresses",
-            "mls_groups",
-            "messages",
-            "outbox",
+            "key_packages",
             "mailboxes",
+            "messages",
+            "mls_groups",
+            "onion_addresses",
+            "outbox",
             "seen_messages",
         ] {
             let exists: i64 = conn

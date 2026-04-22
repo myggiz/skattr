@@ -146,10 +146,11 @@ impl IdentityKey {
 
     /// The raw 32-byte Ed25519 seed. Crate-private: used by the MLS
     /// module to construct an `openmls_basic_credential::SignatureKeyPair`
-    /// that signs with the same key as our identity. Do NOT widen the
-    /// visibility — wrapping code must go through typed identity APIs.
-    pub(crate) fn ed25519_seed(&self) -> [u8; 32] {
-        self.secret
+    /// that signs with the same key as our identity. Wrapped in
+    /// `Zeroizing` so the copy wipes on drop — callers should not
+    /// leave the guard alive longer than the single use site.
+    pub(crate) fn ed25519_seed(&self) -> zeroize::Zeroizing<[u8; 32]> {
+        zeroize::Zeroizing::new(self.secret)
     }
 
     /// The X25519 public key matching [`Self::noise_static_secret`].
