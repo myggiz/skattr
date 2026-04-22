@@ -62,7 +62,7 @@ pub mod test_exports {
         HANDSHAKE_TIMEOUT,
     };
     // Phase 1.C additions:
-    pub use crate::mls::{Group, GroupId, GroupState, KeyPackage};
+    pub use crate::mls::{Group, GroupId, GroupState, KeyPackage, MlsProvider};
     pub use crate::storage::{KeyPackageRepo, MlsGroupRepo};
 
     /// Test-only helper: convert an `IdentityKey` to its X25519 static
@@ -74,32 +74,5 @@ pub mod test_exports {
     #[must_use]
     pub fn noise_public_of(id: &crate::identity::IdentityKey) -> [u8; 32] {
         id.noise_static_public()
-    }
-
-    /// Test-only helper: construct an `MlsProvider` for integration
-    /// tests that can't reach the `pub(crate)` module directly.
-    #[must_use]
-    pub fn new_mls_provider() -> crate::mls::provider::MlsProvider {
-        crate::mls::provider::MlsProvider::new()
-    }
-
-    /// Test-only helper: open an in-memory `Pool` with migrations applied.
-    /// Skips all file I/O and age encryption — suitable for unit and
-    /// integration tests only.
-    #[must_use]
-    pub fn new_in_memory_pool() -> crate::storage::Pool {
-        crate::storage::Pool::in_memory_for_test()
-    }
-
-    /// Test-only helper: construct a `KeyPackageRepo` bound to `pool`.
-    #[must_use]
-    pub fn new_kp_repo(pool: &crate::storage::Pool) -> crate::storage::KeyPackageRepo<'_> {
-        crate::storage::KeyPackageRepo::new_for_test(pool)
-    }
-
-    /// Test-only helper: construct an `MlsGroupRepo` bound to `pool`.
-    #[must_use]
-    pub fn new_group_repo(pool: &crate::storage::Pool) -> crate::storage::MlsGroupRepo<'_> {
-        crate::storage::MlsGroupRepo::new_for_test(pool)
     }
 }

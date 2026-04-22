@@ -39,7 +39,7 @@ pub struct Group {
 
 impl Group {
     /// Create a fresh single-member group.
-    pub(crate) fn create_solo(
+    pub fn create_solo(
         identity: &IdentityKey,
         psk: Option<&[u8; 32]>,
         provider: MlsProvider,
@@ -74,7 +74,10 @@ impl Group {
         })
     }
 
-    pub(crate) fn add_member(
+    /// Add `invitee_kp` to this group. Returns `(welcome_bytes, commit_bytes)`.
+    /// Merges the pending Commit eagerly (2-member only, Phase 1.C).
+    /// Optional `psk` is proposed as an external PSK before the Commit.
+    pub fn add_member(
         &mut self,
         invitee_kp: &KeyPackage,
         psk: Option<&[u8; 32]>,
@@ -124,7 +127,9 @@ impl Group {
         Ok((welcome_bytes, commit_bytes))
     }
 
-    pub(crate) fn join_from_welcome(
+    /// Join an existing group from a TLS-serialized Welcome message.
+    /// `psk` must match the value used by the inviter.
+    pub fn join_from_welcome(
         identity: &IdentityKey,
         welcome: &[u8],
         psk: Option<&[u8; 32]>,
@@ -177,7 +182,8 @@ impl Group {
         })
     }
 
-    pub(crate) fn encrypt(&mut self, envelope: &Envelope) -> Result<Vec<u8>> {
+    /// Encrypt `envelope` as an MLS application message. Returns TLS-encoded ciphertext.
+    pub fn encrypt(&mut self, envelope: &Envelope) -> Result<Vec<u8>> {
         if !self.state.can_send() {
             return Err(CoreError::Mls(format!(
                 "mls: encrypt: invalid state {:?}",
@@ -197,7 +203,8 @@ impl Group {
             .map_err(|e| CoreError::Mls(format!("mls: encrypt: serialize: {e}")))
     }
 
-    pub(crate) fn decrypt(&mut self, ciphertext: &[u8]) -> Result<Envelope> {
+    /// Decrypt a TLS-encoded MLS application message. Returns the decoded `Envelope`.
+    pub fn decrypt(&mut self, ciphertext: &[u8]) -> Result<Envelope> {
         if !self.state.can_send() {
             return Err(CoreError::Mls(format!(
                 "mls: decrypt: invalid state {:?}",
@@ -243,7 +250,8 @@ impl Group {
         Envelope::decode(&plaintext_bytes)
     }
 
-    pub(crate) fn process_incoming_commit(&mut self, commit: &[u8]) -> Result<()> {
+    /// Process a TLS-encoded Commit message from the peer and merge it.
+    pub fn process_incoming_commit(&mut self, commit: &[u8]) -> Result<()> {
         let msg_in = MlsMessageIn::tls_deserialize_exact(commit)
             .map_err(|e| CoreError::Mls(format!("mls: process_commit: deserialize: {e}")))?;
         let protocol_message: ProtocolMessage = match msg_in.extract() {
@@ -277,7 +285,8 @@ impl Group {
         }
     }
 
-    pub(crate) fn advance_epoch(&mut self) -> Result<Vec<u8>> {
+    /// Ratchet our leaf key via a self-update Commit (PCS). Returns the TLS-encoded Commit.
+    pub fn advance_epoch(&mut self) -> Result<Vec<u8>> {
         if !self.state.can_send() {
             return Err(CoreError::Mls(format!(
                 "mls: advance_epoch: invalid state {:?}",
@@ -313,13 +322,13 @@ impl Group {
     /// Persist current state. Writes the `(group_id, state_blob, epoch)`
     /// row via `MlsGroupRepo::put`. `state_blob` is the ciborium-encoded
     /// provider snapshot (HashMap of all OpenMLS internal state).
-    pub(crate) fn save(&self, repo: &MlsGroupRepo<'_>) -> Result<()> {
+    pub fn save(&self, repo: &MlsGroupRepo<'_>) -> Result<()> {
         let blob = self.provider.snapshot()?;
         repo.put(&self.id.0, &blob, self.inner.epoch().as_u64())
     }
 
     /// Restore from persisted state. Returns `None` if `group_id` is unknown.
-    pub(crate) fn load(group_id: &GroupId, repo: &MlsGroupRepo<'_>) -> Result<Option<Self>> {
+    pub fn load(group_id: &GroupId, repo: &MlsGroupRepo<'_>) -> Result<Option<Self>> {
         let Some(blob) = repo.get(&group_id.0)? else {
             return Ok(None);
         };
@@ -398,60 +407,6 @@ fn register_external_psk(provider: &MlsProvider, psk: &[u8; 32]) -> Result<PreSh
         .store(provider.as_openmls(), psk)
         .map_err(|e| CoreError::Mls(format!("mls: psk register: {e:?}")))?;
     Ok(psk_id)
-}
-
-/// Public entry points for the `test-harness` feature — allow integration
-/// tests in `crates/tests` to drive a `Group` end-to-end without exposing
-/// the full API to production callers.
-#[cfg(feature = "test-harness")]
-impl Group {
-    /// Public alias for [`Group::create_solo`] under `test-harness`.
-    pub fn test_create_solo(
-        identity: &IdentityKey,
-        psk: Option<&[u8; 32]>,
-        provider: MlsProvider,
-    ) -> Result<Self> {
-        Self::create_solo(identity, psk, provider)
-    }
-
-    /// Public alias for [`Group::add_member`] under `test-harness`.
-    pub fn test_add_member(
-        &mut self,
-        invitee_kp: &KeyPackage,
-        psk: Option<&[u8; 32]>,
-    ) -> Result<(WelcomeBytes, CommitBytes)> {
-        self.add_member(invitee_kp, psk)
-    }
-
-    /// Public alias for [`Group::join_from_welcome`] under `test-harness`.
-    pub fn test_join_from_welcome(
-        identity: &IdentityKey,
-        welcome: &[u8],
-        psk: Option<&[u8; 32]>,
-        provider: MlsProvider,
-    ) -> Result<Self> {
-        Self::join_from_welcome(identity, welcome, psk, provider)
-    }
-
-    /// Public alias for [`Group::encrypt`] under `test-harness`.
-    pub fn test_encrypt(&mut self, envelope: &crate::envelope::Envelope) -> Result<Vec<u8>> {
-        self.encrypt(envelope)
-    }
-
-    /// Public alias for [`Group::decrypt`] under `test-harness`.
-    pub fn test_decrypt(&mut self, ciphertext: &[u8]) -> Result<crate::envelope::Envelope> {
-        self.decrypt(ciphertext)
-    }
-
-    /// Public alias for [`Group::save`] under `test-harness`.
-    pub fn test_save(&self, repo: &MlsGroupRepo<'_>) -> Result<()> {
-        self.save(repo)
-    }
-
-    /// Public alias for [`Group::load`] under `test-harness`.
-    pub fn test_load(group_id: &GroupId, repo: &MlsGroupRepo<'_>) -> Result<Option<Self>> {
-        Self::load(group_id, repo)
-    }
 }
 
 #[cfg(test)]

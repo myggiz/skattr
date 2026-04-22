@@ -17,21 +17,14 @@ pub struct KeyPackageRepo<'p> {
 }
 
 impl<'p> KeyPackageRepo<'p> {
-    pub(crate) fn new(pool: &'p Pool) -> Self {
-        Self { pool }
-    }
-
-    /// Test-harness constructor accessible from outside the crate via
-    /// `test_exports`. Identical to `new`; the separate name avoids
-    /// widening `new` itself.
-    #[cfg(feature = "test-harness")]
-    pub fn new_for_test(pool: &'p Pool) -> Self {
+    /// Construct a repo bound to the given `pool`.
+    pub fn new(pool: &'p Pool) -> Self {
         Self { pool }
     }
 
     /// Insert a KeyPackage row. `direction` must be `"ours"` or
     /// `"theirs"` (CHECK constraint at the SQL layer).
-    pub(crate) fn insert(&self, hash: &[u8; 32], bytes: &[u8], direction: &str) -> Result<()> {
+    pub fn insert(&self, hash: &[u8; 32], bytes: &[u8], direction: &str) -> Result<()> {
         self.pool.with_mut(|c| {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -48,7 +41,7 @@ impl<'p> KeyPackageRepo<'p> {
     }
 
     /// Return `(kp_bytes, consumed)` if the hash is known. `None` otherwise.
-    pub(crate) fn get(&self, hash: &[u8; 32]) -> Result<Option<(Vec<u8>, bool)>> {
+    pub fn get(&self, hash: &[u8; 32]) -> Result<Option<(Vec<u8>, bool)>> {
         self.pool.with(|c| {
             let result = c.query_row(
                 "SELECT kp_bytes, consumed FROM key_packages WHERE kp_hash = ?1",
@@ -68,7 +61,7 @@ impl<'p> KeyPackageRepo<'p> {
     }
 
     /// Mark a KeyPackage consumed. Idempotent.
-    pub(crate) fn mark_consumed(&self, hash: &[u8; 32]) -> Result<()> {
+    pub fn mark_consumed(&self, hash: &[u8; 32]) -> Result<()> {
         self.pool.with_mut(|c| {
             c.execute(
                 "UPDATE key_packages SET consumed = 1 WHERE kp_hash = ?1",

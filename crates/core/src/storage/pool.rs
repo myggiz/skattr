@@ -131,26 +131,11 @@ impl Pool {
     }
 
     /// Test-only: construct a Pool from an in-memory connection. Skips
-    /// all encryption + file-path bookkeeping. Used by repo unit tests.
-    #[cfg(test)]
-    pub(crate) fn in_memory() -> Self {
-        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
-        apply_pragmas(&conn).unwrap();
-        crate::storage::migrations::apply(&mut conn).unwrap();
-        Self {
-            conn: Mutex::new(conn),
-            encrypted_path: PathBuf::from("/dev/null"),
-            working_path: PathBuf::from("/dev/null"),
-            passphrase: Zeroizing::new(String::new()),
-        }
-    }
-
-    /// Test-harness variant of `in_memory` accessible from outside the
-    /// crate (via `test_exports`). Intentionally separate from the
-    /// `#[cfg(test)]` method above so it doesn't bleed into production.
-    #[cfg(feature = "test-harness")]
+    /// all encryption + file-path bookkeeping. Used by repo unit tests
+    /// and integration tests under the `test-harness` feature.
+    #[cfg(any(test, feature = "test-harness"))]
     #[allow(clippy::expect_used)]
-    pub fn in_memory_for_test() -> Self {
+    pub fn in_memory() -> Self {
         let mut conn = rusqlite::Connection::open_in_memory().expect("in-memory sqlite");
         apply_pragmas(&conn).expect("pragmas");
         crate::storage::migrations::apply(&mut conn).expect("migrations");

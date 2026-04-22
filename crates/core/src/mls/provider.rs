@@ -23,9 +23,14 @@ use crate::error::{CoreError, Result};
 
 /// Crypto + storage provider for OpenMLS.
 #[derive(Debug)]
-#[cfg_attr(not(feature = "test-harness"), allow(dead_code))]
 pub struct MlsProvider {
     inner: OpenMlsRustCrypto,
+}
+
+impl Default for MlsProvider {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MlsProvider {

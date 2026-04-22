@@ -39,7 +39,7 @@ impl KeyPackage {
     /// Generate a fresh KeyPackage bound to `identity` and register it
     /// with `provider`. Persists the package + its hash via `kp_repo`
     /// with `direction = "ours"` and `consumed = false`.
-    pub(crate) fn generate(
+    pub fn generate(
         identity: &IdentityKey,
         provider: &MlsProvider,
         kp_repo: &KeyPackageRepo<'_>,
@@ -62,7 +62,7 @@ impl KeyPackage {
     }
 
     /// Serialize to TLS-codec wire bytes for transmission.
-    pub(crate) fn to_bytes(&self) -> Result<Vec<u8>> {
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
         self.inner
             .tls_serialize_detached()
             .map_err(|e| CoreError::Mls(format!("mls: key_package serialize: {e}")))
@@ -70,7 +70,7 @@ impl KeyPackage {
 
     /// Deserialize from TLS-codec wire bytes. Validates the KeyPackage
     /// via OpenMLS's verification step (signature + ciphersuite).
-    pub(crate) fn from_bytes(bytes: &[u8]) -> Result<Self> {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         let kp_in = openmls::key_packages::KeyPackageIn::tls_deserialize_exact(bytes)
             .map_err(|e| CoreError::Mls(format!("mls: key_package deserialize: {e}")))?;
         let crypto = openmls_rust_crypto::OpenMlsRustCrypto::default();
@@ -81,7 +81,7 @@ impl KeyPackage {
     }
 
     /// 32-byte SHA-256 of the TLS-codec serialization.
-    pub(crate) fn hash(&self) -> Result<[u8; 32]> {
+    pub fn hash(&self) -> Result<[u8; 32]> {
         let bytes = self
             .inner
             .tls_serialize_detached()
@@ -134,19 +134,6 @@ fn sha256(bytes: &[u8]) -> [u8; 32] {
     let mut arr = [0u8; 32];
     arr.copy_from_slice(&out);
     arr
-}
-
-/// Public entry points for the `test-harness` feature.
-#[cfg(feature = "test-harness")]
-impl KeyPackage {
-    /// Public alias for [`KeyPackage::generate`] under `test-harness`.
-    pub fn test_generate(
-        identity: &IdentityKey,
-        provider: &MlsProvider,
-        kp_repo: &KeyPackageRepo<'_>,
-    ) -> Result<Self> {
-        Self::generate(identity, provider, kp_repo)
-    }
 }
 
 #[cfg(test)]
