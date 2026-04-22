@@ -6,6 +6,7 @@
 use openmls::group::{MlsGroupJoinConfig, StagedWelcome};
 use openmls::prelude::*;
 use openmls::prelude::{ProcessedMessageContent, ProtocolMessage};
+use openmls::schedule::psk::PreSharedKeyId;
 use tls_codec::{Deserialize as _, Serialize as _};
 
 use crate::envelope::Envelope;
@@ -40,7 +41,7 @@ impl Group {
     /// Create a fresh single-member group.
     pub(crate) fn create_solo(
         identity: &IdentityKey,
-        _psk: Option<&[u8; 32]>,
+        psk: Option<&[u8; 32]>,
         provider: MlsProvider,
     ) -> Result<Self> {
         let signer = signer_from_identity(identity, &provider)?;
@@ -60,7 +61,10 @@ impl Group {
         .map_err(|e| CoreError::Mls(format!("mls: builder: {e:?}")))?;
 
         let gid = GroupId(inner.group_id().to_vec());
-        // PSK wiring lands in Task 9; ignored in Task 5.
+
+        if let Some(psk_bytes) = psk {
+            register_external_psk(&provider, psk_bytes)?;
+        }
 
         Ok(Self {
             id: gid,
@@ -73,14 +77,20 @@ impl Group {
     pub(crate) fn add_member(
         &mut self,
         invitee_kp: &KeyPackage,
-        _psk: Option<&[u8; 32]>,
+        psk: Option<&[u8; 32]>,
     ) -> Result<(WelcomeBytes, CommitBytes)> {
         // Guard against 3rd member (2-member only for 1.C).
         if self.inner.members().count() >= 2 {
             return Err(CoreError::Mls("mls: add_member: already 2-member".into()));
         }
 
-        // PSK proposal lands in Task 9; skipped here.
+        if let Some(psk_bytes) = psk {
+            let psk_id = register_external_psk(&self.provider, psk_bytes)?;
+            let signer = load_signer(&self.provider, &own_public_key(&self.inner)?)?;
+            self.inner
+                .propose_external_psk(self.provider.as_openmls(), &signer, psk_id)
+                .map_err(|e| CoreError::Mls(format!("mls: propose external psk: {e:?}")))?;
+        }
 
         let signer = load_signer(&self.provider, &own_public_key(&self.inner)?)?;
 
@@ -117,7 +127,7 @@ impl Group {
     pub(crate) fn join_from_welcome(
         identity: &IdentityKey,
         welcome: &[u8],
-        _psk: Option<&[u8; 32]>,
+        psk: Option<&[u8; 32]>,
         provider: MlsProvider,
     ) -> Result<Self> {
         // Ensure the signer is registered in this provider so OpenMLS can
@@ -125,6 +135,10 @@ impl Group {
         // if KeyPackage::generate was called with the same provider — ignore
         // the "already present" error and proceed.
         let _ = signer_from_identity(identity, &provider);
+
+        if let Some(psk_bytes) = psk {
+            register_external_psk(&provider, psk_bytes)?;
+        }
 
         let welcome_msg = MlsMessageIn::tls_deserialize_exact(welcome)
             .map_err(|e| CoreError::Mls(format!("mls: welcome deserialize: {e}")))?;
@@ -306,6 +320,24 @@ fn own_public_key(group: &openmls::group::MlsGroup) -> Result<Vec<u8>> {
     Ok(own_leaf.signature_key().as_slice().to_vec())
 }
 
+/// The external-PSK identifier byte string. Matches the HKDF label from
+/// 1.B so the two layers use the same constant. Both sides must register
+/// a PSK under this identifier for the Add Commit's PSK proposal to
+/// decrypt on the other side.
+const PSK_ID_BYTES: &[u8] = b"skattr-binding-v1";
+
+/// Register a 32-byte external PSK with the provider under the
+/// canonical Skattr PSK identifier. Returns a `PreSharedKeyId` that
+/// the caller embeds in the Commit's PSK proposal (inviter side) or
+/// that gets derived from the Welcome (invitee side).
+fn register_external_psk(provider: &MlsProvider, psk: &[u8; 32]) -> Result<PreSharedKeyId> {
+    let psk_id = PreSharedKeyId::external(PSK_ID_BYTES.to_vec(), vec![0u8; 32]);
+    psk_id
+        .store(provider.as_openmls(), psk)
+        .map_err(|e| CoreError::Mls(format!("mls: psk register: {e:?}")))?;
+    Ok(psk_id)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -445,5 +477,62 @@ mod tests {
         let ct_b = bob.encrypt(&msg_b).unwrap();
         let got_b = alice.decrypt(&ct_b).unwrap();
         assert_eq!(format!("{got_b:?}"), format!("{msg_b:?}"));
+    }
+
+    fn pair_with_psk(psk_alice: [u8; 32], psk_bob: [u8; 32]) -> Result<(Group, Group)> {
+        let pool = Pool::in_memory();
+        let kp_repo = crate::storage::KeyPackageRepo::new(&pool);
+        let alice_id = alice();
+        let bob_id = IdentityKey::generate().unwrap();
+        let bob_provider = MlsProvider::new();
+        let bob_kp = KeyPackage::generate(&bob_id, &bob_provider, &kp_repo)?;
+        let mut alice = Group::create_solo(&alice_id, Some(&psk_alice), MlsProvider::new())?;
+        let (welcome, _commit) = alice.add_member(&bob_kp, Some(&psk_alice))?;
+        let bob = Group::join_from_welcome(&bob_id, &welcome, Some(&psk_bob), bob_provider)?;
+        Ok((alice, bob))
+    }
+
+    #[test]
+    fn external_psk_match_succeeds() {
+        let psk = [0xEEu8; 32];
+        let (alice, bob) = pair_with_psk(psk, psk).unwrap();
+        assert_eq!(alice.epoch(), 1);
+        assert_eq!(bob.epoch(), 1);
+        assert_eq!(alice.id(), bob.id());
+    }
+
+    #[test]
+    fn external_psk_mismatch_fails_on_bob_join() {
+        let result = pair_with_psk([0xAAu8; 32], [0xBBu8; 32]);
+        let err = match result {
+            Ok(_) => panic!("mismatched PSK must fail"),
+            Err(e) => e,
+        };
+        match err {
+            CoreError::Mls(s) => {
+                assert!(
+                    s.contains("external PSK mismatch")
+                        || s.contains("authentication")
+                        || s.contains("welcome process"),
+                    "unexpected message: {s}"
+                );
+            }
+            other => panic!("expected CoreError::Mls, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_psk_path_still_works() {
+        let pool = Pool::in_memory();
+        let kp_repo = crate::storage::KeyPackageRepo::new(&pool);
+        let alice_id = alice();
+        let bob_id = IdentityKey::generate().unwrap();
+        let bob_provider = MlsProvider::new();
+        let bob_kp = KeyPackage::generate(&bob_id, &bob_provider, &kp_repo).unwrap();
+        let mut alice = Group::create_solo(&alice_id, None, MlsProvider::new()).unwrap();
+        let (welcome, _commit) = alice.add_member(&bob_kp, None).unwrap();
+        let bob = Group::join_from_welcome(&bob_id, &welcome, None, bob_provider).unwrap();
+        assert_eq!(alice.epoch(), 1);
+        assert_eq!(bob.epoch(), 1);
     }
 }
