@@ -98,6 +98,8 @@ snow = { version = "0.9", features = ["default-resolver"] }
 openmls = "0.8"
 openmls_traits = "0.5"
 openmls_rust_crypto = "0.5"
+openmls_basic_credential = "0.5"
+tls_codec = "0.4"
 
 # CLI / errors / logging
 clap = { version = "4", features = ["derive", "env"] }

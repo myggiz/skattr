@@ -16,4 +16,7 @@
 //! via MLS extensions, not by editing this file.
 
 /// MLS ciphersuite IANA code-point.
-pub const CIPHERSUITE: u16 = 0x0001;
+///
+/// RFC 9420 §17: `MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519` = 0x0003.
+/// (0x0001 is `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519` — a different suite.)
+pub const CIPHERSUITE: u16 = 0x0003;

@@ -62,6 +62,8 @@ safelog = { workspace = true }
 openmls = { workspace = true }
 openmls_traits = { workspace = true }
 openmls_rust_crypto = { workspace = true }
+openmls_basic_credential = { workspace = true }
+tls_codec = { workspace = true }
 
 # Error / logging / misc
 thiserror = { workspace = true }
