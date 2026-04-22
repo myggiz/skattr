@@ -34,7 +34,6 @@ fn encode_b32(bytes: &[u8]) -> String {
     base32::encode(Alphabet::Rfc4648Lower { padding: false }, bytes)
 }
 
-#[allow(dead_code)]
 fn decode_b32(s: &str) -> Option<Vec<u8>> {
     base32::decode(Alphabet::Rfc4648Lower { padding: false }, s)
 }
@@ -43,7 +42,6 @@ fn encode_b64url(bytes: &[u8]) -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
-#[allow(dead_code)]
 fn decode_b64url(s: &str) -> Option<Vec<u8>> {
     // Tolerate accidental padding: strip trailing '=' before decoding.
     let trimmed = s.trim_end_matches('=');
@@ -75,6 +73,16 @@ pub struct InviteLink {
     pub signature: Signature,
     /// Zeroizing copy of the PSK.
     pub psk: InvitePsk,
+}
+
+impl std::fmt::Debug for InviteLink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InviteLink")
+            .field("body", &self.body)
+            .field("signature", &"[redacted]")
+            .field("psk", &"[redacted]")
+            .finish()
+    }
 }
 
 /// A 32-byte one-time secret embedded in an invite.
@@ -117,8 +125,114 @@ impl InviteLink {
     }
 
     /// Parse + verify a `skattr://invite/v1#...` URL.
-    pub fn from_url(_url: &str, _now: i64) -> Result<Self> {
-        todo!("Task 9")
+    pub fn from_url(url: &str, now: i64) -> Result<Self> {
+        use zeroize::Zeroize as _;
+
+        let fragment = url
+            .strip_prefix(URL_PREFIX)
+            .ok_or_else(|| crate::error::CoreError::Invite("invite: unsupported scheme".into()))?;
+
+        // Parse key=value pairs. Unknown keys are ignored for forward-compat.
+        let mut id_str: Option<&str> = None;
+        let mut onion: Option<&str> = None;
+        let mut kp_str: Option<&str> = None;
+        let mut psk_str: Option<&str> = None;
+        let mut exp_str: Option<&str> = None;
+        let mut sig_str: Option<&str> = None;
+        for pair in fragment.split('&') {
+            let mut parts = pair.splitn(2, '=');
+            let key = parts.next().unwrap_or_default();
+            let value = parts.next().unwrap_or_default();
+            match key {
+                "id" => id_str = Some(value),
+                "onion" => onion = Some(value),
+                "kp" => kp_str = Some(value),
+                "psk" => psk_str = Some(value),
+                "exp" => exp_str = Some(value),
+                "sig" => sig_str = Some(value),
+                _ => {}
+            }
+        }
+
+        let id_str = id_str
+            .ok_or_else(|| crate::error::CoreError::Invite("invite: missing field id".into()))?;
+        let onion_str = onion
+            .ok_or_else(|| crate::error::CoreError::Invite("invite: missing field onion".into()))?;
+        let kp_str = kp_str
+            .ok_or_else(|| crate::error::CoreError::Invite("invite: missing field kp".into()))?;
+        let psk_str = psk_str
+            .ok_or_else(|| crate::error::CoreError::Invite("invite: missing field psk".into()))?;
+        let exp_str = exp_str
+            .ok_or_else(|| crate::error::CoreError::Invite("invite: missing field exp".into()))?;
+        let sig_str = sig_str
+            .ok_or_else(|| crate::error::CoreError::Invite("invite: missing field sig".into()))?;
+
+        let id_bytes = decode_b32(&id_str.to_ascii_lowercase())
+            .ok_or_else(|| crate::error::CoreError::Invite("invite: malformed id".into()))?;
+        if id_bytes.len() != 32 {
+            return Err(crate::error::CoreError::Invite(
+                "invite: malformed id".into(),
+            ));
+        }
+        let mut identity_bytes = [0u8; 32];
+        identity_bytes.copy_from_slice(&id_bytes);
+        let identity = PublicKey(identity_bytes);
+
+        let key_package = decode_b64url(kp_str)
+            .ok_or_else(|| crate::error::CoreError::Invite("invite: malformed kp".into()))?;
+
+        let psk_bytes = decode_b64url(psk_str)
+            .ok_or_else(|| crate::error::CoreError::Invite("invite: malformed psk".into()))?;
+        if psk_bytes.len() != 32 {
+            return Err(crate::error::CoreError::Invite(
+                "invite: malformed psk".into(),
+            ));
+        }
+        let mut psk = [0u8; 32];
+        psk.copy_from_slice(&psk_bytes);
+
+        let expires_at: i64 = exp_str
+            .parse()
+            .map_err(|_| crate::error::CoreError::Invite("invite: malformed exp".into()))?;
+
+        let sig_bytes = decode_b64url(sig_str)
+            .ok_or_else(|| crate::error::CoreError::Invite("invite: malformed sig".into()))?;
+        if sig_bytes.len() != 64 {
+            return Err(crate::error::CoreError::Invite(
+                "invite: malformed sig".into(),
+            ));
+        }
+        let mut sig_arr = [0u8; 64];
+        sig_arr.copy_from_slice(&sig_bytes);
+        let signature = Signature(sig_arr);
+
+        let body = InviteLinkBody {
+            identity,
+            onion: onion_str.to_string(),
+            key_package,
+            psk,
+            expires_at,
+        };
+
+        // Verify signature.
+        IdentityKey::verify_cbor(&body.identity, &body, &signature).map_err(|_| {
+            crate::error::CoreError::Invite("invite: signature verification failed".into())
+        })?;
+
+        // Expiry check.
+        if now > body.expires_at {
+            return Err(crate::error::CoreError::Invite("invite: expired".into()));
+        }
+
+        // Move PSK into guard, zero body copy.
+        let guard = InvitePsk(body.psk);
+        let mut body = body;
+        body.psk.zeroize();
+        Ok(Self {
+            body,
+            signature,
+            psk: guard,
+        })
     }
 
     /// Re-serialize to a URL.
@@ -244,5 +358,145 @@ mod tests {
         )
         .unwrap();
         assert_eq!(invite.to_url().unwrap(), invite.to_url().unwrap());
+    }
+
+    #[test]
+    fn from_url_round_trip_valid() {
+        let inviter = IdentityKey::generate().unwrap();
+        let invite = InviteLink::generate(
+            &inviter,
+            "xyz.onion".into(),
+            fixed_kp(),
+            [0xCC; 32],
+            3600,
+            1_000_000,
+        )
+        .unwrap();
+        let url = invite.to_url().unwrap();
+
+        let parsed = InviteLink::from_url(&url, 1_000_500).unwrap();
+        assert_eq!(parsed.body.identity, invite.body.identity);
+        assert_eq!(parsed.body.onion, invite.body.onion);
+        assert_eq!(parsed.body.key_package, invite.body.key_package);
+        assert_eq!(parsed.body.expires_at, invite.body.expires_at);
+        // PSK moved into the Zeroizing guard; body.psk cleared.
+        assert_eq!(parsed.psk.0, [0xCC; 32]);
+        assert_eq!(parsed.body.psk, [0u8; 32]);
+    }
+
+    #[test]
+    fn from_url_rejects_unsupported_scheme() {
+        let err = InviteLink::from_url("https://example.com/?id=x", 0).expect_err("bad scheme");
+        match err {
+            crate::error::CoreError::Invite(s) => {
+                assert!(s.contains("unsupported scheme"), "got: {s}");
+            }
+            other => panic!("expected Invite, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_url_rejects_missing_field() {
+        let inviter = IdentityKey::generate().unwrap();
+        let url = InviteLink::generate(
+            &inviter,
+            "a.onion".into(),
+            fixed_kp(),
+            [0xDD; 32],
+            3600,
+            1_000_000,
+        )
+        .unwrap()
+        .to_url()
+        .unwrap();
+
+        // Drop the `&kp=...` segment entirely.
+        let fragment = url.strip_prefix("skattr://invite/v1#").unwrap();
+        let trimmed: String = fragment
+            .split('&')
+            .filter(|p| !p.starts_with("kp="))
+            .collect::<Vec<_>>()
+            .join("&");
+        let bad = format!("skattr://invite/v1#{trimmed}");
+
+        let err = InviteLink::from_url(&bad, 1_000_000).expect_err("missing kp");
+        match err {
+            crate::error::CoreError::Invite(s) => {
+                assert!(s.contains("missing field kp"), "got: {s}");
+            }
+            other => panic!("expected Invite, got {other:?}"),
+        }
+    }
+
+    /// Find the byte offset of the first character inside `&sig=` value.
+    fn sig_value_offset(bytes: &[u8]) -> usize {
+        let needle = b"&sig=";
+        for i in 0..bytes.len().saturating_sub(needle.len()) {
+            if &bytes[i..i + needle.len()] == needle {
+                return i + needle.len();
+            }
+        }
+        panic!("no &sig= in URL")
+    }
+
+    #[test]
+    fn from_url_rejects_tampered_signature() {
+        let inviter = IdentityKey::generate().unwrap();
+        let url = InviteLink::generate(
+            &inviter,
+            "a.onion".into(),
+            fixed_kp(),
+            [0xEE; 32],
+            3600,
+            1_000_000,
+        )
+        .unwrap()
+        .to_url()
+        .unwrap();
+        // Flip one character in the sig segment.
+        let mut bytes = url.into_bytes();
+        let sig_start = sig_value_offset(&bytes);
+        bytes[sig_start] ^= 0x01;
+        // Ensure we didn't produce an out-of-alphabet char.
+        if !bytes[sig_start].is_ascii_alphanumeric()
+            && bytes[sig_start] != b'-'
+            && bytes[sig_start] != b'_'
+        {
+            bytes[sig_start] = b'A';
+        }
+        let tampered = String::from_utf8(bytes).unwrap();
+
+        let err = InviteLink::from_url(&tampered, 1_000_000).expect_err("tampered");
+        match err {
+            crate::error::CoreError::Invite(s) => {
+                assert!(
+                    s.contains("signature verification failed") || s.contains("malformed"),
+                    "got: {s}"
+                );
+            }
+            other => panic!("expected Invite, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_url_rejects_expired() {
+        let inviter = IdentityKey::generate().unwrap();
+        let url = InviteLink::generate(
+            &inviter,
+            "a.onion".into(),
+            fixed_kp(),
+            [0xFF; 32],
+            3600,
+            1_000_000,
+        )
+        .unwrap()
+        .to_url()
+        .unwrap();
+
+        let err = InviteLink::from_url(&url, 1_003_601).expect_err("expired");
+        match err {
+            crate::error::CoreError::Invite(s) => assert!(s.contains("expired"), "got: {s}"),
+            other => panic!("expected Invite, got {other:?}"),
+        }
     }
 }
