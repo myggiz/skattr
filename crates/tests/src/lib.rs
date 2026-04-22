@@ -14,6 +14,8 @@
 #[cfg(test)]
 mod arti_echo;
 #[cfg(test)]
+mod delivery_kill_mid_message;
+#[cfg(test)]
 mod invite_roundtrip;
 #[cfg(test)]
 mod mls_pair;
