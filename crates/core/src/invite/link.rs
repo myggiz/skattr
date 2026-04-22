@@ -24,6 +24,32 @@ use crate::error::Result;
 use crate::identity::{IdentityKey, PublicKey, Signature};
 use crate::storage::KeyPackageRepo;
 
+use base32::Alphabet;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
+
+const URL_PREFIX: &str = "skattr://invite/v1#";
+
+fn encode_b32(bytes: &[u8]) -> String {
+    base32::encode(Alphabet::Rfc4648Lower { padding: false }, bytes)
+}
+
+#[allow(dead_code)]
+fn decode_b32(s: &str) -> Option<Vec<u8>> {
+    base32::decode(Alphabet::Rfc4648Lower { padding: false }, s)
+}
+
+fn encode_b64url(bytes: &[u8]) -> String {
+    URL_SAFE_NO_PAD.encode(bytes)
+}
+
+#[allow(dead_code)]
+fn decode_b64url(s: &str) -> Option<Vec<u8>> {
+    // Tolerate accidental padding: strip trailing '=' before decoding.
+    let trimmed = s.trim_end_matches('=');
+    URL_SAFE_NO_PAD.decode(trimmed.as_bytes()).ok()
+}
+
 /// Content that the inviter signs. Deliberately excludes the signature.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InviteLinkBody {
@@ -97,7 +123,20 @@ impl InviteLink {
 
     /// Re-serialize to a URL.
     pub fn to_url(&self) -> Result<String> {
-        todo!("Task 8")
+        let id = encode_b32(&self.body.identity.0);
+        let kp = encode_b64url(&self.body.key_package);
+        let psk = encode_b64url(&self.body.psk);
+        let sig = encode_b64url(&self.signature.0);
+        Ok(format!(
+            "{prefix}id={id}&onion={onion}&kp={kp}&psk={psk}&exp={exp}&sig={sig}",
+            prefix = URL_PREFIX,
+            id = id,
+            onion = self.body.onion,
+            kp = kp,
+            psk = psk,
+            exp = self.body.expires_at,
+            sig = sig,
+        ))
     }
 
     /// SHA-256 of `body.key_package`.
@@ -167,5 +206,43 @@ mod tests {
         .unwrap();
         IdentityKey::verify_cbor(&invite.body.identity, &invite.body, &invite.signature)
             .expect("body signature must verify against its embedded identity");
+    }
+
+    #[test]
+    fn to_url_has_expected_prefix_and_all_six_params() {
+        let inviter = IdentityKey::generate().unwrap();
+        let invite = InviteLink::generate(
+            &inviter,
+            "abc.onion".into(),
+            fixed_kp(),
+            [0xAA; 32],
+            3600,
+            1_000_000,
+        )
+        .unwrap();
+
+        let url = invite.to_url().unwrap();
+        assert!(url.starts_with("skattr://invite/v1#"));
+        let fragment = url.strip_prefix("skattr://invite/v1#").unwrap();
+        let keys: Vec<&str> = fragment
+            .split('&')
+            .map(|p| p.split('=').next().unwrap())
+            .collect();
+        assert_eq!(keys, &["id", "onion", "kp", "psk", "exp", "sig"]);
+    }
+
+    #[test]
+    fn to_url_is_deterministic() {
+        let inviter = IdentityKey::generate().unwrap();
+        let invite = InviteLink::generate(
+            &inviter,
+            "a.onion".into(),
+            fixed_kp(),
+            [0xAA; 32],
+            3600,
+            1_000_000,
+        )
+        .unwrap();
+        assert_eq!(invite.to_url().unwrap(), invite.to_url().unwrap());
     }
 }
