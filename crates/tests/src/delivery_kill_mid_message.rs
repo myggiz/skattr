@@ -32,6 +32,7 @@ struct MlsInboundDispatch {
     pool: Arc<Pool>,
     group_id: GroupId,
     expected_peer: skattr_core::identity::PublicKey,
+    seen_ciphertexts: std::sync::Mutex<std::collections::HashMap<[u8; 32], MessageId>>,
 }
 
 impl InboundDispatch for MlsInboundDispatch {
@@ -43,18 +44,44 @@ impl InboundDispatch for MlsInboundDispatch {
         if peer != self.expected_peer {
             return None;
         }
+
+        // Stable hash of the ciphertext for replay detection.
+        let hash = {
+            use sha2::{Digest, Sha256};
+            let mut h = Sha256::new();
+            h.update(ciphertext);
+            let out = h.finalize();
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&out);
+            arr
+        };
+
+        // Fast path: we've decrypted this ciphertext before. ACK again so
+        // the sender clears its outbox row (spec §4.4 Case B).
+        if let Some(cached_mid) = self
+            .seen_ciphertexts
+            .lock()
+            .ok()
+            .and_then(|g| g.get(&hash).copied())
+        {
+            return Some(cached_mid);
+        }
+
+        // Full path: reload group, decrypt, save, run receiver.
         let repo = MlsGroupRepo::new(&self.pool);
         let mut g = Group::load(&self.group_id, &repo).ok().flatten()?;
         let envelope = g.decrypt(ciphertext).ok()?;
         let _ = g.save(&repo);
+        let mid = envelope.id;
 
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as i64;
+        // Cache BEFORE returning so a subsequent identical ciphertext short-circuits.
+        if let Ok(mut set) = self.seen_ciphertexts.lock() {
+            set.insert(hash, mid);
+        }
+
+        let now_ms = ts_now_ms();
         let seen = SeenMessagesRepo::new(&self.pool);
         let msgs = MessageRepo::new(&self.pool);
-        let mid = envelope.id;
         match receive(&peer, &self.group_id.0, envelope, now_ms, &seen, &msgs).ok()? {
             ReceiveOutcome::New(_) | ReceiveOutcome::Duplicate => Some(mid),
             ReceiveOutcome::Rejected(_) => None,
@@ -158,11 +185,13 @@ async fn kill_mid_message_redelivers_exactly_once() {
         pool: pair.alice_pool.clone(),
         group_id: pair.gid.clone(),
         expected_peer: pair.bob_id.public(),
+        seen_ciphertexts: std::sync::Mutex::new(std::collections::HashMap::new()),
     });
     let bob_dispatch: Arc<dyn InboundDispatch> = Arc::new(MlsInboundDispatch {
         pool: pair.bob_pool.clone(),
         group_id: pair.gid.clone(),
         expected_peer: pair.alice_id.public(),
+        seen_ciphertexts: std::sync::Mutex::new(std::collections::HashMap::new()),
     });
 
     let alice_hub: DeliveryHub<KillableStream<tokio::io::DuplexStream>> =
@@ -261,6 +290,7 @@ async fn kill_before_any_frame_sent_delivers_on_retry() {
         pool: pair.bob_pool.clone(),
         group_id: pair.gid.clone(),
         expected_peer: pair.alice_id.public(),
+        seen_ciphertexts: std::sync::Mutex::new(std::collections::HashMap::new()),
     });
     // Alice is outbound-only; no inbound dispatcher needed.
     let alice_hub: DeliveryHub<KillableStream<tokio::io::DuplexStream>> =
