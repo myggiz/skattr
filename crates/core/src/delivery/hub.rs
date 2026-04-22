@@ -35,6 +35,18 @@ where
     ctrl: mpsc::Sender<PeerCtrl<S>>,
 }
 
+impl<S> Clone for PeerChannels<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    fn clone(&self) -> Self {
+        Self {
+            jobs: self.jobs.clone(),
+            ctrl: self.ctrl.clone(),
+        }
+    }
+}
+
 /// Daemon-scoped delivery router. Routes outbound sends and inbound
 /// post-handshake connections to per-peer `PeerConnection` actor tasks.
 pub struct DeliveryHub<S>
@@ -44,7 +56,7 @@ where
     peers: Mutex<HashMap<PublicKey, PeerChannels<S>>>,
     pool: Arc<Pool>,
     inbound: Option<Arc<dyn InboundDispatch>>,
-    _sweep: tokio::task::JoinHandle<()>,
+    sweep: tokio::task::JoinHandle<()>,
 }
 
 impl<S> DeliveryHub<S>
@@ -84,8 +96,33 @@ where
             peers: Mutex::new(HashMap::new()),
             pool,
             inbound,
-            _sweep: sweep,
+            sweep,
         }
+    }
+
+    /// Spawn a new peer actor and insert it into the map, returning the
+    /// newly created channels. Callers must already hold the `peers` lock
+    /// guard.
+    fn spawn_peer_actor(
+        &self,
+        peers: &mut HashMap<PublicKey, PeerChannels<S>>,
+        peer: PublicKey,
+    ) -> PeerChannels<S> {
+        let (jobs_tx, jobs_rx) = mpsc::channel::<DeliveryJob>(JOB_CHAN_CAP);
+        let (ctrl_tx, ctrl_rx) = mpsc::channel::<PeerCtrl<S>>(CTRL_CHAN_CAP);
+        let _handle = PeerConnection::spawn::<S>(
+            peer,
+            jobs_rx,
+            ctrl_rx,
+            self.pool.clone(),
+            self.inbound.clone(),
+        );
+        let channels = PeerChannels {
+            jobs: jobs_tx,
+            ctrl: ctrl_tx,
+        };
+        peers.insert(peer, channels.clone());
+        channels
     }
 
     /// Submit a job for `peer`. Spawns the peer actor on first use.
@@ -110,29 +147,21 @@ where
     /// Install a post-handshake `AuthenticatedConnection` for `peer`.
     /// If an actor already exists for this peer, its current conn is
     /// replaced. Otherwise a fresh actor is spawned with the conn.
+    /// The `peers` lock is released before awaiting the ctrl send so a
+    /// full channel cannot block a lock-holding await.
     pub async fn ingest(&self, peer: PublicKey, conn: AuthenticatedConnection<S>) {
-        let mut peers = self.peers.lock().await;
-        if let Some(ch) = peers.get(&peer) {
-            let _ = ch.ctrl.send(PeerCtrl::ReplaceConn(Box::new(conn))).await;
-            return;
-        }
-        let (jobs_tx, jobs_rx) = mpsc::channel::<DeliveryJob>(JOB_CHAN_CAP);
-        let (ctrl_tx, ctrl_rx) = mpsc::channel::<PeerCtrl<S>>(CTRL_CHAN_CAP);
-        let _handle = PeerConnection::spawn::<S>(
-            peer,
-            jobs_rx,
-            ctrl_rx,
-            self.pool.clone(),
-            self.inbound.clone(),
-        );
+        let ctrl_tx = {
+            let mut peers = self.peers.lock().await;
+            match peers.get(&peer) {
+                Some(ch) => ch.ctrl.clone(),
+                None => {
+                    let channels = self.spawn_peer_actor(&mut peers, peer);
+                    channels.ctrl
+                }
+            }
+        }; // lock released here
+
         let _ = ctrl_tx.send(PeerCtrl::ReplaceConn(Box::new(conn))).await;
-        peers.insert(
-            peer,
-            PeerChannels {
-                jobs: jobs_tx,
-                ctrl: ctrl_tx,
-            },
-        );
     }
 
     async fn ensure_actor(&self, peer: PublicKey) -> mpsc::Sender<DeliveryJob> {
@@ -140,23 +169,17 @@ where
         if let Some(ch) = peers.get(&peer) {
             return ch.jobs.clone();
         }
-        let (jobs_tx, jobs_rx) = mpsc::channel::<DeliveryJob>(JOB_CHAN_CAP);
-        let (ctrl_tx, ctrl_rx) = mpsc::channel::<PeerCtrl<S>>(CTRL_CHAN_CAP);
-        let _handle = PeerConnection::spawn::<S>(
-            peer,
-            jobs_rx,
-            ctrl_rx,
-            self.pool.clone(),
-            self.inbound.clone(),
-        );
-        peers.insert(
-            peer,
-            PeerChannels {
-                jobs: jobs_tx.clone(),
-                ctrl: ctrl_tx,
-            },
-        );
-        jobs_tx
+        let channels = self.spawn_peer_actor(&mut peers, peer);
+        channels.jobs
+    }
+}
+
+impl<S> Drop for DeliveryHub<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    fn drop(&mut self) {
+        self.sweep.abort();
     }
 }
 
