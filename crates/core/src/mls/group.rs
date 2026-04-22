@@ -31,10 +31,7 @@ pub struct Group {
 
 impl Group {
     /// Create a fresh single-member group.
-    pub(crate) fn create_solo(
-        _identity: &IdentityKey,
-        _psk: Option<&[u8; 32]>,
-    ) -> Result<Self> {
+    pub(crate) fn create_solo(_identity: &IdentityKey, _psk: Option<&[u8; 32]>) -> Result<Self> {
         todo!("Task 5")
     }
 

@@ -10,7 +10,7 @@
 //! - Matching primitives with our Noise transport (ChaCha20-Poly1305,
 //!   X25519, SHA-256) — reduces audit surface.
 //! - Wide support in OpenMLS.
-//! - IANA code-point: 0x0001 (see RFC 9420 §17).
+//! - IANA code-point: 0x0003 (see RFC 9420 §17).
 //!
 //! Changing this constant is a wire-incompatible change. Upgrades happen
 //! via MLS extensions, not by editing this file.
