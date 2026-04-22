@@ -42,11 +42,9 @@ impl<'p> ContactRepo<'p> {
 
     /// Look up by identity pubkey. Returns `Ok(None)` if not present.
     ///
-    /// Note: the `card` field is NOT loaded here — ContactCards are
-    /// stored separately (Phase 1 wiring). For Phase 0.D we return
-    /// contact metadata only with `card: None`.
+    /// Hydrates the contact's latest card (or `None` if no card exists).
     pub fn get(&self, identity: &PublicKey) -> Result<Option<Contact>> {
-        self.pool.with(|c| {
+        let base = self.pool.with(|c| {
             let result = c.query_row(
                 "SELECT display_name, added_at FROM contacts WHERE identity_pubkey = ?1",
                 rusqlite::params![&identity.0[..]],
@@ -64,12 +62,19 @@ impl<'p> ContactRepo<'p> {
                 Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
                 Err(e) => Err(CoreError::Storage(format!("get contact: {e}"))),
             }
-        })
+        })?;
+        let Some(mut contact) = base else {
+            return Ok(None);
+        };
+        contact.card = self.latest_card(identity)?;
+        Ok(Some(contact))
     }
 
     /// Enumerate all contacts, alphabetical by display name (nulls last).
+    ///
+    /// Hydrates each contact's latest card (or `None` if no card exists).
     pub(crate) fn list(&self) -> Result<Vec<Contact>> {
-        self.pool.with(|c| {
+        let mut contacts: Vec<Contact> = self.pool.with(|c| {
             let mut stmt = c
                 .prepare(
                     "SELECT identity_pubkey, display_name, added_at FROM contacts \
@@ -93,7 +98,15 @@ impl<'p> ContactRepo<'p> {
                 .map_err(|e| CoreError::Storage(format!("query list contacts: {e}")))?;
             let out: std::result::Result<Vec<_>, _> = rows.collect();
             out.map_err(|e| CoreError::Storage(format!("collect contacts: {e}")))
-        })
+        })?;
+
+        // Hydrate each contact's latest_card. For small contact lists
+        // (our expected scale: dozens), an N+1 query is fine. Phase 2
+        // can batch via JOIN if needed.
+        for contact in &mut contacts {
+            contact.card = self.latest_card(&contact.identity)?;
+        }
+        Ok(contacts)
     }
 
     /// Delete by identity pubkey. `onion_addresses` rows cascade via FK.
@@ -463,5 +476,39 @@ mod tests {
             repo.current_onion(&alice.identity).unwrap(),
             Some("bbbb.onion".into())
         );
+    }
+
+    #[test]
+    fn get_hydrates_latest_card() {
+        let pool = Pool::in_memory();
+        let repo = ContactRepo::new(&pool);
+        let contact = sample_contact(20);
+        repo.upsert(&contact).unwrap();
+
+        repo.put_card(&sample_card(20, 1)).unwrap();
+        repo.put_card(&sample_card(20, 2)).unwrap();
+
+        let got = repo.get(&contact.identity).unwrap().unwrap();
+        let card = got.card.expect("contact.card must hydrate");
+        assert_eq!(card.body.version, 2);
+    }
+
+    #[test]
+    fn list_hydrates_latest_card() {
+        let pool = Pool::in_memory();
+        let repo = ContactRepo::new(&pool);
+        let c1 = sample_contact(21);
+        let c2 = sample_contact(22);
+        repo.upsert(&c1).unwrap();
+        repo.upsert(&c2).unwrap();
+
+        repo.put_card(&sample_card(21, 5)).unwrap();
+        // c2 has no card — get should still succeed with card=None.
+
+        let all = repo.list().unwrap();
+        let got_c1 = all.iter().find(|c| c.identity == c1.identity).unwrap();
+        let got_c2 = all.iter().find(|c| c.identity == c2.identity).unwrap();
+        assert_eq!(got_c1.card.as_ref().unwrap().body.version, 5);
+        assert!(got_c2.card.is_none());
     }
 }
