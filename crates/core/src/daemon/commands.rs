@@ -72,7 +72,11 @@ pub enum CommandResult {
 }
 
 impl From<InviteLink> for CommandResult {
-    fn from(link: InviteLink) -> Self {
-        Self::InviteCreated { url: link.to_url() }
+    fn from(_link: InviteLink) -> Self {
+        // TODO-1.D: update once InviteLink::to_url() returns Result<String> (Task 8).
+        // The real implementation will be:
+        //   let url = link.to_url().expect("to_url on a just-generated InviteLink never fails");
+        //   Self::InviteCreated { url }
+        todo!("Task 8: wire InviteLink::to_url() → CommandResult")
     }
 }
