@@ -243,12 +243,71 @@ impl Group {
         Envelope::decode(&plaintext_bytes)
     }
 
-    pub(crate) fn process_incoming_commit(&mut self, _commit: &[u8]) -> Result<()> {
-        todo!("Task 10")
+    pub(crate) fn process_incoming_commit(&mut self, commit: &[u8]) -> Result<()> {
+        let msg_in = MlsMessageIn::tls_deserialize_exact(commit)
+            .map_err(|e| CoreError::Mls(format!("mls: process_commit: deserialize: {e}")))?;
+        let protocol_message: ProtocolMessage = match msg_in.extract() {
+            MlsMessageBodyIn::PublicMessage(pm) => pm.into(),
+            MlsMessageBodyIn::PrivateMessage(pm) => pm.into(),
+            _ => {
+                return Err(CoreError::Mls(
+                    "mls: process_commit: wrong message type".into(),
+                ));
+            }
+        };
+
+        let processed = self
+            .inner
+            .process_message(self.provider.as_openmls(), protocol_message)
+            .map_err(|e| CoreError::Mls(format!("mls: authentication failed: {e:?}")))?;
+
+        match processed.into_content() {
+            ProcessedMessageContent::StagedCommitMessage(staged) => {
+                self.inner
+                    .merge_staged_commit(self.provider.as_openmls(), *staged)
+                    .map_err(|e| CoreError::Mls(format!("mls: merge_staged_commit: {e:?}")))?;
+                self.state = GroupState::Active {
+                    epoch: self.inner.epoch().as_u64(),
+                };
+                Ok(())
+            }
+            _ => Err(CoreError::Mls(
+                "mls: process_commit: not a Commit message".into(),
+            )),
+        }
     }
 
     pub(crate) fn advance_epoch(&mut self) -> Result<Vec<u8>> {
-        todo!("Task 10")
+        if !self.state.can_send() {
+            return Err(CoreError::Mls(format!(
+                "mls: advance_epoch: invalid state {:?}",
+                self.state
+            )));
+        }
+
+        let signer = load_signer(&self.provider, &own_public_key(&self.inner)?)?;
+        let bundle = self
+            .inner
+            .self_update(
+                self.provider.as_openmls(),
+                &signer,
+                LeafNodeParameters::default(),
+            )
+            .map_err(|e| CoreError::Mls(format!("mls: self_update: {e:?}")))?;
+
+        let (commit_out, _welcome_opt, _group_info_opt) = bundle.into_messages();
+
+        self.inner
+            .merge_pending_commit(self.provider.as_openmls())
+            .map_err(|e| CoreError::Mls(format!("mls: merge_pending_commit: {e:?}")))?;
+
+        let bytes = commit_out
+            .tls_serialize_detached()
+            .map_err(|e| CoreError::Mls(format!("mls: advance_epoch: serialize: {e}")))?;
+        self.state = GroupState::Active {
+            epoch: self.inner.epoch().as_u64(),
+        };
+        Ok(bytes)
     }
 
     /// Persist current state. Writes the `(group_id, state_blob, epoch)`
@@ -534,5 +593,24 @@ mod tests {
         let bob = Group::join_from_welcome(&bob_id, &welcome, None, bob_provider).unwrap();
         assert_eq!(alice.epoch(), 1);
         assert_eq!(bob.epoch(), 1);
+    }
+
+    #[test]
+    fn advance_epoch_bumps_epoch_and_both_sides_ratchet() {
+        let (mut alice, mut bob) = pair_no_psk();
+        assert_eq!(alice.epoch(), 1);
+        assert_eq!(bob.epoch(), 1);
+
+        let commit = alice.advance_epoch().unwrap();
+        assert_eq!(alice.epoch(), 2);
+
+        bob.process_incoming_commit(&commit).unwrap();
+        assert_eq!(bob.epoch(), 2);
+
+        // Both sides can still encrypt/decrypt at epoch 2.
+        let env = test_envelope("post-PCS");
+        let ct = alice.encrypt(&env).unwrap();
+        let got = bob.decrypt(&ct).unwrap();
+        assert_eq!(format!("{got:?}"), format!("{env:?}"));
     }
 }
