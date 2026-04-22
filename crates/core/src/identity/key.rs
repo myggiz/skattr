@@ -101,6 +101,30 @@ impl IdentityKey {
         Signature(sig.to_bytes())
     }
 
+    /// Sign the canonical CBOR encoding of `body`. Used by ContactCard
+    /// and InviteLink to sign their Body structs. Pairs with
+    /// [`Self::verify_cbor`].
+    pub fn sign_cbor<T: serde::Serialize>(&self, body: &T) -> Result<Signature> {
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(body, &mut bytes)
+            .map_err(|e| CoreError::Identity(format!("sign_cbor: {e}")))?;
+        Ok(self.sign(&bytes))
+    }
+
+    /// Verify a signature over the canonical CBOR encoding of `body`.
+    /// Signer identity is `pubkey`. Collapses all failure modes to
+    /// the same opaque string (same as [`Self::verify`]).
+    pub fn verify_cbor<T: serde::Serialize>(
+        pubkey: &PublicKey,
+        body: &T,
+        signature: &Signature,
+    ) -> Result<()> {
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(body, &mut bytes)
+            .map_err(|_| CoreError::Identity("verification failed".into()))?;
+        Self::verify(pubkey, &bytes, signature)
+    }
+
     /// Verify a signature against a pubkey. Constant-time, no panics.
     ///
     /// Both invalid-pubkey and bad-signature outcomes collapse to the
@@ -367,5 +391,38 @@ mod tests {
             super::ed25519_pub_to_x25519(&vk),
             super::ed25519_pub_to_x25519(&vk)
         );
+    }
+
+    #[test]
+    fn sign_cbor_verify_cbor_round_trip() {
+        use serde::{Deserialize, Serialize};
+        #[derive(Serialize, Deserialize)]
+        struct Sample {
+            a: u64,
+            b: String,
+            c: Vec<u8>,
+        }
+
+        let id = IdentityKey::generate().unwrap();
+        let body = Sample {
+            a: 42,
+            b: "hello".into(),
+            c: vec![1, 2, 3, 4],
+        };
+
+        let sig = id.sign_cbor(&body).unwrap();
+        IdentityKey::verify_cbor(&id.public(), &body, &sig).expect("valid");
+
+        // Tampered body should fail.
+        let tampered = Sample {
+            a: 43,
+            b: body.b.clone(),
+            c: body.c.clone(),
+        };
+        IdentityKey::verify_cbor(&id.public(), &tampered, &sig).expect_err("tampered body");
+
+        // Wrong signer should fail.
+        let other = IdentityKey::generate().unwrap();
+        IdentityKey::verify_cbor(&other.public(), &body, &sig).expect_err("wrong signer");
     }
 }

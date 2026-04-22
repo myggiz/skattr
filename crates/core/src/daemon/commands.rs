@@ -73,6 +73,8 @@ pub enum CommandResult {
 
 impl From<InviteLink> for CommandResult {
     fn from(link: InviteLink) -> Self {
-        Self::InviteCreated { url: link.to_url() }
+        #[allow(clippy::expect_used)]
+        let url = link.to_url().expect("valid InviteLink serializes cleanly");
+        Self::InviteCreated { url }
     }
 }

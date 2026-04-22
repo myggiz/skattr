@@ -15,5 +15,5 @@ pub mod card;
 pub mod contact;
 pub mod rotation;
 
-pub use card::ContactCard;
+pub use card::{ContactCard, ContactCardBody};
 pub use contact::Contact;

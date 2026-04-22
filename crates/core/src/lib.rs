@@ -64,6 +64,9 @@ pub mod test_exports {
     // Phase 1.C additions:
     pub use crate::mls::{Group, GroupId, GroupState, KeyPackage, MlsProvider};
     pub use crate::storage::{KeyPackageRepo, MlsGroupRepo};
+    // Phase 1.D additions:
+    pub use crate::contact::{Contact, ContactCard, ContactCardBody};
+    pub use crate::invite::{InviteLink, InviteLinkBody, InvitePsk};
 
     /// Test-only helper: convert an `IdentityKey` to its X25519 static
     /// public key for use as `peer_static_x25519` in

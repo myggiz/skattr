@@ -6,6 +6,7 @@
 //! Repository for `contacts` and `onion_addresses` tables.
 
 use crate::contact::Contact;
+use crate::contact::ContactCard;
 use crate::error::{CoreError, Result};
 use crate::identity::PublicKey;
 use crate::storage::Pool;
@@ -41,11 +42,9 @@ impl<'p> ContactRepo<'p> {
 
     /// Look up by identity pubkey. Returns `Ok(None)` if not present.
     ///
-    /// Note: the `card` field is NOT loaded here — ContactCards are
-    /// stored separately (Phase 1 wiring). For Phase 0.D we return
-    /// contact metadata only with `card: None`.
+    /// Hydrates the contact's latest card (or `None` if no card exists).
     pub fn get(&self, identity: &PublicKey) -> Result<Option<Contact>> {
-        self.pool.with(|c| {
+        let base = self.pool.with(|c| {
             let result = c.query_row(
                 "SELECT display_name, added_at FROM contacts WHERE identity_pubkey = ?1",
                 rusqlite::params![&identity.0[..]],
@@ -63,12 +62,19 @@ impl<'p> ContactRepo<'p> {
                 Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
                 Err(e) => Err(CoreError::Storage(format!("get contact: {e}"))),
             }
-        })
+        })?;
+        let Some(mut contact) = base else {
+            return Ok(None);
+        };
+        contact.card = self.latest_card(identity)?;
+        Ok(Some(contact))
     }
 
     /// Enumerate all contacts, alphabetical by display name (nulls last).
+    ///
+    /// Hydrates each contact's latest card (or `None` if no card exists).
     pub(crate) fn list(&self) -> Result<Vec<Contact>> {
-        self.pool.with(|c| {
+        let mut contacts: Vec<Contact> = self.pool.with(|c| {
             let mut stmt = c
                 .prepare(
                     "SELECT identity_pubkey, display_name, added_at FROM contacts \
@@ -92,7 +98,15 @@ impl<'p> ContactRepo<'p> {
                 .map_err(|e| CoreError::Storage(format!("query list contacts: {e}")))?;
             let out: std::result::Result<Vec<_>, _> = rows.collect();
             out.map_err(|e| CoreError::Storage(format!("collect contacts: {e}")))
-        })
+        })?;
+
+        // Hydrate each contact's latest_card. For small contact lists
+        // (our expected scale: dozens), an N+1 query is fine. Phase 2
+        // can batch via JOIN if needed.
+        for contact in &mut contacts {
+            contact.card = self.latest_card(&contact.identity)?;
+        }
+        Ok(contacts)
     }
 
     /// Delete by identity pubkey. `onion_addresses` rows cascade via FK.
@@ -162,6 +176,95 @@ impl<'p> ContactRepo<'p> {
                 Ok(s) => Ok(Some(s)),
                 Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
                 Err(e) => Err(CoreError::Storage(format!("current_onion: {e}"))),
+            }
+        })
+    }
+
+    /// Insert a freshly-verified `ContactCard`. Rejects with
+    /// `CoreError::Contact("contact: card: stale version")` if the
+    /// version is not strictly greater than the latest stored card's
+    /// version for the same identity. Rejects with
+    /// `CoreError::Contact("contact: card: contact not found")` if
+    /// the contact row doesn't exist.
+    pub fn put_card(&self, card: &ContactCard) -> Result<()> {
+        let identity_bytes = card.body.identity.0;
+        let version_i: i64 = i64::try_from(card.body.version)
+            .map_err(|_| CoreError::Contact("contact: card: version overflows i64".into()))?;
+
+        let mut blob = Vec::new();
+        ciborium::ser::into_writer(card, &mut blob)
+            .map_err(|e| CoreError::Contact(format!("contact: card: cbor encode: {e}")))?;
+
+        let verified_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        self.pool.transaction(|tx| {
+            // Resolve the contact's row id. If missing, fail with the
+            // fixed message before touching contact_cards.
+            let contact_id: i64 = match tx.query_row(
+                "SELECT id FROM contacts WHERE identity_pubkey = ?1",
+                rusqlite::params![&identity_bytes[..]],
+                |r| r.get(0),
+            ) {
+                Ok(id) => id,
+                Err(rusqlite::Error::QueryReturnedNoRows) => {
+                    return Err(CoreError::Contact(
+                        "contact: card: contact not found".into(),
+                    ));
+                }
+                Err(e) => return Err(CoreError::Contact(format!("contact: card: lookup: {e}"))),
+            };
+
+            // Compare against the stored max version; reject if not strictly greater.
+            let max_version: Option<i64> = tx
+                .query_row(
+                    "SELECT MAX(version) FROM contact_cards WHERE contact_id = ?1",
+                    rusqlite::params![contact_id],
+                    |r| r.get::<_, Option<i64>>(0),
+                )
+                .map_err(|e| {
+                    CoreError::Contact(format!("contact: card: max-version lookup: {e}"))
+                })?;
+
+            if let Some(max_v) = max_version {
+                if version_i <= max_v {
+                    return Err(CoreError::Contact("contact: card: stale version".into()));
+                }
+            }
+
+            tx.execute(
+                "INSERT INTO contact_cards (contact_id, version, card_blob, verified_at) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![contact_id, version_i, &blob, verified_at],
+            )
+            .map_err(|e| CoreError::Contact(format!("contact: card: insert: {e}")))?;
+            Ok(())
+        })
+    }
+
+    /// Return the highest-version `ContactCard` for `identity`, or
+    /// `None` if no card exists (or the contact is unknown).
+    pub fn latest_card(&self, identity: &PublicKey) -> Result<Option<ContactCard>> {
+        self.pool.with(|c| {
+            let result = c.query_row(
+                "SELECT cc.card_blob FROM contact_cards cc \
+                 JOIN contacts k ON cc.contact_id = k.id \
+                 WHERE k.identity_pubkey = ?1 \
+                 ORDER BY cc.version DESC LIMIT 1",
+                rusqlite::params![&identity.0[..]],
+                |r| r.get::<_, Vec<u8>>(0),
+            );
+            match result {
+                Ok(blob) => {
+                    let card: ContactCard = ciborium::de::from_reader(&blob[..]).map_err(|e| {
+                        CoreError::Contact(format!("contact: card: cbor decode: {e}"))
+                    })?;
+                    Ok(Some(card))
+                }
+                Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+                Err(e) => Err(CoreError::Contact(format!("contact: card: latest: {e}"))),
             }
         })
     }
@@ -245,6 +348,119 @@ mod tests {
         assert_eq!(count, 0);
     }
 
+    use crate::contact::card::{ContactCard, ContactCardBody};
+    use crate::identity::Signature;
+
+    fn sample_card(seed: u8, version: u64) -> ContactCard {
+        ContactCard {
+            body: ContactCardBody {
+                identity: PublicKey([seed; 32]),
+                onion: format!("onion-{seed}.onion"),
+                mailboxes: Vec::new(),
+                version,
+                expires_at: 1_700_000_000 + i64::from(seed),
+            },
+            // The signature bytes are irrelevant for storage tests —
+            // put_card / latest_card don't re-verify (that's the
+            // caller's job via ContactCard::verify before put_card).
+            signature: Signature([0u8; 64]),
+        }
+    }
+
+    #[test]
+    fn put_card_then_latest_card_round_trip() {
+        let pool = Pool::in_memory();
+        let repo = ContactRepo::new(&pool);
+        let contact = sample_contact(10);
+        repo.upsert(&contact).unwrap();
+
+        let card = sample_card(10, 1);
+        repo.put_card(&card).unwrap();
+
+        let got = repo.latest_card(&contact.identity).unwrap().unwrap();
+        assert_eq!(got.body.version, 1);
+        assert_eq!(got.body.onion, "onion-10.onion");
+    }
+
+    #[test]
+    fn put_card_rejects_stale_version() {
+        let pool = Pool::in_memory();
+        let repo = ContactRepo::new(&pool);
+        let contact = sample_contact(11);
+        repo.upsert(&contact).unwrap();
+
+        repo.put_card(&sample_card(11, 5)).unwrap();
+        let err = repo
+            .put_card(&sample_card(11, 5))
+            .expect_err("same version");
+        assert!(
+            matches!(err, CoreError::Contact(ref s) if s.contains("stale version")),
+            "got: {err:?}"
+        );
+
+        let err = repo
+            .put_card(&sample_card(11, 4))
+            .expect_err("older version");
+        assert!(
+            matches!(err, CoreError::Contact(ref s) if s.contains("stale version")),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn put_card_rejects_when_contact_absent() {
+        let pool = Pool::in_memory();
+        let repo = ContactRepo::new(&pool);
+        // No upsert — the contact row isn't there.
+        let err = repo.put_card(&sample_card(12, 1)).expect_err("no contact");
+        assert!(
+            matches!(err, CoreError::Contact(ref s) if s.contains("contact not found")),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn latest_card_missing_contact_returns_none() {
+        let pool = Pool::in_memory();
+        let repo = ContactRepo::new(&pool);
+        assert!(repo.latest_card(&PublicKey([0x99; 32])).unwrap().is_none());
+    }
+
+    #[test]
+    fn put_card_accepts_higher_version() {
+        let pool = Pool::in_memory();
+        let repo = ContactRepo::new(&pool);
+        let contact = sample_contact(13);
+        repo.upsert(&contact).unwrap();
+
+        repo.put_card(&sample_card(13, 1)).unwrap();
+        repo.put_card(&sample_card(13, 2)).unwrap();
+        repo.put_card(&sample_card(13, 10)).unwrap();
+
+        let latest = repo.latest_card(&contact.identity).unwrap().unwrap();
+        assert_eq!(latest.body.version, 10);
+    }
+
+    #[test]
+    fn cascade_delete_removes_cards() {
+        let pool = Pool::in_memory();
+        let repo = ContactRepo::new(&pool);
+        let contact = sample_contact(14);
+        repo.upsert(&contact).unwrap();
+        repo.put_card(&sample_card(14, 1)).unwrap();
+        repo.put_card(&sample_card(14, 2)).unwrap();
+
+        repo.remove(&contact.identity).unwrap();
+
+        let count: i64 = pool
+            .with(|c| {
+                c.query_row("SELECT COUNT(*) FROM contact_cards", [], |r| r.get(0))
+                    .map_err(|e| CoreError::Storage(e.to_string()))
+            })
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
     #[test]
     fn onion_rotation_flow() {
         let pool = Pool::in_memory();
@@ -260,5 +476,39 @@ mod tests {
             repo.current_onion(&alice.identity).unwrap(),
             Some("bbbb.onion".into())
         );
+    }
+
+    #[test]
+    fn get_hydrates_latest_card() {
+        let pool = Pool::in_memory();
+        let repo = ContactRepo::new(&pool);
+        let contact = sample_contact(20);
+        repo.upsert(&contact).unwrap();
+
+        repo.put_card(&sample_card(20, 1)).unwrap();
+        repo.put_card(&sample_card(20, 2)).unwrap();
+
+        let got = repo.get(&contact.identity).unwrap().unwrap();
+        let card = got.card.expect("contact.card must hydrate");
+        assert_eq!(card.body.version, 2);
+    }
+
+    #[test]
+    fn list_hydrates_latest_card() {
+        let pool = Pool::in_memory();
+        let repo = ContactRepo::new(&pool);
+        let c1 = sample_contact(21);
+        let c2 = sample_contact(22);
+        repo.upsert(&c1).unwrap();
+        repo.upsert(&c2).unwrap();
+
+        repo.put_card(&sample_card(21, 5)).unwrap();
+        // c2 has no card — get should still succeed with card=None.
+
+        let all = repo.list().unwrap();
+        let got_c1 = all.iter().find(|c| c.identity == c1.identity).unwrap();
+        let got_c2 = all.iter().find(|c| c.identity == c2.identity).unwrap();
+        assert_eq!(got_c1.card.as_ref().unwrap().body.version, 5);
+        assert!(got_c2.card.is_none());
     }
 }
