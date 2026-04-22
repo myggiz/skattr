@@ -255,22 +255,40 @@ impl InviteLink {
 
     /// SHA-256 of `body.key_package`.
     pub fn kp_hash(&self) -> [u8; 32] {
-        todo!("Task 10")
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(&self.body.key_package);
+        h.finalize().into()
     }
 
     /// Record this received invite's KP under `direction='theirs'`.
-    pub fn record_received(&self, _kp_repo: &KeyPackageRepo<'_>) -> Result<()> {
-        todo!("Task 10")
+    pub fn record_received(&self, kp_repo: &KeyPackageRepo<'_>) -> Result<()> {
+        let hash = self.kp_hash();
+        // Idempotent: if already present, no-op.
+        if kp_repo.get(&hash)?.is_some() {
+            return Ok(());
+        }
+        kp_repo.insert(&hash, &self.body.key_package, "theirs")
     }
 
     /// Whether this invite's KP has been marked consumed in the repo.
-    pub fn is_consumed(&self, _kp_repo: &KeyPackageRepo<'_>) -> Result<bool> {
-        todo!("Task 10")
+    pub fn is_consumed(&self, kp_repo: &KeyPackageRepo<'_>) -> Result<bool> {
+        let hash = self.kp_hash();
+        match kp_repo.get(&hash)? {
+            Some((_, consumed)) => Ok(consumed),
+            None => Ok(false),
+        }
     }
 
     /// Flip `consumed=1` for this invite's KP.
-    pub fn mark_consumed(&self, _kp_repo: &KeyPackageRepo<'_>) -> Result<()> {
-        todo!("Task 10")
+    pub fn mark_consumed(&self, kp_repo: &KeyPackageRepo<'_>) -> Result<()> {
+        let hash = self.kp_hash();
+        if kp_repo.get(&hash)?.is_none() {
+            return Err(crate::error::CoreError::Invite(
+                "invite: unknown: not recorded".into(),
+            ));
+        }
+        kp_repo.mark_consumed(&hash)
     }
 }
 
@@ -498,5 +516,81 @@ mod tests {
             crate::error::CoreError::Invite(s) => assert!(s.contains("expired"), "got: {s}"),
             other => panic!("expected Invite, got {other:?}"),
         }
+    }
+
+    use crate::storage::{KeyPackageRepo, Pool};
+
+    fn make_invite() -> InviteLink {
+        let inviter = IdentityKey::generate().unwrap();
+        InviteLink::generate(
+            &inviter,
+            "a.onion".into(),
+            fixed_kp(),
+            [0xAA; 32],
+            3600,
+            1_000_000,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn kp_hash_matches_sha256_of_key_package() {
+        let invite = make_invite();
+        let hash = invite.kp_hash();
+
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(&invite.body.key_package);
+        let expected: [u8; 32] = h.finalize().into();
+        assert_eq!(hash, expected);
+    }
+
+    #[test]
+    fn record_received_then_is_consumed_false_then_mark_then_true() {
+        let pool = Pool::in_memory();
+        let kp_repo = KeyPackageRepo::new(&pool);
+        let invite = make_invite();
+
+        invite.record_received(&kp_repo).unwrap();
+        assert!(!invite.is_consumed(&kp_repo).unwrap());
+
+        invite.mark_consumed(&kp_repo).unwrap();
+        assert!(invite.is_consumed(&kp_repo).unwrap());
+    }
+
+    #[test]
+    fn record_received_is_idempotent() {
+        let pool = Pool::in_memory();
+        let kp_repo = KeyPackageRepo::new(&pool);
+        let invite = make_invite();
+
+        invite.record_received(&kp_repo).unwrap();
+        invite.record_received(&kp_repo).unwrap();
+
+        let hash = invite.kp_hash();
+        let row = kp_repo.get(&hash).unwrap().unwrap();
+        assert_eq!(row.0, invite.body.key_package);
+    }
+
+    #[test]
+    fn mark_consumed_on_unrecorded_errors() {
+        let pool = Pool::in_memory();
+        let kp_repo = KeyPackageRepo::new(&pool);
+        let invite = make_invite();
+        let err = invite.mark_consumed(&kp_repo).expect_err("unrecorded");
+        match err {
+            crate::error::CoreError::Invite(s) => {
+                assert!(s.contains("unknown"), "got: {s}");
+            }
+            other => panic!("expected Invite, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn is_consumed_returns_false_for_unrecorded() {
+        let pool = Pool::in_memory();
+        let kp_repo = KeyPackageRepo::new(&pool);
+        let invite = make_invite();
+        assert!(!invite.is_consumed(&kp_repo).unwrap());
     }
 }
