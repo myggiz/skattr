@@ -4,6 +4,7 @@
 //! Send/receive plumbing: outbox queue, retry, dedup, ACK handling.
 
 pub(crate) mod backoff;
+pub(crate) mod hub;
 pub(crate) mod outbox;
+pub(crate) mod peer;
 pub(crate) mod receiver;
-pub(crate) mod sender;
