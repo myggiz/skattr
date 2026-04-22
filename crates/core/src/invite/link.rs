@@ -58,14 +58,36 @@ pub struct InvitePsk(pub [u8; 32]);
 impl InviteLink {
     /// Build + sign a new invite.
     pub fn generate(
-        _inviter: &IdentityKey,
-        _onion: String,
-        _key_package: Vec<u8>,
-        _psk: [u8; 32],
-        _ttl_secs: u64,
-        _now: i64,
+        inviter: &IdentityKey,
+        onion: String,
+        key_package: Vec<u8>,
+        psk: [u8; 32],
+        ttl_secs: u64,
+        now: i64,
     ) -> Result<Self> {
-        todo!("Task 7")
+        let expires_at =
+            now.checked_add(i64::try_from(ttl_secs).map_err(|_| {
+                crate::error::CoreError::Invite("invite: ttl overflows i64".into())
+            })?)
+            .ok_or_else(|| {
+                crate::error::CoreError::Invite("invite: expires_at overflows i64".into())
+            })?;
+
+        let body = InviteLinkBody {
+            identity: inviter.public(),
+            onion,
+            key_package,
+            psk,
+            expires_at,
+        };
+        let signature = inviter
+            .sign_cbor(&body)
+            .map_err(|e| crate::error::CoreError::Invite(format!("invite: sign: {e}")))?;
+        Ok(Self {
+            body,
+            signature,
+            psk: InvitePsk(psk),
+        })
     }
 
     /// Parse + verify a `skattr://invite/v1#...` URL.
@@ -96,5 +118,54 @@ impl InviteLink {
     /// Flip `consumed=1` for this invite's KP.
     pub fn mark_consumed(&self, _kp_repo: &KeyPackageRepo<'_>) -> Result<()> {
         todo!("Task 10")
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    fn fixed_kp() -> Vec<u8> {
+        (0..64u8).collect()
+    }
+
+    #[test]
+    fn generate_populates_body_and_signature() {
+        let inviter = IdentityKey::generate().unwrap();
+        let psk = [0xAA; 32];
+        let invite = InviteLink::generate(
+            &inviter,
+            "abc.onion".into(),
+            fixed_kp(),
+            psk,
+            3600,
+            1_000_000,
+        )
+        .unwrap();
+
+        assert_eq!(invite.body.identity, inviter.public());
+        assert_eq!(invite.body.onion, "abc.onion");
+        assert_eq!(invite.body.key_package, fixed_kp());
+        assert_eq!(invite.body.psk, psk);
+        assert_eq!(invite.body.expires_at, 1_000_000 + 3600);
+        assert_eq!(invite.signature.0.len(), 64);
+        assert_eq!(invite.psk.0, psk);
+    }
+
+    #[test]
+    fn generate_signature_verifies_via_identity() {
+        let inviter = IdentityKey::generate().unwrap();
+        let invite = InviteLink::generate(
+            &inviter,
+            "xyz.onion".into(),
+            fixed_kp(),
+            [0xBB; 32],
+            3600,
+            1_000_000,
+        )
+        .unwrap();
+        IdentityKey::verify_cbor(&invite.body.identity, &invite.body, &invite.signature)
+            .expect("body signature must verify against its embedded identity");
     }
 }
