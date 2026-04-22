@@ -42,14 +42,30 @@ pub struct ContactCard {
 impl ContactCard {
     /// Build and sign a new card.
     pub fn sign(
-        _signer: &IdentityKey,
-        _onion: String,
-        _mailboxes: Vec<String>,
-        _version: u64,
-        _ttl_secs: u64,
-        _now: i64,
+        signer: &IdentityKey,
+        onion: String,
+        mailboxes: Vec<String>,
+        version: u64,
+        ttl_secs: u64,
+        now: i64,
     ) -> Result<Self> {
-        todo!("Task 5")
+        let expires_at = now
+            .checked_add(i64::try_from(ttl_secs).map_err(|_| {
+                crate::error::CoreError::Contact("contact: card: ttl overflows i64".into())
+            })?)
+            .ok_or_else(|| {
+                crate::error::CoreError::Contact("contact: card: expires_at overflows i64".into())
+            })?;
+
+        let body = ContactCardBody {
+            identity: signer.public(),
+            onion,
+            mailboxes,
+            version,
+            expires_at,
+        };
+        let signature = signer.sign_cbor(&body)?;
+        Ok(Self { body, signature })
     }
 
     /// Verify the Ed25519 signature + expiry. On success returns the
@@ -57,5 +73,32 @@ impl ContactCard {
     /// known contact).
     pub fn verify(&self, _now: i64) -> Result<PublicKey> {
         todo!("Task 6")
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sign_fills_body_fields_and_signature_is_64_bytes() {
+        let signer = IdentityKey::generate().unwrap();
+        let card = ContactCard::sign(
+            &signer,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion".into(),
+            Vec::new(),
+            7,
+            3600,
+            1_000_000,
+        )
+        .unwrap();
+
+        assert_eq!(card.body.identity, signer.public());
+        assert_eq!(card.body.version, 7);
+        assert_eq!(card.body.expires_at, 1_000_000 + 3600);
+        assert!(card.body.mailboxes.is_empty());
+        assert_eq!(card.body.onion.len(), 62); // 56-char onion + ".onion"
+        assert_eq!(card.signature.0.len(), 64);
     }
 }
