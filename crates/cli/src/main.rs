@@ -101,6 +101,11 @@ enum Command {
         contact: String,
         /// Message body.
         text: String,
+        /// Exit with status 8 if the daemon reports Queued (no ACK
+        /// within the inline wait). Without this flag the CLI prints
+        /// "queued" and exits 0.
+        #[arg(long)]
+        fail_on_timeout: bool,
     },
     /// Tail incoming messages.
     Tail {
@@ -227,7 +232,9 @@ async fn main() -> Result<()> {
         Command::Invite { qr } => invite(qr, socket.as_deref(), json).await,
         Command::Add { link } => add(&link, socket.as_deref(), json).await,
         Command::Contacts => contacts(socket.as_deref(), json).await,
-        Command::Send { contact, text } => send(&contact, &text).await,
+        Command::Send { contact, text, fail_on_timeout } => {
+            send(&contact, &text, fail_on_timeout, socket.as_deref(), json).await
+        }
         Command::Tail { contact } => tail(contact.as_deref()).await,
     }
 }
@@ -605,9 +612,92 @@ fn render_contacts_human(rows: &[skattr_core::daemon::commands::ContactSummary])
     out
 }
 
-async fn send(_contact: &str, _text: &str) -> Result<()> {
-    println!("skattr send: not yet implemented.");
+async fn send(
+    contact_prefix: &str,
+    text: &str,
+    fail_on_timeout: bool,
+    sock_flag: Option<&std::path::Path>,
+    json: bool,
+) -> Result<()> {
+    use skattr_core::daemon::{Command as CoreCommand, CommandResult};
+    use skattr_core::daemon::commands::SendStatus;
+    use skattr_core::envelope::Kind;
+
+    let mut client = connect_or_exit(sock_flag).await?;
+
+    // Resolve prefix via ListContacts (server-side).
+    let rows_result = match client.execute(CoreCommand::ListContacts).await {
+        Ok(r) => r,
+        Err(e) => exit_on_ipc_error(e),
+    };
+    let rows = match rows_result {
+        CommandResult::Contacts(rows) => rows,
+        other => anyhow::bail!("unexpected result: {other:?}"),
+    };
+    let pubkey = match resolve_contact(&rows, contact_prefix) {
+        Ok(pk) => pk,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(6);
+        }
+    };
+
+    let result = match client
+        .execute(CoreCommand::SendMessage {
+            contact: pubkey,
+            kind: Kind::Text { body: text.to_string() },
+        })
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => exit_on_ipc_error(e),
+    };
+
+    let (msg_id, status) = match result {
+        CommandResult::MessageSent { message_id, status } => (message_id, status),
+        other => anyhow::bail!("unexpected result: {other:?}"),
+    };
+
+    if json {
+        let obj = serde_json::json!({
+            "message_id": msg_id.to_string(),
+            "status": match status {
+                SendStatus::Queued => "queued",
+                SendStatus::Delivered => "delivered",
+            },
+        });
+        println!("{obj}");
+    } else {
+        println!(
+            "{msg_id}  {state}",
+            state = match status { SendStatus::Queued => "queued", SendStatus::Delivered => "delivered" }
+        );
+    }
+
+    if fail_on_timeout && matches!(status, SendStatus::Queued) {
+        std::process::exit(8);
+    }
     Ok(())
+}
+
+fn resolve_contact(
+    rows: &[skattr_core::daemon::commands::ContactSummary],
+    prefix: &str,
+) -> Result<skattr_core::identity::PublicKey> {
+    let lower = prefix.to_ascii_lowercase();
+    let mut matches: Vec<&skattr_core::daemon::commands::ContactSummary> = rows
+        .iter()
+        .filter(|r| {
+            let hex: String = r.pubkey.0.iter().map(|b| format!("{b:02x}")).collect();
+            hex.starts_with(&lower)
+                || r.nickname.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(prefix))
+        })
+        .collect();
+    match matches.len() {
+        1 => Ok(matches.remove(0).pubkey),
+        0 => anyhow::bail!("no contact matches {prefix:?}"),
+        n => anyhow::bail!("ambiguous: {n} contacts match {prefix:?}"),
+    }
 }
 
 async fn tail(_contact: Option<&str>) -> Result<()> {
@@ -707,6 +797,39 @@ mod tests {
         assert!(out.contains("alice"));
         assert!(out.contains("aaaa.onion"));
         assert!(out.contains("abab")); // pubkey prefix
+    }
+
+    #[test]
+    fn resolve_contact_matches_unique_prefix() {
+        use skattr_core::daemon::commands::ContactSummary;
+        use skattr_core::identity::PublicKey;
+
+        let rows = vec![
+            ContactSummary { pubkey: PublicKey([0xAB; 32]), nickname: None, onion: "".into(), card_version: 0, added_at: 0 },
+            ContactSummary { pubkey: PublicKey([0xCD; 32]), nickname: None, onion: "".into(), card_version: 0, added_at: 0 },
+        ];
+        let pk = resolve_contact(&rows, "ab").unwrap();
+        assert_eq!(pk.0[0], 0xAB);
+    }
+
+    #[test]
+    fn resolve_contact_ambiguous_returns_error_with_count() {
+        use skattr_core::daemon::commands::ContactSummary;
+        use skattr_core::identity::PublicKey;
+
+        let rows = vec![
+            ContactSummary { pubkey: PublicKey([0xAB; 32]), nickname: None, onion: "".into(), card_version: 0, added_at: 0 },
+            ContactSummary { pubkey: PublicKey({ let mut b = [0xAB; 32]; b[1] = 0xCD; b }), nickname: None, onion: "".into(), card_version: 0, added_at: 0 },
+        ];
+        let err = resolve_contact(&rows, "ab").unwrap_err();
+        assert!(err.to_string().contains("ambiguous"));
+    }
+
+    #[test]
+    fn resolve_contact_no_match_returns_error() {
+        let rows: Vec<skattr_core::daemon::commands::ContactSummary> = vec![];
+        let err = resolve_contact(&rows, "ff").unwrap_err();
+        assert!(err.to_string().contains("no contact"));
     }
 
     #[test]
