@@ -244,6 +244,82 @@ impl<'p> ContactRepo<'p> {
         })
     }
 
+    /// Set the MLS group id for `identity`. Returns `CoreError::Contact`
+    /// if the contact row is missing.
+    pub fn set_group_id(&self, identity: &PublicKey, group_id: &[u8]) -> Result<()> {
+        self.pool.with_mut(|c| {
+            let changed = c
+                .execute(
+                    "UPDATE contacts SET group_id = ?1 WHERE identity_pubkey = ?2",
+                    rusqlite::params![group_id, &identity.0[..]],
+                )
+                .map_err(|e| CoreError::Storage(format!("set group_id: {e}")))?;
+            if changed == 0 {
+                return Err(CoreError::Contact(
+                    "contact: group_id: contact not found".into(),
+                ));
+            }
+            Ok(())
+        })
+    }
+
+    /// Read the MLS group id for `identity`. Returns `Ok(None)` if the
+    /// contact row is missing; `Ok(Some(Vec::new()))` for a contact that
+    /// has not yet been linked to a group (pre-`AddContact`).
+    pub fn get_group_id(&self, identity: &PublicKey) -> Result<Option<Vec<u8>>> {
+        self.pool.with(|c| {
+            let result = c.query_row(
+                "SELECT group_id FROM contacts WHERE identity_pubkey = ?1",
+                rusqlite::params![&identity.0[..]],
+                |r| r.get::<_, Vec<u8>>(0),
+            );
+            match result {
+                Ok(v) => Ok(Some(v)),
+                Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+                Err(e) => Err(CoreError::Storage(format!("get group_id: {e}"))),
+            }
+        })
+    }
+
+    /// Find every contact whose hex-encoded `identity_pubkey` starts
+    /// with `prefix` (case-insensitive). Empty result = no match;
+    /// the caller enforces "exactly one" when a unique contact is
+    /// required. Returns `CoreError::Contact` if `prefix` contains
+    /// non-hex characters.
+    pub fn lookup_by_prefix(&self, prefix: &str) -> Result<Vec<PublicKey>> {
+        if !prefix.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(CoreError::Contact(format!(
+                "contact: lookup: non-hex prefix {prefix:?}"
+            )));
+        }
+        let lower = prefix.to_ascii_lowercase();
+        self.pool.with(|c| {
+            let mut stmt = c
+                .prepare("SELECT identity_pubkey FROM contacts")
+                .map_err(|e| CoreError::Storage(format!("prepare lookup: {e}")))?;
+            let rows = stmt
+                .query_map([], |r| r.get::<_, Vec<u8>>(0))
+                .map_err(|e| CoreError::Storage(format!("query lookup: {e}")))?;
+            let mut out = Vec::new();
+            for row in rows {
+                let bytes = row.map_err(|e| CoreError::Storage(format!("row lookup: {e}")))?;
+                if bytes.len() != 32 {
+                    continue;
+                }
+                let hex = bytes
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>();
+                if hex.starts_with(&lower) {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&bytes);
+                    out.push(PublicKey(arr));
+                }
+            }
+            Ok(out)
+        })
+    }
+
     /// Return the highest-version `ContactCard` for `identity`, or
     /// `None` if no card exists (or the contact is unknown).
     pub fn latest_card(&self, identity: &PublicKey) -> Result<Option<ContactCard>> {
@@ -510,5 +586,81 @@ mod tests {
         let got_c2 = all.iter().find(|c| c.identity == c2.identity).unwrap();
         assert_eq!(got_c1.card.as_ref().unwrap().body.version, 5);
         assert!(got_c2.card.is_none());
+    }
+
+    #[test]
+    fn set_get_group_id_round_trip() {
+        let pool = Pool::in_memory();
+        let repo = ContactRepo::new(&pool);
+        let alice = sample_contact(30);
+        repo.upsert(&alice).unwrap();
+
+        // Default group_id is empty (per migration 0005).
+        assert_eq!(repo.get_group_id(&alice.identity).unwrap(), Some(Vec::new()));
+
+        let gid = vec![0xAAu8; 32];
+        repo.set_group_id(&alice.identity, &gid).unwrap();
+        assert_eq!(repo.get_group_id(&alice.identity).unwrap(), Some(gid));
+    }
+
+    #[test]
+    fn get_group_id_missing_contact_returns_none() {
+        let pool = Pool::in_memory();
+        let repo = ContactRepo::new(&pool);
+        assert!(repo.get_group_id(&PublicKey([0x99; 32])).unwrap().is_none());
+    }
+
+    #[test]
+    fn lookup_by_prefix_returns_unique_match() {
+        let pool = Pool::in_memory();
+        let repo = ContactRepo::new(&pool);
+        let alice = sample_contact(0x10);
+        let bob = sample_contact(0x20);
+        repo.upsert(&alice).unwrap();
+        repo.upsert(&bob).unwrap();
+
+        // "10" is a unique 1-byte hex prefix for alice.
+        let hit = repo.lookup_by_prefix("10").unwrap();
+        assert_eq!(hit, vec![alice.identity]);
+    }
+
+    #[test]
+    fn lookup_by_prefix_returns_all_ambiguous_matches() {
+        let pool = Pool::in_memory();
+        let repo = ContactRepo::new(&pool);
+        // Two contacts both starting with 0xAB.
+        let mut a = sample_contact(0xAB);
+        a.identity = PublicKey([0xAB; 32]);
+        let mut b = sample_contact(0xAB);
+        b.identity = PublicKey({
+            let mut bytes = [0xAB; 32];
+            bytes[1] = 0xCD;
+            bytes
+        });
+        repo.upsert(&a).unwrap();
+        repo.upsert(&b).unwrap();
+
+        let mut hits = repo.lookup_by_prefix("ab").unwrap();
+        hits.sort();
+        let mut want = vec![a.identity, b.identity];
+        want.sort();
+        assert_eq!(hits, want);
+    }
+
+    #[test]
+    fn lookup_by_prefix_empty_returns_empty() {
+        let pool = Pool::in_memory();
+        let repo = ContactRepo::new(&pool);
+        repo.upsert(&sample_contact(1)).unwrap();
+        // Unknown prefix -> empty result (NOT error).
+        assert!(repo.lookup_by_prefix("ff00").unwrap().is_empty());
+    }
+
+    #[test]
+    fn lookup_by_prefix_rejects_non_hex() {
+        let pool = Pool::in_memory();
+        let repo = ContactRepo::new(&pool);
+        let err = repo.lookup_by_prefix("zz").expect_err("non-hex prefix");
+        assert!(matches!(err, CoreError::Contact(ref s) if s.contains("hex")), "got {err:?}");
     }
 }
