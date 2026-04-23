@@ -10,7 +10,6 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
-use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -39,6 +38,11 @@ struct Cli {
     /// JSON output (for scripting).
     #[arg(long, global = true)]
     json: bool,
+
+    /// Read the vault passphrase from FILE (one passphrase, optional
+    /// trailing newline). Overridden by `$SKATTR_PASSPHRASE_FILE`.
+    #[arg(long, value_name = "FILE", global = true)]
+    passphrase_file: Option<PathBuf>,
 
     /// Subcommand.
     #[command(subcommand)]
@@ -110,6 +114,7 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+    let passphrase_file = cli_passphrase_file_or_env(&cli);
     match cli.cmd {
         Command::Init => init(cli.data_dir.as_deref()).await,
         Command::Restore { seed } => restore(&seed, cli.data_dir.as_deref()).await,
@@ -117,7 +122,9 @@ async fn main() -> Result<()> {
         Command::RestoreBackup { seed, file } => {
             restore_backup(&seed, &file, cli.data_dir.as_deref()).await
         }
-        Command::Daemon { detach } => daemon(detach, cli.data_dir.as_deref()).await,
+        Command::Daemon { detach } => {
+            daemon(detach, cli.data_dir.as_deref(), passphrase_file).await
+        }
         Command::Invite { qr } => invite(qr).await,
         Command::Add { link } => add(&link).await,
         Command::Contacts => contacts().await,
@@ -174,17 +181,49 @@ async fn init(data_dir_override: Option<&std::path::Path>) -> Result<()> {
     Ok(())
 }
 
+/// Source the daemon passphrase can come from.
+#[derive(Debug, Clone)]
+enum PassphraseSource {
+    /// Prompt on `/dev/tty` with echo off.
+    InteractiveTty(String),
+    /// Read from a file at `path`; trim exactly one trailing newline.
+    File(std::path::PathBuf),
+}
+
 fn read_passphrase(prompt: &str) -> Result<zeroize::Zeroizing<String>> {
-    // TODO(phase-2): use rpassword to suppress terminal echo.
-    print!("{prompt}");
-    io::stdout().flush()?;
-    let mut line = zeroize::Zeroizing::new(String::new());
-    io::stdin().lock().read_line(&mut line)?;
-    // Trim trailing newline in-place.
-    while line.ends_with('\n') || line.ends_with('\r') {
-        line.pop();
+    read_passphrase_from_source(PassphraseSource::InteractiveTty(prompt.to_string()))
+}
+
+fn read_passphrase_from_source(source: PassphraseSource) -> Result<zeroize::Zeroizing<String>> {
+    match source {
+        PassphraseSource::InteractiveTty(prompt) => {
+            let raw = rpassword::prompt_password(prompt)
+                .map_err(|e| anyhow::anyhow!("read passphrase: {e}"))?;
+            Ok(zeroize::Zeroizing::new(raw))
+        }
+        PassphraseSource::File(path) => read_passphrase_from_file(&path),
     }
-    Ok(line)
+}
+
+fn read_passphrase_from_file(path: &std::path::Path) -> Result<zeroize::Zeroizing<String>> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("read passphrase from {}: {e}", path.display()))?;
+    // Trim exactly one trailing newline (CRLF or LF), preserve internal newlines.
+    let mut pw = zeroize::Zeroizing::new(raw);
+    if pw.ends_with('\n') {
+        pw.pop();
+        if pw.ends_with('\r') {
+            pw.pop();
+        }
+    }
+    Ok(pw)
+}
+
+fn cli_passphrase_file_or_env(cli: &Cli) -> Option<PathBuf> {
+    if let Some(p) = &cli.passphrase_file {
+        return Some(p.clone());
+    }
+    std::env::var_os("SKATTR_PASSPHRASE_FILE").map(PathBuf::from)
 }
 
 async fn restore(seed_phrase: &str, data_dir_override: Option<&std::path::Path>) -> Result<()> {
@@ -282,7 +321,11 @@ async fn restore_backup(
     Ok(())
 }
 
-async fn daemon(detach: bool, data_dir_override: Option<&std::path::Path>) -> Result<()> {
+async fn daemon(
+    detach: bool,
+    data_dir_override: Option<&std::path::Path>,
+    passphrase_file: Option<PathBuf>,
+) -> Result<()> {
     use skattr_core::daemon::{Config, Daemon};
 
     if detach {
@@ -303,7 +346,10 @@ async fn daemon(detach: bool, data_dir_override: Option<&std::path::Path>) -> Re
         );
     }
 
-    let pw = read_passphrase("Vault passphrase: ")?;
+    let pw = match passphrase_file {
+        Some(path) => read_passphrase_from_source(PassphraseSource::File(path))?,
+        None => read_passphrase("Vault passphrase: ")?,
+    };
 
     println!("Bootstrapping Tor\u{2026}");
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
@@ -361,4 +407,34 @@ async fn send(_contact: &str, _text: &str) -> Result<()> {
 async fn tail(_contact: Option<&str>) -> Result<()> {
     println!("skattr tail: not yet implemented.");
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn read_from_file_trims_single_trailing_newline() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        writeln!(tmp, "secret-pw").unwrap();
+        let pw = read_passphrase_from_file(tmp.path()).unwrap();
+        assert_eq!(pw.as_str(), "secret-pw");
+    }
+
+    #[test]
+    fn read_from_file_preserves_internal_newlines() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        write!(tmp, "line1\nline2\n").unwrap();
+        let pw = read_passphrase_from_file(tmp.path()).unwrap();
+        assert_eq!(pw.as_str(), "line1\nline2");
+    }
+
+    #[test]
+    fn read_from_missing_file_returns_error() {
+        let err = read_passphrase_from_file(std::path::Path::new("/does/not/exist"))
+            .expect_err("missing file must error");
+        assert!(err.to_string().contains("/does/not/exist"));
+    }
 }
