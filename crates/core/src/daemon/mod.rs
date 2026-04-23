@@ -15,6 +15,7 @@ pub mod config;
 pub mod error_kind;
 pub mod events;
 pub mod hex;
+pub mod ipc;
 pub mod state;
 
 pub use commands::{Command, CommandResult};
