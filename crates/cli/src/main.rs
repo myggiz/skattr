@@ -107,10 +107,16 @@ enum Command {
         #[arg(long)]
         fail_on_timeout: bool,
     },
-    /// Tail incoming messages.
+    /// Tail messages. Without --follow: dump most recent N and exit.
     Tail {
-        /// Only from this contact.
+        /// Only from this contact (prefix or nickname).
         contact: Option<String>,
+        /// Max rows to dump before exiting (only affects non-follow mode).
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
+        /// Follow: after dumping, stream new MessageReceived events.
+        #[arg(long)]
+        follow: bool,
     },
 }
 
@@ -235,7 +241,7 @@ async fn main() -> Result<()> {
         Command::Send { contact, text, fail_on_timeout } => {
             send(&contact, &text, fail_on_timeout, socket.as_deref(), json).await
         }
-        Command::Tail { contact } => tail(contact.as_deref()).await,
+        Command::Tail { contact, limit, follow } => tail(contact.as_deref(), limit, follow, socket.as_deref(), json).await,
     }
 }
 
@@ -700,8 +706,165 @@ fn resolve_contact(
     }
 }
 
-async fn tail(_contact: Option<&str>) -> Result<()> {
-    println!("skattr tail: not yet implemented.");
+async fn tail(
+    contact_prefix: Option<&str>,
+    limit: u32,
+    follow: bool,
+    sock_flag: Option<&std::path::Path>,
+    json: bool,
+) -> Result<()> {
+    use skattr_core::daemon::{Command as CoreCommand, CommandResult};
+
+    if follow {
+        return tail_follow(contact_prefix, limit, sock_flag).await;
+    }
+
+    let mut client = connect_or_exit(sock_flag).await?;
+    let target = resolve_optional_contact(&mut client, contact_prefix).await?;
+
+    let result = match client
+        .execute(CoreCommand::RecentMessages { contact: target, limit })
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => exit_on_ipc_error(e),
+    };
+
+    let rows = match result {
+        CommandResult::Messages(rows) => rows,
+        other => anyhow::bail!("unexpected result: {other:?}"),
+    };
+
+    if json {
+        println!("{}", serde_json::to_string(&rows)?);
+    } else {
+        print!("{}", render_messages_human(&rows));
+    }
+    Ok(())
+}
+
+async fn resolve_optional_contact(
+    client: &mut skattr_core::daemon::IpcClient<tokio::net::UnixStream>,
+    prefix: Option<&str>,
+) -> Result<Option<skattr_core::identity::PublicKey>> {
+    use skattr_core::daemon::{Command as CoreCommand, CommandResult};
+    let Some(prefix) = prefix else { return Ok(None) };
+    let rows_result = match client.execute(CoreCommand::ListContacts).await {
+        Ok(r) => r,
+        Err(e) => exit_on_ipc_error(e),
+    };
+    let rows = match rows_result {
+        CommandResult::Contacts(rows) => rows,
+        other => anyhow::bail!("unexpected result: {other:?}"),
+    };
+    match resolve_contact(&rows, prefix) {
+        Ok(pk) => Ok(Some(pk)),
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(6);
+        }
+    }
+}
+
+fn render_messages_human(rows: &[skattr_core::daemon::commands::MessageRecord]) -> String {
+    use skattr_core::daemon::commands::Direction;
+    use skattr_core::envelope::Kind;
+    use std::fmt::Write;
+
+    if rows.is_empty() {
+        return "No messages.\n".to_string();
+    }
+
+    let mut out = String::new();
+    // Render oldest-first on stdout (`recent` returns newest-first).
+    for row in rows.iter().rev() {
+        let arrow = match row.direction {
+            Direction::Incoming => "<-",
+            Direction::Outgoing => "->",
+        };
+        let body = match &row.kind {
+            Kind::Text { body } => body.clone(),
+            other => format!("({other:?})"),
+        };
+        let contact_short: String =
+            row.contact.0.iter().take(4).map(|b| format!("{b:02x}")).collect();
+        let _ = writeln!(
+            out,
+            "[{ts}] {arrow} {contact_short} {body}",
+            ts = row.ts_daemon_recv
+        );
+    }
+    out
+}
+
+async fn tail_follow(
+    contact_prefix: Option<&str>,
+    limit: u32,
+    sock_flag: Option<&std::path::Path>,
+) -> Result<()> {
+    use skattr_core::daemon::events::Event;
+    use skattr_core::daemon::ipc::wire::EventFilter;
+    use skattr_core::daemon::{Command as CoreCommand, CommandResult, IpcClientError};
+    use skattr_core::envelope::Kind;
+
+    let mut client = connect_or_exit(sock_flag).await?;
+    let target = resolve_optional_contact(&mut client, contact_prefix).await?;
+
+    // 1. Dump recent.
+    let recent = match client
+        .execute(CoreCommand::RecentMessages { contact: target, limit })
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => exit_on_ipc_error(e),
+    };
+    if let CommandResult::Messages(rows) = recent {
+        print!("{}", render_messages_human(&rows));
+    }
+
+    // 2. Subscribe.
+    let filter = match target {
+        Some(pk) => EventFilter::Contact(pk),
+        None => EventFilter::All,
+    };
+    match client.subscribe(filter).await {
+        Ok(()) => {}
+        Err(e) => exit_on_ipc_error(e),
+    }
+
+    // 3. Stream events until Ctrl-C / EOF.
+    loop {
+        let ev = match client.next_event().await {
+            Ok(ev) => ev,
+            Err(IpcClientError::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(IpcClientError::UnexpectedFrame(_)) => break,
+            Err(other) => exit_on_ipc_error(other),
+        };
+        match ev {
+            Event::MessageReceived { from, envelope } => {
+                let short: String =
+                    from.0.iter().take(4).map(|b| format!("{b:02x}")).collect();
+                let body = match envelope.kind {
+                    Kind::Text { body } => body,
+                    other => format!("({other:?})"),
+                };
+                println!("[{ts}] <- {short} {body}", ts = envelope.ts);
+            }
+            Event::DeliveryStatusChanged { message, status } => {
+                let id_hex: String =
+                    message.0.iter().map(|b| format!("{b:02x}")).collect();
+                println!("... {id_hex} {status:?}");
+            }
+            Event::ContactUpdated(pk) => {
+                let short: String =
+                    pk.0.iter().take(4).map(|b| format!("{b:02x}")).collect();
+                println!("contact updated: {short}");
+            }
+            Event::TorStatusChanged(s) => {
+                eprintln!("tor: {s:?}");
+            }
+        }
+    }
     Ok(())
 }
 
@@ -830,6 +993,32 @@ mod tests {
         let rows: Vec<skattr_core::daemon::commands::ContactSummary> = vec![];
         let err = resolve_contact(&rows, "ff").unwrap_err();
         assert!(err.to_string().contains("no contact"));
+    }
+
+    #[test]
+    fn render_messages_human_empty() {
+        let out = render_messages_human(&[]);
+        assert_eq!(out.trim(), "No messages.");
+    }
+
+    #[test]
+    fn render_messages_human_one_text_row() {
+        use skattr_core::daemon::commands::{Direction, MessageRecord};
+        use skattr_core::daemon::hex::Hex16;
+        use skattr_core::envelope::Kind;
+        use skattr_core::identity::PublicKey;
+        let rows = vec![MessageRecord {
+            message_id: Hex16::from([2; 16]),
+            contact: PublicKey([7; 32]),
+            direction: Direction::Incoming,
+            kind: Kind::Text { body: "hello".into() },
+            mls_generation: 0,
+            ts_daemon_recv: 1_700_000_000,
+            ts_envelope: 1_699_999_999,
+        }];
+        let out = render_messages_human(&rows);
+        assert!(out.contains("hello"));
+        assert!(out.contains("<-")); // incoming arrow
     }
 
     #[test]
