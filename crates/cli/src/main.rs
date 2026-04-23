@@ -44,6 +44,11 @@ struct Cli {
     #[arg(long, value_name = "FILE", global = true)]
     passphrase_file: Option<PathBuf>,
 
+    /// Path to the daemon's IPC socket. Overrides $SKATTR_SOCKET and
+    /// the XDG default.
+    #[arg(long, global = true, value_name = "PATH")]
+    socket: Option<PathBuf>,
+
     /// Subcommand.
     #[command(subcommand)]
     cmd: Command,
@@ -102,6 +107,98 @@ enum Command {
         /// Only from this contact.
         contact: Option<String>,
     },
+}
+
+/// Resolve the IPC socket path with precedence flag > env > XDG default.
+fn resolve_socket_path(flag: Option<&std::path::Path>) -> PathBuf {
+    if let Some(p) = flag {
+        return p.to_path_buf();
+    }
+    if let Some(env) = std::env::var_os("SKATTR_SOCKET") {
+        return PathBuf::from(env);
+    }
+    let base = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("TMPDIR").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("/tmp"));
+    base.join("skattr").join("daemon.sock")
+}
+
+/// Connect or print a helpful error and exit with code 3. Returns a
+/// live `IpcClient` on success.
+async fn connect_or_exit(
+    sock_flag: Option<&std::path::Path>,
+) -> Result<skattr_core::daemon::IpcClient<tokio::net::UnixStream>> {
+    let path = resolve_socket_path(sock_flag);
+    match skattr_core::daemon::IpcClient::connect(&path).await {
+        Ok(c) => Ok(c),
+        Err(skattr_core::daemon::IpcClientError::DaemonNotRunning) => {
+            eprintln!("skattr daemon is not running.");
+            eprintln!("Start it with:  skattr daemon");
+            std::process::exit(3);
+        }
+        Err(e) => Err(anyhow::anyhow!("ipc: {e}")),
+    }
+}
+
+/// Translate a wire `IpcClientError` into a one-line human-readable message
+/// plus a stable exit code. Called from every command's error branch.
+fn exit_on_ipc_error(err: skattr_core::daemon::IpcClientError) -> ! {
+    use skattr_core::daemon::error_kind::DaemonErrorKind;
+    use skattr_core::daemon::ipc::wire::IpcError;
+    use skattr_core::daemon::IpcClientError;
+    match err {
+        IpcClientError::Server(IpcError::AuthDenied) => {
+            eprintln!("ipc: auth denied (peer-cred mismatch)");
+            std::process::exit(4);
+        }
+        IpcClientError::Server(IpcError::Daemon(k)) => match k {
+            DaemonErrorKind::ContactNotFound => {
+                eprintln!("contact not found");
+                std::process::exit(6);
+            }
+            DaemonErrorKind::ContactAmbiguous { matches } => {
+                eprintln!("contact prefix is ambiguous ({matches} matches)");
+                std::process::exit(6);
+            }
+            DaemonErrorKind::InviteExpired => {
+                eprintln!("invite expired");
+                std::process::exit(7);
+            }
+            DaemonErrorKind::InviteConsumed => {
+                eprintln!("invite already consumed");
+                std::process::exit(7);
+            }
+            DaemonErrorKind::InviteSignatureInvalid => {
+                eprintln!("invite signature invalid");
+                std::process::exit(7);
+            }
+            DaemonErrorKind::GroupCorrupt => {
+                eprintln!("mls group state corrupt");
+                std::process::exit(1);
+            }
+            DaemonErrorKind::DeliveryTimeout => {
+                eprintln!("delivery timed out");
+                std::process::exit(8);
+            }
+            DaemonErrorKind::TorNotReady => {
+                eprintln!("Tor still bootstrapping; retry shortly");
+                std::process::exit(1);
+            }
+            DaemonErrorKind::StorageError => {
+                eprintln!("storage error (see daemon logs)");
+                std::process::exit(1);
+            }
+        },
+        IpcClientError::Server(other) => {
+            eprintln!("ipc: server error: {other:?}");
+            std::process::exit(1);
+        }
+        other => {
+            eprintln!("ipc: {other}");
+            std::process::exit(1);
+        }
+    }
 }
 
 #[tokio::main]
@@ -436,5 +533,38 @@ mod tests {
         let err = read_passphrase_from_file(std::path::Path::new("/does/not/exist"))
             .expect_err("missing file must error");
         assert!(err.to_string().contains("/does/not/exist"));
+    }
+
+    #[test]
+    fn resolve_socket_path_prefers_flag_over_env() {
+        let tmp = tempfile::tempdir().unwrap();
+        let flag = tmp.path().join("flag.sock");
+        let env = tmp.path().join("env.sock");
+        std::env::set_var("SKATTR_SOCKET", &env);
+        let got = resolve_socket_path(Some(&flag));
+        assert_eq!(got.as_path(), flag);
+        std::env::remove_var("SKATTR_SOCKET");
+    }
+
+    #[test]
+    fn resolve_socket_path_env_fallback() {
+        let tmp = tempfile::tempdir().unwrap();
+        let env = tmp.path().join("env.sock");
+        std::env::set_var("SKATTR_SOCKET", &env);
+        let got = resolve_socket_path(None);
+        assert_eq!(got, env);
+        std::env::remove_var("SKATTR_SOCKET");
+    }
+
+    #[test]
+    fn resolve_socket_path_xdg_fallback() {
+        std::env::remove_var("SKATTR_SOCKET");
+        std::env::set_var("XDG_RUNTIME_DIR", "/custom/run/1000");
+        let got = resolve_socket_path(None);
+        assert_eq!(
+            got,
+            std::path::PathBuf::from("/custom/run/1000/skattr/daemon.sock")
+        );
+        std::env::remove_var("XDG_RUNTIME_DIR");
     }
 }
