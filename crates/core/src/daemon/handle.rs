@@ -10,7 +10,10 @@ use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::broadcast;
 
+use crate::daemon::commands::{Command as IpcCommand, CommandResult as IpcCommandResult};
 use crate::daemon::events::Event;
+use crate::daemon::ipc::server::CommandExecutor;
+use crate::daemon::ipc::wire::IpcError;
 use crate::delivery::hub::DeliveryHub;
 use crate::identity::IdentityKey;
 use crate::storage::Pool;
@@ -19,8 +22,9 @@ use crate::storage::Pool;
 /// transport stream type so the integration tests can instantiate one
 /// over `tokio::io::DuplexStream` and the real daemon over a
 /// Tor-anchored listener's stream type.
-// wired up by Task 13 dispatch
-#[allow(dead_code)]
+///
+/// `identity` is wrapped in `Arc` so the handle can be cheaply cloned
+/// for per-command dispatch without copying secret material.
 pub struct DaemonHandle<S>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -30,7 +34,7 @@ where
     /// Per-daemon delivery router.
     pub hub: Arc<DeliveryHub<S>>,
     /// Local Ed25519 identity (used for signing ContactCards + invites).
-    pub identity: IdentityKey,
+    pub identity: Arc<IdentityKey>,
     /// Event broadcast sender. Subscribers (IPC connections, tests)
     /// get a `Receiver` via `.subscribe()`.
     pub events_tx: broadcast::Sender<Event>,
@@ -48,7 +52,38 @@ where
         identity: IdentityKey,
         events_tx: broadcast::Sender<Event>,
     ) -> Self {
-        Self { pool, hub, identity, events_tx }
+        Self { pool, hub, identity: Arc::new(identity), events_tx }
+    }
+}
+
+#[async_trait::async_trait]
+impl<S> CommandExecutor for DaemonHandle<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + Sync + 'static,
+{
+    async fn execute(
+        &self,
+        cmd: IpcCommand,
+    ) -> std::result::Result<IpcCommandResult, IpcError> {
+        // CommandExecutor takes `&self`; dispatch::execute_command
+        // takes Arc<DaemonHandle>. Build a fresh Arc by cloning the
+        // subsystem handles (all Arc / Clone).
+        let arc = Arc::new(self.clone_for_dispatch());
+        crate::daemon::dispatch::execute_command(arc, cmd).await
+    }
+}
+
+impl<S> DaemonHandle<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    fn clone_for_dispatch(&self) -> Self {
+        Self {
+            pool: self.pool.clone(),
+            hub: self.hub.clone(),
+            identity: self.identity.clone(),
+            events_tx: self.events_tx.clone(),
+        }
     }
 }
 

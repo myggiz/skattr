@@ -12,6 +12,7 @@
 pub mod backup;
 pub mod commands;
 pub mod config;
+pub(crate) mod dispatch;
 pub mod error_kind;
 pub mod events;
 pub(crate) mod handle;
