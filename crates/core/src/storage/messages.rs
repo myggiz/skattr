@@ -13,6 +13,24 @@ use crate::envelope::Envelope;
 use crate::error::{CoreError, Result};
 use crate::storage::Pool;
 
+/// Convert a free-form user query into an FTS5 MATCH expression using
+/// the tokenize-and-AND strategy: split on whitespace, wrap each token
+/// in FTS5-escaped double quotes (FTS5 doubles internal `"` to `""`),
+/// join with ` AND `. Returns `None` if the query is empty or
+/// whitespace-only — callers should short-circuit to an empty result
+/// without hitting the FTS5 engine.
+pub(super) fn fts5_tokenize_and_and(query: &str) -> Option<String> {
+    let tokens: Vec<String> = query
+        .split_whitespace()
+        .map(|tok| format!("\"{}\"", tok.replace('"', "\"\"")))
+        .collect();
+    if tokens.is_empty() {
+        None
+    } else {
+        Some(tokens.join(" AND "))
+    }
+}
+
 /// A stored message row.
 #[derive(Debug, Clone)]
 pub struct StoredMessage {
@@ -239,5 +257,42 @@ mod tests {
         assert_eq!(rows[0].ts, 2000, "row 0 must be last-inserted, not max ts");
         assert_eq!(rows[1].ts, 1000);
         assert_eq!(rows[2].ts, 3000);
+    }
+
+    #[test]
+    fn fts5_tokenize_and_and_single_token() {
+        assert_eq!(
+            super::fts5_tokenize_and_and("arti"),
+            Some("\"arti\"".to_string())
+        );
+    }
+
+    #[test]
+    fn fts5_tokenize_and_and_multi_token() {
+        assert_eq!(
+            super::fts5_tokenize_and_and("arti tor"),
+            Some("\"arti\" AND \"tor\"".to_string())
+        );
+    }
+
+    #[test]
+    fn fts5_tokenize_and_and_escapes_internal_quotes() {
+        // FTS5 escapes " by doubling it. The token `"hi"` (4 chars) becomes
+        // `""hi""` after doubling, then wrapped in outer quotes -> `"""hi"""`
+        // (3 leading + hi + 3 trailing = 8 chars).
+        assert_eq!(
+            super::fts5_tokenize_and_and(r#"she said "hi""#),
+            Some("\"she\" AND \"said\" AND \"\"\"hi\"\"\"".to_string())
+        );
+    }
+
+    #[test]
+    fn fts5_tokenize_and_and_empty_returns_none() {
+        assert_eq!(super::fts5_tokenize_and_and(""), None);
+    }
+
+    #[test]
+    fn fts5_tokenize_and_and_whitespace_only_returns_none() {
+        assert_eq!(super::fts5_tokenize_and_and("   \t\n  "), None);
     }
 }
