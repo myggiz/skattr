@@ -73,7 +73,13 @@ impl DaemonInbound {
         group.save(&group_repo)?;
 
         let msg_repo = MessageRepo::new(&self.pool);
-        msg_repo.insert(group_id, &from.0, &envelope)?;
+        msg_repo.insert(crate::storage::messages::InsertParams {
+            group_id,
+            sender: &from.0,
+            envelope: &envelope,
+            mls_generation: 0,           // populated by Task 15
+            ts_daemon_recv: envelope.ts, // placeholder; Task 15 supplies real local-clock ts
+        })?;
 
         let message_id = envelope.id;
 

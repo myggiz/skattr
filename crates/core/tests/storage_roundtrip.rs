@@ -12,7 +12,7 @@ use skattr_core::identity::{PublicKey, Seed};
 // Pool + repos are pub(crate); the test-harness feature exposes the
 // handful we need through test_exports. Extend test_exports in core
 // if the set grows.
-use skattr_core::test_exports::{ContactRepo, MessageRepo, Pool};
+use skattr_core::test_exports::{ContactRepo, InsertParams, MessageRepo, Pool};
 
 #[test]
 fn pool_close_reopen_preserves_contacts_and_messages() {
@@ -40,7 +40,15 @@ fn pool_close_reopen_preserves_contacts_and_messages() {
     };
     let gid = [0xAA; 32];
     let sender = [0x77; 32];
-    MessageRepo::new(&pool).insert(&gid, &sender, &env).unwrap();
+    MessageRepo::new(&pool)
+        .insert(InsertParams {
+            group_id: &gid,
+            sender: &sender,
+            envelope: &env,
+            mls_generation: 0,
+            ts_daemon_recv: env.ts,
+        })
+        .unwrap();
 
     pool.close().unwrap();
 

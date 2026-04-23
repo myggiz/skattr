@@ -53,7 +53,13 @@ pub fn receive(
     if !is_new {
         return Ok(ReceiveOutcome::Duplicate);
     }
-    let _ = messages.insert(group_id, &sender.0, &envelope)?;
+    let _ = messages.insert(crate::storage::messages::InsertParams {
+        group_id,
+        sender: &sender.0,
+        envelope: &envelope,
+        mls_generation: 0,      // populated by Task 13
+        ts_daemon_recv: now_ms, // best-effort placeholder; Task 13 splits ts_daemon_recv from the replay-window ts argument
+    })?;
     Ok(ReceiveOutcome::New(envelope))
 }
 

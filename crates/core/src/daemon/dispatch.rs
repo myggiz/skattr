@@ -702,7 +702,14 @@ mod tests {
             reply_to: None,
             kind: Kind::Text { body: "hey".into() },
         };
-        mr.insert(&gid, &peer.0, &env).unwrap();
+        mr.insert(crate::storage::messages::InsertParams {
+            group_id: &gid,
+            sender: &peer.0,
+            envelope: &env,
+            mls_generation: 0,
+            ts_daemon_recv: env.ts,
+        })
+        .unwrap();
 
         let res = execute_command(
             handle.clone(),

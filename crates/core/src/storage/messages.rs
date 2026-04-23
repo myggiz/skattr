@@ -43,6 +43,22 @@ pub struct StoredMessage {
     pub delivered_at: Option<i64>,
 }
 
+/// All fields required to persist a single message row.
+pub struct InsertParams<'a> {
+    /// MLS group id this message belongs to.
+    pub group_id: &'a [u8],
+    /// Sender Ed25519 public key bytes.
+    pub sender: &'a [u8],
+    /// The decoded application envelope (already MLS-decrypted on the
+    /// receiver side, or the local payload on the sender side).
+    pub envelope: &'a Envelope,
+    /// MLS group epoch at the time the row is persisted. For the
+    /// receiver, captured post-decrypt; for the sender, post-encrypt.
+    pub mls_generation: u64,
+    /// Local clock at the moment the daemon persisted the row.
+    pub ts_daemon_recv: i64,
+}
+
 /// Message history CRUD operations.
 pub struct MessageRepo<'p> {
     pool: &'p Pool,
@@ -54,10 +70,12 @@ impl<'p> MessageRepo<'p> {
         Self { pool }
     }
 
-    /// Insert a message and return its rowid.
-    pub fn insert(&self, group_id: &[u8], sender: &[u8], envelope: &Envelope) -> Result<i64> {
-        let body = envelope.encode()?;
-        let kind = match &envelope.kind {
+    /// Insert a message and return its rowid. Populates `body_text` for
+    /// text-kind envelopes (NULL otherwise), letting the FTS5 triggers
+    /// index the row automatically.
+    pub fn insert(&self, p: InsertParams<'_>) -> Result<i64> {
+        let body = p.envelope.encode()?;
+        let kind = match &p.envelope.kind {
             crate::envelope::Kind::Text { .. } => "text",
             crate::envelope::Kind::File { .. } => "file",
             crate::envelope::Kind::Reaction { .. } => "reaction",
@@ -65,11 +83,27 @@ impl<'p> MessageRepo<'p> {
             crate::envelope::Kind::Delete { .. } => "delete",
             crate::envelope::Kind::Typing => "typing",
         };
+        let body_text: Option<&str> = match &p.envelope.kind {
+            crate::envelope::Kind::Text { body } => Some(body.as_str()),
+            _ => None,
+        };
+        let mls_gen_signed = i64::try_from(p.mls_generation).unwrap_or(i64::MAX);
         self.pool.with_mut(|c| {
             c.execute(
-                "INSERT INTO messages (group_id, sender, kind, body_blob, ts) \
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params![group_id, sender, kind, body, envelope.ts],
+                "INSERT INTO messages \
+                     (group_id, sender, kind, body_blob, body_text, ts, \
+                      mls_generation, ts_daemon_recv) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                rusqlite::params![
+                    p.group_id,
+                    p.sender,
+                    kind,
+                    body,
+                    body_text,
+                    p.envelope.ts,
+                    mls_gen_signed,
+                    p.ts_daemon_recv,
+                ],
             )
             .map_err(|e| CoreError::Storage(format!("insert message: {e}")))?;
             Ok(c.last_insert_rowid())
@@ -150,7 +184,15 @@ mod tests {
         let sender = [0x42; 32];
         let env = sample_envelope("hello");
 
-        let id = repo.insert(&gid, &sender, &env).unwrap();
+        let id = repo
+            .insert(InsertParams {
+                group_id: &gid,
+                sender: &sender,
+                envelope: &env,
+                mls_generation: 0,
+                ts_daemon_recv: env.ts,
+            })
+            .unwrap();
         assert!(id > 0);
 
         let all = repo.recent(&gid, 10).unwrap();
@@ -171,7 +213,14 @@ mod tests {
         for i in 0..5 {
             let mut env = sample_envelope(&format!("msg-{i}"));
             env.ts = 100 + i as i64;
-            repo.insert(&gid, &[0u8; 32], &env).unwrap();
+            repo.insert(InsertParams {
+                group_id: &gid,
+                sender: &[0u8; 32],
+                envelope: &env,
+                mls_generation: 0,
+                ts_daemon_recv: env.ts,
+            })
+            .unwrap();
         }
         let three = repo.recent(&gid, 3).unwrap();
         assert_eq!(three.len(), 3);
@@ -186,10 +235,24 @@ mod tests {
         let repo = MessageRepo::new(&pool);
         let g1 = [0x11; 32];
         let g2 = [0x22; 32];
-        repo.insert(&g1, &[0u8; 32], &sample_envelope("g1"))
-            .unwrap();
-        repo.insert(&g2, &[0u8; 32], &sample_envelope("g2"))
-            .unwrap();
+        let env_g1 = sample_envelope("g1");
+        let env_g2 = sample_envelope("g2");
+        repo.insert(InsertParams {
+            group_id: &g1,
+            sender: &[0u8; 32],
+            envelope: &env_g1,
+            mls_generation: 0,
+            ts_daemon_recv: env_g1.ts,
+        })
+        .unwrap();
+        repo.insert(InsertParams {
+            group_id: &g2,
+            sender: &[0u8; 32],
+            envelope: &env_g2,
+            mls_generation: 0,
+            ts_daemon_recv: env_g2.ts,
+        })
+        .unwrap();
         assert_eq!(repo.recent(&g1, 10).unwrap().len(), 1);
         assert_eq!(repo.recent(&g2, 10).unwrap().len(), 1);
     }
@@ -198,8 +261,15 @@ mod tests {
     fn mark_delivered_sets_timestamp() {
         let pool = Pool::in_memory();
         let repo = MessageRepo::new(&pool);
+        let env = sample_envelope("x");
         let id = repo
-            .insert(&[0x33; 32], &[0u8; 32], &sample_envelope("x"))
+            .insert(InsertParams {
+                group_id: &[0x33; 32],
+                sender: &[0u8; 32],
+                envelope: &env,
+                mls_generation: 0,
+                ts_daemon_recv: env.ts,
+            })
             .unwrap();
         repo.mark_delivered(id, 9999).unwrap();
         let rows = repo.recent(&[0x33; 32], 10).unwrap();
@@ -247,9 +317,30 @@ mod tests {
             },
         };
 
-        repo.insert(&gid, &sender, &e1).unwrap();
-        repo.insert(&gid, &sender, &e2).unwrap();
-        repo.insert(&gid, &sender, &e3).unwrap();
+        repo.insert(InsertParams {
+            group_id: &gid,
+            sender: &sender,
+            envelope: &e1,
+            mls_generation: 0,
+            ts_daemon_recv: e1.ts,
+        })
+        .unwrap();
+        repo.insert(InsertParams {
+            group_id: &gid,
+            sender: &sender,
+            envelope: &e2,
+            mls_generation: 0,
+            ts_daemon_recv: e2.ts,
+        })
+        .unwrap();
+        repo.insert(InsertParams {
+            group_id: &gid,
+            sender: &sender,
+            envelope: &e3,
+            mls_generation: 0,
+            ts_daemon_recv: e3.ts,
+        })
+        .unwrap();
 
         let rows = repo.recent(&gid, 10).unwrap();
         // id DESC -> e3 (id=3), e2 (id=2), e1 (id=1).
@@ -294,5 +385,95 @@ mod tests {
     #[test]
     fn fts5_tokenize_and_and_whitespace_only_returns_none() {
         assert_eq!(super::fts5_tokenize_and_and("   \t\n  "), None);
+    }
+
+    #[test]
+    fn insert_populates_body_text_for_text_kind_and_fts_indexes_it() {
+        let pool = Pool::in_memory();
+        let repo = MessageRepo::new(&pool);
+        let gid = [0xDD; 32];
+        let env = sample_envelope("hello full text search");
+
+        let id = repo
+            .insert(InsertParams {
+                group_id: &gid,
+                sender: &[0x42; 32],
+                envelope: &env,
+                mls_generation: 7,
+                ts_daemon_recv: 1_700_000_500,
+            })
+            .unwrap();
+        assert!(id > 0);
+
+        // body_text column populated
+        let body_text: Option<String> = pool
+            .with(|c| {
+                c.query_row(
+                    "SELECT body_text FROM messages WHERE id = ?1",
+                    rusqlite::params![id],
+                    |r| r.get(0),
+                )
+                .map_err(|e| crate::error::CoreError::Storage(e.to_string()))
+            })
+            .unwrap();
+        assert_eq!(body_text.as_deref(), Some("hello full text search"));
+
+        // FTS index returns the row
+        let fts_hits: i64 = pool
+            .with(|c| {
+                c.query_row(
+                    "SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH 'search'",
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(|e| crate::error::CoreError::Storage(e.to_string()))
+            })
+            .unwrap();
+        assert_eq!(fts_hits, 1, "trigger must have indexed the new row");
+
+        // mls_generation + ts_daemon_recv stored
+        let (gen, recv): (i64, i64) = pool
+            .with(|c| {
+                c.query_row(
+                    "SELECT mls_generation, ts_daemon_recv FROM messages WHERE id = ?1",
+                    rusqlite::params![id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .map_err(|e| crate::error::CoreError::Storage(e.to_string()))
+            })
+            .unwrap();
+        assert_eq!(gen, 7);
+        assert_eq!(recv, 1_700_000_500);
+    }
+
+    #[test]
+    fn insert_leaves_body_text_null_for_non_text_kind() {
+        let pool = Pool::in_memory();
+        let repo = MessageRepo::new(&pool);
+        let gid = [0xEE; 32];
+        let mut env = sample_envelope("ignored");
+        env.kind = crate::envelope::Kind::Typing;
+
+        let id = repo
+            .insert(InsertParams {
+                group_id: &gid,
+                sender: &[0x42; 32],
+                envelope: &env,
+                mls_generation: 0,
+                ts_daemon_recv: 1_700_000_000,
+            })
+            .unwrap();
+
+        let body_text: Option<String> = pool
+            .with(|c| {
+                c.query_row(
+                    "SELECT body_text FROM messages WHERE id = ?1",
+                    rusqlite::params![id],
+                    |r| r.get(0),
+                )
+                .map_err(|e| crate::error::CoreError::Storage(e.to_string()))
+            })
+            .unwrap();
+        assert_eq!(body_text, None, "non-text kinds must leave body_text NULL");
     }
 }
