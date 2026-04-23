@@ -212,6 +212,8 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let passphrase_file = cli_passphrase_file_or_env(&cli);
+    let socket = cli.socket.clone();
+    let json = cli.json;
     match cli.cmd {
         Command::Init => init(cli.data_dir.as_deref()).await,
         Command::Restore { seed } => restore(&seed, cli.data_dir.as_deref()).await,
@@ -222,7 +224,7 @@ async fn main() -> Result<()> {
         Command::Daemon { detach } => {
             daemon(detach, cli.data_dir.as_deref(), passphrase_file).await
         }
-        Command::Invite { qr } => invite(qr).await,
+        Command::Invite { qr } => invite(qr, socket.as_deref(), json).await,
         Command::Add { link } => add(&link).await,
         Command::Contacts => contacts().await,
         Command::Send { contact, text } => send(&contact, &text).await,
@@ -481,9 +483,56 @@ async fn daemon(
     Ok(())
 }
 
-async fn invite(_qr: bool) -> Result<()> {
-    println!("skattr invite: not yet implemented.");
+async fn invite(qr: bool, sock_flag: Option<&std::path::Path>, json: bool) -> Result<()> {
+    use skattr_core::daemon::{Command as CoreCommand, CommandResult};
+
+    let mut client = connect_or_exit(sock_flag).await?;
+    let result = match client
+        .execute(CoreCommand::CreateInvite { nickname: None, ttl_secs: None })
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => exit_on_ipc_error(e),
+    };
+
+    let (url, kpi, expires_at) = match result {
+        CommandResult::InviteCreated { url, key_package_id, expires_at } => {
+            (url, key_package_id, expires_at)
+        }
+        other => anyhow::bail!("unexpected result: {other:?}"),
+    };
+
+    if json {
+        let obj = serde_json::json!({
+            "url": url,
+            "key_package_id": kpi.to_string(),
+            "expires_at": expires_at,
+        });
+        println!("{obj}");
+    } else {
+        println!("{url}");
+        println!("(expires at unix {expires_at}, key package {kpi})");
+        if qr {
+            println!();
+            println!("{}", render_invite_qr(&url));
+        }
+    }
     Ok(())
+}
+
+fn render_invite_qr(url: &str) -> String {
+    use qrcode::render::unicode;
+    use qrcode::QrCode;
+
+    match QrCode::new(url.as_bytes()) {
+        Ok(code) => code
+            .render::<unicode::Dense1x2>()
+            .quiet_zone(false)
+            .dark_color(unicode::Dense1x2::Light)
+            .light_color(unicode::Dense1x2::Dark)
+            .build(),
+        Err(_) => String::new(),
+    }
 }
 
 async fn add(_link: &str) -> Result<()> {
@@ -566,5 +615,14 @@ mod tests {
             std::path::PathBuf::from("/custom/run/1000/skattr/daemon.sock")
         );
         std::env::remove_var("XDG_RUNTIME_DIR");
+    }
+
+    #[test]
+    fn render_qr_ascii_produces_non_empty_output() {
+        let url = "skattr://invite/v1#id=AAAA";
+        let qr = render_invite_qr(url);
+        assert!(!qr.is_empty(), "QR rendering must produce output");
+        // Dense1x2 unicode rendering uses U+2580/U+2584 + space.
+        assert!(qr.contains('\u{2580}') || qr.contains('\u{2584}') || qr.contains(' '));
     }
 }
