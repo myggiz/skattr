@@ -5,7 +5,7 @@
 
 //! `DaemonHandle` groups the subsystems every command handler needs.
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::broadcast;
@@ -38,6 +38,9 @@ where
     /// Event broadcast sender. Subscribers (IPC connections, tests)
     /// get a `Receiver` via `.subscribe()`.
     pub events_tx: broadcast::Sender<Event>,
+    /// Cached onion address, set by `Daemon::run` after Tor publishes.
+    /// None until the daemon has finished bootstrapping.
+    pub onion: Arc<RwLock<Option<String>>>,
 }
 
 impl<S> DaemonHandle<S>
@@ -52,7 +55,28 @@ where
         identity: IdentityKey,
         events_tx: broadcast::Sender<Event>,
     ) -> Self {
-        Self { pool, hub, identity: Arc::new(identity), events_tx }
+        Self {
+            pool,
+            hub,
+            identity: Arc::new(identity),
+            events_tx,
+            onion: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    /// Cache the published onion address. Called by `Daemon::run` after
+    /// Tor finishes bootstrapping.
+    pub fn set_onion(&self, addr: impl Into<String>) {
+        if let Ok(mut guard) = self.onion.write() {
+            *guard = Some(addr.into());
+        }
+    }
+
+    /// Read the cached onion address. Returns `None` if Tor has not yet
+    /// published (daemon still bootstrapping).
+    #[must_use]
+    pub fn onion(&self) -> Option<String> {
+        self.onion.read().ok().and_then(|g| g.clone())
     }
 }
 
@@ -83,6 +107,7 @@ where
             hub: self.hub.clone(),
             identity: self.identity.clone(),
             events_tx: self.events_tx.clone(),
+            onion: self.onion.clone(),
         }
     }
 }

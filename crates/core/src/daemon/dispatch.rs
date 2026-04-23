@@ -32,8 +32,10 @@ where
     match cmd {
         Command::Shutdown | Command::RotateOnion => Ok(CommandResult::Ok),
         Command::ListContacts => list_contacts(&handle).await,
-        Command::CreateInvite { .. }
-        | Command::AddContact { .. }
+        Command::CreateInvite { nickname, ttl_secs } => {
+            create_invite(&handle, nickname, ttl_secs).await
+        }
+        Command::AddContact { .. }
         | Command::SendMessage { .. }
         | Command::RecentMessages { .. }
         | Command::CreateGroup { .. } => Err(IpcError::UnknownCommand),
@@ -69,6 +71,54 @@ where
         })
         .collect();
     Ok(CommandResult::Contacts(summaries))
+}
+
+async fn create_invite<S>(
+    handle: &Arc<DaemonHandle<S>>,
+    _nickname: Option<String>,
+    ttl_secs: Option<u64>,
+) -> std::result::Result<CommandResult, IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    use crate::daemon::hex::Hex32;
+    use crate::daemon::error_kind::DaemonErrorKind;
+    use crate::invite::InviteLink;
+    use crate::mls::key_package::KeyPackage;
+    use crate::mls::provider::MlsProvider;
+    use crate::storage::KeyPackageRepo;
+    use rand_core::{OsRng, RngCore as _};
+
+    let onion = handle.onion().ok_or(IpcError::Daemon(DaemonErrorKind::TorNotReady))?;
+
+    let ttl = ttl_secs.unwrap_or(24 * 3600);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .map_err(|e| map_err(CoreError::Config(format!("clock: {e}"))))?;
+
+    // Generate a fresh MLS KeyPackage. `generate` internally stores the
+    // KP bytes in `KeyPackageRepo` with direction="ours", consumed=false.
+    let provider = MlsProvider::new();
+    let kp_repo = KeyPackageRepo::new(&handle.pool);
+    let kp = KeyPackage::generate(&handle.identity, &provider, &kp_repo).map_err(map_err)?;
+    let kp_hash = kp.hash().map_err(map_err)?;
+    let kp_bytes = kp.to_bytes().map_err(map_err)?;
+
+    // 32-byte one-time PSK.
+    let mut psk = [0u8; 32];
+    OsRng.fill_bytes(&mut psk);
+
+    let link =
+        InviteLink::generate(&handle.identity, onion, kp_bytes, psk, ttl, now).map_err(map_err)?;
+    let url = link.to_url().map_err(map_err)?;
+    let expires_at = u64::try_from(now + ttl as i64).unwrap_or(0);
+
+    Ok(CommandResult::InviteCreated {
+        url,
+        key_package_id: Hex32::from(kp_hash),
+        expires_at,
+    })
 }
 
 /// Map any `CoreError` to an `IpcError`. Projects via `CoreError::kind`
@@ -132,6 +182,57 @@ mod tests {
     use crate::daemon::commands::ContactSummary;
     use crate::identity::PublicKey;
     use crate::storage::ContactRepo;
+
+    #[tokio::test]
+    async fn create_invite_returns_parseable_url_and_records_keypackage() {
+        let handle = test_handle();
+        // Set the onion so invite can embed it (publishes typically do).
+        handle.set_onion("testonion".repeat(8));
+
+        let result = execute_command(
+            handle.clone(),
+            Command::CreateInvite { nickname: None, ttl_secs: Some(3600) },
+        )
+        .await
+        .unwrap();
+
+        let (url, kpi, expires_at) = match result {
+            CommandResult::InviteCreated { url, key_package_id, expires_at } => {
+                (url, key_package_id, expires_at)
+            }
+            other => panic!("expected InviteCreated, got {other:?}"),
+        };
+        assert!(url.starts_with("skattr://invite/v1#"), "url={url}");
+        assert!(expires_at > 0);
+        assert_ne!(kpi.0, [0u8; 32]);
+
+        // The URL parses back cleanly.
+        let parsed = crate::invite::InviteLink::from_url(&url, 1).unwrap();
+        assert_eq!(parsed.body.onion, "testonion".repeat(8));
+
+        // The KeyPackage is recorded in storage (single-use tracking).
+        use crate::storage::KeyPackageRepo;
+        let kp_repo = KeyPackageRepo::new(&handle.pool);
+        assert!(kp_repo.get(&kpi.0).unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn create_invite_without_onion_returns_tor_not_ready() {
+        let handle = test_handle();
+        // onion not set — still None
+        let result = execute_command(
+            handle,
+            Command::CreateInvite { nickname: None, ttl_secs: Some(3600) },
+        )
+        .await;
+        assert!(
+            matches!(
+                result,
+                Err(IpcError::Daemon(crate::daemon::error_kind::DaemonErrorKind::TorNotReady))
+            ),
+            "expected TorNotReady, got {result:?}"
+        );
+    }
 
     #[tokio::test]
     async fn list_contacts_returns_all_rows_projected() {
