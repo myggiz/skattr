@@ -3,6 +3,9 @@
 
 //! CLI ↔ daemon IPC transport.
 
+pub mod client;
 pub mod codec;
 pub mod server;
 pub mod wire;
+
+pub use client::{IpcClient, IpcClientError};
