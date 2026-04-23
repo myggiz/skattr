@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Myggiz AB
 
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::panic))]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::panic, clippy::expect_used))]
 
 //! Command dispatch: one function per `Command` variant, consuming a
 //! `DaemonHandle` + the command and returning a typed result / error.
@@ -36,9 +36,10 @@ where
             create_invite(&handle, nickname, ttl_secs).await
         }
         Command::AddContact { invite_url } => add_contact(&handle, invite_url).await,
-        Command::SendMessage { .. }
-        | Command::RecentMessages { .. }
-        | Command::CreateGroup { .. } => Err(IpcError::UnknownCommand),
+        Command::SendMessage { contact, kind } => send_message(&handle, contact, kind).await,
+        Command::RecentMessages { .. } | Command::CreateGroup { .. } => {
+            Err(IpcError::UnknownCommand)
+        }
     }
 }
 
@@ -198,6 +199,82 @@ where
         card_version: 0,
         added_at: u64::try_from(now).unwrap_or(0),
     }))
+}
+
+async fn send_message<S>(
+    handle: &Arc<DaemonHandle<S>>,
+    contact: crate::identity::PublicKey,
+    kind: crate::envelope::Kind,
+) -> std::result::Result<CommandResult, IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    use crate::daemon::commands::SendStatus;
+    use crate::daemon::error_kind::DaemonErrorKind;
+    use crate::daemon::hex::Hex16;
+    use crate::envelope::{Envelope, MessageId};
+    use crate::mls::group::{Group, GroupId};
+    use crate::storage::outbox::OutboxRepo;
+    use crate::storage::{ContactRepo, MlsGroupRepo};
+
+    // 1. Resolve group_id from contact.
+    let contact_repo = ContactRepo::new(&handle.pool);
+    let group_id_bytes = match contact_repo.get_group_id(&contact).map_err(map_err)? {
+        Some(bytes) if !bytes.is_empty() => bytes,
+        _ => return Err(IpcError::Daemon(DaemonErrorKind::ContactNotFound)),
+    };
+
+    // 2. Load MLS group (provider is embedded in the blob).
+    let group_repo = MlsGroupRepo::new(&handle.pool);
+    let group_id = GroupId(group_id_bytes.clone());
+    let mut group = Group::load(&group_id, &group_repo)
+        .map_err(map_err)?
+        .ok_or(IpcError::Daemon(DaemonErrorKind::GroupCorrupt))?;
+
+    // 3. Build envelope.
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .map_err(|e| map_err(CoreError::Config(format!("clock: {e}"))))?;
+
+    let message_id = MessageId::generate();
+
+    let envelope = Envelope {
+        v: 1,
+        id: message_id,
+        ts: now_ms,
+        reply_to: None,
+        kind,
+    };
+
+    // 4. MLS-encrypt (ratchet advances).
+    let ciphertext = group.encrypt(&envelope).map_err(map_err)?;
+
+    // 5. Persist updated group state after ratchet advance.
+    group.save(&group_repo).map_err(map_err)?;
+
+    // 6. Idempotent outbox insert.
+    let outbox_repo = OutboxRepo::new(&handle.pool);
+    outbox_repo
+        .insert(&contact.0, &message_id.0, &ciphertext, 0)
+        .map_err(map_err)?;
+
+    // 7. Kick the delivery hub, wait up to 2 s for an ACK.
+    let ack_rx = handle
+        .hub
+        .send(contact, message_id, ciphertext)
+        .await
+        .map_err(map_err)?;
+
+    let status = match tokio::time::timeout(std::time::Duration::from_secs(2), ack_rx).await {
+        Ok(Ok(Ok(()))) => SendStatus::Delivered,
+        _ => SendStatus::Queued,
+    };
+
+    Ok(CommandResult::MessageSent {
+        message_id: Hex16::from(message_id.0),
+        status,
+    })
 }
 
 /// Map any `CoreError` to an `IpcError`. Projects via `CoreError::kind`
@@ -423,6 +500,103 @@ mod tests {
                 }
             }
             other => panic!("expected Contacts, got {other:?}"),
+        }
+    }
+
+    use crate::daemon::commands::SendStatus;
+    use crate::envelope::Kind;
+
+    #[tokio::test]
+    async fn send_message_to_unknown_contact_returns_contact_not_found() {
+        let handle = test_handle();
+        let res = execute_command(
+            handle,
+            Command::SendMessage {
+                contact: crate::identity::PublicKey([0x99; 32]),
+                kind: Kind::Text { body: "hi".into() },
+            },
+        )
+        .await;
+        assert!(matches!(
+            res,
+            Err(IpcError::Daemon(crate::daemon::error_kind::DaemonErrorKind::ContactNotFound))
+        ));
+    }
+
+    #[tokio::test]
+    async fn send_message_without_group_returns_contact_not_found() {
+        let handle = test_handle();
+        let peer = crate::identity::PublicKey([0x10; 32]);
+
+        // Seed a contact row but do NOT set group_id (stays empty blob).
+        let repo = ContactRepo::new(&handle.pool);
+        repo.upsert(&crate::contact::Contact {
+            identity: peer,
+            display_name: None,
+            added_at: 0,
+            card: None,
+        })
+        .unwrap();
+
+        let res = execute_command(
+            handle,
+            Command::SendMessage { contact: peer, kind: Kind::Text { body: "hi".into() } },
+        )
+        .await;
+        // Empty group_id is the "not linked" state.
+        assert!(matches!(
+            res,
+            Err(IpcError::Daemon(crate::daemon::error_kind::DaemonErrorKind::ContactNotFound))
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn send_message_with_real_group_yields_queued_without_transport() {
+        // Alice creates an invite. Bob (separate identity + pool) consumes
+        // it, establishing a real MLS group for Alice (as a contact).
+        // Bob then sends to Alice. The hub has no peer actor wired, so the
+        // DeliveryHub::send will enqueue but no ACK arrives within 2 s.
+        // Expected: SendStatus::Queued.
+        let handle_a = test_handle();
+        handle_a.set_onion("alice.onion".to_string());
+
+        let CommandResult::InviteCreated { url, .. } = execute_command(
+            handle_a.clone(),
+            Command::CreateInvite { nickname: None, ttl_secs: Some(3600) },
+        )
+        .await
+        .unwrap()
+        else {
+            panic!("expected InviteCreated");
+        };
+
+        // Bob consumes Alice's invite; this creates a group with Alice as
+        // the contact (group_id is set on Alice's pubkey in Bob's pool).
+        let handle_b = test_handle();
+        let CommandResult::ContactAdded(summary) = execute_command(
+            handle_b.clone(),
+            Command::AddContact { invite_url: url },
+        )
+        .await
+        .unwrap()
+        else {
+            panic!("expected ContactAdded");
+        };
+
+        // Bob sends to Alice (summary.pubkey == Alice's pubkey).
+        let fut = execute_command(
+            handle_b,
+            Command::SendMessage {
+                contact: summary.pubkey,
+                kind: Kind::Text { body: "hi".into() },
+            },
+        );
+        let res = tokio::time::timeout(std::time::Duration::from_secs(3), fut)
+            .await
+            .expect("outer 3 s budget");
+        match res {
+            Ok(CommandResult::MessageSent { status: SendStatus::Queued, .. }) => {}
+            other => panic!("expected MessageSent(Queued), got {other:?}"),
         }
     }
 }
