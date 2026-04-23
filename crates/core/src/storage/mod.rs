@@ -23,6 +23,7 @@ pub(crate) mod messages;
 pub(crate) mod migrations;
 pub(crate) mod outbox;
 pub(crate) mod pool;
+pub(crate) mod read_state;
 pub(crate) mod seen_messages;
 
 // Under `test-harness` the items need a `pub` path so `lib.rs::test_exports`
@@ -40,6 +41,8 @@ pub(crate) use messages::MessageRepo;
 #[cfg(not(feature = "test-harness"))]
 pub(crate) use pool::Pool;
 #[cfg(not(feature = "test-harness"))]
+pub(crate) use read_state::ReadStateRepo;
+#[cfg(not(feature = "test-harness"))]
 pub(crate) use seen_messages::SeenMessagesRepo;
 
 #[cfg(feature = "test-harness")]
@@ -52,5 +55,7 @@ pub use key_packages::KeyPackageRepo;
 pub use messages::MessageRepo;
 #[cfg(feature = "test-harness")]
 pub use pool::Pool;
+#[cfg(feature = "test-harness")]
+pub use read_state::ReadStateRepo;
 #[cfg(feature = "test-harness")]
 pub use seen_messages::SeenMessagesRepo;

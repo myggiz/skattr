@@ -53,7 +53,7 @@ pub use error::{CoreError, Result};
 pub mod test_exports {
     pub use crate::transport::{OnionListener, TorConfig, TorRuntime, TorStatus};
     // Phase 0.D additions:
-    pub use crate::storage::{ContactRepo, MessageRepo, Pool, SeenMessagesRepo};
+    pub use crate::storage::{ContactRepo, MessageRepo, Pool, ReadStateRepo, SeenMessagesRepo};
     // Phase 1.A additions:
     pub use crate::transport::{Frame, FrameCodec, FrameType, MAX_FRAME_SIZE};
     // Phase 1.B additions:
