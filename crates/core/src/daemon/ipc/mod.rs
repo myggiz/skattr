@@ -4,4 +4,5 @@
 //! CLI ↔ daemon IPC transport.
 
 pub mod codec;
+pub mod server;
 pub mod wire;
