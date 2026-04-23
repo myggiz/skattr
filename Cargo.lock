@@ -4442,6 +4442,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "proptest",
+ "sha2",
  "skattr-core",
  "tempfile",
  "tokio",
