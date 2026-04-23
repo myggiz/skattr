@@ -225,8 +225,8 @@ async fn main() -> Result<()> {
             daemon(detach, cli.data_dir.as_deref(), passphrase_file).await
         }
         Command::Invite { qr } => invite(qr, socket.as_deref(), json).await,
-        Command::Add { link } => add(&link).await,
-        Command::Contacts => contacts().await,
+        Command::Add { link } => add(&link, socket.as_deref(), json).await,
+        Command::Contacts => contacts(socket.as_deref(), json).await,
         Command::Send { contact, text } => send(&contact, &text).await,
         Command::Tail { contact } => tail(contact.as_deref()).await,
     }
@@ -535,14 +535,74 @@ fn render_invite_qr(url: &str) -> String {
     }
 }
 
-async fn add(_link: &str) -> Result<()> {
-    println!("skattr add: not yet implemented.");
+async fn add(link: &str, sock_flag: Option<&std::path::Path>, json: bool) -> Result<()> {
+    use skattr_core::daemon::{Command as CoreCommand, CommandResult};
+
+    let mut client = connect_or_exit(sock_flag).await?;
+    let result = match client
+        .execute(CoreCommand::AddContact { invite_url: link.to_string() })
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => exit_on_ipc_error(e),
+    };
+
+    let summary = match result {
+        CommandResult::ContactAdded(s) => s,
+        other => anyhow::bail!("unexpected result: {other:?}"),
+    };
+
+    if json {
+        println!("{}", serde_json::to_string(&summary)?);
+    } else {
+        let hex: String = summary.pubkey.0.iter().map(|b| format!("{b:02x}")).collect();
+        println!("Added contact:");
+        println!("  pubkey:  {}", hex);
+        println!("  onion:   {}", summary.onion);
+        println!("  added:   {}", summary.added_at);
+    }
     Ok(())
 }
 
-async fn contacts() -> Result<()> {
-    println!("skattr contacts: not yet implemented.");
+async fn contacts(sock_flag: Option<&std::path::Path>, json: bool) -> Result<()> {
+    use skattr_core::daemon::{Command as CoreCommand, CommandResult};
+
+    let mut client = connect_or_exit(sock_flag).await?;
+    let result = match client.execute(CoreCommand::ListContacts).await {
+        Ok(r) => r,
+        Err(e) => exit_on_ipc_error(e),
+    };
+
+    let rows = match result {
+        CommandResult::Contacts(rows) => rows,
+        other => anyhow::bail!("unexpected result: {other:?}"),
+    };
+
+    if json {
+        println!("{}", serde_json::to_string(&rows)?);
+    } else {
+        print!("{}", render_contacts_human(&rows));
+    }
     Ok(())
+}
+
+fn render_contacts_human(rows: &[skattr_core::daemon::commands::ContactSummary]) -> String {
+    use std::fmt::Write;
+    if rows.is_empty() {
+        return "No contacts.\n".to_string();
+    }
+    let mut out = String::new();
+    for row in rows {
+        let short: String = row.pubkey.0.iter().take(4).map(|b| format!("{b:02x}")).collect();
+        let name = row.nickname.as_deref().unwrap_or("(unnamed)");
+        let _ = writeln!(
+            out,
+            "{short}  {name:<20}  {onion}  added={added}",
+            onion = row.onion,
+            added = row.added_at
+        );
+    }
+    out
 }
 
 async fn send(_contact: &str, _text: &str) -> Result<()> {
@@ -556,7 +616,7 @@ async fn tail(_contact: Option<&str>) -> Result<()> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use std::io::Write;
@@ -615,6 +675,38 @@ mod tests {
             std::path::PathBuf::from("/custom/run/1000/skattr/daemon.sock")
         );
         std::env::remove_var("XDG_RUNTIME_DIR");
+    }
+
+    #[test]
+    fn clap_parses_add_link() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from(["skattr", "add", "skattr://invite/v1#abc"]).unwrap();
+        match cli.cmd {
+            Command::Add { link } => assert_eq!(link, "skattr://invite/v1#abc"),
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn render_contacts_human_empty() {
+        let out = render_contacts_human(&[]);
+        assert_eq!(out.trim(), "No contacts.");
+    }
+
+    #[test]
+    fn render_contacts_human_one_row() {
+        use skattr_core::daemon::commands::ContactSummary;
+        let rows = vec![ContactSummary {
+            pubkey: skattr_core::identity::PublicKey([0xABu8; 32]),
+            nickname: Some("alice".into()),
+            onion: "aaaa.onion".into(),
+            card_version: 3,
+            added_at: 1_700_000_000,
+        }];
+        let out = render_contacts_human(&rows);
+        assert!(out.contains("alice"));
+        assert!(out.contains("aaaa.onion"));
+        assert!(out.contains("abab")); // pubkey prefix
     }
 
     #[test]
