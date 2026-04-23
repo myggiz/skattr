@@ -43,7 +43,7 @@ Modules, top-down:
 
 ```
 daemon              long-lived process: owns Tor runtime, storage pool, delivery hub,
-                    listener (Daemon::run shipped; Command/Event wiring is 1.F)
+                    listener, IPC server + dispatch — done Phase 1.F
   ├── delivery      per-peer actor hub, outbox + exp-backoff retry, receiver
   │                 dedupe + ACK — done Phase 1.E
   ├── contact       contacts and signed ContactCards, monotonic-version
@@ -63,60 +63,31 @@ daemon              long-lived process: owns Tor runtime, storage pool, delivery
 
 **Public API boundary.** Only `daemon`, `error`, `envelope`, `invite`, `contact`, and the key types in `identity` are `pub`. Everything else is `pub(crate)`. Consumers (`cli`, `ui`) talk to the daemon through `Command` / `Event` enums.
 
-## Data flow: sending one message
+## "skattr send <contact> <text>" end-to-end trace
 
-End-to-end trace of the 1.E delivery stack. The `Command::SendMessage`
-CLI wiring is still 1.F, but tests drive the same path today via
-`test_exports::DeliveryHub`:
-
-```
-1. Caller encrypts an Envelope (MessageId, ts, kind) via the peer's
-   MLS group (mls::group::Group::encrypt → ciphertext). The MLS
-   ratchet advances exactly once per message.
-2. storage::outbox::OutboxRepo.insert persists (target, message_id,
-   ciphertext) with next_retry_at = now. INSERT OR IGNORE keeps the
-   call idempotent over (target, message_id).
-3. delivery::hub::DeliveryHub.send routes to the per-peer
-   delivery::peer::PeerConnection actor, spawning one on first use.
-4. The actor owns an Option<AuthenticatedConnection<S>>:
-     - If None, dial via transport::tor::TorRuntime::connect and
-       run transport::noise::handshake_initiator to populate it.
-     - conn.send(Frame::MlsApp(ciphertext)) — frame-in-frame through
-       the Noise transport cipher.
-5. Actor registers a oneshot in pending_acks[MessageId] and waits.
-6. On inbound Frame::Ack(id), actor resolves the oneshot,
-   OutboxRepo.ack_by_message_id drops the row, and the Daemon emits
-   Event::DeliveryStatusChanged { status: Delivered }.
-7. On conn error / kill-mid-message, pending_acks are drained with
-   Err(()); the outbox row stays. The actor's 1 s retry tick picks
-   it up, redials if needed, re-sends the same ciphertext (no
-   re-encrypt), and reschedules with exponential backoff (1s → 5min
-   cap, ±25% jitter).
-```
-
-The inverse (receiving):
-
-```
-1. transport::listener accepts an onion connection; the post-handshake
-   AuthenticatedConnection is handed to DeliveryHub::ingest.
-2. The per-peer actor's select! arm on conn.recv() observes a
-   Frame::MlsApp and passes the ciphertext to the injected
-   InboundDispatch (mls::group::Group::decrypt → Envelope).
-3. delivery::receiver::receive enforces a ±1 h ts window, checks
-   storage::seen_messages::SeenMessagesRepo for (sender,
-   message_id), and on fresh insert calls
-   storage::messages::MessageRepo.insert.
-4. Actor replies with Frame::Ack(message_id) whether the receive
-   was New or Duplicate (duplicate ACK lets the sender's retry
-   loop clear its outbox row).
-5. Daemon emits Event::MessageReceived.
-```
+1. **CLI process** parses argv via `clap`; resolves the IPC socket path (`--socket` > `$SKATTR_SOCKET` > `$XDG_RUNTIME_DIR/skattr/daemon.sock`).
+2. CLI `UnixStream::connect`s the socket; daemon's IPC server accepts, calls `SO_PEERCRED`, rejects non-matching UIDs with `IpcError::AuthDenied`.
+3. CLI resolves the positional contact via `Command::ListContacts` → prefix match (hex pubkey or nickname).
+4. CLI sends `Command::SendMessage { contact, kind: Kind::Text { body } }` as a length-prefixed CBOR frame.
+5. Daemon's `dispatch::send_message`:
+   a. reads `contacts.group_id` for the peer (migration 0005 column),
+   b. loads the MLS `Group` via `Group::load(&group_id, &group_repo)`,
+   c. builds an `Envelope { v, id, ts, reply_to, kind }` with a fresh `MessageId::generate()`,
+   d. `Group::encrypt(&env)` → ciphertext (MLS ratchet advances once),
+   e. `group.save(&group_repo)` to persist the advanced ratchet,
+   f. `OutboxRepo::insert(target, message_id, ciphertext, next_retry_at)` (idempotent),
+   g. `DeliveryHub::send(peer, message_id, ciphertext)` kicks the per-peer actor.
+6. `PeerConnection` actor either uses its live `AuthenticatedConnection<DataStream>` or dials the peer's cached onion, completes `Noise_XK` handshake, sends a length-prefixed `FrameType::MlsApp` frame.
+7. Remote peer's `OnionListener` accepts the stream; post-handshake, the stream enters the remote `DeliveryHub`. `DaemonInbound::dispatch` → MLS decrypt → `MessageRepo::insert` → `events_tx.send(Event::MessageReceived { from, envelope })`.
+8. Remote CLI running `skattr tail --follow` or `skattr chat` receives the event frame and prints the plaintext.
+9. Remote `PeerConnection` sends back `FrameType::Ack { message_id }`; the sender's oneshot resolves, local `dispatch::send_message`'s `tokio::time::timeout(2s, ..)` completes with `SendStatus::Delivered`, `CommandResult::MessageSent { status: Delivered }` is written to the CLI's IPC socket.
+10. CLI prints `<message_id>  delivered` and exits 0.
 
 **Current phase state.**
 
-- `Daemon::run` bootstraps Tor, publishes the onion, and blocks on
-  shutdown. `Daemon::send` is a `pub(crate)` stub until 1.F wires
-  `Command::Send` into the hub.
+- `Daemon::run` takes `Config`, bootstraps Tor, publishes the onion,
+  starts the IPC server, and signals `Ready { onion, ipc_socket }`.
+  All `Command`/`Event` variants are wired through `dispatch::execute_command`.
 - `mls::group` covers 2-member groups (create, add, encrypt/decrypt,
   persist). Group chat >2 members is Phase 3.
 - `delivery::{hub, peer, outbox, receiver, backoff}` are fully
@@ -127,7 +98,7 @@ The inverse (receiving):
 - `invite::InviteLink` + `contact::ContactCard` parse/verify/sign/
   persist with single-use enforcement on KeyPackages.
 - `mailbox::client` is `todo!()` — offline delivery is Phase 2.
-- `storage::*` is fully implemented (migrations through 0004).
+- `storage::*` is fully implemented (migrations through 0005).
 
 ## Cross-cutting: transport↔MLS binding
 
@@ -165,7 +136,9 @@ The design deliberately uses two separate keypairs (identity vs. onion service �
 | 0.C ✅ | transport::{tor, hs_key, listener} | Two daemons echo bytes over Tor (integration test) |
 | 0.D ✅ | storage, daemon::backup | Pool + 7 repos + backup/restore-backup CLI |
 | 0.E ✅ | docs | THREAT_MODEL.md, OPERATIONS.md, ARCHITECTURE.md refresh, README update |
-| 1 | mls, delivery, transport::{noise, frame, connection}, daemon::state session manager | Two CLI users exchange E2EE messages over real Tor |
+| 1.A–1.E ✅ | mls, delivery, transport::{noise, frame, connection} | Kill-mid-message → reconnect → exactly-once delivery (CI) |
+| 1.F ✅ | daemon::{ipc, dispatch}, cli | `skattr send` through IPC; `cli_ipc_roundtrip` + `cli_two_daemons` CI |
+| 1.G | message storage & search | Full-text search, pagination |
 | 2 | mailbox (client + server), contact::{card, rotation}, ui | Offline user receives queued messages; Tauri UI shell |
 | 3 | mls (multi-member), delivery::fanout, envelope::kinds (attachments, reactions, edits) | 50-member group passes week-long soak |
 | 4 | hardening — fuzz harnesses, padding, duress mode, reproducible builds | External audit clean |
