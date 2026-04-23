@@ -282,6 +282,22 @@ impl<'p> MessageRepo<'p> {
         })
     }
 
+    /// Advance the read cursor for `group_id` to `up_to_message_id`.
+    /// Idempotent. Caller picks `updated_at` (typically `now() seconds`).
+    pub fn mark_read(&self, group_id: &[u8], up_to_message_id: i64) -> Result<()> {
+        crate::storage::ReadStateRepo::new(self.pool).set(
+            group_id,
+            up_to_message_id,
+            i64::try_from(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+            )
+            .unwrap_or(0),
+        )
+    }
+
     /// Mark a message delivered. Used by the ACK path.
     pub(crate) fn mark_delivered(&self, id: i64, delivered_at: i64) -> Result<()> {
         self.pool.with_mut(|c| {
@@ -825,5 +841,33 @@ mod tests {
         let recent = repo.recent(&gid, 10).unwrap();
         let recent_ids: Vec<i64> = recent.iter().map(|r| r.id).collect();
         assert_eq!(recent_ids, rows);
+    }
+
+    #[test]
+    fn mark_read_advances_cursor_idempotent() {
+        let pool = Pool::in_memory();
+        let gid = [0x30; 32];
+        seed_three_text(&pool, &gid);
+        let repo = MessageRepo::new(&pool);
+
+        repo.mark_read(&gid, 42).unwrap();
+        repo.mark_read(&gid, 42).unwrap(); // idempotent overwrite
+
+        use crate::storage::ReadStateRepo;
+        assert_eq!(ReadStateRepo::new(&pool).get(&gid).unwrap(), Some(42));
+    }
+
+    #[test]
+    fn mark_read_updates_existing_cursor() {
+        let pool = Pool::in_memory();
+        let gid = [0x31; 32];
+        seed_three_text(&pool, &gid);
+        let repo = MessageRepo::new(&pool);
+
+        repo.mark_read(&gid, 10).unwrap();
+        repo.mark_read(&gid, 99).unwrap();
+
+        use crate::storage::ReadStateRepo;
+        assert_eq!(ReadStateRepo::new(&pool).get(&gid).unwrap(), Some(99));
     }
 }
