@@ -12,12 +12,14 @@
 pub mod backup;
 pub mod commands;
 pub mod config;
+pub mod error_kind;
 pub mod events;
 pub mod hex;
 pub mod state;
 
 pub use commands::{Command, CommandResult};
 pub use config::Config;
+pub use error_kind::DaemonErrorKind;
 pub use events::{DeliveryStatus, Event, TorStatus};
 pub use hex::{Hex16, Hex32};
 pub use state::Daemon;
