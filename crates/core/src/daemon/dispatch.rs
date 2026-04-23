@@ -35,8 +35,8 @@ where
         Command::CreateInvite { nickname, ttl_secs } => {
             create_invite(&handle, nickname, ttl_secs).await
         }
-        Command::AddContact { .. }
-        | Command::SendMessage { .. }
+        Command::AddContact { invite_url } => add_contact(&handle, invite_url).await,
+        Command::SendMessage { .. }
         | Command::RecentMessages { .. }
         | Command::CreateGroup { .. } => Err(IpcError::UnknownCommand),
     }
@@ -119,6 +119,85 @@ where
         key_package_id: Hex32::from(kp_hash),
         expires_at,
     })
+}
+
+async fn add_contact<S>(
+    handle: &Arc<DaemonHandle<S>>,
+    invite_url: String,
+) -> std::result::Result<CommandResult, IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    use crate::contact::Contact;
+    use crate::daemon::commands::ContactSummary;
+    use crate::daemon::error_kind::DaemonErrorKind;
+    use crate::daemon::events::Event;
+    use crate::invite::InviteLink;
+    use crate::mls::{group::Group, key_package::KeyPackage, provider::MlsProvider};
+    use crate::storage::{ContactRepo, KeyPackageRepo, MlsGroupRepo};
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .map_err(|e| map_err(CoreError::Config(format!("clock: {e}"))))?;
+
+    let link = InviteLink::from_url(&invite_url, now).map_err(map_err)?;
+
+    let kp_repo = KeyPackageRepo::new(&handle.pool);
+
+    // Record the inbound KP so mark_consumed can find it (idempotent if
+    // same invite is re-submitted).
+    link.record_received(&kp_repo).map_err(map_err)?;
+
+    // Reject if this invite's KP was already consumed (double-use guard).
+    if link.is_consumed(&kp_repo).map_err(map_err)? {
+        return Err(IpcError::Daemon(DaemonErrorKind::InviteConsumed));
+    }
+
+    // Build our solo MLS group, then add the inviter as the second member.
+    let provider = MlsProvider::new();
+    let mut group = Group::create_solo(
+        &handle.identity,
+        Some(&link.psk.0),
+        provider,
+    )
+    .map_err(map_err)?;
+
+    let invitee_kp = KeyPackage::from_bytes(&link.body.key_package).map_err(map_err)?;
+    let (_welcome, _commit) = group
+        .add_member(&invitee_kp, Some(&link.psk.0))
+        .map_err(map_err)?;
+    let group_id = group.id().0.clone();
+
+    // Persist group state.
+    let group_repo = MlsGroupRepo::new(&handle.pool);
+    group.save(&group_repo).map_err(map_err)?;
+
+    // Persist contact row + group_id link.
+    let contact_repo = ContactRepo::new(&handle.pool);
+    let contact = Contact {
+        identity: link.body.identity,
+        display_name: None,
+        added_at: now,
+        card: None,
+    };
+    contact_repo.upsert(&contact).map_err(map_err)?;
+    contact_repo
+        .set_group_id(&link.body.identity, &group_id)
+        .map_err(map_err)?;
+
+    // Mark the inviter's single-use KP as consumed.
+    link.mark_consumed(&kp_repo).map_err(map_err)?;
+
+    let _ = handle.events_tx.send(Event::ContactUpdated(link.body.identity));
+
+    Ok(CommandResult::ContactAdded(ContactSummary {
+        pubkey: link.body.identity,
+        nickname: None,
+        onion: link.body.onion.clone(),
+        card_version: 0,
+        added_at: u64::try_from(now).unwrap_or(0),
+    }))
 }
 
 /// Map any `CoreError` to an `IpcError`. Projects via `CoreError::kind`
@@ -231,6 +310,78 @@ mod tests {
                 Err(IpcError::Daemon(crate::daemon::error_kind::DaemonErrorKind::TorNotReady))
             ),
             "expected TorNotReady, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn add_contact_from_self_invite_persists_group_link_and_emits_event() {
+        let handle_a = test_handle();
+        handle_a.set_onion("alice.onion".to_string());
+
+        // Alice creates an invite.
+        let CommandResult::InviteCreated { url, .. } =
+            execute_command(
+                handle_a.clone(),
+                Command::CreateInvite { nickname: None, ttl_secs: Some(3600) },
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("expected InviteCreated");
+        };
+
+        // Bob's handle consumes it. Bob is a separate daemon with a separate pool.
+        let handle_b = test_handle();
+        let mut events_rx = handle_b.events_tx.subscribe();
+        let res = execute_command(handle_b.clone(), Command::AddContact { invite_url: url })
+            .await
+            .unwrap();
+        let summary = match res {
+            CommandResult::ContactAdded(s) => s,
+            other => panic!("expected ContactAdded, got {other:?}"),
+        };
+
+        // Contact row written with a non-empty group_id.
+        let repo = ContactRepo::new(&handle_b.pool);
+        let gid = repo.get_group_id(&summary.pubkey).unwrap().unwrap();
+        assert!(!gid.is_empty(), "group_id must be set");
+
+        // Event fired.
+        match tokio::time::timeout(std::time::Duration::from_secs(1), events_rx.recv()).await {
+            Ok(Ok(Event::ContactUpdated(pk))) => assert_eq!(pk, summary.pubkey),
+            other => panic!("expected ContactUpdated event, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn add_contact_double_use_is_rejected() {
+        let handle_a = test_handle();
+        handle_a.set_onion("alice.onion".to_string());
+
+        let CommandResult::InviteCreated { url, .. } =
+            execute_command(
+                handle_a.clone(),
+                Command::CreateInvite { nickname: None, ttl_secs: Some(3600) },
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("expected InviteCreated");
+        };
+
+        let handle_b = test_handle();
+        // First use succeeds.
+        execute_command(handle_b.clone(), Command::AddContact { invite_url: url.clone() })
+            .await
+            .unwrap();
+        // Second use is rejected.
+        let res = execute_command(handle_b.clone(), Command::AddContact { invite_url: url }).await;
+        assert!(
+            matches!(
+                res,
+                Err(IpcError::Daemon(crate::daemon::error_kind::DaemonErrorKind::InviteConsumed))
+            ),
+            "expected InviteConsumed, got {res:?}"
         );
     }
 
