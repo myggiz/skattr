@@ -47,4 +47,18 @@ impl Config {
             log_filter: default_log_filter(),
         })
     }
+
+    /// Return the configured `ipc_socket` or a best-effort default
+    /// under `$XDG_RUNTIME_DIR/skattr/daemon.sock`, falling back to
+    /// `$TMPDIR/skattr/daemon.sock`, then `/tmp/skattr/daemon.sock`.
+    pub fn ipc_socket_or_default(&self) -> Result<std::path::PathBuf> {
+        if let Some(p) = &self.ipc_socket {
+            return Ok(p.clone());
+        }
+        let base = std::env::var_os("XDG_RUNTIME_DIR")
+            .map(std::path::PathBuf::from)
+            .or_else(|| std::env::var_os("TMPDIR").map(std::path::PathBuf::from))
+            .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
+        Ok(base.join("skattr").join("daemon.sock"))
+    }
 }

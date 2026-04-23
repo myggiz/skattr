@@ -78,6 +78,24 @@ impl Drop for Server {
     }
 }
 
+/// Return the effective UID of the current process without using `unsafe`.
+///
+/// On Linux we stat `/proc/self`; on other platforms we fall back to
+/// the `$UID` environment variable then `0` (suitable for tests).
+#[cfg(unix)]
+pub(crate) fn current_uid() -> u32 {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata("/proc/self")
+        .map(|m| m.uid())
+        .or_else(|_| {
+            std::env::var("UID")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .ok_or(())
+        })
+        .unwrap_or(0)
+}
+
 /// Check that `peer_uid` matches `expected`. Unit-testable in isolation
 /// from the `UnixStream` accept path.
 pub(crate) fn check_peer_uid(peer_uid: Option<u32>, expected: u32) -> io::Result<()> {

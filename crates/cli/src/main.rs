@@ -283,15 +283,18 @@ async fn restore_backup(
 }
 
 async fn daemon(detach: bool, data_dir_override: Option<&std::path::Path>) -> Result<()> {
-    use skattr_core::daemon::Daemon;
+    use skattr_core::daemon::{Config, Daemon};
 
     if detach {
-        anyhow::bail!("--detach is not yet supported; run in foreground for Phase 0.C");
+        anyhow::bail!("--detach is not yet supported in Phase 1.F");
     }
 
-    let data_dir = effective_data_dir(data_dir_override)?;
-    std::fs::create_dir_all(&data_dir)?;
-    let vault_path = data_dir.join("identity.vault");
+    let mut config = Config::defaults()?;
+    if let Some(override_dir) = data_dir_override {
+        config.data_dir = override_dir.to_path_buf();
+    }
+    std::fs::create_dir_all(&config.data_dir)?;
+    let vault_path = config.data_dir.join("identity.vault");
 
     if !vault_path.exists() {
         anyhow::bail!(
@@ -308,20 +311,21 @@ async fn daemon(detach: bool, data_dir_override: Option<&std::path::Path>) -> Re
         let _ = tokio::signal::ctrl_c().await;
     };
 
-    // Move the Zeroizing<String> passphrase by value into the spawned
-    // task — it drops (and wipes) when Daemon::run returns.
-    let data_dir_owned = data_dir.clone();
-    let daemon_fut =
-        tokio::spawn(
-            async move { Daemon::run(&data_dir_owned, &pw, ready_tx, shutdown_fut).await },
-        );
+    // Move the Zeroizing<String> passphrase and config by value into the
+    // spawned task — they drop (and wipe) when Daemon::run returns.
+    let data_dir_owned = config.data_dir.clone();
+    let config_owned = config.clone();
+    let daemon_fut = tokio::spawn(async move {
+        Daemon::run(&data_dir_owned, &pw, config_owned, ready_tx, shutdown_fut).await
+    });
 
     // Wait for the daemon to signal readiness.
-    let onion = ready_rx
+    let ready = ready_rx
         .await
         .map_err(|_| anyhow::anyhow!("daemon exited before becoming ready"))?;
     println!();
-    println!("Listening on: {onion}:1");
+    println!("Listening on: {}:1", ready.onion);
+    println!("IPC socket:   {}", ready.ipc_socket.display());
     println!("Ctrl-C to shut down.");
 
     // Block until the daemon future returns (SIGINT + graceful shutdown).

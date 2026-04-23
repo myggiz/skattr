@@ -4,6 +4,7 @@
 //! Daemon struct: owns all long-lived handles.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use tokio::sync::{broadcast, oneshot};
 
@@ -21,6 +22,15 @@ use crate::transport::tor::{TorConfig, TorRuntime};
 /// design — the daemon must not back-pressure). UI consumers should
 /// reconcile via a full `refresh` command on resubscribe.
 const EVENT_CHANNEL_CAPACITY: usize = 1024;
+
+/// Published readiness of the daemon: onion address + bound IPC path.
+#[derive(Debug, Clone)]
+pub struct Ready {
+    /// Full v3 onion address, without port suffix.
+    pub onion: String,
+    /// Path of the Unix socket the daemon is listening on.
+    pub ipc_socket: std::path::PathBuf,
+}
 
 /// The running daemon.
 pub struct Daemon {
@@ -55,28 +65,46 @@ impl Daemon {
 }
 
 impl Daemon {
-    /// Run the Phase 0.C daemon: unlock the vault, derive the storage
-    /// seed, bootstrap Tor, publish the onion service, signal readiness
-    /// with the `.onion` address, then await a caller-supplied shutdown
-    /// future. Returns `Ok(())` after a graceful shutdown.
+    /// Run the full daemon lifecycle:
     ///
-    /// `ready` fires as soon as the onion is published — the caller can
-    /// print the banner while this future continues to hold the runtime.
+    /// 1. Unlock the vault and derive the storage seed.
+    /// 2. Open `Pool` (SQLite + age encryption) and run migrations.
+    /// 3. Bootstrap Tor and publish the onion service.
+    /// 4. Construct the `DeliveryHub` with `DaemonInbound` MLS dispatch.
+    /// 5. Bind the IPC Unix socket and start the `serve` loop.
+    /// 6. Signal readiness via the [`Ready`] struct (`onion` + `ipc_socket`).
+    /// 7. Await the caller-supplied shutdown future.
+    /// 8. Tear down: IPC server → Tor runtime → socket file (via Drop).
     ///
-    /// This is the public entry point the CLI calls; subsequent phases
-    /// extend it with the MLS session manager, outbox, mailbox poller,
-    /// etc.
+    /// Returns `Ok(())` after a graceful shutdown.
     pub async fn run(
         data_dir: &Path,
         passphrase: &zeroize::Zeroizing<String>,
-        ready: oneshot::Sender<String>,
+        config: Config,
+        ready: oneshot::Sender<Ready>,
         shutdown: impl std::future::Future<Output = ()> + Send + 'static,
     ) -> Result<()> {
-        std::fs::create_dir_all(data_dir)?;
-        let vault_path = data_dir.join("identity.vault");
-        let (_vault, identity) = Vault::open(&vault_path, passphrase.as_str())?;
-        let seed = derive_storage_seed(identity)?;
+        use crate::daemon::handle::DaemonHandle;
+        use crate::daemon::inbound::DaemonInbound;
+        use crate::daemon::ipc::server::{current_uid, serve, Server};
+        use crate::delivery::hub::DeliveryHub;
+        use crate::delivery::peer::InboundDispatch;
+        use crate::storage::Pool;
 
+        std::fs::create_dir_all(data_dir)?;
+
+        // Step 1: unlock vault → identity → derive storage seed.
+        // `derive_storage_seed` consumes the identity key, so we open
+        // the vault a second time to get a fresh copy for DaemonHandle.
+        let vault_path = data_dir.join("identity.vault");
+        let (_vault, identity_for_seed) = Vault::open(&vault_path, passphrase.as_str())?;
+        let seed = derive_storage_seed(identity_for_seed)?;
+        let (_vault2, identity) = Vault::open(&vault_path, passphrase.as_str())?;
+
+        // Step 2: open Pool (migrations are applied inside Pool::open).
+        let pool = Arc::new(Pool::open(data_dir, &seed)?);
+
+        // Step 3: Tor bootstrap + onion publish.
         let cfg = TorConfig {
             state_dir: data_dir.join("arti"),
             socks_port: None,
@@ -88,12 +116,66 @@ impl Daemon {
             .publish_onion(&hs_key_path, &seed, "skattr-daemon")
             .await?;
 
-        // If the receiver was dropped, there's no reader — that's fine,
-        // proceed to listen until shutdown.
-        let _ = ready.send(onion);
+        // Step 4: event broadcast channel.
+        let (events_tx, _) = broadcast::channel::<Event>(EVENT_CHANNEL_CAPACITY);
 
+        // Step 5: DaemonInbound + DeliveryHub.
+        let inbound = Arc::new(DaemonInbound::new(pool.clone(), events_tx.clone()))
+            as Arc<dyn InboundDispatch>;
+        // Use DataStream as the transport type parameter. The hub stores
+        // per-peer actor channels; actual DataStream-backed connections are
+        // injected via `hub.ingest()` from the onion-listener accept loop
+        // (wired in a later phase). For Phase 1.F we only need the hub
+        // constructed so IPC commands can be dispatched.
+        let hub: Arc<DeliveryHub<arti_client::DataStream>> =
+            Arc::new(DeliveryHub::new_with_inbound(pool.clone(), inbound));
+
+        // Step 6: DaemonHandle.
+        let handle = DaemonHandle::<arti_client::DataStream>::new(
+            pool,
+            hub,
+            identity,
+            events_tx.clone(),
+        );
+        handle.set_onion(onion.clone());
+
+        // Step 7: IPC server.
+        let sock_path = config.ipc_socket_or_default()?;
+        let allowed_uid = current_uid();
+        let ipc_server = Server::bind(&sock_path, allowed_uid)?;
+        let sock_path_copy = sock_path.clone();
+
+        let (ipc_shutdown_tx, ipc_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        // Build the executor Arc from a clone of the handle's subsystems.
+        let executor: Arc<dyn crate::daemon::ipc::server::CommandExecutor> =
+            Arc::new(handle.clone_for_dispatch());
+        let ipc_events = events_tx.clone();
+        let ipc_task = tokio::spawn(async move {
+            serve(
+                ipc_server,
+                executor,
+                ipc_events,
+                async move {
+                    let _ = ipc_shutdown_rx.await;
+                },
+            )
+            .await;
+        });
+
+        // Step 8: signal readiness.
+        let _ = ready.send(Ready {
+            onion,
+            ipc_socket: sock_path_copy.clone(),
+        });
+
+        // Step 9: await shutdown.
         shutdown.await;
+
+        // Step 10: tear down.
+        let _ = ipc_shutdown_tx.send(());
+        let _ = ipc_task.await;
         rt.shutdown().await?;
+        // Server::drop removes the socket file automatically.
         Ok(())
     }
 
@@ -117,5 +199,57 @@ impl Daemon {
         Err(crate::error::CoreError::Delivery(
             "Daemon::send requires 1.F CLI integration".into(),
         ))
+    }
+}
+
+#[cfg(all(test, feature = "test-harness"))]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use tokio::sync::oneshot;
+    use zeroize::Zeroizing;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "spawns a real Arti bootstrap; run with --ignored"]
+    async fn run_signals_ready_and_exits_on_shutdown() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().to_path_buf();
+        let seed = crate::identity::Seed::generate().unwrap();
+        let identity = crate::identity::IdentityKey::from_seed(&seed).unwrap();
+        let pw = Zeroizing::new("a-test-passphrase-1234".to_string());
+        crate::identity::Vault::create(&data_dir.join("identity.vault"), identity, pw.as_str())
+            .unwrap();
+
+        let mut config = Config::defaults().unwrap();
+        config.data_dir = data_dir.clone();
+        config.ipc_socket = Some(data_dir.join("ipc.sock"));
+
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let shutdown_fut = async move {
+            let _ = shutdown_rx.await;
+        };
+
+        // Move `data_dir` and `pw` into the spawned future so the borrows
+        // are within the `'static` async block.
+        let daemon_task = tokio::spawn(async move {
+            Daemon::run(&data_dir, &pw, config, ready_tx, shutdown_fut).await
+        });
+
+        let ready = tokio::time::timeout(std::time::Duration::from_secs(180), ready_rx)
+            .await
+            .expect("daemon becomes ready within 180 s")
+            .expect("ready_tx still open");
+        assert!(ready.onion.contains(".onion"));
+        assert!(ready.ipc_socket.exists());
+
+        shutdown_tx.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(30), daemon_task)
+            .await
+            .expect("shutdown within 30 s")
+            .expect("join")
+            .expect("daemon returned Ok");
+
+        assert!(!ready.ipc_socket.exists(), "socket removed on drop");
     }
 }

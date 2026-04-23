@@ -27,4 +27,4 @@ pub use error_kind::DaemonErrorKind;
 pub use events::{DeliveryStatus, Event, TorStatus};
 pub use hex::{Hex16, Hex32};
 pub use ipc::{IpcClient, IpcClientError};
-pub use state::Daemon;
+pub use state::{Daemon, Ready};

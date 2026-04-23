@@ -101,7 +101,7 @@ impl<S> DaemonHandle<S>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    fn clone_for_dispatch(&self) -> Self {
+    pub(crate) fn clone_for_dispatch(&self) -> Self {
         Self {
             pool: self.pool.clone(),
             hub: self.hub.clone(),
