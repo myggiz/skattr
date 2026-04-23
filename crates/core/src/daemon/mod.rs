@@ -17,6 +17,7 @@ pub mod error_kind;
 pub mod events;
 pub(crate) mod handle;
 pub mod hex;
+pub(crate) mod inbound;
 pub mod ipc;
 pub mod state;
 
