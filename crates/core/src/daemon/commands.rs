@@ -184,12 +184,18 @@ mod tests {
     fn new_command_variants_serde_roundtrip() {
         let cmds: Vec<Command> = vec![
             Command::ListContacts,
-            Command::RecentMessages { contact: None, limit: 50 },
+            Command::RecentMessages {
+                contact: None,
+                limit: 50,
+            },
             Command::RecentMessages {
                 contact: Some(crate::identity::PublicKey([1; 32])),
                 limit: 10,
             },
-            Command::CreateInvite { nickname: Some("alice".into()), ttl_secs: Some(3600) },
+            Command::CreateInvite {
+                nickname: Some("alice".into()),
+                ttl_secs: Some(3600),
+            },
         ];
         for cmd in &cmds {
             let _back: Command = roundtrip(cmd);

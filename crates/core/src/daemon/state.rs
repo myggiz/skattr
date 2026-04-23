@@ -131,12 +131,8 @@ impl Daemon {
             Arc::new(DeliveryHub::new_with_inbound(pool.clone(), inbound));
 
         // Step 6: DaemonHandle.
-        let handle = DaemonHandle::<arti_client::DataStream>::new(
-            pool,
-            hub,
-            identity,
-            events_tx.clone(),
-        );
+        let handle =
+            DaemonHandle::<arti_client::DataStream>::new(pool, hub, identity, events_tx.clone());
         handle.set_onion(onion.clone());
 
         // Step 7: IPC server.
@@ -151,14 +147,9 @@ impl Daemon {
             Arc::new(handle.clone_for_dispatch());
         let ipc_events = events_tx.clone();
         let ipc_task = tokio::spawn(async move {
-            serve(
-                ipc_server,
-                executor,
-                ipc_events,
-                async move {
-                    let _ = ipc_shutdown_rx.await;
-                },
-            )
+            serve(ipc_server, executor, ipc_events, async move {
+                let _ = ipc_shutdown_rx.await;
+            })
             .await;
         });
 

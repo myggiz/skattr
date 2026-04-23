@@ -74,7 +74,10 @@ pub enum HexParseError {
 
 fn parse_fixed<const N: usize>(s: &str) -> Result<[u8; N], HexParseError> {
     if s.len() != N * 2 {
-        return Err(HexParseError::Length { expected: N * 2, got: s.len() });
+        return Err(HexParseError::Length {
+            expected: N * 2,
+            got: s.len(),
+        });
     }
     let mut out = [0u8; N];
     for (i, chunk) in s.as_bytes().chunks_exact(2).enumerate() {
@@ -154,7 +157,9 @@ mod tests {
         let h = Hex32::from(raw);
         let s = h.to_string();
         assert_eq!(s.len(), 64);
-        assert!(s.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        assert!(s
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
         let parsed: Hex32 = s.parse().unwrap();
         assert_eq!(parsed.0, raw);
     }

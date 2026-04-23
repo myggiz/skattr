@@ -36,12 +36,8 @@ async fn spawn_real_daemon(
     let seed = skattr_core::identity::Seed::generate().unwrap();
     let identity = skattr_core::identity::IdentityKey::from_seed(&seed).unwrap();
     let pw = Zeroizing::new("real-tor-passphrase-xyz".to_string());
-    skattr_core::identity::Vault::create(
-        &data_dir.join("identity.vault"),
-        identity,
-        pw.as_str(),
-    )
-    .unwrap();
+    skattr_core::identity::Vault::create(&data_dir.join("identity.vault"), identity, pw.as_str())
+        .unwrap();
 
     let mut config = Config::defaults().unwrap();
     config.data_dir = data_dir.to_path_buf();
@@ -58,7 +54,14 @@ async fn spawn_real_daemon(
     let pw_owned = pw.clone();
     let config_owned = config.clone();
     let task = tokio::spawn(async move {
-        Daemon::run(&data_dir_owned, &pw_owned, config_owned, ready_tx, shutdown_fut).await
+        Daemon::run(
+            &data_dir_owned,
+            &pw_owned,
+            config_owned,
+            ready_tx,
+            shutdown_fut,
+        )
+        .await
     });
 
     let ready = tokio::time::timeout(std::time::Duration::from_secs(180), ready_rx)
@@ -99,7 +102,10 @@ async fn full_flow_over_real_tor() {
 
     // --- Alice creates an invite ---
     let invite_url = match client_a
-        .execute(Command::CreateInvite { nickname: None, ttl_secs: Some(3600) })
+        .execute(Command::CreateInvite {
+            nickname: None,
+            ttl_secs: Some(3600),
+        })
         .await
         .unwrap()
     {
@@ -135,7 +141,9 @@ async fn full_flow_over_real_tor() {
     let send_result = client_b
         .execute(Command::SendMessage {
             contact: summary.pubkey,
-            kind: Kind::Text { body: "hello-over-tor".into() },
+            kind: Kind::Text {
+                body: "hello-over-tor".into(),
+            },
         })
         .await
         .unwrap();

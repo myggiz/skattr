@@ -183,10 +183,7 @@ mod tests {
         let v: u32 = conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(
-            v,
-            ALL_MIGRATIONS.iter().map(|m| m.version).max().unwrap()
-        );
+        assert_eq!(v, ALL_MIGRATIONS.iter().map(|m| m.version).max().unwrap());
     }
 
     #[test]

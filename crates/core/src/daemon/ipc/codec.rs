@@ -53,7 +53,10 @@ where
         max: MAX_IPC_BODY,
     })?;
     if len > MAX_IPC_BODY {
-        return Err(CodecError::FrameTooLarge { got: len, max: MAX_IPC_BODY });
+        return Err(CodecError::FrameTooLarge {
+            got: len,
+            max: MAX_IPC_BODY,
+        });
     }
     w.write_all(&len.to_be_bytes()).await?;
     w.write_all(&body).await?;
@@ -74,7 +77,10 @@ where
         return Err(CodecError::EmptyFrame);
     }
     if len > MAX_IPC_BODY {
-        return Err(CodecError::FrameTooLarge { got: len, max: MAX_IPC_BODY });
+        return Err(CodecError::FrameTooLarge {
+            got: len,
+            max: MAX_IPC_BODY,
+        });
     }
     let mut body = vec![0u8; len as usize];
     r.read_exact(&mut body).await?;
@@ -141,6 +147,9 @@ mod tests {
         let req = IpcRequest::Execute(Command::AddContact { invite_url: big });
         let mut buf: Vec<u8> = Vec::new();
         let err = write_frame(&mut buf, &req).await.unwrap_err();
-        assert!(matches!(err, CodecError::FrameTooLarge { .. }), "got {err:?}");
+        assert!(
+            matches!(err, CodecError::FrameTooLarge { .. }),
+            "got {err:?}"
+        );
     }
 }

@@ -244,10 +244,16 @@ async fn main() -> Result<()> {
         Command::Invite { qr } => invite(qr, socket.as_deref(), json).await,
         Command::Add { link } => add(&link, socket.as_deref(), json).await,
         Command::Contacts => contacts(socket.as_deref(), json).await,
-        Command::Send { contact, text, fail_on_timeout } => {
-            send(&contact, &text, fail_on_timeout, socket.as_deref(), json).await
-        }
-        Command::Tail { contact, limit, follow } => tail(contact.as_deref(), limit, follow, socket.as_deref(), json).await,
+        Command::Send {
+            contact,
+            text,
+            fail_on_timeout,
+        } => send(&contact, &text, fail_on_timeout, socket.as_deref(), json).await,
+        Command::Tail {
+            contact,
+            limit,
+            follow,
+        } => tail(contact.as_deref(), limit, follow, socket.as_deref(), json).await,
         Command::Chat { contact } => chat(&contact, socket.as_deref()).await,
     }
 }
@@ -508,7 +514,10 @@ async fn invite(qr: bool, sock_flag: Option<&std::path::Path>, json: bool) -> Re
 
     let mut client = connect_or_exit(sock_flag).await?;
     let result = match client
-        .execute(CoreCommand::CreateInvite { nickname: None, ttl_secs: None })
+        .execute(CoreCommand::CreateInvite {
+            nickname: None,
+            ttl_secs: None,
+        })
         .await
     {
         Ok(r) => r,
@@ -516,9 +525,11 @@ async fn invite(qr: bool, sock_flag: Option<&std::path::Path>, json: bool) -> Re
     };
 
     let (url, kpi, expires_at) = match result {
-        CommandResult::InviteCreated { url, key_package_id, expires_at } => {
-            (url, key_package_id, expires_at)
-        }
+        CommandResult::InviteCreated {
+            url,
+            key_package_id,
+            expires_at,
+        } => (url, key_package_id, expires_at),
         other => anyhow::bail!("unexpected result: {other:?}"),
     };
 
@@ -560,7 +571,9 @@ async fn add(link: &str, sock_flag: Option<&std::path::Path>, json: bool) -> Res
 
     let mut client = connect_or_exit(sock_flag).await?;
     let result = match client
-        .execute(CoreCommand::AddContact { invite_url: link.to_string() })
+        .execute(CoreCommand::AddContact {
+            invite_url: link.to_string(),
+        })
         .await
     {
         Ok(r) => r,
@@ -575,7 +588,12 @@ async fn add(link: &str, sock_flag: Option<&std::path::Path>, json: bool) -> Res
     if json {
         println!("{}", serde_json::to_string(&summary)?);
     } else {
-        let hex: String = summary.pubkey.0.iter().map(|b| format!("{b:02x}")).collect();
+        let hex: String = summary
+            .pubkey
+            .0
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
         println!("Added contact:");
         println!("  pubkey:  {}", hex);
         println!("  onion:   {}", summary.onion);
@@ -613,7 +631,13 @@ fn render_contacts_human(rows: &[skattr_core::daemon::commands::ContactSummary])
     }
     let mut out = String::new();
     for row in rows {
-        let short: String = row.pubkey.0.iter().take(4).map(|b| format!("{b:02x}")).collect();
+        let short: String = row
+            .pubkey
+            .0
+            .iter()
+            .take(4)
+            .map(|b| format!("{b:02x}"))
+            .collect();
         let name = row.nickname.as_deref().unwrap_or("(unnamed)");
         let _ = writeln!(
             out,
@@ -632,8 +656,8 @@ async fn send(
     sock_flag: Option<&std::path::Path>,
     json: bool,
 ) -> Result<()> {
-    use skattr_core::daemon::{Command as CoreCommand, CommandResult};
     use skattr_core::daemon::commands::SendStatus;
+    use skattr_core::daemon::{Command as CoreCommand, CommandResult};
     use skattr_core::envelope::Kind;
 
     let mut client = connect_or_exit(sock_flag).await?;
@@ -658,7 +682,9 @@ async fn send(
     let result = match client
         .execute(CoreCommand::SendMessage {
             contact: pubkey,
-            kind: Kind::Text { body: text.to_string() },
+            kind: Kind::Text {
+                body: text.to_string(),
+            },
         })
         .await
     {
@@ -683,7 +709,10 @@ async fn send(
     } else {
         println!(
             "{msg_id}  {state}",
-            state = match status { SendStatus::Queued => "queued", SendStatus::Delivered => "delivered" }
+            state = match status {
+                SendStatus::Queued => "queued",
+                SendStatus::Delivered => "delivered",
+            }
         );
     }
 
@@ -703,7 +732,9 @@ fn resolve_contact(
         .filter(|r| {
             let hex: String = r.pubkey.0.iter().map(|b| format!("{b:02x}")).collect();
             hex.starts_with(&lower)
-                || r.nickname.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(prefix))
+                || r.nickname
+                    .as_deref()
+                    .is_some_and(|n| n.eq_ignore_ascii_case(prefix))
         })
         .collect();
     match matches.len() {
@@ -730,7 +761,10 @@ async fn tail(
     let target = resolve_optional_contact(&mut client, contact_prefix).await?;
 
     let result = match client
-        .execute(CoreCommand::RecentMessages { contact: target, limit })
+        .execute(CoreCommand::RecentMessages {
+            contact: target,
+            limit,
+        })
         .await
     {
         Ok(r) => r,
@@ -755,7 +789,9 @@ async fn resolve_optional_contact(
     prefix: Option<&str>,
 ) -> Result<Option<skattr_core::identity::PublicKey>> {
     use skattr_core::daemon::{Command as CoreCommand, CommandResult};
-    let Some(prefix) = prefix else { return Ok(None) };
+    let Some(prefix) = prefix else {
+        return Ok(None);
+    };
     let rows_result = match client.execute(CoreCommand::ListContacts).await {
         Ok(r) => r,
         Err(e) => exit_on_ipc_error(e),
@@ -793,8 +829,13 @@ fn render_messages_human(rows: &[skattr_core::daemon::commands::MessageRecord]) 
             Kind::Text { body } => body.clone(),
             other => format!("({other:?})"),
         };
-        let contact_short: String =
-            row.contact.0.iter().take(4).map(|b| format!("{b:02x}")).collect();
+        let contact_short: String = row
+            .contact
+            .0
+            .iter()
+            .take(4)
+            .map(|b| format!("{b:02x}"))
+            .collect();
         let _ = writeln!(
             out,
             "[{ts}] {arrow} {contact_short} {body}",
@@ -819,7 +860,10 @@ async fn tail_follow(
 
     // 1. Dump recent.
     let recent = match client
-        .execute(CoreCommand::RecentMessages { contact: target, limit })
+        .execute(CoreCommand::RecentMessages {
+            contact: target,
+            limit,
+        })
         .await
     {
         Ok(r) => r,
@@ -849,8 +893,7 @@ async fn tail_follow(
         };
         match ev {
             Event::MessageReceived { from, envelope } => {
-                let short: String =
-                    from.0.iter().take(4).map(|b| format!("{b:02x}")).collect();
+                let short: String = from.0.iter().take(4).map(|b| format!("{b:02x}")).collect();
                 let body = match envelope.kind {
                     Kind::Text { body } => body,
                     other => format!("({other:?})"),
@@ -858,13 +901,11 @@ async fn tail_follow(
                 println!("[{ts}] <- {short} {body}", ts = envelope.ts);
             }
             Event::DeliveryStatusChanged { message, status } => {
-                let id_hex: String =
-                    message.0.iter().map(|b| format!("{b:02x}")).collect();
+                let id_hex: String = message.0.iter().map(|b| format!("{b:02x}")).collect();
                 println!("... {id_hex} {status:?}");
             }
             Event::ContactUpdated(pk) => {
-                let short: String =
-                    pk.0.iter().take(4).map(|b| format!("{b:02x}")).collect();
+                let short: String = pk.0.iter().take(4).map(|b| format!("{b:02x}")).collect();
                 println!("contact updated: {short}");
             }
             Event::TorStatusChanged(s) => {
@@ -875,10 +916,7 @@ async fn tail_follow(
     Ok(())
 }
 
-async fn chat(
-    contact_prefix: &str,
-    sock_flag: Option<&std::path::Path>,
-) -> Result<()> {
+async fn chat(contact_prefix: &str, sock_flag: Option<&std::path::Path>) -> Result<()> {
     use skattr_core::daemon::events::Event;
     use skattr_core::daemon::ipc::wire::EventFilter;
     use skattr_core::daemon::{Command as CoreCommand, CommandResult, IpcClientError};
@@ -1067,8 +1105,20 @@ mod tests {
         use skattr_core::identity::PublicKey;
 
         let rows = vec![
-            ContactSummary { pubkey: PublicKey([0xAB; 32]), nickname: None, onion: "".into(), card_version: 0, added_at: 0 },
-            ContactSummary { pubkey: PublicKey([0xCD; 32]), nickname: None, onion: "".into(), card_version: 0, added_at: 0 },
+            ContactSummary {
+                pubkey: PublicKey([0xAB; 32]),
+                nickname: None,
+                onion: "".into(),
+                card_version: 0,
+                added_at: 0,
+            },
+            ContactSummary {
+                pubkey: PublicKey([0xCD; 32]),
+                nickname: None,
+                onion: "".into(),
+                card_version: 0,
+                added_at: 0,
+            },
         ];
         let pk = resolve_contact(&rows, "ab").unwrap();
         assert_eq!(pk.0[0], 0xAB);
@@ -1080,8 +1130,24 @@ mod tests {
         use skattr_core::identity::PublicKey;
 
         let rows = vec![
-            ContactSummary { pubkey: PublicKey([0xAB; 32]), nickname: None, onion: "".into(), card_version: 0, added_at: 0 },
-            ContactSummary { pubkey: PublicKey({ let mut b = [0xAB; 32]; b[1] = 0xCD; b }), nickname: None, onion: "".into(), card_version: 0, added_at: 0 },
+            ContactSummary {
+                pubkey: PublicKey([0xAB; 32]),
+                nickname: None,
+                onion: "".into(),
+                card_version: 0,
+                added_at: 0,
+            },
+            ContactSummary {
+                pubkey: PublicKey({
+                    let mut b = [0xAB; 32];
+                    b[1] = 0xCD;
+                    b
+                }),
+                nickname: None,
+                onion: "".into(),
+                card_version: 0,
+                added_at: 0,
+            },
         ];
         let err = resolve_contact(&rows, "ab").unwrap_err();
         assert!(err.to_string().contains("ambiguous"));
@@ -1110,7 +1176,9 @@ mod tests {
             message_id: Hex16::from([2; 16]),
             contact: PublicKey([7; 32]),
             direction: Direction::Incoming,
-            kind: Kind::Text { body: "hello".into() },
+            kind: Kind::Text {
+                body: "hello".into(),
+            },
             mls_generation: 0,
             ts_daemon_recv: 1_700_000_000,
             ts_envelope: 1_699_999_999,

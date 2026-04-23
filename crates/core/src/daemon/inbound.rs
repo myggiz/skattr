@@ -159,9 +159,7 @@ mod tests {
             id: msg_id,
             ts: 1_700_000_000,
             reply_to: None,
-            kind: Kind::Text {
-                body: "hi".into(),
-            },
+            kind: Kind::Text { body: "hi".into() },
         };
         let ciphertext = bob_group.encrypt(&env).unwrap();
 

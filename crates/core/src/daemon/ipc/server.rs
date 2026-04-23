@@ -31,7 +31,9 @@ impl Server {
     pub fn bind(path: &Path, allowed_uid: u32) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(CoreError::Io)?;
-            let mut perms = std::fs::metadata(parent).map_err(CoreError::Io)?.permissions();
+            let mut perms = std::fs::metadata(parent)
+                .map_err(CoreError::Io)?
+                .permissions();
             perms.set_mode(0o700);
             std::fs::set_permissions(parent, perms).map_err(CoreError::Io)?;
         }
@@ -42,11 +44,17 @@ impl Server {
         let listener = UnixListener::bind(path).map_err(CoreError::Io)?;
 
         // Tighten the socket file to 0600 immediately after bind.
-        let mut perms = std::fs::metadata(path).map_err(CoreError::Io)?.permissions();
+        let mut perms = std::fs::metadata(path)
+            .map_err(CoreError::Io)?
+            .permissions();
         perms.set_mode(0o600);
         std::fs::set_permissions(path, perms).map_err(CoreError::Io)?;
 
-        Ok(Self { listener, path: path.to_path_buf(), allowed_uid })
+        Ok(Self {
+            listener,
+            path: path.to_path_buf(),
+            allowed_uid,
+        })
     }
 
     /// Path the socket file is bound to.
@@ -59,12 +67,14 @@ impl Server {
     /// stream only if its peer-cred UID matches `allowed_uid`; else
     /// closes immediately and returns `Err(IpcError::AuthDenied)`.
     pub async fn accept_one(&self) -> std::result::Result<tokio::net::UnixStream, IpcError> {
-        let (stream, _) = self.listener.accept().await.map_err(|e| {
-            IpcError::Internal(format!("accept: {e}"))
-        })?;
-        let cred = stream.peer_cred().map_err(|e| {
-            IpcError::Internal(format!("peer_cred: {e}"))
-        })?;
+        let (stream, _) = self
+            .listener
+            .accept()
+            .await
+            .map_err(|e| IpcError::Internal(format!("accept: {e}")))?;
+        let cred = stream
+            .peer_cred()
+            .map_err(|e| IpcError::Internal(format!("peer_cred: {e}")))?;
         check_peer_uid(Some(cred.uid()), self.allowed_uid).map_err(|_| IpcError::AuthDenied)?;
         Ok(stream)
     }
@@ -206,8 +216,7 @@ pub async fn handle_connection<S>(
                 // active. When subscribed, keep the connection open so
                 // the client can interleave Execute(SendMessage) calls
                 // with the ongoing event stream. Always close on error.
-                let is_terminal = subscribed.is_none()
-                    || matches!(resp, IpcResponse::Err(_));
+                let is_terminal = subscribed.is_none() || matches!(resp, IpcResponse::Err(_));
                 if write_frame(&mut stream, &resp).await.is_err() {
                     break;
                 }
@@ -326,10 +335,20 @@ mod tests {
         let server = Server::bind(&sock, 1000).unwrap();
 
         let sock_mode = std::fs::metadata(&sock).unwrap().permissions().mode() & 0o777;
-        assert_eq!(sock_mode, 0o600, "socket mode must be 0600; got {sock_mode:o}");
+        assert_eq!(
+            sock_mode, 0o600,
+            "socket mode must be 0600; got {sock_mode:o}"
+        );
 
-        let parent_mode = std::fs::metadata(sock.parent().unwrap()).unwrap().permissions().mode() & 0o777;
-        assert_eq!(parent_mode, 0o700, "parent mode must be 0700; got {parent_mode:o}");
+        let parent_mode = std::fs::metadata(sock.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            parent_mode, 0o700,
+            "parent mode must be 0700; got {parent_mode:o}"
+        );
 
         drop(server);
         // Socket file removed on drop.
@@ -374,8 +393,7 @@ mod tests {
         let exec: Arc<dyn CommandExecutor> = Arc::new(EchoExec);
         let (events_tx, _) = broadcast::channel::<Event>(16);
 
-        let handle_task =
-            tokio::spawn(handle_connection(server_stream, exec, events_tx));
+        let handle_task = tokio::spawn(handle_connection(server_stream, exec, events_tx));
 
         write_frame(&mut client, &IpcRequest::Execute(Command::ListContacts))
             .await
@@ -398,8 +416,7 @@ mod tests {
         let (events_tx, _) = broadcast::channel::<Event>(16);
 
         let events_tx_clone = events_tx.clone();
-        let handle_task =
-            tokio::spawn(handle_connection(server_stream, exec, events_tx_clone));
+        let handle_task = tokio::spawn(handle_connection(server_stream, exec, events_tx_clone));
 
         // Subscribe -> Ok(Subscribed).
         write_frame(&mut client, &IpcRequest::Subscribe(EventFilter::TorStatus))
@@ -437,12 +454,14 @@ mod tests {
         let exec: Arc<dyn CommandExecutor> = Arc::new(EchoExec);
         let (events_tx, _) = broadcast::channel::<Event>(16);
 
-        let handle_task =
-            tokio::spawn(handle_connection(server_stream, exec, events_tx));
+        let handle_task = tokio::spawn(handle_connection(server_stream, exec, events_tx));
 
         write_frame(
             &mut client,
-            &IpcRequest::Execute(Command::CreateGroup { members: vec![], name: "x".into() }),
+            &IpcRequest::Execute(Command::CreateGroup {
+                members: vec![],
+                name: "x".into(),
+            }),
         )
         .await
         .unwrap();

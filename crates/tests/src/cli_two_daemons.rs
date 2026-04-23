@@ -184,12 +184,21 @@ impl DaemonBundle {
 
         // Handle owns one copy of the identity.
         let id_for_handle = IdentityKey::from_seed(&seed).unwrap();
-        let handle = Arc::new(DaemonHandle::new(pool.clone(), hub, id_for_handle, events_tx));
+        let handle = Arc::new(DaemonHandle::new(
+            pool.clone(),
+            hub,
+            id_for_handle,
+            events_tx,
+        ));
 
         // Second copy from the same seed for Noise handshake wiring.
         let identity = Arc::new(IdentityKey::from_seed(&seed).unwrap());
 
-        Self { handle, identity, pool }
+        Self {
+            handle,
+            identity,
+            pool,
+        }
     }
 
     /// Send one command.
@@ -262,7 +271,10 @@ async fn full_flow_invite_add_send_queued() {
 
     // --- Alice creates invite ---
     let invite_url = match alice
-        .exec(Command::CreateInvite { nickname: None, ttl_secs: Some(3600) })
+        .exec(Command::CreateInvite {
+            nickname: None,
+            ttl_secs: Some(3600),
+        })
         .await
         .unwrap()
     {
@@ -275,11 +287,7 @@ async fn full_flow_invite_add_send_queued() {
     );
 
     // --- Bob consumes invite ---
-    let alice_summary = match bob
-        .exec(Command::AddContact { invite_url })
-        .await
-        .unwrap()
-    {
+    let alice_summary = match bob.exec(Command::AddContact { invite_url }).await.unwrap() {
         CommandResult::ContactAdded(s) => s,
         other => panic!("expected ContactAdded, got {other:?}"),
     };
@@ -294,7 +302,10 @@ async fn full_flow_invite_add_send_queued() {
         .get_group_id(&alice_summary.pubkey)
         .unwrap()
         .unwrap_or_default();
-    assert!(!gid_bytes.is_empty(), "Bob must have a non-empty group_id for Alice");
+    assert!(
+        !gid_bytes.is_empty(),
+        "Bob must have a non-empty group_id for Alice"
+    );
 
     // --- Bob sends to Alice ---
     //
@@ -303,7 +314,9 @@ async fn full_flow_invite_add_send_queued() {
         Duration::from_secs(4),
         bob.exec(Command::SendMessage {
             contact: alice_summary.pubkey,
-            kind: Kind::Text { body: "hello alice".into() },
+            kind: Kind::Text {
+                body: "hello alice".into(),
+            },
         }),
     )
     .await
@@ -311,10 +324,16 @@ async fn full_flow_invite_add_send_queued() {
     .unwrap();
 
     match send_result {
-        CommandResult::MessageSent { status: SendStatus::Queued, .. } => {
+        CommandResult::MessageSent {
+            status: SendStatus::Queued,
+            ..
+        } => {
             // Expected: enqueued but no ACK came (Alice has no group).
         }
-        CommandResult::MessageSent { status: SendStatus::Delivered, .. } => {
+        CommandResult::MessageSent {
+            status: SendStatus::Delivered,
+            ..
+        } => {
             // Alice's side ACKed somehow — not wrong, just surprising.
             eprintln!("NOTE: MessageSent returned Delivered (unexpected but not wrong)");
         }
@@ -331,7 +350,10 @@ async fn alice_has_no_contacts_after_minting_invite() {
 
     // Mint an invite — must not create a contact row.
     let _ = alice
-        .exec(Command::CreateInvite { nickname: None, ttl_secs: Some(3600) })
+        .exec(Command::CreateInvite {
+            nickname: None,
+            ttl_secs: Some(3600),
+        })
         .await
         .unwrap();
 
@@ -351,7 +373,10 @@ async fn add_contact_rejects_double_use() {
     alice.handle.set_onion("alice-mock.onion".to_string());
 
     let invite_url = match alice
-        .exec(Command::CreateInvite { nickname: None, ttl_secs: Some(3600) })
+        .exec(Command::CreateInvite {
+            nickname: None,
+            ttl_secs: Some(3600),
+        })
         .await
         .unwrap()
     {
@@ -364,9 +389,11 @@ async fn add_contact_rejects_double_use() {
     // First use succeeds.
     assert!(
         matches!(
-            bob.exec(Command::AddContact { invite_url: invite_url.clone() })
-                .await
-                .unwrap(),
+            bob.exec(Command::AddContact {
+                invite_url: invite_url.clone()
+            })
+            .await
+            .unwrap(),
             CommandResult::ContactAdded(_)
         ),
         "first AddContact must succeed"
@@ -387,7 +414,10 @@ async fn bob_recent_messages_empty_before_send() {
     alice.handle.set_onion("alice-mock.onion".to_string());
 
     let invite_url = match alice
-        .exec(Command::CreateInvite { nickname: None, ttl_secs: Some(3600) })
+        .exec(Command::CreateInvite {
+            nickname: None,
+            ttl_secs: Some(3600),
+        })
         .await
         .unwrap()
     {
@@ -396,22 +426,24 @@ async fn bob_recent_messages_empty_before_send() {
     };
 
     let bob = DaemonBundle::new_noop();
-    let alice_summary = match bob
-        .exec(Command::AddContact { invite_url })
-        .await
-        .unwrap()
-    {
+    let alice_summary = match bob.exec(Command::AddContact { invite_url }).await.unwrap() {
         CommandResult::ContactAdded(s) => s,
         other => panic!("expected ContactAdded, got {other:?}"),
     };
 
     match bob
-        .exec(Command::RecentMessages { contact: Some(alice_summary.pubkey), limit: 10 })
+        .exec(Command::RecentMessages {
+            contact: Some(alice_summary.pubkey),
+            limit: 10,
+        })
         .await
         .unwrap()
     {
         CommandResult::Messages(rows) => {
-            assert!(rows.is_empty(), "no messages sent yet — expected empty list");
+            assert!(
+                rows.is_empty(),
+                "no messages sent yet — expected empty list"
+            );
         }
         other => panic!("expected Messages, got {other:?}"),
     }

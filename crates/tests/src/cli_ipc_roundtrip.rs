@@ -15,7 +15,7 @@ use std::sync::Arc;
 use skattr_core::daemon::{Command, CommandResult, IpcClient, IpcClientError};
 use skattr_core::identity::{IdentityKey, Seed};
 use skattr_core::test_exports::{
-    CommandExecutor, DaemonHandle, DeliveryHub, IpcError, Pool, handle_connection,
+    handle_connection, CommandExecutor, DaemonHandle, DeliveryHub, IpcError, Pool,
 };
 use tokio::sync::broadcast;
 
@@ -33,10 +33,7 @@ struct ExecShim(Arc<DuplexHandle>);
 
 #[async_trait::async_trait]
 impl CommandExecutor for ExecShim {
-    async fn execute(
-        &self,
-        cmd: Command,
-    ) -> std::result::Result<CommandResult, IpcError> {
+    async fn execute(&self, cmd: Command) -> std::result::Result<CommandResult, IpcError> {
         self.0.execute(cmd).await
     }
 }
@@ -94,7 +91,10 @@ async fn ipc_unknown_command_returns_typed_error() {
 
     let mut client = IpcClient::from_stream(client_io);
     let err = client
-        .execute(Command::CreateGroup { members: vec![], name: "x".into() })
+        .execute(Command::CreateGroup {
+            members: vec![],
+            name: "x".into(),
+        })
         .await
         .unwrap_err();
     assert!(

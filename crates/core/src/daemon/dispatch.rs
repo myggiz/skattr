@@ -83,15 +83,17 @@ async fn create_invite<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    use crate::daemon::hex::Hex32;
     use crate::daemon::error_kind::DaemonErrorKind;
+    use crate::daemon::hex::Hex32;
     use crate::invite::InviteLink;
     use crate::mls::key_package::KeyPackage;
     use crate::mls::provider::MlsProvider;
     use crate::storage::KeyPackageRepo;
     use rand_core::{OsRng, RngCore as _};
 
-    let onion = handle.onion().ok_or(IpcError::Daemon(DaemonErrorKind::TorNotReady))?;
+    let onion = handle
+        .onion()
+        .ok_or(IpcError::Daemon(DaemonErrorKind::TorNotReady))?;
 
     let ttl = ttl_secs.unwrap_or(24 * 3600);
     let now = std::time::SystemTime::now()
@@ -158,12 +160,8 @@ where
 
     // Build our solo MLS group, then add the inviter as the second member.
     let provider = MlsProvider::new();
-    let mut group = Group::create_solo(
-        &handle.identity,
-        Some(&link.psk.0),
-        provider,
-    )
-    .map_err(map_err)?;
+    let mut group =
+        Group::create_solo(&handle.identity, Some(&link.psk.0), provider).map_err(map_err)?;
 
     let invitee_kp = KeyPackage::from_bytes(&link.body.key_package).map_err(map_err)?;
     let (_welcome, _commit) = group
@@ -191,7 +189,9 @@ where
     // Mark the inviter's single-use KP as consumed.
     link.mark_consumed(&kp_repo).map_err(map_err)?;
 
-    let _ = handle.events_tx.send(Event::ContactUpdated(link.body.identity));
+    let _ = handle
+        .events_tx
+        .send(Event::ContactUpdated(link.body.identity));
 
     Ok(CommandResult::ContactAdded(ContactSummary {
         pubkey: link.body.identity,
@@ -396,7 +396,10 @@ mod tests {
         let handle = test_handle();
         let result = execute_command(
             handle,
-            Command::CreateGroup { members: vec![], name: "x".into() },
+            Command::CreateGroup {
+                members: vec![],
+                name: "x".into(),
+            },
         )
         .await;
         assert!(matches!(result, Err(IpcError::UnknownCommand)));
@@ -415,15 +418,20 @@ mod tests {
 
         let result = execute_command(
             handle.clone(),
-            Command::CreateInvite { nickname: None, ttl_secs: Some(3600) },
+            Command::CreateInvite {
+                nickname: None,
+                ttl_secs: Some(3600),
+            },
         )
         .await
         .unwrap();
 
         let (url, kpi, expires_at) = match result {
-            CommandResult::InviteCreated { url, key_package_id, expires_at } => {
-                (url, key_package_id, expires_at)
-            }
+            CommandResult::InviteCreated {
+                url,
+                key_package_id,
+                expires_at,
+            } => (url, key_package_id, expires_at),
             other => panic!("expected InviteCreated, got {other:?}"),
         };
         assert!(url.starts_with("skattr://invite/v1#"), "url={url}");
@@ -446,13 +454,18 @@ mod tests {
         // onion not set — still None
         let result = execute_command(
             handle,
-            Command::CreateInvite { nickname: None, ttl_secs: Some(3600) },
+            Command::CreateInvite {
+                nickname: None,
+                ttl_secs: Some(3600),
+            },
         )
         .await;
         assert!(
             matches!(
                 result,
-                Err(IpcError::Daemon(crate::daemon::error_kind::DaemonErrorKind::TorNotReady))
+                Err(IpcError::Daemon(
+                    crate::daemon::error_kind::DaemonErrorKind::TorNotReady
+                ))
             ),
             "expected TorNotReady, got {result:?}"
         );
@@ -464,14 +477,15 @@ mod tests {
         handle_a.set_onion("alice.onion".to_string());
 
         // Alice creates an invite.
-        let CommandResult::InviteCreated { url, .. } =
-            execute_command(
-                handle_a.clone(),
-                Command::CreateInvite { nickname: None, ttl_secs: Some(3600) },
-            )
-            .await
-            .unwrap()
-        else {
+        let CommandResult::InviteCreated { url, .. } = execute_command(
+            handle_a.clone(),
+            Command::CreateInvite {
+                nickname: None,
+                ttl_secs: Some(3600),
+            },
+        )
+        .await
+        .unwrap() else {
             panic!("expected InviteCreated");
         };
 
@@ -503,28 +517,36 @@ mod tests {
         let handle_a = test_handle();
         handle_a.set_onion("alice.onion".to_string());
 
-        let CommandResult::InviteCreated { url, .. } =
-            execute_command(
-                handle_a.clone(),
-                Command::CreateInvite { nickname: None, ttl_secs: Some(3600) },
-            )
-            .await
-            .unwrap()
-        else {
+        let CommandResult::InviteCreated { url, .. } = execute_command(
+            handle_a.clone(),
+            Command::CreateInvite {
+                nickname: None,
+                ttl_secs: Some(3600),
+            },
+        )
+        .await
+        .unwrap() else {
             panic!("expected InviteCreated");
         };
 
         let handle_b = test_handle();
         // First use succeeds.
-        execute_command(handle_b.clone(), Command::AddContact { invite_url: url.clone() })
-            .await
-            .unwrap();
+        execute_command(
+            handle_b.clone(),
+            Command::AddContact {
+                invite_url: url.clone(),
+            },
+        )
+        .await
+        .unwrap();
         // Second use is rejected.
         let res = execute_command(handle_b.clone(), Command::AddContact { invite_url: url }).await;
         assert!(
             matches!(
                 res,
-                Err(IpcError::Daemon(crate::daemon::error_kind::DaemonErrorKind::InviteConsumed))
+                Err(IpcError::Daemon(
+                    crate::daemon::error_kind::DaemonErrorKind::InviteConsumed
+                ))
             ),
             "expected InviteConsumed, got {res:?}"
         );
@@ -552,11 +574,14 @@ mod tests {
             .unwrap();
         }
 
-        let result = execute_command(handle, Command::ListContacts).await.unwrap();
+        let result = execute_command(handle, Command::ListContacts)
+            .await
+            .unwrap();
         match result {
             CommandResult::Contacts(summaries) => {
                 assert_eq!(summaries.len(), 2);
-                let names: Vec<Option<String>> = summaries.iter().map(|s| s.nickname.clone()).collect();
+                let names: Vec<Option<String>> =
+                    summaries.iter().map(|s| s.nickname.clone()).collect();
                 assert!(names.contains(&Some("alice".into())));
                 assert!(names.contains(&None));
                 // No card yet -> onion is empty string, version 0.
@@ -587,7 +612,9 @@ mod tests {
         .await;
         assert!(matches!(
             res,
-            Err(IpcError::Daemon(crate::daemon::error_kind::DaemonErrorKind::ContactNotFound))
+            Err(IpcError::Daemon(
+                crate::daemon::error_kind::DaemonErrorKind::ContactNotFound
+            ))
         ));
     }
 
@@ -608,13 +635,18 @@ mod tests {
 
         let res = execute_command(
             handle,
-            Command::SendMessage { contact: peer, kind: Kind::Text { body: "hi".into() } },
+            Command::SendMessage {
+                contact: peer,
+                kind: Kind::Text { body: "hi".into() },
+            },
         )
         .await;
         // Empty group_id is the "not linked" state.
         assert!(matches!(
             res,
-            Err(IpcError::Daemon(crate::daemon::error_kind::DaemonErrorKind::ContactNotFound))
+            Err(IpcError::Daemon(
+                crate::daemon::error_kind::DaemonErrorKind::ContactNotFound
+            ))
         ));
     }
 
@@ -632,7 +664,9 @@ mod tests {
         assert!(
             matches!(
                 res,
-                Err(IpcError::Daemon(crate::daemon::error_kind::DaemonErrorKind::ContactNotFound))
+                Err(IpcError::Daemon(
+                    crate::daemon::error_kind::DaemonErrorKind::ContactNotFound
+                ))
             ),
             "expected ContactNotFound, got {res:?}"
         );
@@ -672,7 +706,10 @@ mod tests {
 
         let res = execute_command(
             handle.clone(),
-            Command::RecentMessages { contact: Some(peer), limit: 10 },
+            Command::RecentMessages {
+                contact: Some(peer),
+                limit: 10,
+            },
         )
         .await
         .unwrap();
@@ -710,7 +747,10 @@ mod tests {
 
         let res = execute_command(
             handle,
-            Command::RecentMessages { contact: Some(peer), limit: 10 },
+            Command::RecentMessages {
+                contact: Some(peer),
+                limit: 10,
+            },
         )
         .await
         .unwrap();
@@ -733,23 +773,23 @@ mod tests {
 
         let CommandResult::InviteCreated { url, .. } = execute_command(
             handle_a.clone(),
-            Command::CreateInvite { nickname: None, ttl_secs: Some(3600) },
+            Command::CreateInvite {
+                nickname: None,
+                ttl_secs: Some(3600),
+            },
         )
         .await
-        .unwrap()
-        else {
+        .unwrap() else {
             panic!("expected InviteCreated");
         };
 
         // Bob consumes Alice's invite; this creates a group with Alice as
         // the contact (group_id is set on Alice's pubkey in Bob's pool).
         let handle_b = test_handle();
-        let CommandResult::ContactAdded(summary) = execute_command(
-            handle_b.clone(),
-            Command::AddContact { invite_url: url },
-        )
-        .await
-        .unwrap()
+        let CommandResult::ContactAdded(summary) =
+            execute_command(handle_b.clone(), Command::AddContact { invite_url: url })
+                .await
+                .unwrap()
         else {
             panic!("expected ContactAdded");
         };
@@ -766,7 +806,10 @@ mod tests {
             .await
             .expect("outer 3 s budget");
         match res {
-            Ok(CommandResult::MessageSent { status: SendStatus::Queued, .. }) => {}
+            Ok(CommandResult::MessageSent {
+                status: SendStatus::Queued,
+                ..
+            }) => {}
             other => panic!("expected MessageSent(Queued), got {other:?}"),
         }
     }

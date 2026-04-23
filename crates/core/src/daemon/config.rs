@@ -80,9 +80,8 @@ impl Config {
     ) -> Result<Self> {
         let mut cfg = match file {
             Some(p) => {
-                let text = std::fs::read_to_string(p).map_err(|e| {
-                    CoreError::Config(format!("read {}: {e}", p.display()))
-                })?;
+                let text = std::fs::read_to_string(p)
+                    .map_err(|e| CoreError::Config(format!("read {}: {e}", p.display())))?;
                 toml::from_str(&text)
                     .map_err(|e| CoreError::Config(format!("parse {}: {e}", p.display())))?
             }
@@ -130,7 +129,11 @@ impl Config {
 fn xdg_config_candidates() -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
-        out.push(std::path::PathBuf::from(xdg).join("skattr").join("config.toml"));
+        out.push(
+            std::path::PathBuf::from(xdg)
+                .join("skattr")
+                .join("config.toml"),
+        );
     }
     if let Some(home) = std::env::var_os("HOME") {
         out.push(
@@ -169,7 +172,8 @@ mod tests {
         let cfg_path = tmp.path().join("config.toml");
         std::fs::write(&cfg_path, r#"data_dir = "/file/data""#).unwrap();
         let env_path = tmp.path().join("env_data");
-        let cfg = Config::load_with_precedence(Some(&cfg_path), None, Some(&env_path), None).unwrap();
+        let cfg =
+            Config::load_with_precedence(Some(&cfg_path), None, Some(&env_path), None).unwrap();
         assert_eq!(cfg.data_dir, env_path);
     }
 
@@ -180,7 +184,9 @@ mod tests {
         std::fs::write(&cfg_path, r#"data_dir = "/file/data""#).unwrap();
         let env_path = tmp.path().join("env_data");
         let flag_path = tmp.path().join("flag_data");
-        let cfg = Config::load_with_precedence(Some(&cfg_path), Some(&flag_path), Some(&env_path), None).unwrap();
+        let cfg =
+            Config::load_with_precedence(Some(&cfg_path), Some(&flag_path), Some(&env_path), None)
+                .unwrap();
         assert_eq!(cfg.data_dir, flag_path);
     }
 

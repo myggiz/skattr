@@ -288,9 +288,7 @@ impl<'p> ContactRepo<'p> {
     /// non-hex characters.
     pub fn lookup_by_prefix(&self, prefix: &str) -> Result<Vec<PublicKey>> {
         if prefix.is_empty() {
-            return Err(CoreError::Contact(
-                "contact: lookup: empty prefix".into(),
-            ));
+            return Err(CoreError::Contact("contact: lookup: empty prefix".into()));
         }
         if !prefix.chars().all(|c| c.is_ascii_hexdigit()) {
             return Err(CoreError::Contact(format!(
@@ -311,10 +309,7 @@ impl<'p> ContactRepo<'p> {
                 if bytes.len() != 32 {
                     continue;
                 }
-                let hex = bytes
-                    .iter()
-                    .map(|b| format!("{b:02x}"))
-                    .collect::<String>();
+                let hex = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
                 if hex.starts_with(&lower) {
                     let mut arr = [0u8; 32];
                     arr.copy_from_slice(&bytes);
@@ -601,7 +596,10 @@ mod tests {
         repo.upsert(&alice).unwrap();
 
         // Default group_id is empty (per migration 0005).
-        assert_eq!(repo.get_group_id(&alice.identity).unwrap(), Some(Vec::new()));
+        assert_eq!(
+            repo.get_group_id(&alice.identity).unwrap(),
+            Some(Vec::new())
+        );
 
         let gid = vec![0xAAu8; 32];
         repo.set_group_id(&alice.identity, &gid).unwrap();
@@ -666,7 +664,10 @@ mod tests {
         let pool = Pool::in_memory();
         let repo = ContactRepo::new(&pool);
         let err = repo.lookup_by_prefix("").expect_err("empty prefix");
-        assert!(matches!(err, CoreError::Contact(ref s) if s.contains("empty")), "got {err:?}");
+        assert!(
+            matches!(err, CoreError::Contact(ref s) if s.contains("empty")),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -674,6 +675,9 @@ mod tests {
         let pool = Pool::in_memory();
         let repo = ContactRepo::new(&pool);
         let err = repo.lookup_by_prefix("zz").expect_err("non-hex prefix");
-        assert!(matches!(err, CoreError::Contact(ref s) if s.contains("hex")), "got {err:?}");
+        assert!(
+            matches!(err, CoreError::Contact(ref s) if s.contains("hex")),
+            "got {err:?}"
+        );
     }
 }

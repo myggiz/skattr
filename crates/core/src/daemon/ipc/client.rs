@@ -86,7 +86,10 @@ where
     /// Build a client from an existing duplex stream. Used by tests
     /// (`tokio::io::duplex`) and the integration test harness.
     pub fn from_stream(stream: S) -> Self {
-        Self { stream: BufReader::new(stream), subscribed: false }
+        Self {
+            stream: BufReader::new(stream),
+            subscribed: false,
+        }
     }
 
     /// Send a one-shot `Execute` request and return the single

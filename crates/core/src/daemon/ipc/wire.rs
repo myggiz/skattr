@@ -120,7 +120,10 @@ mod tests {
             IpcResponse::Ok(CommandResult::Ok),
             IpcResponse::Err(IpcError::AuthDenied),
             IpcResponse::Err(IpcError::Codec("bad cbor".into())),
-            IpcResponse::Err(IpcError::FrameTooLarge { got: 2_000_000, max: 1_048_576 }),
+            IpcResponse::Err(IpcError::FrameTooLarge {
+                got: 2_000_000,
+                max: 1_048_576,
+            }),
             IpcResponse::Err(IpcError::UnknownCommand),
             IpcResponse::Err(IpcError::VaultNotReady),
             IpcResponse::Err(IpcError::Daemon(DaemonErrorKind::ContactNotFound)),

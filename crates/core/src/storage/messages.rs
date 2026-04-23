@@ -206,21 +206,27 @@ mod tests {
             id: MessageId([1; 16]),
             ts: 3000,
             reply_to: None,
-            kind: Kind::Text { body: "first".into() },
+            kind: Kind::Text {
+                body: "first".into(),
+            },
         };
         let e2 = Envelope {
             v: 1,
             id: MessageId([2; 16]),
             ts: 1000,
             reply_to: None,
-            kind: Kind::Text { body: "second".into() },
+            kind: Kind::Text {
+                body: "second".into(),
+            },
         };
         let e3 = Envelope {
             v: 1,
             id: MessageId([3; 16]),
             ts: 2000,
             reply_to: None,
-            kind: Kind::Text { body: "third".into() },
+            kind: Kind::Text {
+                body: "third".into(),
+            },
         };
 
         repo.insert(&gid, &sender, &e1).unwrap();

@@ -85,10 +85,7 @@ impl<S> CommandExecutor for DaemonHandle<S>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + Sync + 'static,
 {
-    async fn execute(
-        &self,
-        cmd: IpcCommand,
-    ) -> std::result::Result<IpcCommandResult, IpcError> {
+    async fn execute(&self, cmd: IpcCommand) -> std::result::Result<IpcCommandResult, IpcError> {
         // CommandExecutor takes `&self`; dispatch::execute_command
         // takes Arc<DaemonHandle>. Build a fresh Arc by cloning the
         // subsystem handles (all Arc / Clone).
