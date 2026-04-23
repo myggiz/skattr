@@ -29,26 +29,51 @@ pub async fn execute_command<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    // Reference all fields to silence dead_code warnings until T14+
-    // call them.
-    let _ = handle.pool.clone();
-    let _ = handle.events_tx.clone();
-
     match cmd {
         Command::Shutdown | Command::RotateOnion => Ok(CommandResult::Ok),
+        Command::ListContacts => list_contacts(&handle).await,
         Command::CreateInvite { .. }
         | Command::AddContact { .. }
-        | Command::ListContacts
         | Command::SendMessage { .. }
         | Command::RecentMessages { .. }
         | Command::CreateGroup { .. } => Err(IpcError::UnknownCommand),
     }
 }
 
+async fn list_contacts<S>(
+    handle: &Arc<DaemonHandle<S>>,
+) -> std::result::Result<CommandResult, IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    use crate::daemon::commands::ContactSummary;
+    use crate::storage::ContactRepo;
+
+    let repo = ContactRepo::new(&handle.pool);
+    let contacts = repo.list().map_err(map_err)?;
+    let summaries: Vec<ContactSummary> = contacts
+        .into_iter()
+        .map(|c| {
+            let (onion, card_version) = c
+                .card
+                .as_ref()
+                .map(|card| (card.body.onion.clone(), card.body.version))
+                .unwrap_or_else(|| (String::new(), 0));
+            ContactSummary {
+                pubkey: c.identity,
+                nickname: c.display_name,
+                onion,
+                card_version,
+                added_at: u64::try_from(c.added_at).unwrap_or(0),
+            }
+        })
+        .collect();
+    Ok(CommandResult::Contacts(summaries))
+}
+
 /// Map any `CoreError` to an `IpcError`. Projects via `CoreError::kind`
 /// into `DaemonErrorKind`; otherwise `Internal(...)` with a truncated
 /// display. Logs the full error server-side.
-#[allow(dead_code)] // wired up by Task 14+ handlers.
 pub(crate) fn map_err(err: CoreError) -> IpcError {
     if let Some(kind) = err.kind() {
         tracing::warn!(?err, ?kind, "ipc: typed daemon error");
@@ -101,5 +126,51 @@ mod tests {
         )
         .await;
         assert!(matches!(result, Err(IpcError::UnknownCommand)));
+    }
+
+    use crate::contact::Contact;
+    use crate::daemon::commands::ContactSummary;
+    use crate::identity::PublicKey;
+    use crate::storage::ContactRepo;
+
+    #[tokio::test]
+    async fn list_contacts_returns_all_rows_projected() {
+        let handle = test_handle();
+        // Seed two contacts directly via the repo.
+        {
+            let repo = ContactRepo::new(&handle.pool);
+            repo.upsert(&Contact {
+                identity: PublicKey([0x01; 32]),
+                display_name: Some("alice".into()),
+                added_at: 1_700_000_000,
+                card: None,
+            })
+            .unwrap();
+            repo.upsert(&Contact {
+                identity: PublicKey([0x02; 32]),
+                display_name: None,
+                added_at: 1_700_000_100,
+                card: None,
+            })
+            .unwrap();
+        }
+
+        let result = execute_command(handle, Command::ListContacts).await.unwrap();
+        match result {
+            CommandResult::Contacts(summaries) => {
+                assert_eq!(summaries.len(), 2);
+                let names: Vec<Option<String>> = summaries.iter().map(|s| s.nickname.clone()).collect();
+                assert!(names.contains(&Some("alice".into())));
+                assert!(names.contains(&None));
+                // No card yet -> onion is empty string, version 0.
+                for s in &summaries {
+                    if s.nickname == Some("alice".into()) {
+                        assert_eq!(s.onion, "");
+                        assert_eq!(s.card_version, 0);
+                    }
+                }
+            }
+            other => panic!("expected Contacts, got {other:?}"),
+        }
     }
 }
