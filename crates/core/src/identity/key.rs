@@ -18,6 +18,10 @@ use crate::error::{CoreError, Result};
 /// `PublicKey` is `Copy` and safe to log in debug output at `trace`
 /// level only — pubkeys are sensitive metadata. Display format is
 /// hex-encoded; see [`PublicKey::to_hex`].
+///
+/// `Ord` / `PartialOrd` derive lexicographic byte order; used for
+/// stable display sorts and for deterministic ordering in tests.
+/// Not a cryptographic ordering — do not use for security decisions.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct PublicKey(pub [u8; 32]);
 

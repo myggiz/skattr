@@ -287,6 +287,11 @@ impl<'p> ContactRepo<'p> {
     /// required. Returns `CoreError::Contact` if `prefix` contains
     /// non-hex characters.
     pub fn lookup_by_prefix(&self, prefix: &str) -> Result<Vec<PublicKey>> {
+        if prefix.is_empty() {
+            return Err(CoreError::Contact(
+                "contact: lookup: empty prefix".into(),
+            ));
+        }
         if !prefix.chars().all(|c| c.is_ascii_hexdigit()) {
             return Err(CoreError::Contact(format!(
                 "contact: lookup: non-hex prefix {prefix:?}"
@@ -654,6 +659,14 @@ mod tests {
         repo.upsert(&sample_contact(1)).unwrap();
         // Unknown prefix -> empty result (NOT error).
         assert!(repo.lookup_by_prefix("ff00").unwrap().is_empty());
+    }
+
+    #[test]
+    fn lookup_by_prefix_rejects_empty() {
+        let pool = Pool::in_memory();
+        let repo = ContactRepo::new(&pool);
+        let err = repo.lookup_by_prefix("").expect_err("empty prefix");
+        assert!(matches!(err, CoreError::Contact(ref s) if s.contains("empty")), "got {err:?}");
     }
 
     #[test]
