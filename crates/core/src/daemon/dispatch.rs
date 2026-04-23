@@ -37,9 +37,10 @@ where
         }
         Command::AddContact { invite_url } => add_contact(&handle, invite_url).await,
         Command::SendMessage { contact, kind } => send_message(&handle, contact, kind).await,
-        Command::RecentMessages { .. } | Command::CreateGroup { .. } => {
-            Err(IpcError::UnknownCommand)
+        Command::RecentMessages { contact, limit } => {
+            recent_messages(&handle, contact, limit).await
         }
+        Command::CreateGroup { .. } => Err(IpcError::UnknownCommand),
     }
 }
 
@@ -275,6 +276,73 @@ where
         message_id: Hex16::from(message_id.0),
         status,
     })
+}
+
+async fn recent_messages<S>(
+    handle: &Arc<DaemonHandle<S>>,
+    contact: Option<crate::identity::PublicKey>,
+    limit: u32,
+) -> std::result::Result<CommandResult, IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    use crate::daemon::commands::{Direction, MessageRecord};
+    use crate::daemon::error_kind::DaemonErrorKind;
+    use crate::daemon::hex::Hex16;
+    use crate::envelope::Envelope;
+    use crate::identity::PublicKey;
+    use crate::storage::{ContactRepo, MessageRepo};
+
+    // Phase 1.F requires a contact filter. Global recent lands in Phase 1.G.
+    let peer = contact.ok_or(IpcError::Daemon(DaemonErrorKind::ContactNotFound))?;
+
+    let contact_repo = ContactRepo::new(&handle.pool);
+    let group_id = match contact_repo.get_group_id(&peer).map_err(map_err)? {
+        Some(bytes) if !bytes.is_empty() => bytes,
+        _ => return Err(IpcError::Daemon(DaemonErrorKind::ContactNotFound)),
+    };
+
+    let msg_repo = MessageRepo::new(&handle.pool);
+    let rows = msg_repo
+        .recent(&group_id, usize::try_from(limit).unwrap_or(usize::MAX))
+        .map_err(map_err)?;
+
+    // Local identity pubkey — determines message direction.
+    let my_pubkey: PublicKey = handle.identity.public();
+
+    let records: Vec<MessageRecord> = rows
+        .into_iter()
+        .filter_map(|row| {
+            // Decode body_blob -> Envelope (skip rows with no blob or bad CBOR).
+            let blob = row.body_blob.as_deref().unwrap_or(&[]);
+            let env: Envelope = Envelope::decode(blob).ok()?;
+
+            let mut sender_arr = [0u8; 32];
+            if row.sender.len() == 32 {
+                sender_arr.copy_from_slice(&row.sender);
+            }
+            let sender_pk = PublicKey(sender_arr);
+
+            let direction = if sender_pk == my_pubkey {
+                Direction::Outgoing
+            } else {
+                Direction::Incoming
+            };
+            // `contact` field is always the peer — outgoing rows were sent
+            // to `peer`; incoming rows were sent by `peer` (the sender).
+            Some(MessageRecord {
+                message_id: Hex16::from(env.id.0),
+                contact: peer,
+                direction,
+                kind: env.kind,
+                mls_generation: 0,
+                ts_daemon_recv: u64::try_from(row.ts).unwrap_or(0),
+                ts_envelope: env.ts,
+            })
+        })
+        .collect();
+
+    Ok(CommandResult::Messages(records))
 }
 
 /// Map any `CoreError` to an `IpcError`. Projects via `CoreError::kind`
@@ -548,6 +616,109 @@ mod tests {
             res,
             Err(IpcError::Daemon(crate::daemon::error_kind::DaemonErrorKind::ContactNotFound))
         ));
+    }
+
+    #[tokio::test]
+    async fn recent_messages_returns_contact_not_found_for_unknown_contact() {
+        let handle = test_handle();
+        let res = execute_command(
+            handle,
+            Command::RecentMessages {
+                contact: Some(crate::identity::PublicKey([0x88; 32])),
+                limit: 50,
+            },
+        )
+        .await;
+        assert!(
+            matches!(
+                res,
+                Err(IpcError::Daemon(crate::daemon::error_kind::DaemonErrorKind::ContactNotFound))
+            ),
+            "expected ContactNotFound, got {res:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn recent_messages_projects_stored_rows() {
+        use crate::daemon::commands::{Direction, MessageRecord};
+        use crate::envelope::{Envelope, Kind, MessageId};
+        use crate::storage::MessageRepo;
+
+        let handle = test_handle();
+        let peer = crate::identity::PublicKey([0x10; 32]);
+        let gid = [0xAAu8; 32];
+
+        // Seed contact + group_id mapping.
+        let cr = ContactRepo::new(&handle.pool);
+        cr.upsert(&crate::contact::Contact {
+            identity: peer,
+            display_name: None,
+            added_at: 0,
+            card: None,
+        })
+        .unwrap();
+        cr.set_group_id(&peer, &gid).unwrap();
+
+        // Insert one message row (sender = peer, so direction = Incoming).
+        let mr = MessageRepo::new(&handle.pool);
+        let env = Envelope {
+            v: 1,
+            id: MessageId::generate(),
+            ts: 1_700_000_000,
+            reply_to: None,
+            kind: Kind::Text { body: "hey".into() },
+        };
+        mr.insert(&gid, &peer.0, &env).unwrap();
+
+        let res = execute_command(
+            handle.clone(),
+            Command::RecentMessages { contact: Some(peer), limit: 10 },
+        )
+        .await
+        .unwrap();
+
+        match res {
+            CommandResult::Messages(records) => {
+                assert_eq!(records.len(), 1);
+                assert_eq!(records[0].contact, peer);
+                // Sender (peer) != local identity -> Incoming.
+                assert_eq!(records[0].direction, Direction::Incoming);
+                assert!(
+                    matches!(records[0].kind, Kind::Text { .. }),
+                    "expected Text kind"
+                );
+            }
+            other => panic!("expected Messages, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn recent_messages_returns_empty_vec_for_contact_with_no_messages() {
+        let handle = test_handle();
+        let peer = crate::identity::PublicKey([0x20; 32]);
+        let gid = [0xBBu8; 32];
+
+        let cr = ContactRepo::new(&handle.pool);
+        cr.upsert(&crate::contact::Contact {
+            identity: peer,
+            display_name: None,
+            added_at: 0,
+            card: None,
+        })
+        .unwrap();
+        cr.set_group_id(&peer, &gid).unwrap();
+
+        let res = execute_command(
+            handle,
+            Command::RecentMessages { contact: Some(peer), limit: 10 },
+        )
+        .await
+        .unwrap();
+
+        match res {
+            CommandResult::Messages(records) => assert!(records.is_empty()),
+            other => panic!("expected Messages, got {other:?}"),
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
