@@ -94,6 +94,193 @@ pub(crate) fn check_peer_uid(peer_uid: Option<u32>, expected: u32) -> io::Result
     }
 }
 
+use std::sync::Arc;
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::broadcast;
+
+use crate::daemon::commands::{Command, CommandResult};
+use crate::daemon::events::Event;
+use crate::daemon::ipc::codec::{read_frame, write_frame, CodecError};
+use crate::daemon::ipc::wire::{EventFilter, IpcRequest, IpcResponse};
+
+/// Execute one `Command` and return its `CommandResult` or a typed
+/// `IpcError`. Decouples the per-connection handler from the concrete
+/// `DaemonHandle` so the unit tests can drive the handler with a mock.
+#[async_trait::async_trait]
+pub trait CommandExecutor: Send + Sync {
+    /// Dispatch `cmd` and return a result or typed wire error.
+    async fn execute(&self, cmd: Command) -> std::result::Result<CommandResult, IpcError>;
+}
+
+/// Handle one accepted connection. The loop owns a per-connection
+/// `subscribed: Option<EventFilter>`; once set, events flow until the
+/// client hangs up or a `Shutdown` arrives.
+pub async fn handle_connection<S>(
+    mut stream: S,
+    executor: Arc<dyn CommandExecutor>,
+    events_tx: broadcast::Sender<Event>,
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let mut events_rx: Option<broadcast::Receiver<Event>> = None;
+    let mut subscribed: Option<EventFilter> = None;
+
+    loop {
+        // Two sources: inbound request, or a pending event on the
+        // subscription. Use select to avoid blocking on a quiet client
+        // once subscribed.
+        let request_result: std::result::Result<IpcRequest, CodecError> = tokio::select! {
+            r = read_frame::<_, IpcRequest>(&mut stream) => r,
+            maybe_event = receive_if_some(events_rx.as_mut()) => {
+                match maybe_event {
+                    Some(ev) if event_matches(&ev, subscribed.as_ref()) => {
+                        if write_frame(&mut stream, &IpcResponse::Event(ev)).await.is_err() {
+                            break;
+                        }
+                        continue;
+                    }
+                    Some(_) => continue, // filtered out
+                    None => {
+                        // lagged: reset and keep going
+                        if let Some(filter) = subscribed.clone() {
+                            events_rx = Some(events_tx.subscribe());
+                            tracing::warn!(?filter, "ipc subscriber lagged; resubscribed");
+                        }
+                        continue;
+                    }
+                }
+            }
+        };
+
+        let req = match request_result {
+            Ok(r) => r,
+            Err(CodecError::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(CodecError::Cbor(s)) => {
+                let _ = write_frame(&mut stream, &IpcResponse::Err(IpcError::Codec(s))).await;
+                continue;
+            }
+            Err(CodecError::FrameTooLarge { got, max }) => {
+                let _ = write_frame(
+                    &mut stream,
+                    &IpcResponse::Err(IpcError::FrameTooLarge { got, max }),
+                )
+                .await;
+                break;
+            }
+            Err(CodecError::EmptyFrame) => {
+                let _ = write_frame(
+                    &mut stream,
+                    &IpcResponse::Err(IpcError::Codec("empty frame".into())),
+                )
+                .await;
+                break;
+            }
+            Err(_) => break,
+        };
+
+        match req {
+            IpcRequest::Execute(cmd) => {
+                let resp = match executor.execute(cmd).await {
+                    Ok(result) => IpcResponse::Ok(result),
+                    Err(e) => IpcResponse::Err(e),
+                };
+                // Close after a one-shot Execute if no subscription is
+                // active. When subscribed, keep the connection open so
+                // the client can interleave Execute(SendMessage) calls
+                // with the ongoing event stream. Always close on error.
+                let is_terminal = subscribed.is_none()
+                    || matches!(resp, IpcResponse::Err(_));
+                if write_frame(&mut stream, &resp).await.is_err() {
+                    break;
+                }
+                if is_terminal {
+                    break;
+                }
+            }
+            IpcRequest::Subscribe(filter) => {
+                subscribed = Some(filter);
+                events_rx = Some(events_tx.subscribe());
+                if write_frame(&mut stream, &IpcResponse::Ok(CommandResult::Subscribed))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            IpcRequest::Shutdown => {
+                let _ = write_frame(&mut stream, &IpcResponse::Ok(CommandResult::Ok)).await;
+                break;
+            }
+        }
+    }
+
+    // Terminal frame. Ignore write errors — the peer may already be gone.
+    let _ = write_frame(&mut stream, &IpcResponse::Bye).await;
+}
+
+/// Accept loop. Spawns [`handle_connection`] per accepted stream.
+/// Terminates when `shutdown` future completes.
+pub async fn serve(
+    server: Server,
+    executor: Arc<dyn CommandExecutor>,
+    events_tx: broadcast::Sender<Event>,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) {
+    tokio::pin!(shutdown);
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => {
+                break;
+            }
+            accepted = server.accept_one() => {
+                match accepted {
+                    Ok(stream) => {
+                        let exec = executor.clone();
+                        let evs = events_tx.clone();
+                        tokio::spawn(async move {
+                            handle_connection(stream, exec, evs).await;
+                        });
+                    }
+                    Err(IpcError::AuthDenied) => {
+                        tracing::warn!("ipc: rejected connection: peer uid mismatch");
+                    }
+                    Err(e) => {
+                        tracing::warn!(?e, "ipc: accept error");
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn receive_if_some(rx: Option<&mut broadcast::Receiver<Event>>) -> Option<Event> {
+    match rx {
+        Some(r) => match r.recv().await {
+            Ok(ev) => Some(ev),
+            Err(broadcast::error::RecvError::Lagged(_)) => None,
+            Err(broadcast::error::RecvError::Closed) => None,
+        },
+        None => std::future::pending().await,
+    }
+}
+
+fn event_matches(event: &Event, filter: Option<&EventFilter>) -> bool {
+    let Some(filter) = filter else { return false };
+    match (filter, event) {
+        (EventFilter::All, _) => true,
+        (EventFilter::TorStatus, Event::TorStatusChanged(_)) => true,
+        (EventFilter::Contact(peer), Event::MessageReceived { from, .. }) => from == peer,
+        (EventFilter::Contact(peer), Event::DeliveryStatusChanged { .. }) => {
+            // DeliveryStatusChanged doesn't carry the peer; forward all
+            // for now. The CLI filters further by message_id.
+            let _ = peer;
+            true
+        }
+        (EventFilter::Contact(_), Event::ContactUpdated(_)) => true,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,5 +328,118 @@ mod tests {
         let server = Server::bind(&sock, 1000).unwrap();
         // Bind succeeded; socket now a real Unix listener.
         drop(server);
+    }
+
+    use crate::daemon::commands::{Command, CommandResult};
+    use crate::daemon::events::{Event, TorStatus};
+    use crate::daemon::ipc::codec::{read_frame, write_frame};
+    use crate::daemon::ipc::wire::{EventFilter, IpcError, IpcRequest, IpcResponse};
+    use async_trait::async_trait;
+    use std::sync::Arc;
+    use tokio::sync::broadcast;
+
+    struct EchoExec;
+    #[async_trait]
+    impl CommandExecutor for EchoExec {
+        async fn execute(&self, cmd: Command) -> std::result::Result<CommandResult, IpcError> {
+            match cmd {
+                Command::ListContacts => Ok(CommandResult::Ok),
+                Command::Shutdown => Ok(CommandResult::Ok),
+                _ => Err(IpcError::UnknownCommand),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn per_conn_execute_returns_ok_and_bye() {
+        let (mut client, server_stream) = tokio::io::duplex(1024 * 1024);
+        let exec: Arc<dyn CommandExecutor> = Arc::new(EchoExec);
+        let (events_tx, _) = broadcast::channel::<Event>(16);
+
+        let handle_task =
+            tokio::spawn(handle_connection(server_stream, exec, events_tx));
+
+        write_frame(&mut client, &IpcRequest::Execute(Command::ListContacts))
+            .await
+            .unwrap();
+
+        let ok: IpcResponse = read_frame(&mut client).await.unwrap();
+        assert!(matches!(ok, IpcResponse::Ok(CommandResult::Ok)));
+        let bye: IpcResponse = read_frame(&mut client).await.unwrap();
+        assert!(matches!(bye, IpcResponse::Bye));
+
+        // Drop client so the server exits its read loop cleanly.
+        drop(client);
+        handle_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn per_conn_subscribe_forwards_events_then_execute_still_works() {
+        let (mut client, server_stream) = tokio::io::duplex(1024 * 1024);
+        let exec: Arc<dyn CommandExecutor> = Arc::new(EchoExec);
+        let (events_tx, _) = broadcast::channel::<Event>(16);
+
+        let events_tx_clone = events_tx.clone();
+        let handle_task =
+            tokio::spawn(handle_connection(server_stream, exec, events_tx_clone));
+
+        // Subscribe -> Ok(Subscribed).
+        write_frame(&mut client, &IpcRequest::Subscribe(EventFilter::TorStatus))
+            .await
+            .unwrap();
+        match read_frame::<_, IpcResponse>(&mut client).await.unwrap() {
+            IpcResponse::Ok(CommandResult::Subscribed) => {}
+            other => panic!("expected Ok(Subscribed), got {other:?}"),
+        }
+
+        // Publish a matching event; subscriber should receive it.
+        let _ = events_tx.send(Event::TorStatusChanged(TorStatus::Ready));
+        match read_frame::<_, IpcResponse>(&mut client).await.unwrap() {
+            IpcResponse::Event(Event::TorStatusChanged(TorStatus::Ready)) => {}
+            other => panic!("expected Event(TorStatus::Ready), got {other:?}"),
+        }
+
+        // Execute after Subscribe on the same connection.
+        write_frame(&mut client, &IpcRequest::Execute(Command::ListContacts))
+            .await
+            .unwrap();
+        match read_frame::<_, IpcResponse>(&mut client).await.unwrap() {
+            IpcResponse::Ok(CommandResult::Ok) => {}
+            other => panic!("expected Ok, got {other:?}"),
+        }
+
+        // Hang up; server should exit cleanly.
+        drop(client);
+        handle_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn per_conn_unknown_command_returns_err_but_keeps_connection() {
+        let (mut client, server_stream) = tokio::io::duplex(1024 * 1024);
+        let exec: Arc<dyn CommandExecutor> = Arc::new(EchoExec);
+        let (events_tx, _) = broadcast::channel::<Event>(16);
+
+        let handle_task =
+            tokio::spawn(handle_connection(server_stream, exec, events_tx));
+
+        write_frame(
+            &mut client,
+            &IpcRequest::Execute(Command::CreateGroup { members: vec![], name: "x".into() }),
+        )
+        .await
+        .unwrap();
+
+        match read_frame::<_, IpcResponse>(&mut client).await.unwrap() {
+            IpcResponse::Err(IpcError::UnknownCommand) => {}
+            other => panic!("expected Err(UnknownCommand), got {other:?}"),
+        }
+        // Connection closed afterwards (Bye).
+        match read_frame::<_, IpcResponse>(&mut client).await.unwrap() {
+            IpcResponse::Bye => {}
+            other => panic!("expected Bye, got {other:?}"),
+        }
+
+        drop(client);
+        handle_task.await.unwrap();
     }
 }

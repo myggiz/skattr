@@ -35,8 +35,12 @@ pub enum DeliveryStatus {
 }
 
 /// Event emitted by the daemon.
+///
+/// Adjacently tagged (`tag = "event", content = "data"`) so that
+/// ciborium can round-trip newtype variants (e.g. `TorStatusChanged`)
+/// without hitting the internally-tagged / non-map-value limitation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "event", rename_all = "snake_case")]
+#[serde(tag = "event", content = "data", rename_all = "snake_case")]
 pub enum Event {
     /// Bootstrap progress / final status.
     TorStatusChanged(TorStatus),
