@@ -14,6 +14,7 @@ pub mod commands;
 pub mod config;
 pub mod error_kind;
 pub mod events;
+pub(crate) mod handle;
 pub mod hex;
 pub mod ipc;
 pub mod state;
