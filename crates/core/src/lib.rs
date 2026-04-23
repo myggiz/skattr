@@ -74,6 +74,16 @@ pub mod test_exports {
         PeerCtrl, ReceiveOutcome, REPLAY_WINDOW_MS,
     };
 
+    // Phase 1.F additions:
+    pub use crate::daemon::handle::DaemonHandle;
+    pub use crate::daemon::ipc::{
+        client::{IpcClient, IpcClientError},
+        codec::CodecError,
+        server::{handle_connection, CommandExecutor},
+        wire::{EventFilter, IpcError, IpcRequest, IpcResponse, MAX_IPC_BODY},
+    };
+    pub use crate::daemon::state::Ready;
+
     /// Test-only helper: convert an `IdentityKey` to its X25519 static
     /// public key for use as `peer_static_x25519` in
     /// `handshake_initiator`. Integration tests cannot reach

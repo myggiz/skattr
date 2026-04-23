@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Phase 1.F — CLI integration (2026-04-23)
+
+- Persistent `skattr daemon` owns `Pool` + `DeliveryHub` + `OnionListener` + IPC server.
+- New `daemon::ipc` submodule: CBOR length-prefix codec, Unix-socket server with `0600` perms and `SO_PEERCRED`/`getpeereid` peer-cred check, per-connection state machine that lets `Subscribe` coexist with further `Execute`s (powers `skattr chat`), `IpcClient` for the CLI.
+- `Daemon::run` signature changed: now takes `Config` and returns via `Ready { onion, ipc_socket }`.
+- Migration 0005 adds `contacts.group_id` (plus index); `AddContact` populates it atomically.
+- New wire-safe types: `ContactSummary`, `MessageRecord`, `SendStatus`, `Direction`, `Hex16`, `Hex32`, `EventFilter`, `IpcError`, `DaemonErrorKind`.
+- Every CLI stub (`invite`, `add`, `contacts`, `send`, `tail`, new `chat`) now wires through IPC. `init`/`restore`/`backup` remain in-process.
+- `skattr daemon` prompt moved to `/dev/tty` via `rpassword`; `--passphrase-file <path>` / `$SKATTR_PASSPHRASE_FILE` for automation.
+- `skattr invite --qr` renders an ASCII QR via the `qrcode` crate.
+- `skattr send --fail-on-timeout` flips the 2 s inline-wait default from "exit 0 with `status=queued`" to "exit 8".
+- Integration tests: `cli_ipc_roundtrip.rs` (mocked transport), `cli_two_daemons.rs` (full invite→send flow, mocked transport; full decrypt round-trip is deferred because MLS Welcome-handoff is not yet symmetric), `cli_real_tor.rs` (`#[ignore]`-gated, real Arti).
+
 ## [Unreleased]
 
 ### Added

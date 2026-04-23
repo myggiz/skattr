@@ -14,6 +14,12 @@
 #[cfg(test)]
 mod arti_echo;
 #[cfg(test)]
+mod cli_ipc_roundtrip;
+#[cfg(test)]
+mod cli_real_tor;
+#[cfg(test)]
+mod cli_two_daemons;
+#[cfg(test)]
 mod delivery_kill_mid_message;
 #[cfg(test)]
 mod delivery_real_tor;

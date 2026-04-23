@@ -59,6 +59,10 @@ impl<'p> MessageRepo<'p> {
     }
 
     /// Most-recent-first list of messages in a group.
+    ///
+    /// Ordering is by row `id` DESC (SQLite autoincrement), NOT by
+    /// `ts`. Sender-claimed timestamps are display-only per CLAUDE.md
+    /// — backdated messages must not front-run newer inserts.
     pub fn recent(&self, group_id: &[u8], limit: usize) -> Result<Vec<StoredMessage>> {
         self.pool.with(|c| {
             let mut stmt = c
@@ -66,7 +70,7 @@ impl<'p> MessageRepo<'p> {
                     "SELECT id, group_id, sender, kind, body_blob, ts, delivered_at \
                      FROM messages \
                      WHERE group_id = ?1 \
-                     ORDER BY ts DESC LIMIT ?2",
+                     ORDER BY id DESC LIMIT ?2",
                 )
                 .map_err(|e| CoreError::Storage(format!("prepare recent: {e}")))?;
             let rows = stmt
@@ -182,5 +186,58 @@ mod tests {
         repo.mark_delivered(id, 9999).unwrap();
         let rows = repo.recent(&[0x33; 32], 10).unwrap();
         assert_eq!(rows[0].delivered_at, Some(9999));
+    }
+
+    #[test]
+    fn recent_orders_by_id_desc_not_by_ts() {
+        // CLAUDE.md: authoritative ordering is NOT ts-based. The repo
+        // must return rows with the newest *inserted* first, independent
+        // of the sender-claimed `ts` field (which can be backdated).
+        let pool = Pool::in_memory();
+        let repo = MessageRepo::new(&pool);
+        let gid = vec![0x42u8; 32];
+        let sender = [0x01u8; 32];
+
+        // Insert messages with deliberately non-monotonic `ts`:
+        // row1 ts=3000, row2 ts=1000, row3 ts=2000.
+        // Expected order from recent(): row3, row2, row1 (id DESC).
+        let e1 = Envelope {
+            v: 1,
+            id: MessageId([1; 16]),
+            ts: 3000,
+            reply_to: None,
+            kind: Kind::Text {
+                body: "first".into(),
+            },
+        };
+        let e2 = Envelope {
+            v: 1,
+            id: MessageId([2; 16]),
+            ts: 1000,
+            reply_to: None,
+            kind: Kind::Text {
+                body: "second".into(),
+            },
+        };
+        let e3 = Envelope {
+            v: 1,
+            id: MessageId([3; 16]),
+            ts: 2000,
+            reply_to: None,
+            kind: Kind::Text {
+                body: "third".into(),
+            },
+        };
+
+        repo.insert(&gid, &sender, &e1).unwrap();
+        repo.insert(&gid, &sender, &e2).unwrap();
+        repo.insert(&gid, &sender, &e3).unwrap();
+
+        let rows = repo.recent(&gid, 10).unwrap();
+        // id DESC -> e3 (id=3), e2 (id=2), e1 (id=1).
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].ts, 2000, "row 0 must be last-inserted, not max ts");
+        assert_eq!(rows[1].ts, 1000);
+        assert_eq!(rows[2].ts, 3000);
     }
 }

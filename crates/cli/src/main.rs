@@ -10,7 +10,6 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
-use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -39,6 +38,16 @@ struct Cli {
     /// JSON output (for scripting).
     #[arg(long, global = true)]
     json: bool,
+
+    /// Read the vault passphrase from FILE (one passphrase, optional
+    /// trailing newline). Overridden by `$SKATTR_PASSPHRASE_FILE`.
+    #[arg(long, value_name = "FILE", global = true)]
+    passphrase_file: Option<PathBuf>,
+
+    /// Path to the daemon's IPC socket. Overrides $SKATTR_SOCKET and
+    /// the XDG default.
+    #[arg(long, global = true, value_name = "PATH")]
+    socket: Option<PathBuf>,
 
     /// Subcommand.
     #[command(subcommand)]
@@ -92,12 +101,121 @@ enum Command {
         contact: String,
         /// Message body.
         text: String,
+        /// Exit with status 8 if the daemon reports Queued (no ACK
+        /// within the inline wait). Without this flag the CLI prints
+        /// "queued" and exits 0.
+        #[arg(long)]
+        fail_on_timeout: bool,
     },
-    /// Tail incoming messages.
+    /// Interactive chat: stream messages from a contact and send lines
+    /// typed on stdin.
+    Chat {
+        /// Contact identifier (prefix or nickname).
+        contact: String,
+    },
+    /// Tail messages. Without --follow: dump most recent N and exit.
     Tail {
-        /// Only from this contact.
+        /// Only from this contact (prefix or nickname).
         contact: Option<String>,
+        /// Max rows to dump before exiting (only affects non-follow mode).
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
+        /// Follow: after dumping, stream new MessageReceived events.
+        #[arg(long)]
+        follow: bool,
     },
+}
+
+/// Resolve the IPC socket path with precedence flag > env > XDG default.
+fn resolve_socket_path(flag: Option<&std::path::Path>) -> PathBuf {
+    if let Some(p) = flag {
+        return p.to_path_buf();
+    }
+    if let Some(env) = std::env::var_os("SKATTR_SOCKET") {
+        return PathBuf::from(env);
+    }
+    let base = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("TMPDIR").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("/tmp"));
+    base.join("skattr").join("daemon.sock")
+}
+
+/// Connect or print a helpful error and exit with code 3. Returns a
+/// live `IpcClient` on success.
+async fn connect_or_exit(
+    sock_flag: Option<&std::path::Path>,
+) -> Result<skattr_core::daemon::IpcClient<tokio::net::UnixStream>> {
+    let path = resolve_socket_path(sock_flag);
+    match skattr_core::daemon::IpcClient::connect(&path).await {
+        Ok(c) => Ok(c),
+        Err(skattr_core::daemon::IpcClientError::DaemonNotRunning) => {
+            eprintln!("skattr daemon is not running.");
+            eprintln!("Start it with:  skattr daemon");
+            std::process::exit(3);
+        }
+        Err(e) => Err(anyhow::anyhow!("ipc: {e}")),
+    }
+}
+
+/// Translate a wire `IpcClientError` into a one-line human-readable message
+/// plus a stable exit code. Called from every command's error branch.
+fn exit_on_ipc_error(err: skattr_core::daemon::IpcClientError) -> ! {
+    use skattr_core::daemon::error_kind::DaemonErrorKind;
+    use skattr_core::daemon::ipc::wire::IpcError;
+    use skattr_core::daemon::IpcClientError;
+    match err {
+        IpcClientError::Server(IpcError::AuthDenied) => {
+            eprintln!("ipc: auth denied (peer-cred mismatch)");
+            std::process::exit(4);
+        }
+        IpcClientError::Server(IpcError::Daemon(k)) => match k {
+            DaemonErrorKind::ContactNotFound => {
+                eprintln!("contact not found");
+                std::process::exit(6);
+            }
+            DaemonErrorKind::ContactAmbiguous { matches } => {
+                eprintln!("contact prefix is ambiguous ({matches} matches)");
+                std::process::exit(6);
+            }
+            DaemonErrorKind::InviteExpired => {
+                eprintln!("invite expired");
+                std::process::exit(7);
+            }
+            DaemonErrorKind::InviteConsumed => {
+                eprintln!("invite already consumed");
+                std::process::exit(7);
+            }
+            DaemonErrorKind::InviteSignatureInvalid => {
+                eprintln!("invite signature invalid");
+                std::process::exit(7);
+            }
+            DaemonErrorKind::GroupCorrupt => {
+                eprintln!("mls group state corrupt");
+                std::process::exit(1);
+            }
+            DaemonErrorKind::DeliveryTimeout => {
+                eprintln!("delivery timed out");
+                std::process::exit(8);
+            }
+            DaemonErrorKind::TorNotReady => {
+                eprintln!("Tor still bootstrapping; retry shortly");
+                std::process::exit(1);
+            }
+            DaemonErrorKind::StorageError => {
+                eprintln!("storage error (see daemon logs)");
+                std::process::exit(1);
+            }
+        },
+        IpcClientError::Server(other) => {
+            eprintln!("ipc: server error: {other:?}");
+            std::process::exit(1);
+        }
+        other => {
+            eprintln!("ipc: {other}");
+            std::process::exit(1);
+        }
+    }
 }
 
 #[tokio::main]
@@ -110,6 +228,9 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+    let passphrase_file = cli_passphrase_file_or_env(&cli);
+    let socket = cli.socket.clone();
+    let json = cli.json;
     match cli.cmd {
         Command::Init => init(cli.data_dir.as_deref()).await,
         Command::Restore { seed } => restore(&seed, cli.data_dir.as_deref()).await,
@@ -117,12 +238,23 @@ async fn main() -> Result<()> {
         Command::RestoreBackup { seed, file } => {
             restore_backup(&seed, &file, cli.data_dir.as_deref()).await
         }
-        Command::Daemon { detach } => daemon(detach, cli.data_dir.as_deref()).await,
-        Command::Invite { qr } => invite(qr).await,
-        Command::Add { link } => add(&link).await,
-        Command::Contacts => contacts().await,
-        Command::Send { contact, text } => send(&contact, &text).await,
-        Command::Tail { contact } => tail(contact.as_deref()).await,
+        Command::Daemon { detach } => {
+            daemon(detach, cli.data_dir.as_deref(), passphrase_file).await
+        }
+        Command::Invite { qr } => invite(qr, socket.as_deref(), json).await,
+        Command::Add { link } => add(&link, socket.as_deref(), json).await,
+        Command::Contacts => contacts(socket.as_deref(), json).await,
+        Command::Send {
+            contact,
+            text,
+            fail_on_timeout,
+        } => send(&contact, &text, fail_on_timeout, socket.as_deref(), json).await,
+        Command::Tail {
+            contact,
+            limit,
+            follow,
+        } => tail(contact.as_deref(), limit, follow, socket.as_deref(), json).await,
+        Command::Chat { contact } => chat(&contact, socket.as_deref()).await,
     }
 }
 
@@ -174,17 +306,49 @@ async fn init(data_dir_override: Option<&std::path::Path>) -> Result<()> {
     Ok(())
 }
 
+/// Source the daemon passphrase can come from.
+#[derive(Debug, Clone)]
+enum PassphraseSource {
+    /// Prompt on `/dev/tty` with echo off.
+    InteractiveTty(String),
+    /// Read from a file at `path`; trim exactly one trailing newline.
+    File(std::path::PathBuf),
+}
+
 fn read_passphrase(prompt: &str) -> Result<zeroize::Zeroizing<String>> {
-    // TODO(phase-2): use rpassword to suppress terminal echo.
-    print!("{prompt}");
-    io::stdout().flush()?;
-    let mut line = zeroize::Zeroizing::new(String::new());
-    io::stdin().lock().read_line(&mut line)?;
-    // Trim trailing newline in-place.
-    while line.ends_with('\n') || line.ends_with('\r') {
-        line.pop();
+    read_passphrase_from_source(PassphraseSource::InteractiveTty(prompt.to_string()))
+}
+
+fn read_passphrase_from_source(source: PassphraseSource) -> Result<zeroize::Zeroizing<String>> {
+    match source {
+        PassphraseSource::InteractiveTty(prompt) => {
+            let raw = rpassword::prompt_password(prompt)
+                .map_err(|e| anyhow::anyhow!("read passphrase: {e}"))?;
+            Ok(zeroize::Zeroizing::new(raw))
+        }
+        PassphraseSource::File(path) => read_passphrase_from_file(&path),
     }
-    Ok(line)
+}
+
+fn read_passphrase_from_file(path: &std::path::Path) -> Result<zeroize::Zeroizing<String>> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("read passphrase from {}: {e}", path.display()))?;
+    // Trim exactly one trailing newline (CRLF or LF), preserve internal newlines.
+    let mut pw = zeroize::Zeroizing::new(raw);
+    if pw.ends_with('\n') {
+        pw.pop();
+        if pw.ends_with('\r') {
+            pw.pop();
+        }
+    }
+    Ok(pw)
+}
+
+fn cli_passphrase_file_or_env(cli: &Cli) -> Option<PathBuf> {
+    if let Some(p) = &cli.passphrase_file {
+        return Some(p.clone());
+    }
+    std::env::var_os("SKATTR_PASSPHRASE_FILE").map(PathBuf::from)
 }
 
 async fn restore(seed_phrase: &str, data_dir_override: Option<&std::path::Path>) -> Result<()> {
@@ -282,16 +446,23 @@ async fn restore_backup(
     Ok(())
 }
 
-async fn daemon(detach: bool, data_dir_override: Option<&std::path::Path>) -> Result<()> {
-    use skattr_core::daemon::Daemon;
+async fn daemon(
+    detach: bool,
+    data_dir_override: Option<&std::path::Path>,
+    passphrase_file: Option<PathBuf>,
+) -> Result<()> {
+    use skattr_core::daemon::{Config, Daemon};
 
     if detach {
-        anyhow::bail!("--detach is not yet supported; run in foreground for Phase 0.C");
+        anyhow::bail!("--detach is not yet supported in Phase 1.F");
     }
 
-    let data_dir = effective_data_dir(data_dir_override)?;
-    std::fs::create_dir_all(&data_dir)?;
-    let vault_path = data_dir.join("identity.vault");
+    let mut config = Config::defaults()?;
+    if let Some(override_dir) = data_dir_override {
+        config.data_dir = override_dir.to_path_buf();
+    }
+    std::fs::create_dir_all(&config.data_dir)?;
+    let vault_path = config.data_dir.join("identity.vault");
 
     if !vault_path.exists() {
         anyhow::bail!(
@@ -300,7 +471,10 @@ async fn daemon(detach: bool, data_dir_override: Option<&std::path::Path>) -> Re
         );
     }
 
-    let pw = read_passphrase("Vault passphrase: ")?;
+    let pw = match passphrase_file {
+        Some(path) => read_passphrase_from_source(PassphraseSource::File(path))?,
+        None => read_passphrase("Vault passphrase: ")?,
+    };
 
     println!("Bootstrapping Tor\u{2026}");
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
@@ -308,20 +482,21 @@ async fn daemon(detach: bool, data_dir_override: Option<&std::path::Path>) -> Re
         let _ = tokio::signal::ctrl_c().await;
     };
 
-    // Move the Zeroizing<String> passphrase by value into the spawned
-    // task — it drops (and wipes) when Daemon::run returns.
-    let data_dir_owned = data_dir.clone();
-    let daemon_fut =
-        tokio::spawn(
-            async move { Daemon::run(&data_dir_owned, &pw, ready_tx, shutdown_fut).await },
-        );
+    // Move the Zeroizing<String> passphrase and config by value into the
+    // spawned task — they drop (and wipe) when Daemon::run returns.
+    let data_dir_owned = config.data_dir.clone();
+    let config_owned = config.clone();
+    let daemon_fut = tokio::spawn(async move {
+        Daemon::run(&data_dir_owned, &pw, config_owned, ready_tx, shutdown_fut).await
+    });
 
     // Wait for the daemon to signal readiness.
-    let onion = ready_rx
+    let ready = ready_rx
         .await
         .map_err(|_| anyhow::anyhow!("daemon exited before becoming ready"))?;
     println!();
-    println!("Listening on: {onion}:1");
+    println!("Listening on: {}:1", ready.onion);
+    println!("IPC socket:   {}", ready.ipc_socket.display());
     println!("Ctrl-C to shut down.");
 
     // Block until the daemon future returns (SIGINT + graceful shutdown).
@@ -334,27 +509,701 @@ async fn daemon(detach: bool, data_dir_override: Option<&std::path::Path>) -> Re
     Ok(())
 }
 
-async fn invite(_qr: bool) -> Result<()> {
-    println!("skattr invite: not yet implemented.");
+async fn invite(qr: bool, sock_flag: Option<&std::path::Path>, json: bool) -> Result<()> {
+    use skattr_core::daemon::{Command as CoreCommand, CommandResult};
+
+    let mut client = connect_or_exit(sock_flag).await?;
+    let result = match client
+        .execute(CoreCommand::CreateInvite {
+            nickname: None,
+            ttl_secs: None,
+        })
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => exit_on_ipc_error(e),
+    };
+
+    let (url, kpi, expires_at) = match result {
+        CommandResult::InviteCreated {
+            url,
+            key_package_id,
+            expires_at,
+        } => (url, key_package_id, expires_at),
+        other => anyhow::bail!("unexpected result: {other:?}"),
+    };
+
+    if json {
+        let obj = serde_json::json!({
+            "url": url,
+            "key_package_id": kpi.to_string(),
+            "expires_at": expires_at,
+        });
+        println!("{obj}");
+    } else {
+        println!("{url}");
+        println!("(expires at unix {expires_at}, key package {kpi})");
+        if qr {
+            println!();
+            println!("{}", render_invite_qr(&url));
+        }
+    }
     Ok(())
 }
 
-async fn add(_link: &str) -> Result<()> {
-    println!("skattr add: not yet implemented.");
+fn render_invite_qr(url: &str) -> String {
+    use qrcode::render::unicode;
+    use qrcode::QrCode;
+
+    match QrCode::new(url.as_bytes()) {
+        Ok(code) => code
+            .render::<unicode::Dense1x2>()
+            .quiet_zone(false)
+            .dark_color(unicode::Dense1x2::Light)
+            .light_color(unicode::Dense1x2::Dark)
+            .build(),
+        Err(_) => String::new(),
+    }
+}
+
+async fn add(link: &str, sock_flag: Option<&std::path::Path>, json: bool) -> Result<()> {
+    use skattr_core::daemon::{Command as CoreCommand, CommandResult};
+
+    let mut client = connect_or_exit(sock_flag).await?;
+    let result = match client
+        .execute(CoreCommand::AddContact {
+            invite_url: link.to_string(),
+        })
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => exit_on_ipc_error(e),
+    };
+
+    let summary = match result {
+        CommandResult::ContactAdded(s) => s,
+        other => anyhow::bail!("unexpected result: {other:?}"),
+    };
+
+    if json {
+        println!("{}", serde_json::to_string(&summary)?);
+    } else {
+        let hex: String = summary
+            .pubkey
+            .0
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        println!("Added contact:");
+        println!("  pubkey:  {}", hex);
+        println!("  onion:   {}", summary.onion);
+        println!("  added:   {}", summary.added_at);
+    }
     Ok(())
 }
 
-async fn contacts() -> Result<()> {
-    println!("skattr contacts: not yet implemented.");
+async fn contacts(sock_flag: Option<&std::path::Path>, json: bool) -> Result<()> {
+    use skattr_core::daemon::{Command as CoreCommand, CommandResult};
+
+    let mut client = connect_or_exit(sock_flag).await?;
+    let result = match client.execute(CoreCommand::ListContacts).await {
+        Ok(r) => r,
+        Err(e) => exit_on_ipc_error(e),
+    };
+
+    let rows = match result {
+        CommandResult::Contacts(rows) => rows,
+        other => anyhow::bail!("unexpected result: {other:?}"),
+    };
+
+    if json {
+        println!("{}", serde_json::to_string(&rows)?);
+    } else {
+        print!("{}", render_contacts_human(&rows));
+    }
     Ok(())
 }
 
-async fn send(_contact: &str, _text: &str) -> Result<()> {
-    println!("skattr send: not yet implemented.");
+fn render_contacts_human(rows: &[skattr_core::daemon::commands::ContactSummary]) -> String {
+    use std::fmt::Write;
+    if rows.is_empty() {
+        return "No contacts.\n".to_string();
+    }
+    let mut out = String::new();
+    for row in rows {
+        let short: String = row
+            .pubkey
+            .0
+            .iter()
+            .take(4)
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let name = row.nickname.as_deref().unwrap_or("(unnamed)");
+        let _ = writeln!(
+            out,
+            "{short}  {name:<20}  {onion}  added={added}",
+            onion = row.onion,
+            added = row.added_at
+        );
+    }
+    out
+}
+
+async fn send(
+    contact_prefix: &str,
+    text: &str,
+    fail_on_timeout: bool,
+    sock_flag: Option<&std::path::Path>,
+    json: bool,
+) -> Result<()> {
+    use skattr_core::daemon::commands::SendStatus;
+    use skattr_core::daemon::{Command as CoreCommand, CommandResult};
+    use skattr_core::envelope::Kind;
+
+    let mut client = connect_or_exit(sock_flag).await?;
+
+    // Resolve prefix via ListContacts (server-side).
+    let rows_result = match client.execute(CoreCommand::ListContacts).await {
+        Ok(r) => r,
+        Err(e) => exit_on_ipc_error(e),
+    };
+    let rows = match rows_result {
+        CommandResult::Contacts(rows) => rows,
+        other => anyhow::bail!("unexpected result: {other:?}"),
+    };
+    let pubkey = match resolve_contact(&rows, contact_prefix) {
+        Ok(pk) => pk,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(6);
+        }
+    };
+
+    let result = match client
+        .execute(CoreCommand::SendMessage {
+            contact: pubkey,
+            kind: Kind::Text {
+                body: text.to_string(),
+            },
+        })
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => exit_on_ipc_error(e),
+    };
+
+    let (msg_id, status) = match result {
+        CommandResult::MessageSent { message_id, status } => (message_id, status),
+        other => anyhow::bail!("unexpected result: {other:?}"),
+    };
+
+    if json {
+        let obj = serde_json::json!({
+            "message_id": msg_id.to_string(),
+            "status": match status {
+                SendStatus::Queued => "queued",
+                SendStatus::Delivered => "delivered",
+            },
+        });
+        println!("{obj}");
+    } else {
+        println!(
+            "{msg_id}  {state}",
+            state = match status {
+                SendStatus::Queued => "queued",
+                SendStatus::Delivered => "delivered",
+            }
+        );
+    }
+
+    if fail_on_timeout && matches!(status, SendStatus::Queued) {
+        std::process::exit(8);
+    }
     Ok(())
 }
 
-async fn tail(_contact: Option<&str>) -> Result<()> {
-    println!("skattr tail: not yet implemented.");
+fn resolve_contact(
+    rows: &[skattr_core::daemon::commands::ContactSummary],
+    prefix: &str,
+) -> Result<skattr_core::identity::PublicKey> {
+    let lower = prefix.to_ascii_lowercase();
+    let mut matches: Vec<&skattr_core::daemon::commands::ContactSummary> = rows
+        .iter()
+        .filter(|r| {
+            let hex: String = r.pubkey.0.iter().map(|b| format!("{b:02x}")).collect();
+            hex.starts_with(&lower)
+                || r.nickname
+                    .as_deref()
+                    .is_some_and(|n| n.eq_ignore_ascii_case(prefix))
+        })
+        .collect();
+    match matches.len() {
+        1 => Ok(matches.remove(0).pubkey),
+        0 => anyhow::bail!("no contact matches {prefix:?}"),
+        n => anyhow::bail!("ambiguous: {n} contacts match {prefix:?}"),
+    }
+}
+
+async fn tail(
+    contact_prefix: Option<&str>,
+    limit: u32,
+    follow: bool,
+    sock_flag: Option<&std::path::Path>,
+    json: bool,
+) -> Result<()> {
+    use skattr_core::daemon::{Command as CoreCommand, CommandResult};
+
+    if follow {
+        return tail_follow(contact_prefix, limit, sock_flag).await;
+    }
+
+    let mut client = connect_or_exit(sock_flag).await?;
+    let target = resolve_optional_contact(&mut client, contact_prefix).await?;
+
+    let result = match client
+        .execute(CoreCommand::RecentMessages {
+            contact: target,
+            limit,
+        })
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => exit_on_ipc_error(e),
+    };
+
+    let rows = match result {
+        CommandResult::Messages(rows) => rows,
+        other => anyhow::bail!("unexpected result: {other:?}"),
+    };
+
+    if json {
+        println!("{}", serde_json::to_string(&rows)?);
+    } else {
+        print!("{}", render_messages_human(&rows));
+    }
     Ok(())
+}
+
+async fn resolve_optional_contact(
+    client: &mut skattr_core::daemon::IpcClient<tokio::net::UnixStream>,
+    prefix: Option<&str>,
+) -> Result<Option<skattr_core::identity::PublicKey>> {
+    use skattr_core::daemon::{Command as CoreCommand, CommandResult};
+    let Some(prefix) = prefix else {
+        return Ok(None);
+    };
+    let rows_result = match client.execute(CoreCommand::ListContacts).await {
+        Ok(r) => r,
+        Err(e) => exit_on_ipc_error(e),
+    };
+    let rows = match rows_result {
+        CommandResult::Contacts(rows) => rows,
+        other => anyhow::bail!("unexpected result: {other:?}"),
+    };
+    match resolve_contact(&rows, prefix) {
+        Ok(pk) => Ok(Some(pk)),
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(6);
+        }
+    }
+}
+
+fn render_messages_human(rows: &[skattr_core::daemon::commands::MessageRecord]) -> String {
+    use skattr_core::daemon::commands::Direction;
+    use skattr_core::envelope::Kind;
+    use std::fmt::Write;
+
+    if rows.is_empty() {
+        return "No messages.\n".to_string();
+    }
+
+    let mut out = String::new();
+    // Render oldest-first on stdout (`recent` returns newest-first).
+    for row in rows.iter().rev() {
+        let arrow = match row.direction {
+            Direction::Incoming => "<-",
+            Direction::Outgoing => "->",
+        };
+        let body = match &row.kind {
+            Kind::Text { body } => body.clone(),
+            other => format!("({other:?})"),
+        };
+        let contact_short: String = row
+            .contact
+            .0
+            .iter()
+            .take(4)
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let _ = writeln!(
+            out,
+            "[{ts}] {arrow} {contact_short} {body}",
+            ts = row.ts_daemon_recv
+        );
+    }
+    out
+}
+
+async fn tail_follow(
+    contact_prefix: Option<&str>,
+    limit: u32,
+    sock_flag: Option<&std::path::Path>,
+) -> Result<()> {
+    use skattr_core::daemon::events::Event;
+    use skattr_core::daemon::ipc::wire::EventFilter;
+    use skattr_core::daemon::{Command as CoreCommand, CommandResult, IpcClientError};
+    use skattr_core::envelope::Kind;
+
+    let mut client = connect_or_exit(sock_flag).await?;
+    let target = resolve_optional_contact(&mut client, contact_prefix).await?;
+
+    // 1. Dump recent.
+    let recent = match client
+        .execute(CoreCommand::RecentMessages {
+            contact: target,
+            limit,
+        })
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => exit_on_ipc_error(e),
+    };
+    if let CommandResult::Messages(rows) = recent {
+        print!("{}", render_messages_human(&rows));
+    }
+
+    // 2. Subscribe.
+    let filter = match target {
+        Some(pk) => EventFilter::Contact(pk),
+        None => EventFilter::All,
+    };
+    match client.subscribe(filter).await {
+        Ok(()) => {}
+        Err(e) => exit_on_ipc_error(e),
+    }
+
+    // 3. Stream events until Ctrl-C / EOF.
+    loop {
+        let ev = match client.next_event().await {
+            Ok(ev) => ev,
+            Err(IpcClientError::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(IpcClientError::UnexpectedFrame(_)) => break,
+            Err(other) => exit_on_ipc_error(other),
+        };
+        match ev {
+            Event::MessageReceived { from, envelope } => {
+                let short: String = from.0.iter().take(4).map(|b| format!("{b:02x}")).collect();
+                let body = match envelope.kind {
+                    Kind::Text { body } => body,
+                    other => format!("({other:?})"),
+                };
+                println!("[{ts}] <- {short} {body}", ts = envelope.ts);
+            }
+            Event::DeliveryStatusChanged { message, status } => {
+                let id_hex: String = message.0.iter().map(|b| format!("{b:02x}")).collect();
+                println!("... {id_hex} {status:?}");
+            }
+            Event::ContactUpdated(pk) => {
+                let short: String = pk.0.iter().take(4).map(|b| format!("{b:02x}")).collect();
+                println!("contact updated: {short}");
+            }
+            Event::TorStatusChanged(s) => {
+                eprintln!("tor: {s:?}");
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn chat(contact_prefix: &str, sock_flag: Option<&std::path::Path>) -> Result<()> {
+    use skattr_core::daemon::events::Event;
+    use skattr_core::daemon::ipc::wire::EventFilter;
+    use skattr_core::daemon::{Command as CoreCommand, CommandResult, IpcClientError};
+    use skattr_core::envelope::Kind;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    let mut client = connect_or_exit(sock_flag).await?;
+
+    // Resolve contact via ListContacts + resolve_contact.
+    let rows_result = match client.execute(CoreCommand::ListContacts).await {
+        Ok(r) => r,
+        Err(e) => exit_on_ipc_error(e),
+    };
+    let rows = match rows_result {
+        CommandResult::Contacts(rows) => rows,
+        other => anyhow::bail!("unexpected result: {other:?}"),
+    };
+    let pubkey = match resolve_contact(&rows, contact_prefix) {
+        Ok(pk) => pk,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(6);
+        }
+    };
+
+    // Subscribe for incoming messages from this peer.
+    match client.subscribe(EventFilter::Contact(pubkey)).await {
+        Ok(()) => {}
+        Err(e) => exit_on_ipc_error(e),
+    }
+
+    eprintln!("chat: connected. Type a line and press Enter; Ctrl-D to exit.");
+
+    let mut stdin = BufReader::new(tokio::io::stdin());
+    let mut line = String::new();
+
+    loop {
+        tokio::select! {
+            // Incoming event from the daemon.
+            ev = client.next_event() => {
+                match ev {
+                    Ok(Event::MessageReceived { from: _, envelope }) => {
+                        let body = match envelope.kind {
+                            Kind::Text { body } => body,
+                            other => format!("({other:?})"),
+                        };
+                        println!("<- {body}");
+                    }
+                    Ok(Event::DeliveryStatusChanged { message: _, status }) => {
+                        eprintln!("... {status:?}");
+                    }
+                    Ok(_) => {}
+                    Err(IpcClientError::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                    Err(IpcClientError::UnexpectedFrame(_)) => break,
+                    Err(other) => exit_on_ipc_error(other),
+                }
+            }
+            // User typed a line.
+            n = stdin.read_line(&mut line) => {
+                let n = n?;
+                if n == 0 {
+                    // EOF on stdin.
+                    break;
+                }
+                let trimmed = line.trim_end_matches(['\n', '\r']).to_string();
+                line.clear();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let res = client
+                    .execute(CoreCommand::SendMessage {
+                        contact: pubkey,
+                        kind: Kind::Text { body: trimmed },
+                    })
+                    .await;
+                match res {
+                    Ok(CommandResult::MessageSent { status, .. }) => {
+                        eprintln!(".. {status:?}");
+                    }
+                    Ok(other) => eprintln!("unexpected: {other:?}"),
+                    Err(e) => exit_on_ipc_error(e),
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn read_from_file_trims_single_trailing_newline() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        writeln!(tmp, "secret-pw").unwrap();
+        let pw = read_passphrase_from_file(tmp.path()).unwrap();
+        assert_eq!(pw.as_str(), "secret-pw");
+    }
+
+    #[test]
+    fn read_from_file_preserves_internal_newlines() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        write!(tmp, "line1\nline2\n").unwrap();
+        let pw = read_passphrase_from_file(tmp.path()).unwrap();
+        assert_eq!(pw.as_str(), "line1\nline2");
+    }
+
+    #[test]
+    fn read_from_missing_file_returns_error() {
+        let err = read_passphrase_from_file(std::path::Path::new("/does/not/exist"))
+            .expect_err("missing file must error");
+        assert!(err.to_string().contains("/does/not/exist"));
+    }
+
+    #[test]
+    fn resolve_socket_path_prefers_flag_over_env() {
+        let tmp = tempfile::tempdir().unwrap();
+        let flag = tmp.path().join("flag.sock");
+        let env = tmp.path().join("env.sock");
+        std::env::set_var("SKATTR_SOCKET", &env);
+        let got = resolve_socket_path(Some(&flag));
+        assert_eq!(got.as_path(), flag);
+        std::env::remove_var("SKATTR_SOCKET");
+    }
+
+    #[test]
+    fn resolve_socket_path_env_fallback() {
+        let tmp = tempfile::tempdir().unwrap();
+        let env = tmp.path().join("env.sock");
+        std::env::set_var("SKATTR_SOCKET", &env);
+        let got = resolve_socket_path(None);
+        assert_eq!(got, env);
+        std::env::remove_var("SKATTR_SOCKET");
+    }
+
+    #[test]
+    fn resolve_socket_path_xdg_fallback() {
+        std::env::remove_var("SKATTR_SOCKET");
+        std::env::set_var("XDG_RUNTIME_DIR", "/custom/run/1000");
+        let got = resolve_socket_path(None);
+        assert_eq!(
+            got,
+            std::path::PathBuf::from("/custom/run/1000/skattr/daemon.sock")
+        );
+        std::env::remove_var("XDG_RUNTIME_DIR");
+    }
+
+    #[test]
+    fn clap_parses_add_link() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from(["skattr", "add", "skattr://invite/v1#abc"]).unwrap();
+        match cli.cmd {
+            Command::Add { link } => assert_eq!(link, "skattr://invite/v1#abc"),
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn render_contacts_human_empty() {
+        let out = render_contacts_human(&[]);
+        assert_eq!(out.trim(), "No contacts.");
+    }
+
+    #[test]
+    fn render_contacts_human_one_row() {
+        use skattr_core::daemon::commands::ContactSummary;
+        let rows = vec![ContactSummary {
+            pubkey: skattr_core::identity::PublicKey([0xABu8; 32]),
+            nickname: Some("alice".into()),
+            onion: "aaaa.onion".into(),
+            card_version: 3,
+            added_at: 1_700_000_000,
+        }];
+        let out = render_contacts_human(&rows);
+        assert!(out.contains("alice"));
+        assert!(out.contains("aaaa.onion"));
+        assert!(out.contains("abab")); // pubkey prefix
+    }
+
+    #[test]
+    fn resolve_contact_matches_unique_prefix() {
+        use skattr_core::daemon::commands::ContactSummary;
+        use skattr_core::identity::PublicKey;
+
+        let rows = vec![
+            ContactSummary {
+                pubkey: PublicKey([0xAB; 32]),
+                nickname: None,
+                onion: "".into(),
+                card_version: 0,
+                added_at: 0,
+            },
+            ContactSummary {
+                pubkey: PublicKey([0xCD; 32]),
+                nickname: None,
+                onion: "".into(),
+                card_version: 0,
+                added_at: 0,
+            },
+        ];
+        let pk = resolve_contact(&rows, "ab").unwrap();
+        assert_eq!(pk.0[0], 0xAB);
+    }
+
+    #[test]
+    fn resolve_contact_ambiguous_returns_error_with_count() {
+        use skattr_core::daemon::commands::ContactSummary;
+        use skattr_core::identity::PublicKey;
+
+        let rows = vec![
+            ContactSummary {
+                pubkey: PublicKey([0xAB; 32]),
+                nickname: None,
+                onion: "".into(),
+                card_version: 0,
+                added_at: 0,
+            },
+            ContactSummary {
+                pubkey: PublicKey({
+                    let mut b = [0xAB; 32];
+                    b[1] = 0xCD;
+                    b
+                }),
+                nickname: None,
+                onion: "".into(),
+                card_version: 0,
+                added_at: 0,
+            },
+        ];
+        let err = resolve_contact(&rows, "ab").unwrap_err();
+        assert!(err.to_string().contains("ambiguous"));
+    }
+
+    #[test]
+    fn resolve_contact_no_match_returns_error() {
+        let rows: Vec<skattr_core::daemon::commands::ContactSummary> = vec![];
+        let err = resolve_contact(&rows, "ff").unwrap_err();
+        assert!(err.to_string().contains("no contact"));
+    }
+
+    #[test]
+    fn render_messages_human_empty() {
+        let out = render_messages_human(&[]);
+        assert_eq!(out.trim(), "No messages.");
+    }
+
+    #[test]
+    fn render_messages_human_one_text_row() {
+        use skattr_core::daemon::commands::{Direction, MessageRecord};
+        use skattr_core::daemon::hex::Hex16;
+        use skattr_core::envelope::Kind;
+        use skattr_core::identity::PublicKey;
+        let rows = vec![MessageRecord {
+            message_id: Hex16::from([2; 16]),
+            contact: PublicKey([7; 32]),
+            direction: Direction::Incoming,
+            kind: Kind::Text {
+                body: "hello".into(),
+            },
+            mls_generation: 0,
+            ts_daemon_recv: 1_700_000_000,
+            ts_envelope: 1_699_999_999,
+        }];
+        let out = render_messages_human(&rows);
+        assert!(out.contains("hello"));
+        assert!(out.contains("<-")); // incoming arrow
+    }
+
+    #[test]
+    fn clap_parses_chat_contact() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from(["skattr", "chat", "abc12"]).unwrap();
+        match cli.cmd {
+            Command::Chat { contact } => assert_eq!(contact, "abc12"),
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn render_qr_ascii_produces_non_empty_output() {
+        let url = "skattr://invite/v1#id=AAAA";
+        let qr = render_invite_qr(url);
+        assert!(!qr.is_empty(), "QR rendering must produce output");
+        // Dense1x2 unicode rendering uses U+2580/U+2584 + space.
+        assert!(qr.contains('\u{2580}') || qr.contains('\u{2584}') || qr.contains(' '));
+    }
 }

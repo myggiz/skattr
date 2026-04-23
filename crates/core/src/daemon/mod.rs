@@ -12,10 +12,19 @@
 pub mod backup;
 pub mod commands;
 pub mod config;
+pub(crate) mod dispatch;
+pub mod error_kind;
 pub mod events;
+pub(crate) mod handle;
+pub mod hex;
+pub(crate) mod inbound;
+pub mod ipc;
 pub mod state;
 
 pub use commands::{Command, CommandResult};
 pub use config::Config;
+pub use error_kind::DaemonErrorKind;
 pub use events::{DeliveryStatus, Event, TorStatus};
-pub use state::Daemon;
+pub use hex::{Hex16, Hex32};
+pub use ipc::{IpcClient, IpcClientError};
+pub use state::{Daemon, Ready};

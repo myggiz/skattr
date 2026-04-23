@@ -1,0 +1,136 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Myggiz AB
+
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::panic))]
+
+//! `DaemonHandle` groups the subsystems every command handler needs.
+
+use std::sync::{Arc, RwLock};
+
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::broadcast;
+
+use crate::daemon::commands::{Command as IpcCommand, CommandResult as IpcCommandResult};
+use crate::daemon::events::Event;
+use crate::daemon::ipc::server::CommandExecutor;
+use crate::daemon::ipc::wire::IpcError;
+use crate::delivery::hub::DeliveryHub;
+use crate::identity::IdentityKey;
+use crate::storage::Pool;
+
+/// Shared handle to the long-lived daemon subsystems. Generic over the
+/// transport stream type so the integration tests can instantiate one
+/// over `tokio::io::DuplexStream` and the real daemon over a
+/// Tor-anchored listener's stream type.
+///
+/// `identity` is wrapped in `Arc` so the handle can be cheaply cloned
+/// for per-command dispatch without copying secret material.
+pub struct DaemonHandle<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    /// Encrypted SQLite pool.
+    pub pool: Arc<Pool>,
+    /// Per-daemon delivery router.
+    pub hub: Arc<DeliveryHub<S>>,
+    /// Local Ed25519 identity (used for signing ContactCards + invites).
+    pub identity: Arc<IdentityKey>,
+    /// Event broadcast sender. Subscribers (IPC connections, tests)
+    /// get a `Receiver` via `.subscribe()`.
+    pub events_tx: broadcast::Sender<Event>,
+    /// Cached onion address, set by `Daemon::run` after Tor publishes.
+    /// None until the daemon has finished bootstrapping.
+    pub onion: Arc<RwLock<Option<String>>>,
+}
+
+impl<S> DaemonHandle<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    /// Construct a handle from the four owned subsystems.
+    #[must_use]
+    pub fn new(
+        pool: Arc<Pool>,
+        hub: Arc<DeliveryHub<S>>,
+        identity: IdentityKey,
+        events_tx: broadcast::Sender<Event>,
+    ) -> Self {
+        Self {
+            pool,
+            hub,
+            identity: Arc::new(identity),
+            events_tx,
+            onion: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    /// Cache the published onion address. Called by `Daemon::run` after
+    /// Tor finishes bootstrapping.
+    pub fn set_onion(&self, addr: impl Into<String>) {
+        if let Ok(mut guard) = self.onion.write() {
+            *guard = Some(addr.into());
+        }
+    }
+
+    /// Read the cached onion address. Returns `None` if Tor has not yet
+    /// published (daemon still bootstrapping).
+    #[must_use]
+    pub fn onion(&self) -> Option<String> {
+        self.onion.read().ok().and_then(|g| g.clone())
+    }
+}
+
+#[async_trait::async_trait]
+impl<S> CommandExecutor for DaemonHandle<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + Sync + 'static,
+{
+    async fn execute(&self, cmd: IpcCommand) -> std::result::Result<IpcCommandResult, IpcError> {
+        // CommandExecutor takes `&self`; dispatch::execute_command
+        // takes Arc<DaemonHandle>. Build a fresh Arc by cloning the
+        // subsystem handles (all Arc / Clone).
+        let arc = Arc::new(self.clone_for_dispatch());
+        crate::daemon::dispatch::execute_command(arc, cmd).await
+    }
+}
+
+impl<S> DaemonHandle<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    pub(crate) fn clone_for_dispatch(&self) -> Self {
+        Self {
+            pool: self.pool.clone(),
+            hub: self.hub.clone(),
+            identity: self.identity.clone(),
+            events_tx: self.events_tx.clone(),
+            onion: self.onion.clone(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::identity::Seed;
+
+    #[tokio::test]
+    async fn constructs_with_mock_subsystems() {
+        let seed = Seed::generate().unwrap();
+        let identity = IdentityKey::from_seed(&seed).unwrap();
+        let pool = Arc::new(Pool::in_memory());
+        let hub: Arc<DeliveryHub<tokio::io::DuplexStream>> =
+            Arc::new(DeliveryHub::new(pool.clone()));
+        let (events_tx, _) = broadcast::channel::<Event>(16);
+
+        let handle = DaemonHandle::<tokio::io::DuplexStream>::new(
+            pool.clone(),
+            hub.clone(),
+            identity,
+            events_tx.clone(),
+        );
+
+        assert!(Arc::ptr_eq(&handle.pool, &pool));
+        assert!(Arc::ptr_eq(&handle.hub, &hub));
+    }
+}

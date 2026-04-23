@@ -74,6 +74,7 @@ directories = { workspace = true }
 qrcode = { workspace = true, optional = true }
 # Optional: fuzzing harness support
 arbitrary = { workspace = true, optional = true }
+libc = "0.2.185"
 
 [dev-dependencies]
 tempfile = { workspace = true }

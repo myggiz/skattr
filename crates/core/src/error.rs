@@ -75,3 +75,44 @@ pub enum CoreError {
     #[error("cbor decode: {0}")]
     CborDecode(String),
 }
+
+impl CoreError {
+    /// Project this library error onto the stable [`crate::daemon::error_kind::DaemonErrorKind`]
+    /// wire enum. Returns `None` when the error has no specific category
+    /// the CLI can act on — the IPC layer turns those into
+    /// `IpcError::Internal` and logs the full `CoreError` server-side.
+    ///
+    /// Matching is string-based for now because library error payloads
+    /// are free-form `String`s rather than structured variants. If this
+    /// grows unwieldy, Phase 2 can restructure the subsystem error
+    /// strings into dedicated sub-enums with `thiserror` `#[from]`.
+    #[must_use]
+    pub fn kind(&self) -> Option<crate::daemon::error_kind::DaemonErrorKind> {
+        use crate::daemon::error_kind::DaemonErrorKind as K;
+        match self {
+            CoreError::Contact(s) if s.contains("not found") => Some(K::ContactNotFound),
+            CoreError::Contact(s) if s.contains("ambiguous") => {
+                let matches = extract_matches_count(s).unwrap_or(0);
+                Some(K::ContactAmbiguous { matches })
+            }
+            CoreError::Invite(s) if s.contains("expired") => Some(K::InviteExpired),
+            CoreError::Invite(s) if s.contains("consumed") => Some(K::InviteConsumed),
+            CoreError::Invite(s) if s.contains("signature") => Some(K::InviteSignatureInvalid),
+            CoreError::Mls(s) if s.contains("corrupt") => Some(K::GroupCorrupt),
+            CoreError::Delivery(s) if s.contains("timeout") => Some(K::DeliveryTimeout),
+            CoreError::Transport(s) if s.contains("not ready") || s.contains("bootstrap") => {
+                Some(K::TorNotReady)
+            }
+            CoreError::Sqlite(_) | CoreError::Storage(_) => Some(K::StorageError),
+            _ => None,
+        }
+    }
+}
+
+fn extract_matches_count(s: &str) -> Option<u32> {
+    // Format expected: "... (N matches)" — find "(N" and parse N.
+    let open = s.find('(')? + 1;
+    let rest = &s[open..];
+    let end = rest.find(|c: char| !c.is_ascii_digit())?;
+    rest[..end].parse().ok()
+}

@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository state
 
-**Phase 0 is complete; Phase 1.A (frame codec), 1.B (Noise_XK
-handshake), 1.C (MLS 2-member groups), 1.D (invite & contact
-flow), and 1.E (delivery semantics) are done.** Phase 0 shipped all five workstreams (0.A scaffold,
+**Phase 0 is complete; Phase 1.A (frame codec), 1.B (Noise_XK handshake),
+1.C (MLS 2-member groups), 1.D (invite & contact flow), 1.E (delivery
+semantics), and 1.F (CLI integration) are done.** Phase 0 shipped all five workstreams (0.A scaffold,
 0.B identity & crypto, 0.C Arti integration, 0.D storage layer, 0.E
 documentation baseline). Phase 1.A added `transport::frame::FrameCodec`.
 Phase 1.B added `transport::noise::handshake_{initiator,responder}`
@@ -21,6 +21,14 @@ PSK guard, single-use tracking via `KeyPackageRepo.consumed`),
 persistence in a new `contact_cards` table (migration 0003), and
 `IdentityKey::{sign_cbor, verify_cbor}` helpers.
 Phase 1.E added `delivery::hub::DeliveryHub<S>` (per-daemon router), per-peer `delivery::peer::PeerConnection` actors (1 s retry tick, 60 s keepalive, 180 s idle close, `PeerCtrl::ReplaceConn` for concurrent-dial races), `delivery::outbox::Outbox` over `OutboxRepo` with `(target, message_id)` idempotency (migration 0004), `delivery::receiver::receive()` for ts-window + dedup + persist, a `pub(crate) trait InboundDispatch` injection point for MLS decrypt, and `delivery::kill_stream::{KillSwitch, KillableStream}` under `feature = "test-harness"`. A CI integration test (`delivery_kill_mid_message.rs`) proves kill-mid-message → reconnect → exactly-once delivery; `delivery_real_tor.rs` (`#[ignore]`-gated) exercises the same stack over real Arti.
+Phase 1.F added the `skattr daemon` IPC server + `IpcClient`, expanded
+`Daemon::run` to own `Pool` + `DeliveryHub` + IPC, introduced
+`DaemonHandle` + `dispatch::execute_command`, migration 0005
+(`contacts.group_id`), `DaemonInbound` (MLS decrypt + persist + emit
+`Event::MessageReceived`), `/dev/tty` passphrase prompts (rpassword),
+`--passphrase-file` automation, `--qr` invite rendering,
+`--fail-on-timeout` on `send`, and three integration tests
+(`cli_ipc_roundtrip`, `cli_two_daemons`, `cli_real_tor` `#[ignore]`-gated).
 
 `crates/core/src/identity/` is fully implemented (Ed25519, BIP39,
 Argon2id + XChaCha20-Poly1305 vault, HKDF). `crates/core/src/transport/{tor,
@@ -41,10 +49,9 @@ passing. Phase 0 exit criterion (two daemons echo bytes over Tor)
 is exercised by `crates/tests/src/arti_echo.rs`, `#[ignore]`-gated
 (run with `cargo test -p skattr-tests --release -- --ignored`).
 
-Phase 1 continues with 1.F CLI integration,
-1.G message storage & search — see
-`docs/superpowers/specs/2026-04-21-phase-1-decomposition.md` for the
-full Phase 1 split. The bootstrap prompt remains authoritative for
+Phase 1 continues with 1.G message storage & search — see
+`docs/superpowers/specs/2026-04-21-phase-1-decomposition.md`.
+The bootstrap prompt remains authoritative for
 file layout, module boundaries, type signatures, and visibility rules
 — match it exactly.
 
