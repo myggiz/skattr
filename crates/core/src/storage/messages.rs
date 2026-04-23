@@ -123,9 +123,12 @@ impl<'p> MessageRepo<'p> {
 
     /// Most-recent-first list of messages in a group.
     ///
-    /// Ordering is by row `id` DESC (SQLite autoincrement), NOT by
-    /// `ts`. Sender-claimed timestamps are display-only per CLAUDE.md
-    /// — backdated messages must not front-run newer inserts.
+    /// Ordering is `(mls_generation DESC, id DESC)`. MLS generation is
+    /// the authoritative protocol-level epoch (CLAUDE.md: "Authoritative
+    /// ordering comes from MLS generation numbers, not `Envelope.ts`");
+    /// row `id` DESC is the deterministic tie-breaker among rows
+    /// persisted in the same generation. Sender-claimed timestamps are
+    /// display-only and never feed into ordering.
     pub fn recent(&self, group_id: &[u8], limit: usize) -> Result<Vec<StoredMessage>> {
         self.pool.with(|c| {
             let mut stmt = c
@@ -133,7 +136,7 @@ impl<'p> MessageRepo<'p> {
                     "SELECT id, group_id, sender, kind, body_blob, ts, delivered_at \
                      FROM messages \
                      WHERE group_id = ?1 \
-                     ORDER BY id DESC LIMIT ?2",
+                     ORDER BY mls_generation DESC, id DESC LIMIT ?2",
                 )
                 .map_err(|e| CoreError::Storage(format!("prepare recent: {e}")))?;
             let rows = stmt
@@ -241,6 +244,41 @@ impl<'p> MessageRepo<'p> {
 
             let out: std::result::Result<Vec<_>, _> = rows.collect();
             out.map_err(|e| CoreError::Storage(format!("collect search: {e}")))
+        })
+    }
+
+    /// Count of messages in `group_id` whose `id` is greater than the
+    /// `read_state` cursor. Absent cursor → all rows count as unread.
+    pub fn unread_count(&self, group_id: &[u8]) -> Result<u64> {
+        self.pool.with(|c| {
+            let cursor: Option<i64> = match c.query_row(
+                "SELECT last_read_message_id FROM read_state WHERE group_id = ?1",
+                rusqlite::params![group_id],
+                |r| r.get::<_, i64>(0),
+            ) {
+                Ok(v) => Some(v),
+                Err(rusqlite::Error::QueryReturnedNoRows) => None,
+                Err(e) => return Err(CoreError::Storage(format!("unread_count cursor: {e}"))),
+            };
+
+            let n: i64 = match cursor {
+                Some(cur) => c
+                    .query_row(
+                        "SELECT COUNT(*) FROM messages \
+                         WHERE group_id = ?1 AND id > ?2",
+                        rusqlite::params![group_id, cur],
+                        |r| r.get(0),
+                    )
+                    .map_err(|e| CoreError::Storage(format!("unread_count: {e}")))?,
+                None => c
+                    .query_row(
+                        "SELECT COUNT(*) FROM messages WHERE group_id = ?1",
+                        rusqlite::params![group_id],
+                        |r| r.get(0),
+                    )
+                    .map_err(|e| CoreError::Storage(format!("unread_count: {e}")))?,
+            };
+            Ok(u64::try_from(n).unwrap_or(0))
         })
     }
 
@@ -661,5 +699,131 @@ mod tests {
             .unwrap();
         assert_eq!(hits.len(), 2);
         assert!(hits[0].message.id > hits[1].message.id);
+    }
+
+    #[test]
+    fn unread_count_returns_total_when_no_cursor() {
+        let pool = Pool::in_memory();
+        let gid = [0x20; 32];
+        seed_three_text(&pool, &gid);
+        let n = MessageRepo::new(&pool).unread_count(&gid).unwrap();
+        assert_eq!(n, 3, "no cursor → all rows are unread");
+    }
+
+    #[test]
+    fn unread_count_returns_zero_after_cursor_passes_all() {
+        use crate::storage::ReadStateRepo;
+        let pool = Pool::in_memory();
+        let gid = [0x21; 32];
+        seed_three_text(&pool, &gid);
+        let last_id: i64 = pool
+            .with(|c| {
+                c.query_row(
+                    "SELECT MAX(id) FROM messages WHERE group_id = ?1",
+                    rusqlite::params![&gid[..]],
+                    |r| r.get(0),
+                )
+                .map_err(|e| crate::error::CoreError::Storage(e.to_string()))
+            })
+            .unwrap();
+        ReadStateRepo::new(&pool)
+            .set(&gid, last_id, 1_700_000_000)
+            .unwrap();
+        let n = MessageRepo::new(&pool).unread_count(&gid).unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn unread_count_returns_partial_after_cursor_in_middle() {
+        use crate::storage::ReadStateRepo;
+        let pool = Pool::in_memory();
+        let gid = [0x22; 32];
+        seed_three_text(&pool, &gid);
+        let mid_id: i64 = pool
+            .with(|c| {
+                c.query_row(
+                    "SELECT id FROM messages WHERE group_id = ?1 \
+                     ORDER BY id ASC LIMIT 1 OFFSET 1",
+                    rusqlite::params![&gid[..]],
+                    |r| r.get(0),
+                )
+                .map_err(|e| crate::error::CoreError::Storage(e.to_string()))
+            })
+            .unwrap();
+        ReadStateRepo::new(&pool)
+            .set(&gid, mid_id, 1_700_000_000)
+            .unwrap();
+        let n = MessageRepo::new(&pool).unread_count(&gid).unwrap();
+        assert_eq!(n, 1, "1 of 3 rows has id > cursor");
+    }
+
+    #[test]
+    fn recent_by_contact_orders_by_mls_generation_then_id() {
+        let pool = Pool::in_memory();
+        let gid = [0x23; 32];
+        let repo = MessageRepo::new(&pool);
+        // Insert with mixed mls_generation values.
+        for (gen, body, ts) in [
+            (2, "first-but-newer-gen", 100),
+            (5, "third-yet-older-gen", 102),
+            (3, "second", 101),
+        ] {
+            let mut env = sample_envelope(body);
+            env.ts = ts;
+            repo.insert(InsertParams {
+                group_id: &gid,
+                sender: &[0u8; 32],
+                envelope: &env,
+                mls_generation: gen,
+                ts_daemon_recv: ts,
+            })
+            .unwrap();
+        }
+        let rows: Vec<i64> = pool
+            .with(|c| {
+                let mut stmt = c
+                    .prepare(
+                        "SELECT id FROM messages WHERE group_id = ?1 \
+                     ORDER BY mls_generation DESC, id DESC",
+                    )
+                    .map_err(|e| crate::error::CoreError::Storage(e.to_string()))?;
+                let it = stmt
+                    .query_map(rusqlite::params![&gid[..]], |r| r.get::<_, i64>(0))
+                    .map_err(|e| crate::error::CoreError::Storage(e.to_string()))?;
+                let v: std::result::Result<Vec<_>, _> = it.collect();
+                v.map_err(|e| crate::error::CoreError::Storage(e.to_string()))
+            })
+            .unwrap();
+        // Highest mls_generation first → "third-yet-older-gen" (gen=5),
+        // then "second" (gen=3), then "first-but-newer-gen" (gen=2).
+        assert_eq!(rows.len(), 3);
+        let bodies: Vec<String> = pool
+            .with(|c| {
+                let mut stmt = c
+                    .prepare("SELECT body_text FROM messages WHERE id = ?1")
+                    .map_err(|e| crate::error::CoreError::Storage(e.to_string()))?;
+                let mut out = Vec::new();
+                for id in &rows {
+                    let body: String = stmt
+                        .query_row(rusqlite::params![id], |r| r.get(0))
+                        .map_err(|e| crate::error::CoreError::Storage(e.to_string()))?;
+                    out.push(body);
+                }
+                Ok(out)
+            })
+            .unwrap();
+        assert_eq!(
+            bodies,
+            vec![
+                "third-yet-older-gen".to_string(),
+                "second".to_string(),
+                "first-but-newer-gen".to_string(),
+            ]
+        );
+
+        // Repo's recent() must agree with the upgraded SQL: same ordering.
+        let recent = repo.recent(&gid, 10).unwrap();
+        let recent_ids: Vec<i64> = recent.iter().map(|r| r.id).collect();
+        assert_eq!(recent_ids, rows);
     }
 }
