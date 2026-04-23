@@ -4467,6 +4467,7 @@ name = "skattr-tests"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "async-trait",
  "proptest",
  "sha2",
  "skattr-core",
