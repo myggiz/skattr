@@ -96,4 +96,26 @@ impl Daemon {
         rt.shutdown().await?;
         Ok(())
     }
+
+    /// Encrypt an envelope for `peer` via the existing MLS group, persist
+    /// it to the outbox, and hand it off to the delivery hub for
+    /// transmission. `pub(crate)` until 1.F wires the CLI path; tests
+    /// reach this via `test_exports::send`.
+    #[allow(dead_code)]
+    pub(crate) async fn send(
+        &self,
+        _peer: crate::identity::PublicKey,
+        _envelope: crate::envelope::Envelope,
+    ) -> crate::error::Result<tokio::sync::oneshot::Receiver<std::result::Result<(), ()>>> {
+        // 1.E is scaffold-complete but Daemon::run does not yet
+        // construct the hub (that wiring lands with 1.F when
+        // Daemon::execute grows Command::Send). Returning an error
+        // here keeps the signature stable for tests; the integration
+        // test in crates/tests/src/delivery_kill_mid_message.rs
+        // bypasses Daemon and drives DeliveryHub directly through
+        // test_exports.
+        Err(crate::error::CoreError::Delivery(
+            "Daemon::send requires 1.F CLI integration".into(),
+        ))
+    }
 }

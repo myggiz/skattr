@@ -39,6 +39,8 @@ pub(crate) use key_packages::KeyPackageRepo;
 pub(crate) use messages::MessageRepo;
 #[cfg(not(feature = "test-harness"))]
 pub(crate) use pool::Pool;
+#[cfg(not(feature = "test-harness"))]
+pub(crate) use seen_messages::SeenMessagesRepo;
 
 #[cfg(feature = "test-harness")]
 pub use contacts::ContactRepo;
@@ -50,3 +52,5 @@ pub use key_packages::KeyPackageRepo;
 pub use messages::MessageRepo;
 #[cfg(feature = "test-harness")]
 pub use pool::Pool;
+#[cfg(feature = "test-harness")]
+pub use seen_messages::SeenMessagesRepo;

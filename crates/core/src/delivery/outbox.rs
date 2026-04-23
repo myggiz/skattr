@@ -3,16 +3,18 @@
 
 //! Persisted send queue with exponential-backoff retry.
 //!
-//! Rows live in the `outbox` table. Each row represents one message to
-//! one recipient (group messages fan out to N rows). A background task
-//! scans for `next_retry_at <= now` and attempts delivery; on ACK the
-//! row is removed. See design §1.5 and the Phase 1 delivery workstream.
+//! Thin wrapper over [`crate::storage::outbox::OutboxRepo`] that speaks
+//! in `PublicKey`/`MessageId` terms rather than raw byte slices. Rows
+//! live in the `outbox` table (see migration 0001 + 0004).
 
 use std::time::Duration;
 
+use crate::delivery::backoff::backoff;
 use crate::envelope::MessageId;
 use crate::error::Result;
 use crate::identity::PublicKey;
+use crate::storage::outbox::{OutboxRepo, OutboxRow};
+use crate::storage::Pool;
 
 /// A pending outbound delivery.
 #[derive(Debug, Clone)]
@@ -27,42 +29,140 @@ pub struct OutboxEntry {
     pub message_id: MessageId,
     /// Retry attempt count (0 on first enqueue).
     pub attempts: u32,
-    /// Unix timestamp when we may next attempt delivery.
-    pub next_retry_at: i64,
 }
 
-/// Compute the next backoff interval for a failed delivery.
-///
-/// 1s → 2s → 4s → … → 5 min cap, with random jitter to avoid thundering herds.
-#[must_use]
-pub fn backoff(_attempts: u32) -> Duration {
-    todo!("base = 1s << attempts, cap at 5min, +/- 25% jitter")
+/// Borrowed view over the outbox backed by a `Pool`.
+pub struct Outbox<'p> {
+    repo: OutboxRepo<'p>,
 }
 
-/// Persisted outbox interface.
-#[derive(Debug)]
-pub struct Outbox {
-    _private: (),
+impl<'p> Outbox<'p> {
+    /// Create a new `Outbox` backed by the given `Pool`.
+    pub fn new(pool: &'p Pool) -> Self {
+        Self {
+            repo: OutboxRepo::new(pool),
+        }
+    }
+
+    /// Enqueue a fresh `(target, message_id, payload)` tuple with
+    /// `next_retry_at = now`. Returns `Ok(Some(rowid))` on fresh
+    /// insert, `Ok(None)` if `(target, message_id)` is already present.
+    pub fn enqueue(
+        &self,
+        target: &PublicKey,
+        message_id: MessageId,
+        payload: &[u8],
+        now: i64,
+    ) -> Result<Option<i64>> {
+        self.repo.insert(&target.0, &message_id.0, payload, now)
+    }
+
+    /// Entries whose `next_retry_at` has passed, up to `max`.
+    pub fn due(&self, now: i64, max: usize) -> Result<Vec<OutboxEntry>> {
+        let rows = self.repo.due(now, max)?;
+        Ok(rows.into_iter().map(row_to_entry).collect())
+    }
+
+    /// Delete the `(target, message_id)` row. Returns `true` if a row
+    /// was removed.
+    pub fn ack(&self, target: &PublicKey, message_id: MessageId) -> Result<bool> {
+        self.repo.ack_by_message_id(&target.0, &message_id.0)
+    }
+
+    /// Bump `attempts` and set `next_retry_at = now + backoff(attempts_now)`.
+    pub fn reschedule(&self, id: i64, attempts_now: u32, now: i64) -> Result<()> {
+        let delay = backoff(attempts_now);
+        let next_retry_at =
+            now.saturating_add(i64::try_from(delay.as_millis()).unwrap_or(i64::MAX));
+        self.repo.reschedule(id, next_retry_at)
+    }
+
+    /// Convenience: the configured cap used by [`backoff`]. Exposed
+    /// for the retry-tick ceiling when logging.
+    #[cfg(test)]
+    pub(crate) fn backoff_cap() -> Duration {
+        crate::delivery::backoff::CAP
+    }
 }
 
-impl Outbox {
-    /// Enqueue a message for a recipient.
-    pub fn enqueue(&self, _entry: OutboxEntry) -> Result<()> {
-        todo!("INSERT into outbox")
+fn row_to_entry(row: OutboxRow) -> OutboxEntry {
+    let (id, target, payload, message_id, attempts) = row;
+    let mut pk = [0u8; 32];
+    if target.len() == 32 {
+        pk.copy_from_slice(&target);
+    }
+    OutboxEntry {
+        id,
+        target: PublicKey(pk),
+        payload,
+        message_id: MessageId(message_id),
+        attempts,
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    fn pk(byte: u8) -> PublicKey {
+        PublicKey([byte; 32])
     }
 
-    /// Pop (up to `max`) entries that are due for a retry.
-    pub fn due(&self, _max: usize) -> Result<Vec<OutboxEntry>> {
-        todo!("SELECT … WHERE next_retry_at <= now ORDER BY next_retry_at LIMIT max")
+    fn mid(byte: u8) -> MessageId {
+        MessageId([byte; 16])
     }
 
-    /// Mark an entry delivered and remove it.
-    pub fn ack(&self, _message_id: MessageId) -> Result<()> {
-        todo!("DELETE FROM outbox WHERE message_id = ?")
+    #[test]
+    fn enqueue_is_idempotent_on_target_message_id() {
+        let pool = Pool::in_memory();
+        let ob = Outbox::new(&pool);
+        assert!(ob
+            .enqueue(&pk(0xAA), mid(0x01), b"p", 100)
+            .unwrap()
+            .is_some());
+        assert!(ob
+            .enqueue(&pk(0xAA), mid(0x01), b"p", 100)
+            .unwrap()
+            .is_none());
     }
 
-    /// Reschedule an entry after a failed attempt.
-    pub fn reschedule(&self, _id: i64) -> Result<()> {
-        todo!("UPDATE outbox SET attempts = attempts+1, next_retry_at = … WHERE id = ?")
+    #[test]
+    fn due_returns_entries_with_public_key_and_message_id() {
+        let pool = Pool::in_memory();
+        let ob = Outbox::new(&pool);
+        ob.enqueue(&pk(0xAA), mid(0x01), b"past", 100).unwrap();
+        let list = ob.due(999, 10).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].target, pk(0xAA));
+        assert_eq!(list[0].message_id, mid(0x01));
+        assert_eq!(list[0].payload, b"past");
+        assert_eq!(list[0].attempts, 0);
+    }
+
+    #[test]
+    fn ack_removes_exactly_one_row() {
+        let pool = Pool::in_memory();
+        let ob = Outbox::new(&pool);
+        ob.enqueue(&pk(0xAA), mid(0x01), b"p", 100).unwrap();
+        assert!(ob.ack(&pk(0xAA), mid(0x01)).unwrap());
+        assert!(ob.due(999, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn reschedule_bumps_attempts_and_next_retry() {
+        let pool = Pool::in_memory();
+        let ob = Outbox::new(&pool);
+        let rid = ob
+            .enqueue(&pk(0xAA), mid(0x01), b"p", 100)
+            .unwrap()
+            .unwrap();
+        ob.reschedule(rid, 0, 1_000).unwrap();
+        // With backoff(0) ∈ [0.75s, 1.25s], next_retry_at ∈ [1750, 2250].
+        // Immediately after reschedule, due(now=1_499) should return nothing.
+        assert!(ob.due(1_499, 10).unwrap().is_empty());
+        let later = ob.due(3_000, 10).unwrap();
+        assert_eq!(later.len(), 1);
+        assert_eq!(later[0].attempts, 1);
     }
 }

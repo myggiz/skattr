@@ -53,7 +53,7 @@ pub use error::{CoreError, Result};
 pub mod test_exports {
     pub use crate::transport::{OnionListener, TorConfig, TorRuntime, TorStatus};
     // Phase 0.D additions:
-    pub use crate::storage::{ContactRepo, MessageRepo, Pool};
+    pub use crate::storage::{ContactRepo, MessageRepo, Pool, SeenMessagesRepo};
     // Phase 1.A additions:
     pub use crate::transport::{Frame, FrameCodec, FrameType, MAX_FRAME_SIZE};
     // Phase 1.B additions:
@@ -67,6 +67,12 @@ pub mod test_exports {
     // Phase 1.D additions:
     pub use crate::contact::{Contact, ContactCard, ContactCardBody};
     pub use crate::invite::{InviteLink, InviteLinkBody, InvitePsk};
+    // Phase 1.E additions:
+    pub use crate::delivery::kill_stream::{KillSwitch, KillableStream};
+    pub use crate::delivery::{
+        receive, DeliveryHub, DeliveryJob, InboundDispatch, Outbox, OutboxEntry, PeerConnection,
+        PeerCtrl, ReceiveOutcome, REPLAY_WINDOW_MS,
+    };
 
     /// Test-only helper: convert an `IdentityKey` to its X25519 static
     /// public key for use as `peer_static_x25519` in
