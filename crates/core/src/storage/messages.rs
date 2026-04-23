@@ -69,8 +69,7 @@ pub struct MessageRepo<'p> {
 pub struct SearchHit {
     /// The full stored message row.
     pub message: StoredMessage,
-    /// SQLite FTS5 BM25 score. Lower is better. Zero when
-    /// `newest_first` overrode the ranking.
+    /// SQLite FTS5 BM25 score. Lower is better. Always populated; ordering is independent.
     pub bm25: f64,
     /// FTS5 `snippet()` output with delimiter markers and 32-token window.
     pub snippet: String,
@@ -236,10 +235,7 @@ impl<'p> MessageRepo<'p> {
                     map_row,
                 )
             } else {
-                stmt.query_map(
-                    rusqlite::params![match_expr, limit_i, offset_i],
-                    map_row,
-                )
+                stmt.query_map(rusqlite::params![match_expr, limit_i, offset_i], map_row)
             }
             .map_err(|e| CoreError::Storage(format!("query search: {e}")))?;
 
@@ -581,7 +577,10 @@ mod tests {
 
     fn seed_three_text(pool: &Pool, gid: &[u8; 32]) {
         let repo = MessageRepo::new(pool);
-        for (i, body) in ["alpha bravo", "bravo charlie", "delta echo"].iter().enumerate() {
+        for (i, body) in ["alpha bravo", "bravo charlie", "delta echo"]
+            .iter()
+            .enumerate()
+        {
             let mut env = sample_envelope(body);
             env.ts = 100 + i as i64;
             repo.insert(InsertParams {
