@@ -107,6 +107,12 @@ enum Command {
         #[arg(long)]
         fail_on_timeout: bool,
     },
+    /// Interactive chat: stream messages from a contact and send lines
+    /// typed on stdin.
+    Chat {
+        /// Contact identifier (prefix or nickname).
+        contact: String,
+    },
     /// Tail messages. Without --follow: dump most recent N and exit.
     Tail {
         /// Only from this contact (prefix or nickname).
@@ -242,6 +248,7 @@ async fn main() -> Result<()> {
             send(&contact, &text, fail_on_timeout, socket.as_deref(), json).await
         }
         Command::Tail { contact, limit, follow } => tail(contact.as_deref(), limit, follow, socket.as_deref(), json).await,
+        Command::Chat { contact } => chat(&contact, socket.as_deref()).await,
     }
 }
 
@@ -868,6 +875,98 @@ async fn tail_follow(
     Ok(())
 }
 
+async fn chat(
+    contact_prefix: &str,
+    sock_flag: Option<&std::path::Path>,
+) -> Result<()> {
+    use skattr_core::daemon::events::Event;
+    use skattr_core::daemon::ipc::wire::EventFilter;
+    use skattr_core::daemon::{Command as CoreCommand, CommandResult, IpcClientError};
+    use skattr_core::envelope::Kind;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    let mut client = connect_or_exit(sock_flag).await?;
+
+    // Resolve contact via ListContacts + resolve_contact.
+    let rows_result = match client.execute(CoreCommand::ListContacts).await {
+        Ok(r) => r,
+        Err(e) => exit_on_ipc_error(e),
+    };
+    let rows = match rows_result {
+        CommandResult::Contacts(rows) => rows,
+        other => anyhow::bail!("unexpected result: {other:?}"),
+    };
+    let pubkey = match resolve_contact(&rows, contact_prefix) {
+        Ok(pk) => pk,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(6);
+        }
+    };
+
+    // Subscribe for incoming messages from this peer.
+    match client.subscribe(EventFilter::Contact(pubkey)).await {
+        Ok(()) => {}
+        Err(e) => exit_on_ipc_error(e),
+    }
+
+    eprintln!("chat: connected. Type a line and press Enter; Ctrl-D to exit.");
+
+    let mut stdin = BufReader::new(tokio::io::stdin());
+    let mut line = String::new();
+
+    loop {
+        tokio::select! {
+            // Incoming event from the daemon.
+            ev = client.next_event() => {
+                match ev {
+                    Ok(Event::MessageReceived { from: _, envelope }) => {
+                        let body = match envelope.kind {
+                            Kind::Text { body } => body,
+                            other => format!("({other:?})"),
+                        };
+                        println!("<- {body}");
+                    }
+                    Ok(Event::DeliveryStatusChanged { message: _, status }) => {
+                        eprintln!("... {status:?}");
+                    }
+                    Ok(_) => {}
+                    Err(IpcClientError::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                    Err(IpcClientError::UnexpectedFrame(_)) => break,
+                    Err(other) => exit_on_ipc_error(other),
+                }
+            }
+            // User typed a line.
+            n = stdin.read_line(&mut line) => {
+                let n = n?;
+                if n == 0 {
+                    // EOF on stdin.
+                    break;
+                }
+                let trimmed = line.trim_end_matches(['\n', '\r']).to_string();
+                line.clear();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let res = client
+                    .execute(CoreCommand::SendMessage {
+                        contact: pubkey,
+                        kind: Kind::Text { body: trimmed },
+                    })
+                    .await;
+                match res {
+                    Ok(CommandResult::MessageSent { status, .. }) => {
+                        eprintln!(".. {status:?}");
+                    }
+                    Ok(other) => eprintln!("unexpected: {other:?}"),
+                    Err(e) => exit_on_ipc_error(e),
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -1019,6 +1118,16 @@ mod tests {
         let out = render_messages_human(&rows);
         assert!(out.contains("hello"));
         assert!(out.contains("<-")); // incoming arrow
+    }
+
+    #[test]
+    fn clap_parses_chat_contact() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from(["skattr", "chat", "abc12"]).unwrap();
+        match cli.cmd {
+            Command::Chat { contact } => assert_eq!(contact, "abc12"),
+            other => panic!("unexpected variant: {other:?}"),
+        }
     }
 
     #[test]
