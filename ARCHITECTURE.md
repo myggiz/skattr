@@ -42,69 +42,92 @@ The `ui/` crate is deliberately **not** scaffolded in Phase 0. Tauri 2 + SvelteK
 Modules, top-down:
 
 ```
-daemon              long-lived process: owns Tor runtime, storage pool, outbox, listener
-                    (Phase 1 — session manager, command/event API)
-  ├── delivery      send/receive/dedupe/ack, outbox retry logic (Phase 1)
-  ├── contact       contacts and signed ContactCards; address rotation (Phase 1)
-  ├── mailbox       client of the mailbox server (Phase 1)
-  ├── invite        signed invite links, QR rendering (feature-gated) (Phase 1)
-  ├── mls           MLS groups, state machine, keystore, Welcomes, Commits (Phase 1)
-  ├── envelope      CBOR application payloads flowing inside MLS (Phase 1)
-  ├── transport     tor + HS key + accept loop implemented; Noise/frame/connection
-  │                 stubbed for Phase 1
+daemon              long-lived process: owns Tor runtime, storage pool, delivery hub,
+                    listener (Daemon::run shipped; Command/Event wiring is 1.F)
+  ├── delivery      per-peer actor hub, outbox + exp-backoff retry, receiver
+  │                 dedupe + ACK — done Phase 1.E
+  ├── contact       contacts and signed ContactCards, monotonic-version
+  │                 persistence — done Phase 1.D
+  ├── mailbox       client of the mailbox server (deferred to Phase 2)
+  ├── invite        signed skattr://invite/v1# links, QR rendering — done Phase 1.D
+  ├── mls           2-member MLS groups, state machine, keystore, Welcome/Commit —
+  │                 done Phase 1.C
+  ├── envelope      CBOR application payloads flowing inside MLS — done Phase 1.A
+  ├── transport     tor + HS key + accept loop, frame codec, Noise_XK handshake +
+  │                 AuthenticatedConnection — done Phase 0.C, 1.A, 1.B
   ├── identity      Ed25519 keypair, BIP39, Argon2id + XChaCha20-Poly1305 vault,
-  │                 HKDF derivations — all done Phase 0.B
-  └── storage       Pool (age-encrypted), migrations runner, 7 repos, backup — all
-                    done Phase 0.D
+  │                 HKDF derivations — done Phase 0.B
+  └── storage       Pool (age-encrypted), migrations runner (through 0004), 7
+                    repos, backup — done Phase 0.D + extended in 1.C/1.D/1.E
 ```
 
 **Public API boundary.** Only `daemon`, `error`, `envelope`, `invite`, `contact`, and the key types in `identity` are `pub`. Everything else is `pub(crate)`. Consumers (`cli`, `ui`) talk to the daemon through `Command` / `Event` enums.
 
 ## Data flow: sending one message
 
-End-to-end trace of `Command::SendMessage { contact, kind: Text { ... } }`
-once Phase 1 wires the message-send path in:
+End-to-end trace of the 1.E delivery stack. The `Command::SendMessage`
+CLI wiring is still 1.F, but tests drive the same path today via
+`test_exports::DeliveryHub`:
 
 ```
-1. UI/CLI submits Command::SendMessage via the Daemon's public API.
-2. Daemon looks up the contact's MLS group state (storage::groups::MlsGroupRepo).
-3. mls::group wraps the Envelope as an MLS application message (AEAD).
-4. storage::outbox::OutboxRepo enqueues the ciphertext with next_retry_at = now.
-5. delivery::sender picks up the due entry:
-     a. Peer currently online? → transport::connection::send (MLS_APP over
-        Noise_XK over arti_client::DataStream, dialled via TorRuntime::connect).
-     b. Peer unreachable? → mailbox::client deposits to each of the contact's
-        registered mailboxes in parallel.
-6. storage::messages::MessageRepo.insert records a local copy for history.
-7. On ACK (direct path) or successful DEPOSIT (mailbox path):
-     - outbox entry removed
-     - messages.delivered_at updated
-     - Daemon emits Event::DeliveryStatusChanged to subscribers.
+1. Caller encrypts an Envelope (MessageId, ts, kind) via the peer's
+   MLS group (mls::group::Group::encrypt → ciphertext). The MLS
+   ratchet advances exactly once per message.
+2. storage::outbox::OutboxRepo.insert persists (target, message_id,
+   ciphertext) with next_retry_at = now. INSERT OR IGNORE keeps the
+   call idempotent over (target, message_id).
+3. delivery::hub::DeliveryHub.send routes to the per-peer
+   delivery::peer::PeerConnection actor, spawning one on first use.
+4. The actor owns an Option<AuthenticatedConnection<S>>:
+     - If None, dial via transport::tor::TorRuntime::connect and
+       run transport::noise::handshake_initiator to populate it.
+     - conn.send(Frame::MlsApp(ciphertext)) — frame-in-frame through
+       the Noise transport cipher.
+5. Actor registers a oneshot in pending_acks[MessageId] and waits.
+6. On inbound Frame::Ack(id), actor resolves the oneshot,
+   OutboxRepo.ack_by_message_id drops the row, and the Daemon emits
+   Event::DeliveryStatusChanged { status: Delivered }.
+7. On conn error / kill-mid-message, pending_acks are drained with
+   Err(()); the outbox row stays. The actor's 1 s retry tick picks
+   it up, redials if needed, re-sends the same ciphertext (no
+   re-encrypt), and reschedules with exponential backoff (1s → 5min
+   cap, ±25% jitter).
 ```
 
 The inverse (receiving):
 
 ```
-1. transport::listener accepts an onion connection; Noise_XK auths the peer.
-2. An MLS_APP frame arrives. mls::group decrypts → Envelope.
-3. storage::seen_messages dedupes on (sender, message_id).
-4. storage::messages::MessageRepo.insert persists the envelope.
+1. transport::listener accepts an onion connection; the post-handshake
+   AuthenticatedConnection is handed to DeliveryHub::ingest.
+2. The per-peer actor's select! arm on conn.recv() observes a
+   Frame::MlsApp and passes the ciphertext to the injected
+   InboundDispatch (mls::group::Group::decrypt → Envelope).
+3. delivery::receiver::receive enforces a ±1 h ts window, checks
+   storage::seen_messages::SeenMessagesRepo for (sender,
+   message_id), and on fresh insert calls
+   storage::messages::MessageRepo.insert.
+4. Actor replies with Frame::Ack(message_id) whether the receive
+   was New or Duplicate (duplicate ACK lets the sender's retry
+   loop clear its outbox row).
 5. Daemon emits Event::MessageReceived.
-6. Receiver sends an ACK frame back.
 ```
 
-**Current phase state.** Everything above "Phase 1 wires" is stubbed;
-Phase 0 delivered the building blocks. Concretely:
+**Current phase state.**
 
-- `Daemon::run` exists as the daemon entry point but does not yet
-  accept `Command::SendMessage` — it just bootstraps Tor, publishes,
-  and blocks on Ctrl-C.
-- `mls::*` is all `todo!()` — Phase 1 work.
-- `delivery::sender` is `todo!()` — Phase 1 work.
-- `transport::{connection, noise, frame}` are `todo!()` — Phase 1 work.
-- `storage::*` is fully implemented and unit-tested; repos are just
-  not called yet.
-- `transport::{tor, listener, hs_key}` are fully implemented.
+- `Daemon::run` bootstraps Tor, publishes the onion, and blocks on
+  shutdown. `Daemon::send` is a `pub(crate)` stub until 1.F wires
+  `Command::Send` into the hub.
+- `mls::group` covers 2-member groups (create, add, encrypt/decrypt,
+  persist). Group chat >2 members is Phase 3.
+- `delivery::{hub, peer, outbox, receiver, backoff}` are fully
+  wired; kill-mid-message → reconnect → exactly-once delivery is
+  exercised by a CI integration test.
+- `transport::{frame, noise, connection, listener, tor, hs_key}`
+  are fully wired.
+- `invite::InviteLink` + `contact::ContactCard` parse/verify/sign/
+  persist with single-use enforcement on KeyPackages.
+- `mailbox::client` is `todo!()` — offline delivery is Phase 2.
+- `storage::*` is fully implemented (migrations through 0004).
 
 ## Cross-cutting: transport↔MLS binding
 

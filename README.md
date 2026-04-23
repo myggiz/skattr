@@ -4,12 +4,17 @@
 
 Skattr is a desktop-first, metadata-resistant, end-to-end encrypted messenger built on Tor v3 onion services and MLS (RFC 9420). It has no phone number, no email signup, and no central account server. Identity is a keypair backed by a BIP39 seed phrase.
 
-**Status: Phase 0 complete.** Identity, at-rest encryption, Arti
-integration, and storage all land. `skattr daemon` bootstraps Tor,
-publishes a v3 onion service, and accepts inbound streams. Phase 1
-(MLS message exchange, outbox delivery, invite links) is next. See
-[ARCHITECTURE.md](ARCHITECTURE.md) and [`docs/`](docs/) for the full
-design.
+**Status: Phase 1 on-line messaging almost complete.** Phase 0
+delivered identity, at-rest encryption, Arti integration, and
+storage. Phase 1.A–1.E have since landed the wire-format codec,
+Noise_XK handshake, MLS 2-member groups, invite & contact flow,
+and the delivery layer (per-peer actor connection pool, outbox
+with exponential-backoff retry, ACK correlation, receiver dedup).
+Phase 1.F (CLI integration — `skattr send`, `tail`, `contacts`)
+and Phase 1.G (message history + full-text search) are the final
+Phase 1 steps before end-to-end chat is user-visible. See
+[ARCHITECTURE.md](ARCHITECTURE.md) and [`docs/`](docs/) for the
+full design.
 
 ## What Skattr is
 
@@ -26,7 +31,7 @@ design.
 - Not mobile in v1. Mobile is post-1.0 at the earliest.
 - Not "anonymous" — your contacts know who you are. It's metadata-resistant, not identity-destroying.
 
-## What works now (end of Phase 0)
+## What works now (through Phase 1.E)
 
 - Create and restore a BIP39-backed identity (`skattr init` /
   `skattr restore`).
@@ -35,15 +40,30 @@ design.
   a seed-derived address.
 - Byte-level inbound accept loop (`OnionListener`).
 - Backup / restore of the full state as a portable archive.
+- Wire-format frame codec (16 MiB cap, 10 frame types).
+- `Noise_XK_25519_ChaChaPoly_BLAKE2s` handshake with optional `psk3`
+  for first-contact, producing an `AuthenticatedConnection<S>` with
+  the `h_transport` binding exposed.
+- MLS 2-member groups: create, add-member (Welcome + Commit),
+  encrypt/decrypt, state persists across restart via
+  checkpoint-snapshot.
+- Signed invite links (`skattr://invite/v1#…`) with canonical-CBOR
+  Ed25519 signatures, Zeroizing PSK guard, and single-use tracking.
+- Signed `ContactCard`s with monotonic-version persistence.
+- Delivery layer: per-peer `PeerConnection` actor with 1 s retry
+  tick, 60 s keepalive, 180 s idle close, and `ReplaceConn` for
+  concurrent-dial races. Kill-mid-message → reconnect → exactly-once
+  delivery is proven by a CI integration test.
 
 ## What doesn't work yet
 
-- Sending actual messages (Phase 1 — MLS + delivery layer).
-- Invite links, contact management beyond storage plumbing
-  (Phase 1).
+- `skattr send <contact> "hello"` on the CLI (Phase 1.F — CLI
+  integration is the missing glue between the delivery hub and
+  user-visible commands).
+- Scrolling message history / full-text search (Phase 1.G).
 - Offline delivery via mailbox server (Phase 2).
 - Desktop UI (Phase 2 — Tauri).
-- Group chat (Phase 3).
+- Group chat beyond 2 members (Phase 3).
 
 ## Quickstart (desktop, Linux/macOS)
 
