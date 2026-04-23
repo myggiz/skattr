@@ -39,6 +39,10 @@ const ALL_MIGRATIONS: &[Migration] = &[
         version: 4,
         sql: include_str!("migrations/0004_outbox_message_id.sql"),
     },
+    Migration {
+        version: 5,
+        sql: include_str!("migrations/0005_contact_group_link.sql"),
+    },
 ];
 
 /// Apply all pending migrations in order. Idempotent — re-running does
@@ -141,11 +145,45 @@ mod tests {
             "unique index idx_outbox_target_message_id must exist"
         );
 
-        // schema_version is at 4
+        // schema_version is at latest (all migrations applied)
         let v: u32 = conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 4);
+        let expected = ALL_MIGRATIONS.iter().map(|m| m.version).max().unwrap();
+        assert_eq!(v, expected);
+    }
+
+    #[test]
+    fn migration_0005_adds_group_id_column_and_index() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        apply(&mut conn).unwrap();
+
+        let cols: Vec<String> = conn
+            .prepare("PRAGMA table_info('contacts')")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .map(std::result::Result::unwrap)
+            .collect();
+        assert!(
+            cols.iter().any(|c| c == "group_id"),
+            "migration 0005 must add contacts.group_id; got {cols:?}"
+        );
+
+        let idx_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type = 'index' AND name = 'idx_contacts_group_id'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx_count, 1, "idx_contacts_group_id must exist");
+
+        let v: u32 = conn
+            .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 5);
     }
 
     #[test]
