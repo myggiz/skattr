@@ -238,7 +238,7 @@ where
     use crate::envelope::{Envelope, MessageId};
     use crate::mls::group::{Group, GroupId};
     use crate::storage::outbox::OutboxRepo;
-    use crate::storage::{ContactRepo, MlsGroupRepo};
+    use crate::storage::{ContactRepo, MessageRepo, MlsGroupRepo};
 
     // 1. Resolve group_id from contact.
     let contact_repo = ContactRepo::new(&handle.pool);
@@ -273,33 +273,46 @@ where
     // 4. MLS-encrypt (ratchet advances).
     let ciphertext = group.encrypt(&envelope).map_err(map_err)?;
 
-    // 5. Persist updated group state after ratchet advance.
-    group.save(&group_repo).map_err(map_err)?;
-
-    // 5b. Persist outgoing message row (Phase 1.G: real mls_generation
-    // + ts_daemon_recv). `ts_daemon_recv` is derived from the same
-    // `now_ms` clock read as `envelope.ts` so the two timestamps don't
-    // disagree on which second the message landed in.
+    // 5. Atomic: persist advanced ratchet + message row + outbox entry in
+    // one transaction. If any sub-operation fails the whole tx rolls back,
+    // including the MLS snapshot, so the caller sees a clean error and can
+    // retry without the ratchet having advanced on disk.
     let mls_generation = group.epoch();
     let ts_daemon_recv = now_ms / 1000;
-    let msg_repo = crate::storage::MessageRepo::new(&handle.pool);
-    msg_repo
-        .insert(crate::storage::messages::InsertParams {
-            group_id: &group_id_bytes,
-            sender: &handle.identity.public().0,
-            envelope: &envelope,
-            mls_generation,
-            ts_daemon_recv,
-        })
-        .map_err(map_err)?;
-
-    // 6. Idempotent outbox insert.
+    let msg_repo = MessageRepo::new(&handle.pool);
     let outbox_repo = OutboxRepo::new(&handle.pool);
-    outbox_repo
-        .insert(&contact.0, &message_id.0, &ciphertext, 0)
-        .map_err(map_err)?;
 
-    // 7. Kick the delivery hub, wait up to 2 s for an ACK.
+    let insert_result: crate::error::Result<()> = handle.pool.transaction(|tx| {
+        group.save_in_tx(&group_repo, tx)?;
+        let _ = msg_repo.insert_in_tx(
+            tx,
+            crate::storage::messages::InsertParams {
+                group_id: &group_id_bytes,
+                sender: &handle.identity.public().0,
+                envelope: &envelope,
+                mls_generation,
+                ts_daemon_recv,
+            },
+        )?;
+        let _ = outbox_repo.insert_in_tx(tx, &contact.0, &message_id.0, &ciphertext, 0)?;
+        Ok(())
+    });
+
+    match insert_result {
+        Ok(()) => { /* continue to hub.send below */ }
+        Err(CoreError::Storage(StorageErrorKind::DuplicateMessage)) => {
+            // Idempotent retry: this envelope_id was already persisted by a
+            // prior attempt. Treat as Delivered — the outbox row from the
+            // earlier attempt still owns delivery.
+            return Ok(CommandResult::MessageSent {
+                message_id: Hex16::from(message_id.0),
+                status: SendStatus::Delivered,
+            });
+        }
+        Err(e) => return Err(map_err(e)),
+    }
+
+    // 6. Kick the delivery hub, wait up to 2 s for an ACK.
     let ack_rx = handle
         .hub
         .send(contact, message_id, ciphertext)
