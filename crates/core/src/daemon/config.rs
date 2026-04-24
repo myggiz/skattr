@@ -10,6 +10,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{CoreError, Result};
 
+/// Message history retention settings.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct HistoryConfig {
+    /// Days of history to retain. 0 = infinite (default; sweep no-ops).
+    #[serde(default)]
+    pub retention_days: u32,
+}
+
 /// Top-level daemon config.
 ///
 /// Loaded from `~/.config/skattr/config.toml` by default; the CLI may
@@ -24,6 +32,9 @@ pub struct Config {
     /// Logging filter, e.g. `skattr_core=debug,arti=info`.
     #[serde(default = "default_log_filter")]
     pub log_filter: String,
+    /// Retention + history settings. Drives the retention sweep.
+    #[serde(default)]
+    pub history: HistoryConfig,
 }
 
 fn default_log_filter() -> String {
@@ -46,6 +57,7 @@ impl Config {
             data_dir: dirs.data_dir().to_path_buf(),
             ipc_socket: None,
             log_filter: default_log_filter(),
+            history: HistoryConfig::default(),
         })
     }
 
@@ -122,6 +134,7 @@ impl Config {
             data_dir: std::path::PathBuf::from("./skattr-data"),
             ipc_socket: None,
             log_filter: default_log_filter(),
+            history: HistoryConfig::default(),
         }
     }
 }
@@ -198,5 +211,26 @@ mod tests {
         let err = Config::load_with_precedence(Some(&cfg_path), None, None, None)
             .expect_err("invalid TOML must error");
         assert!(matches!(err, CoreError::Config(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn history_section_defaults_to_zero_when_absent() {
+        let toml = r#"
+            data_dir = "/tmp/skattr"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.history.retention_days, 0);
+    }
+
+    #[test]
+    fn history_section_parses_explicit_retention_days() {
+        let toml = r#"
+            data_dir = "/tmp/skattr"
+
+            [history]
+            retention_days = 90
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.history.retention_days, 90);
     }
 }
