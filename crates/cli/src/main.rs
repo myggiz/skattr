@@ -1529,6 +1529,7 @@ mod tests {
         use skattr_core::envelope::Kind;
         use skattr_core::identity::PublicKey;
         let rows = vec![MessageRecord {
+            row_id: 0, // row_id irrelevant in this test
             message_id: Hex16::from([2; 16]),
             contact: PublicKey([7; 32]),
             direction: Direction::Incoming,
@@ -1571,6 +1572,7 @@ mod tests {
         use skattr_core::identity::PublicKey;
 
         let rec = MessageRecord {
+            row_id: 0, // row_id irrelevant in this test
             message_id: Hex16::from([0xCC; 16]),
             contact: PublicKey([0x42; 32]),
             direction: Direction::Incoming,
@@ -1606,6 +1608,7 @@ mod tests {
         use skattr_core::identity::PublicKey;
 
         let rec = MessageRecord {
+            row_id: 0, // row_id irrelevant in this test
             message_id: Hex16::from([0xAB; 16]),
             contact: PublicKey([0x42; 32]),
             direction: Direction::Incoming,
@@ -1635,6 +1638,7 @@ mod tests {
         use skattr_core::identity::PublicKey;
 
         let rec = MessageRecord {
+            row_id: 0, // row_id irrelevant in this test
             message_id: Hex16::from([0xDD; 16]),
             contact: PublicKey([0x42; 32]),
             direction: Direction::Incoming,

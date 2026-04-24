@@ -1041,6 +1041,10 @@ mod tests {
                     matches!(records[0].kind, Kind::Text { .. }),
                     "expected Text kind"
                 );
+                assert_ne!(
+                    records[0].row_id, 0,
+                    "row_id must be the SQLite id, not a placeholder"
+                );
             }
             other => panic!("expected Messages, got {other:?}"),
         }
