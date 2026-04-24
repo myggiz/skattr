@@ -95,11 +95,18 @@ impl DaemonInbound {
         // save_in_tx, the entire tx rolls back — the ratchet does not
         // advance on disk without a corresponding history row.
         //
+        // Rejected envelopes are surfaced as Err *inside* the closure so
+        // the transaction rolls back before Pool::transaction commits.
+        // If we returned Ok(Rejected) the closure would succeed, the tx
+        // would commit the advanced ratchet snapshot, and the outer
+        // match returning Err would be too late — the exact durability
+        // gap this task was introduced to close.
+        //
         // Event broadcast stays OUTSIDE this block; a failed subscriber
         // must not roll back the persisted message.
         let outcome = self.pool.transaction(|tx| {
             group.save_in_tx(&group_repo, tx)?;
-            receive_in_tx(
+            let out = receive_in_tx(
                 tx,
                 &from,
                 group_id,
@@ -109,7 +116,18 @@ impl DaemonInbound {
                 ts_daemon_recv,
                 &seen_repo,
                 &msg_repo,
-            )
+            )?;
+            match &out {
+                ReceiveOutcome::Rejected(reason) => {
+                    tracing::warn!(
+                        peer = ?from,
+                        reason = %reason,
+                        "inbound: rejected by receiver (replay window or dedup)",
+                    );
+                    Err(CoreError::Delivery(format!("inbound: rejected: {reason}")))
+                }
+                _ => Ok(out),
+            }
         })?;
 
         match &outcome {
@@ -147,14 +165,13 @@ impl DaemonInbound {
                     "inbound: duplicate, acking without event",
                 );
             }
-            ReceiveOutcome::Rejected(reason) => {
-                tracing::warn!(
-                    peer = ?from,
-                    reason = %reason,
-                    "inbound: rejected by receiver (replay window or dedup)",
-                );
-                return Err(CoreError::Delivery(format!("inbound: rejected: {reason}")));
-            }
+            // Rejected is surfaced via Err inside the transaction closure
+            // above and never reaches here — the tx rolls back before
+            // Pool::transaction returns Ok.
+            ReceiveOutcome::Rejected(_) => unreachable!(
+                "Rejected outcome is converted to Err inside the closure; \
+                 it cannot reach the outer match"
+            ),
         }
 
         Ok(msg_id)
@@ -419,15 +436,24 @@ mod tests {
     }
 
     /// Rollback test: when `receive_in_tx` rejects the envelope (ts outside
-    /// ±1h replay window), the wrapping transaction rolls back and the MLS
-    /// ratchet epoch on disk must NOT advance.
+    /// ±1h replay window), the wrapping transaction rolls back and storage
+    /// must be entirely unchanged — the MLS ratchet blob on disk must match
+    /// its pre-dispatch snapshot and no `messages` or `seen_messages` rows
+    /// must have been inserted.
     ///
     /// This exercises the atomicity guarantee introduced in Task 9: before
-    /// this change, `group.save` committed before `receive()` ran, leaving
-    /// the ratchet ahead of the history table on rejection. Now both writes
-    /// are in one transaction and roll back together.
+    /// the C1 fix, the closure returned `Ok(Rejected)`, causing
+    /// `Pool::transaction` to commit the advanced-ratchet snapshot with no
+    /// corresponding history row. Now the closure maps `Rejected` to `Err`,
+    /// which rolls the transaction back before commit.
+    ///
+    /// The epoch-equality assertion that appeared in the original version of
+    /// this test is invariant under `decrypt()` — `Group::epoch()` only
+    /// advances on Commit processing, so it always equalled the pre-dispatch
+    /// value regardless of rollback. The blob comparison below is the real
+    /// load-bearing check.
     #[tokio::test]
-    async fn dispatch_for_group_rollback_leaves_group_epoch_unchanged() {
+    async fn dispatch_for_group_rollback_leaves_storage_unchanged() {
         use crate::mls::key_package::KeyPackage;
         use crate::storage::key_packages::KeyPackageRepo;
 
@@ -464,9 +490,10 @@ mod tests {
         .unwrap_or(0)
             - 10 * 3600 * 1000; // 10 hours ago
 
+        let msg_id = MessageId::generate();
         let env = crate::envelope::Envelope {
             v: 1,
-            id: MessageId::generate(),
+            id: msg_id,
             ts: stale_ts_ms,
             reply_to: None,
             kind: Kind::Text {
@@ -475,30 +502,90 @@ mod tests {
         };
         let ciphertext = bob_group.encrypt(&env).unwrap();
 
-        // Persist alice's initial group state and capture the pre-dispatch epoch.
+        // Persist alice's initial group state and snapshot the raw blob.
         let group_repo = MlsGroupRepo::new(&pool);
         alice_group.save(&group_repo).unwrap();
-        let epoch_before = alice_group.epoch();
+
+        let blob_before: Vec<u8> = pool
+            .with(|c| {
+                c.query_row(
+                    "SELECT state_blob FROM mls_groups WHERE group_id = ?1",
+                    rusqlite::params![&group_id_bytes[..]],
+                    |r| r.get::<_, Vec<u8>>(0),
+                )
+                .map_err(|e| {
+                    crate::error::CoreError::Storage(crate::storage::StorageErrorKind::Other(
+                        e.to_string(),
+                    ))
+                })
+            })
+            .unwrap();
 
         let inbound = DaemonInbound::new(pool.clone(), events_tx);
 
-        // dispatch_for_group must return Err (rejected envelope).
+        // dispatch_for_group must return Err (rejected by replay window).
         let result = inbound.dispatch_for_group(peer, &group_id_bytes, &ciphertext);
         assert!(
             result.is_err(),
             "expected Err for stale-ts envelope, got Ok"
         );
 
-        // The transaction must have rolled back: reload alice's group from
-        // disk and assert the epoch is unchanged (ratchet did not advance).
-        let gid = crate::mls::GroupId(group_id_bytes.clone());
-        let reloaded = crate::mls::Group::load(&gid, &group_repo)
-            .unwrap()
-            .expect("alice's group must still exist on disk after rollback");
+        // 1. Raw state_blob must be identical to the pre-dispatch snapshot.
+        let blob_after: Vec<u8> = pool
+            .with(|c| {
+                c.query_row(
+                    "SELECT state_blob FROM mls_groups WHERE group_id = ?1",
+                    rusqlite::params![&group_id_bytes[..]],
+                    |r| r.get::<_, Vec<u8>>(0),
+                )
+                .map_err(|e| {
+                    crate::error::CoreError::Storage(crate::storage::StorageErrorKind::Other(
+                        e.to_string(),
+                    ))
+                })
+            })
+            .unwrap();
         assert_eq!(
-            reloaded.epoch(),
-            epoch_before,
-            "group epoch must not advance when dispatch_for_group rolls back"
+            blob_before, blob_after,
+            "rollback must leave mls_groups.state_blob untouched"
+        );
+
+        // 2. No messages row must have been persisted for this group.
+        let msg_count: i64 = pool
+            .with(|c| {
+                c.query_row(
+                    "SELECT COUNT(*) FROM messages WHERE group_id = ?1",
+                    rusqlite::params![&group_id_bytes[..]],
+                    |r| r.get(0),
+                )
+                .map_err(|e| {
+                    crate::error::CoreError::Storage(crate::storage::StorageErrorKind::Other(
+                        e.to_string(),
+                    ))
+                })
+            })
+            .unwrap();
+        assert_eq!(msg_count, 0, "rollback must not persist a messages row");
+
+        // 3. No seen_messages row must have been inserted for this
+        //    (sender, message_id) pair.
+        let seen_count: i64 = pool
+            .with(|c| {
+                c.query_row(
+                    "SELECT COUNT(*) FROM seen_messages WHERE sender = ?1 AND message_id = ?2",
+                    rusqlite::params![&peer.0[..], &msg_id.0[..]],
+                    |r| r.get(0),
+                )
+                .map_err(|e| {
+                    crate::error::CoreError::Storage(crate::storage::StorageErrorKind::Other(
+                        e.to_string(),
+                    ))
+                })
+            })
+            .unwrap();
+        assert_eq!(
+            seen_count, 0,
+            "rollback must not persist a seen_messages row"
         );
     }
 }
