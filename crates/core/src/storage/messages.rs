@@ -117,15 +117,17 @@ impl<'p> MessageRepo<'p> {
             _ => None,
         };
         let mls_gen_signed = i64::try_from(p.mls_generation).unwrap_or(i64::MAX);
+        let envelope_id = &p.envelope.id.0[..];
         self.pool.with_mut(|c| {
-            c.execute(
+            match c.execute(
                 "INSERT INTO messages \
-                     (group_id, sender, kind, body_blob, body_text, ts, \
+                     (group_id, sender, envelope_id, kind, body_blob, body_text, ts, \
                       mls_generation, ts_daemon_recv) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 rusqlite::params![
                     p.group_id,
                     p.sender,
+                    envelope_id,
                     kind,
                     body,
                     body_text,
@@ -133,10 +135,19 @@ impl<'p> MessageRepo<'p> {
                     mls_gen_signed,
                     p.ts_daemon_recv,
                 ],
-            )
-            .map_err(|e| {
-                CoreError::Storage(StorageErrorKind::Other(format!("insert message: {e}")))
-            })?;
+            ) {
+                Ok(_) => {}
+                Err(rusqlite::Error::SqliteFailure(e, _))
+                    if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE =>
+                {
+                    return Err(CoreError::Storage(StorageErrorKind::DuplicateMessage));
+                }
+                Err(e) => {
+                    return Err(CoreError::Storage(StorageErrorKind::Other(format!(
+                        "messages INSERT: {e}"
+                    ))));
+                }
+            }
             Ok(c.last_insert_rowid())
         })
     }
@@ -494,9 +505,7 @@ impl<'p> MessageRepo<'p> {
     pub(crate) fn backfill_envelope_id(&self) -> Result<u64> {
         let candidates: Vec<(i64, Vec<u8>)> = self.pool.with(|c| {
             let mut stmt = c
-                .prepare(
-                    "SELECT id, body_blob FROM messages WHERE envelope_id IS NULL",
-                )
+                .prepare("SELECT id, body_blob FROM messages WHERE envelope_id IS NULL")
                 .map_err(|e| {
                     CoreError::Storage(StorageErrorKind::Other(format!(
                         "prepare backfill_envelope_id: {e}"
@@ -1356,16 +1365,19 @@ mod tests {
         let gid = [0x80u8; 32];
 
         // Insert a row directly with body_text NULL (simulating a pre-1.G row).
+        // Migration 0007 adds envelope_id with a BEFORE-INSERT trigger that
+        // requires the 16-byte value; provide it here so the INSERT succeeds
+        // even though we're simulating a legacy row (body_text NULL).
         let env = sample_envelope("legacy hello world");
         let blob = env.encode().unwrap();
         let sender = [0u8; 32];
         pool.with_mut(|c| {
             c.execute(
                 "INSERT INTO messages \
-                     (group_id, sender, kind, body_blob, body_text, ts, \
+                     (group_id, sender, envelope_id, kind, body_blob, body_text, ts, \
                       mls_generation, ts_daemon_recv) \
-                 VALUES (?1, ?2, 'text', ?3, NULL, ?4, 0, 0)",
-                rusqlite::params![&gid[..], &sender[..], blob, env.ts],
+                 VALUES (?1, ?2, ?3, 'text', ?4, NULL, ?5, 0, 0)",
+                rusqlite::params![&gid[..], &sender[..], &env.id.0[..], blob, env.ts],
             )
             .map_err(|e| {
                 crate::error::CoreError::Storage(StorageErrorKind::Other(e.to_string()))
@@ -1483,19 +1495,102 @@ mod tests {
                     |r| r.get::<_, Vec<u8>>(0),
                 )
                 .map_err(|e| {
-                    crate::error::CoreError::Storage(
-                        crate::storage::StorageErrorKind::Other(e.to_string()),
-                    )
+                    crate::error::CoreError::Storage(crate::storage::StorageErrorKind::Other(
+                        e.to_string(),
+                    ))
                 })
             })
             .unwrap();
-        assert_eq!(got, expected_id, "backfilled envelope_id must match body_blob");
+        assert_eq!(
+            got, expected_id,
+            "backfilled envelope_id must match body_blob"
+        );
     }
 
     #[test]
-    #[ignore = "requires Task 4: MessageRepo::insert must populate envelope_id \
-                before this test can call repo.insert() without triggering the \
-                BEFORE-INSERT shape check"]
+    fn insert_populates_envelope_id_column() {
+        let pool = Pool::in_memory();
+        let gid = [0x74u8; 32];
+        let sender = [0x75u8; 32];
+        let env = crate::envelope::Envelope {
+            v: 1,
+            id: crate::envelope::MessageId::generate(),
+            ts: 0,
+            reply_to: None,
+            kind: crate::envelope::Kind::Text { body: "x".into() },
+        };
+        let expected = env.id.0;
+
+        let repo = MessageRepo::new(&pool);
+        repo.insert(InsertParams {
+            group_id: &gid,
+            sender: &sender,
+            envelope: &env,
+            mls_generation: 0,
+            ts_daemon_recv: 0,
+        })
+        .unwrap();
+
+        let got: Vec<u8> = pool
+            .with(|c| {
+                c.query_row(
+                    "SELECT envelope_id FROM messages WHERE group_id = ?1",
+                    rusqlite::params![&gid[..]],
+                    |r| r.get::<_, Vec<u8>>(0),
+                )
+                .map_err(|e| {
+                    crate::error::CoreError::Storage(crate::storage::StorageErrorKind::Other(
+                        e.to_string(),
+                    ))
+                })
+            })
+            .unwrap();
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn insert_duplicate_envelope_id_returns_duplicate_message_error() {
+        use crate::error::CoreError;
+        use crate::storage::StorageErrorKind;
+
+        let pool = Pool::in_memory();
+        let gid = [0x76u8; 32];
+        let sender = [0x77u8; 32];
+        let env = crate::envelope::Envelope {
+            v: 1,
+            id: crate::envelope::MessageId::generate(),
+            ts: 0,
+            reply_to: None,
+            kind: crate::envelope::Kind::Text { body: "y".into() },
+        };
+
+        let repo = MessageRepo::new(&pool);
+        repo.insert(InsertParams {
+            group_id: &gid,
+            sender: &sender,
+            envelope: &env,
+            mls_generation: 0,
+            ts_daemon_recv: 0,
+        })
+        .unwrap();
+
+        let err = repo
+            .insert(InsertParams {
+                group_id: &gid,
+                sender: &sender,
+                envelope: &env, // same envelope.id as above
+                mls_generation: 1,
+                ts_daemon_recv: 1,
+            })
+            .unwrap_err();
+
+        assert!(
+            matches!(err, CoreError::Storage(StorageErrorKind::DuplicateMessage)),
+            "expected DuplicateMessage, got {err:?}"
+        );
+    }
+
+    #[test]
     fn backfill_envelope_id_is_idempotent() {
         let pool = Pool::in_memory();
         let gid = [0x72u8; 32];
