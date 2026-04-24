@@ -52,8 +52,12 @@ where
             contact,
             up_to_message_id,
         } => mark_read(&handle, contact, up_to_message_id).await,
-        // Remaining Phase 1.G handlers land in Tasks 19–20.
-        Command::PruneHistory { .. } => Err(IpcError::UnknownCommand),
+        Command::PruneHistory {
+            contact,
+            before_ts_recv,
+            keep_last,
+        } => prune_history(&handle, contact, before_ts_recv, keep_last).await,
+        // Remaining Phase 1.G handler lands in Task 20.
         Command::ExportHistory { .. } => Err(IpcError::UnknownCommand),
     }
 }
@@ -482,6 +486,57 @@ where
     Ok(CommandResult::MarkedRead {
         up_to: up_to_message_id,
     })
+}
+
+async fn prune_history<S>(
+    handle: &Arc<DaemonHandle<S>>,
+    contact: Option<crate::identity::PublicKey>,
+    before_ts_recv: Option<i64>,
+    keep_last: Option<u64>,
+) -> std::result::Result<CommandResult, IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    use crate::daemon::error_kind::DaemonErrorKind;
+    use crate::storage::{ContactRepo, MessageRepo};
+
+    // Validate: exactly one of before_ts_recv or keep_last must be Some.
+    match (before_ts_recv, keep_last) {
+        (Some(_), Some(_)) | (None, None) => {
+            return Err(IpcError::Internal(
+                "PruneHistory requires exactly one of before_ts_recv or keep_last".into(),
+            ));
+        }
+        _ => {}
+    }
+
+    // Resolve optional contact to group_id.
+    let group_id_owned: Option<Vec<u8>> = match contact {
+        Some(pk) => match ContactRepo::new(&handle.pool)
+            .get_group_id(&pk)
+            .map_err(map_err)?
+        {
+            Some(bytes) if !bytes.is_empty() => Some(bytes),
+            _ => return Err(IpcError::Daemon(DaemonErrorKind::ContactNotFound)),
+        },
+        None => None,
+    };
+
+    let msg_repo = MessageRepo::new(&handle.pool);
+    let rows_deleted = match (before_ts_recv, keep_last) {
+        (Some(ts), None) => msg_repo
+            .prune_before(group_id_owned.as_deref(), ts)
+            .map_err(map_err)?,
+        (None, Some(k)) => {
+            let gid = group_id_owned.as_deref().ok_or_else(|| {
+                IpcError::Internal("PruneHistory keep_last requires a contact".into())
+            })?;
+            msg_repo.prune_keep_last(gid, k).map_err(map_err)?
+        }
+        _ => unreachable!("validated above"),
+    };
+
+    Ok(CommandResult::Pruned { rows_deleted })
 }
 
 /// Map any `CoreError` to an `IpcError`. Projects via `CoreError::kind`
@@ -1201,5 +1256,162 @@ mod tests {
             err,
             IpcError::Daemon(crate::daemon::error_kind::DaemonErrorKind::ContactNotFound)
         ));
+    }
+
+    #[tokio::test]
+    async fn prune_history_keep_last_returns_deleted_count() {
+        let handle = test_handle();
+        let alice = crate::identity::PublicKey([0x77; 32]);
+        let gid = [0x88u8; 32];
+
+        let cr = ContactRepo::new(&handle.pool);
+        cr.upsert(&crate::contact::Contact {
+            identity: alice,
+            display_name: None,
+            added_at: 0,
+            card: None,
+        })
+        .unwrap();
+        cr.set_group_id(&alice, &gid).unwrap();
+
+        let msgs = crate::storage::MessageRepo::new(&handle.pool);
+        for i in 0..8i64 {
+            let env = crate::envelope::Envelope {
+                v: 1,
+                id: crate::envelope::MessageId::generate(),
+                ts: 1_700_000_000 + i,
+                reply_to: None,
+                kind: crate::envelope::Kind::Text {
+                    body: format!("m{i}"),
+                },
+            };
+            msgs.insert(crate::storage::messages::InsertParams {
+                group_id: &gid,
+                sender: &alice.0,
+                envelope: &env,
+                mls_generation: u64::try_from(i).unwrap(),
+                ts_daemon_recv: i,
+            })
+            .unwrap();
+        }
+
+        let result = execute_command(
+            handle.clone(),
+            Command::PruneHistory {
+                contact: Some(alice),
+                before_ts_recv: None,
+                keep_last: Some(3),
+            },
+        )
+        .await
+        .unwrap();
+        match result {
+            CommandResult::Pruned { rows_deleted } => assert_eq!(rows_deleted, 5),
+            other => panic!("expected Pruned, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn prune_history_before_ts_returns_deleted_count() {
+        let handle = test_handle();
+        let alice = crate::identity::PublicKey([0x77; 32]);
+        let gid = [0x99u8; 32];
+
+        let cr = ContactRepo::new(&handle.pool);
+        cr.upsert(&crate::contact::Contact {
+            identity: alice,
+            display_name: None,
+            added_at: 0,
+            card: None,
+        })
+        .unwrap();
+        cr.set_group_id(&alice, &gid).unwrap();
+
+        let msgs = crate::storage::MessageRepo::new(&handle.pool);
+        for i in 0..6i64 {
+            let env = crate::envelope::Envelope {
+                v: 1,
+                id: crate::envelope::MessageId::generate(),
+                ts: 1_700_000_000,
+                reply_to: None,
+                kind: crate::envelope::Kind::Text {
+                    body: format!("t{i}"),
+                },
+            };
+            msgs.insert(crate::storage::messages::InsertParams {
+                group_id: &gid,
+                sender: &alice.0,
+                envelope: &env,
+                mls_generation: 0,
+                ts_daemon_recv: i * 100, // 0, 100, 200, 300, 400, 500
+            })
+            .unwrap();
+        }
+
+        let result = execute_command(
+            handle,
+            Command::PruneHistory {
+                contact: Some(alice),
+                before_ts_recv: Some(250),
+                keep_last: None,
+            },
+        )
+        .await
+        .unwrap();
+        match result {
+            CommandResult::Pruned { rows_deleted } => assert_eq!(rows_deleted, 3),
+            other => panic!("expected Pruned, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn prune_history_rejects_both_before_and_keep_last() {
+        let handle = test_handle();
+        let err = execute_command(
+            handle,
+            Command::PruneHistory {
+                contact: None,
+                before_ts_recv: Some(1),
+                keep_last: Some(2),
+            },
+        )
+        .await;
+        assert!(
+            err.is_err(),
+            "exactly one of before_ts_recv / keep_last must be Some"
+        );
+    }
+
+    #[tokio::test]
+    async fn prune_history_rejects_neither() {
+        let handle = test_handle();
+        let err = execute_command(
+            handle,
+            Command::PruneHistory {
+                contact: None,
+                before_ts_recv: None,
+                keep_last: None,
+            },
+        )
+        .await;
+        assert!(
+            err.is_err(),
+            "exactly one of before_ts_recv / keep_last must be Some"
+        );
+    }
+
+    #[tokio::test]
+    async fn prune_history_keep_last_requires_contact() {
+        let handle = test_handle();
+        let err = execute_command(
+            handle,
+            Command::PruneHistory {
+                contact: None, // global
+                before_ts_recv: None,
+                keep_last: Some(3), // but keep_last requires a scoped group
+            },
+        )
+        .await;
+        assert!(err.is_err(), "keep_last requires a contact");
     }
 }
