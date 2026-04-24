@@ -14,6 +14,8 @@
 #[cfg(test)]
 mod arti_echo;
 #[cfg(test)]
+mod cli_export;
+#[cfg(test)]
 mod cli_ipc_roundtrip;
 #[cfg(test)]
 mod cli_real_tor;
