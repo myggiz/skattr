@@ -62,8 +62,10 @@ pub enum Command {
     Shutdown,
     /// Full-text search over persisted messages.
     SearchMessages {
-        /// Free-form FTS5 query string. Empty queries are rejected
-        /// at the dispatch layer with `DaemonErrorKind::SearchSyntax`.
+        /// Free-form FTS5 query string. Whitespace-only queries
+        /// short-circuit to an empty `SearchResults(vec![])` without
+        /// hitting FTS5. Malformed queries that reach FTS5 and the
+        /// engine rejects surface as `DaemonErrorKind::SearchSyntax`.
         query: String,
         /// If `Some`, restrict results to messages exchanged with this peer.
         contact: Option<crate::identity::PublicKey>,
