@@ -298,6 +298,51 @@ impl<'p> MessageRepo<'p> {
         )
     }
 
+    /// One page of messages in `group_id`, ordered ascending by `id`
+    /// (oldest-first). `after_id = None` starts from the beginning;
+    /// `after_id = Some(n)` returns rows with `id > n`. Caller loops
+    /// until the returned vec is shorter than `limit`.
+    pub fn export_page(
+        &self,
+        group_id: &[u8],
+        after_id: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<StoredMessage>> {
+        self.pool.with(|c| {
+            let mut stmt = c
+                .prepare(
+                    "SELECT id, group_id, sender, kind, body_blob, ts, delivered_at \
+                     FROM messages \
+                     WHERE group_id = ?1 AND id > ?2 \
+                     ORDER BY id ASC \
+                     LIMIT ?3",
+                )
+                .map_err(|e| CoreError::Storage(format!("prepare export_page: {e}")))?;
+            let rows = stmt
+                .query_map(
+                    rusqlite::params![
+                        group_id,
+                        after_id.unwrap_or(0),
+                        i64::try_from(limit).unwrap_or(i64::MAX),
+                    ],
+                    |r| {
+                        Ok(StoredMessage {
+                            id: r.get(0)?,
+                            group_id: r.get(1)?,
+                            sender: r.get(2)?,
+                            kind: r.get(3)?,
+                            body_blob: r.get(4)?,
+                            ts: r.get(5)?,
+                            delivered_at: r.get(6)?,
+                        })
+                    },
+                )
+                .map_err(|e| CoreError::Storage(format!("query export_page: {e}")))?;
+            let out: std::result::Result<Vec<_>, _> = rows.collect();
+            out.map_err(|e| CoreError::Storage(format!("collect export_page: {e}")))
+        })
+    }
+
     /// Mark a message delivered. Used by the ACK path.
     pub(crate) fn mark_delivered(&self, id: i64, delivered_at: i64) -> Result<()> {
         self.pool.with_mut(|c| {
@@ -869,5 +914,58 @@ mod tests {
 
         use crate::storage::ReadStateRepo;
         assert_eq!(ReadStateRepo::new(&pool).get(&gid).unwrap(), Some(99));
+    }
+
+    #[test]
+    fn export_page_yields_oldest_first_full_page() {
+        let pool = Pool::in_memory();
+        let gid = [0x40; 32];
+        let repo = MessageRepo::new(&pool);
+        for i in 0..5i64 {
+            let mut env = sample_envelope(&format!("msg-{i}"));
+            env.ts = 1000 + i;
+            repo.insert(InsertParams {
+                group_id: &gid,
+                sender: &[0u8; 32],
+                envelope: &env,
+                mls_generation: 0,
+                ts_daemon_recv: 1000 + i,
+            })
+            .unwrap();
+        }
+        let page = repo.export_page(&gid, None, 10).unwrap();
+        assert_eq!(page.len(), 5);
+        assert!(page[0].id < page[4].id, "oldest first");
+    }
+
+    #[test]
+    fn export_page_paginates_via_after_id() {
+        let pool = Pool::in_memory();
+        let gid = [0x41; 32];
+        let repo = MessageRepo::new(&pool);
+        for i in 0..7i64 {
+            let mut env = sample_envelope(&format!("p-{i}"));
+            env.ts = 1000 + i;
+            repo.insert(InsertParams {
+                group_id: &gid,
+                sender: &[0u8; 32],
+                envelope: &env,
+                mls_generation: 0,
+                ts_daemon_recv: 1000 + i,
+            })
+            .unwrap();
+        }
+        let page1 = repo.export_page(&gid, None, 3).unwrap();
+        assert_eq!(page1.len(), 3);
+        let page2 = repo
+            .export_page(&gid, Some(page1.last().unwrap().id), 3)
+            .unwrap();
+        assert_eq!(page2.len(), 3);
+        let page3 = repo
+            .export_page(&gid, Some(page2.last().unwrap().id), 3)
+            .unwrap();
+        assert_eq!(page3.len(), 1);
+        assert!(page1.last().unwrap().id < page2.first().unwrap().id);
+        assert!(page2.last().unwrap().id < page3.first().unwrap().id);
     }
 }
