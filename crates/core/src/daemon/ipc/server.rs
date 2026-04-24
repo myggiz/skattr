@@ -296,7 +296,7 @@ fn event_matches(event: &Event, filter: Option<&EventFilter>) -> bool {
     match (filter, event) {
         (EventFilter::All, _) => true,
         (EventFilter::TorStatus, Event::TorStatusChanged(_)) => true,
-        (EventFilter::Contact(peer), Event::MessageReceived { from, .. }) => from == peer,
+        (EventFilter::Contact(peer), Event::MessageReceived { contact, .. }) => contact == peer,
         (EventFilter::Contact(peer), Event::DeliveryStatusChanged { .. }) => {
             // DeliveryStatusChanged doesn't carry the peer; forward all
             // for now. The CLI filters further by message_id.

@@ -897,13 +897,18 @@ async fn tail_follow(
             Err(other) => exit_on_ipc_error(other),
         };
         match ev {
-            Event::MessageReceived { from, envelope } => {
-                let short: String = from.0.iter().take(4).map(|b| format!("{b:02x}")).collect();
-                let body = match envelope.kind {
+            Event::MessageReceived { contact, record } => {
+                let short: String = contact
+                    .0
+                    .iter()
+                    .take(4)
+                    .map(|b| format!("{b:02x}"))
+                    .collect();
+                let body = match record.kind {
                     Kind::Text { body } => body,
                     other => format!("({other:?})"),
                 };
-                println!("[{ts}] <- {short} {body}", ts = envelope.ts);
+                println!("[{ts}] <- {short} {body}", ts = record.ts_envelope);
             }
             Event::DeliveryStatusChanged { message, status } => {
                 let id_hex: String = message.0.iter().map(|b| format!("{b:02x}")).collect();
@@ -963,8 +968,8 @@ async fn chat(contact_prefix: &str, sock_flag: Option<&std::path::Path>) -> Resu
             // Incoming event from the daemon.
             ev = client.next_event() => {
                 match ev {
-                    Ok(Event::MessageReceived { from: _, envelope }) => {
-                        let body = match envelope.kind {
+                    Ok(Event::MessageReceived { contact: _, record }) => {
+                        let body = match record.kind {
                             Kind::Text { body } => body,
                             other => format!("({other:?})"),
                         };

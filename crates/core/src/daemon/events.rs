@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::envelope::{Envelope, MessageId};
+use crate::envelope::MessageId;
 use crate::identity::PublicKey;
 
 /// Tor-layer status, surfaced for UI bootstrap progress bars.
@@ -44,12 +44,18 @@ pub enum DeliveryStatus {
 pub enum Event {
     /// Bootstrap progress / final status.
     TorStatusChanged(TorStatus),
-    /// A message arrived from `from` and has been persisted.
+    /// A message arrived from a peer, was decrypted, and has been
+    /// persisted. The emitted `record` is the canonical
+    /// `MessageRecord` projection — already carrying the authoritative
+    /// `mls_generation` and local-clock `ts_daemon_recv` — so the
+    /// `tail --follow` / `chat` renderers don't have to re-derive the
+    /// wire shape themselves. `contact` is the peer pubkey (same as
+    /// the sender in 2-member groups).
     MessageReceived {
-        /// Sender identity pubkey.
-        from: PublicKey,
-        /// Decrypted payload.
-        envelope: Envelope,
+        /// Peer identity pubkey.
+        contact: PublicKey,
+        /// Canonical message-row projection at receive time.
+        record: crate::daemon::commands::MessageRecord,
     },
     /// A contact's card / nickname / online state changed.
     ContactUpdated(PublicKey),

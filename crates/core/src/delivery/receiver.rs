@@ -55,11 +55,16 @@ pub enum ReceiveOutcome {
 /// `Group::decrypt` on the ciphertext. Pure side effects on
 /// `seen_messages` and `messages`.
 ///
-/// `mls_generation` is the decrypting group's epoch at the moment of
-/// decrypt (authoritative ordering, not the envelope `ts`).
-/// `ts_daemon_recv` is the local daemon's wall-clock arrival time
-/// (seconds since UNIX epoch), used for retention sweeps and
-/// diagnostics.
+/// Parameters:
+/// - `now_ms`: local clock in **milliseconds** since the UNIX epoch,
+///   used for the ±1h replay window check against `envelope.ts`
+///   (both are millis per [`Envelope::ts`](crate::envelope::Envelope)).
+/// - `mls_generation`: the decrypting group's epoch at the moment of
+///   decrypt — authoritative ordering, not the envelope `ts`.
+/// - `ts_daemon_recv`: the local daemon's wall-clock arrival time in
+///   **seconds** since the UNIX epoch. Persisted on the messages row
+///   and surfaced on the wire in `MessageRecord`; used for retention
+///   sweeps and diagnostics.
 #[allow(clippy::too_many_arguments)]
 pub fn receive(
     sender: &PublicKey,
