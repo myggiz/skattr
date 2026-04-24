@@ -41,8 +41,14 @@ where
             recent_messages(&handle, contact, limit).await
         }
         Command::CreateGroup { .. } => Err(IpcError::UnknownCommand),
-        // Phase 1.G handlers land in Tasks 17–20.
-        Command::SearchMessages { .. } => Err(IpcError::UnknownCommand),
+        Command::SearchMessages {
+            query,
+            contact,
+            limit,
+            offset,
+            newest_first,
+        } => search_messages(&handle, query, contact, limit, offset, newest_first).await,
+        // Remaining Phase 1.G handlers land in Tasks 18–20.
         Command::MarkRead { .. } => Err(IpcError::UnknownCommand),
         Command::PruneHistory { .. } => Err(IpcError::UnknownCommand),
         Command::ExportHistory { .. } => Err(IpcError::UnknownCommand),
@@ -363,6 +369,88 @@ where
         .collect();
 
     Ok(CommandResult::Messages(records))
+}
+
+async fn search_messages<S>(
+    handle: &Arc<DaemonHandle<S>>,
+    query: String,
+    contact: Option<crate::identity::PublicKey>,
+    limit: u32,
+    offset: u32,
+    newest_first: bool,
+) -> std::result::Result<CommandResult, IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    use crate::daemon::commands::{Direction, MessageRecord, SearchHitRecord};
+    use crate::daemon::error_kind::DaemonErrorKind;
+    use crate::envelope::Envelope;
+    use crate::identity::PublicKey;
+    use crate::storage::{ContactRepo, MessageRepo};
+
+    // 1. Resolve optional contact -> group_id scope.
+    let group_id_owned: Option<Vec<u8>> = match contact {
+        Some(pk) => match ContactRepo::new(&handle.pool)
+            .get_group_id(&pk)
+            .map_err(map_err)?
+        {
+            Some(bytes) if !bytes.is_empty() => Some(bytes),
+            _ => return Err(IpcError::Daemon(DaemonErrorKind::ContactNotFound)),
+        },
+        None => None,
+    };
+
+    // 2. Run FTS5 search.
+    let msg_repo = MessageRepo::new(&handle.pool);
+    let hits = msg_repo
+        .search(
+            &query,
+            group_id_owned.as_deref(),
+            usize::try_from(limit).unwrap_or(usize::MAX),
+            usize::try_from(offset).unwrap_or(0),
+            newest_first,
+        )
+        .map_err(map_err)?;
+
+    // 3. Project each hit. Direction computed from sender vs local
+    // pubkey, matching the idiom in `recent_messages`. For the `contact`
+    // field: when the query was scoped to a peer use that peer for every
+    // row; when unscoped fall back to the stored sender (correct for
+    // incoming, best-effort for outgoing — Phase 1.G 2-member-group
+    // scope per CLAUDE.md).
+    let my_pubkey: PublicKey = handle.identity.public();
+    let records: Vec<SearchHitRecord> = hits
+        .into_iter()
+        .filter_map(|h| {
+            let env = Envelope::decode(h.message.body_blob.as_deref().unwrap_or(&[])).ok()?;
+            let mut sender_arr = [0u8; 32];
+            if h.message.sender.len() == 32 {
+                sender_arr.copy_from_slice(&h.message.sender);
+            }
+            let sender_pk = PublicKey(sender_arr);
+            let direction = if sender_pk == my_pubkey {
+                Direction::Outgoing
+            } else {
+                Direction::Incoming
+            };
+            let contact_for_record = contact.unwrap_or(sender_pk);
+
+            Some(SearchHitRecord {
+                record: MessageRecord::project(
+                    h.message.id,
+                    &env,
+                    contact_for_record,
+                    u64::try_from(h.message.mls_generation).unwrap_or(0),
+                    h.message.ts_daemon_recv,
+                    direction,
+                ),
+                bm25: h.bm25,
+                snippet: h.snippet,
+            })
+        })
+        .collect();
+
+    Ok(CommandResult::SearchResults(records))
 }
 
 /// Map any `CoreError` to an `IpcError`. Projects via `CoreError::kind`
@@ -909,5 +997,104 @@ mod tests {
             ts_recv > 1_600_000_000,
             "ts_daemon_recv must be a real clock value; got {ts_recv}"
         );
+    }
+
+    #[tokio::test]
+    async fn search_messages_returns_bm25_ranked_hits() {
+        let handle = test_handle();
+        let alice = crate::identity::PublicKey([0x77; 32]);
+        let gid = [0x88u8; 32];
+
+        let cr = ContactRepo::new(&handle.pool);
+        cr.upsert(&crate::contact::Contact {
+            identity: alice,
+            display_name: None,
+            added_at: 0,
+            card: None,
+        })
+        .unwrap();
+        cr.set_group_id(&alice, &gid).unwrap();
+
+        let msgs = crate::storage::MessageRepo::new(&handle.pool);
+        for body in ["alpha bravo", "bravo only", "delta only"] {
+            let env = crate::envelope::Envelope {
+                v: 1,
+                id: crate::envelope::MessageId::generate(),
+                ts: 1_700_000_000,
+                reply_to: None,
+                kind: crate::envelope::Kind::Text { body: body.into() },
+            };
+            msgs.insert(crate::storage::messages::InsertParams {
+                group_id: &gid,
+                sender: &alice.0,
+                envelope: &env,
+                mls_generation: 1,
+                ts_daemon_recv: 1_700_000_000,
+            })
+            .unwrap();
+        }
+
+        let result = execute_command(
+            handle.clone(),
+            Command::SearchMessages {
+                query: "bravo".into(),
+                contact: None,
+                limit: 10,
+                offset: 0,
+                newest_first: false,
+            },
+        )
+        .await
+        .unwrap();
+        match result {
+            CommandResult::SearchResults(hits) => {
+                assert_eq!(hits.len(), 2);
+                assert!(hits[0].snippet.contains("bravo"));
+            }
+            other => panic!("expected SearchResults, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn search_messages_empty_query_returns_empty_results() {
+        let handle = test_handle();
+        let result = execute_command(
+            handle,
+            Command::SearchMessages {
+                query: "   ".into(),
+                contact: None,
+                limit: 10,
+                offset: 0,
+                newest_first: false,
+            },
+        )
+        .await
+        .unwrap();
+        match result {
+            CommandResult::SearchResults(v) => assert!(v.is_empty()),
+            other => panic!("expected SearchResults, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn search_messages_unknown_contact_returns_contact_not_found() {
+        let handle = test_handle();
+        let unknown = crate::identity::PublicKey([0xEE; 32]);
+        let err = execute_command(
+            handle,
+            Command::SearchMessages {
+                query: "bravo".into(),
+                contact: Some(unknown),
+                limit: 10,
+                offset: 0,
+                newest_first: false,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            IpcError::Daemon(crate::daemon::error_kind::DaemonErrorKind::ContactNotFound)
+        ));
     }
 }
