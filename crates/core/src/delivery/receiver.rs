@@ -9,7 +9,7 @@
 //! replay window).
 
 use crate::envelope::{Envelope, MessageId};
-use crate::error::Result;
+use crate::error::{CoreError, Result};
 use crate::identity::PublicKey;
 use crate::storage::messages::MessageRepo;
 use crate::storage::seen_messages::SeenMessagesRepo;
@@ -34,7 +34,7 @@ pub enum ReceiveOutcome {
         /// Noise static public key of the sending peer.
         sender: PublicKey,
         /// MLS group id (opaque bytes) that authored this message.
-        group_id: Vec<u8>,
+        group_id: [u8; 32],
         /// MLS epoch of the decrypting group at decrypt time — the
         /// authoritative ordering signal (not `envelope.ts`).
         mls_generation: u64,
@@ -81,6 +81,11 @@ pub(crate) fn receive_in_tx(
     if !is_new {
         return Ok(ReceiveOutcome::Duplicate);
     }
+    let gid_arr: [u8; 32] = group_id.try_into().map_err(|_| {
+        CoreError::Storage(crate::storage::StorageErrorKind::Other(
+            "group_id must be 32 bytes".into(),
+        ))
+    })?;
     let row_id = messages.insert_in_tx(
         tx,
         crate::storage::messages::InsertParams {
@@ -95,7 +100,7 @@ pub(crate) fn receive_in_tx(
         envelope,
         row_id,
         sender: *sender,
-        group_id: group_id.to_vec(),
+        group_id: gid_arr,
         mls_generation,
         ts_daemon_recv,
     })
@@ -176,7 +181,7 @@ mod tests {
         let sender = PublicKey([0xAA; 32]);
         let out = receive(
             &sender,
-            &[0x01; 16],
+            &[0x01; 32],
             env(0x01, 1000),
             1000,
             0,
@@ -196,10 +201,10 @@ mod tests {
         let msgs = MessageRepo::new(&pool);
         let sender = PublicKey([0xAA; 32]);
         let e = env(0x01, 1000);
-        receive(&sender, &[0x01; 16], e.clone(), 1000, 0, 1000, &seen, &msgs).unwrap();
-        let out = receive(&sender, &[0x01; 16], e, 1000, 0, 1000, &seen, &msgs).unwrap();
+        receive(&sender, &[0x01; 32], e.clone(), 1000, 0, 1000, &seen, &msgs).unwrap();
+        let out = receive(&sender, &[0x01; 32], e, 1000, 0, 1000, &seen, &msgs).unwrap();
         assert!(matches!(out, ReceiveOutcome::Duplicate));
-        let rows = msgs.recent(&[0x01; 16], 10).unwrap();
+        let rows = msgs.recent(&[0x01; 32], 10).unwrap();
         assert_eq!(rows.len(), 1, "dup must not insert a second messages row");
     }
 
@@ -213,7 +218,7 @@ mod tests {
         let old = now - (REPLAY_WINDOW_MS + 1);
         let out = receive(
             &sender,
-            &[0x01; 16],
+            &[0x01; 32],
             env(0x01, old),
             now,
             0,
@@ -236,7 +241,7 @@ mod tests {
         let future = now + (REPLAY_WINDOW_MS + 1);
         let out = receive(
             &sender,
-            &[0x01; 16],
+            &[0x01; 32],
             env(0x01, future),
             now,
             0,
@@ -263,7 +268,7 @@ mod tests {
 
         let out = receive(
             &sender,
-            &[0x01; 16],
+            &[0x01; 32],
             env(0x01, 1000),
             1000,          // now_ms (replay window check)
             9,             // mls_generation
