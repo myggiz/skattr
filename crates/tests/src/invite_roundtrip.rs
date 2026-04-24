@@ -53,8 +53,13 @@ fn alice_mints_invite_bob_parses_records_and_consumes() {
 
     // Expiry: past TTL (was 3600 seconds from 1_000_000).
     let err = InviteLink::from_url(&url, 1_003_601).expect_err("expired");
-    match err {
-        skattr_core::error::CoreError::Invite(s) => assert!(s.contains("expired"), "got: {s}"),
-        other => panic!("expected Invite, got {other:?}"),
-    }
+    assert!(
+        matches!(
+            err,
+            skattr_core::error::CoreError::Invite(
+                skattr_core::invite::InviteErrorKind::Expired
+            )
+        ),
+        "expected InviteErrorKind::Expired, got {err:?}"
+    );
 }
