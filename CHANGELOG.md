@@ -4,6 +4,71 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Phase 1.H — Hardening
+
+Closes all 11 items surfaced in Phase 1.G review threads. No new
+user-facing features; no wire-protocol breaks (additive
+`DaemonErrorKind::InvalidArgument` variant + additive
+`MessageRecord.row_id` field only).
+
+### Correctness
+
+- **#1** `ContactRepo::contact_for_group(&[u8; 32])` helper for 2-member groups;
+  `daemon::dispatch::search_messages` now resolves the peer via the hit's
+  `group_id` on unscoped search, fixing the bug where outgoing rows rendered
+  `record.contact == local_pubkey` (`dd11b47`).
+- **#2** Migration 0007 adds `messages.envelope_id BLOB` (16 bytes, shape trigger,
+  `(group_id, envelope_id)` unique index). Idempotent startup backfill
+  (`MessageRepo::backfill_envelope_id`, fail-closed on error, `ORDER BY id ASC`
+  for deterministic dedup). `MessageRepo::insert` binds the column; UNIQUE
+  violations project to `StorageErrorKind::DuplicateMessage`, mapped by the send
+  path to `SendStatus::Delivered` for idempotent retries
+  (`3e8fe29`, `49a2deb`, `e271971`, `df804eb`).
+- **#3** Send + receive persistence is now transactional. New `Group::save_in_tx`,
+  `MessageRepo::insert_in_tx`, `OutboxRepo::insert_in_tx`,
+  `SeenMessagesRepo::insert_in_tx`, `delivery::receiver::receive_in_tx`.
+  `daemon::dispatch::send_message` and `daemon::inbound::dispatch_for_group` run
+  the full group-save + message-insert (+ outbox on send) under one
+  `pool.transaction`. On `ReceiveOutcome::Rejected`, the closure returns `Err` so
+  the advanced-ratchet snapshot rolls back with the rejected history row
+  (`73acde1`, `84ecbd1`, `21731a6`, `ea2689d`, `0f5305f`).
+
+### Error taxonomy
+
+- **#4** `DaemonErrorKind::InvalidArgument { message }`; `prune_history` validation
+  no longer returns `IpcError::Internal`; CLI exit code 2 for `InvalidArgument`,
+  1 for everything else (`7c604dd`).
+- **#5** Subsystem error sub-enums (`StorageErrorKind`, `ContactErrorKind`,
+  `InviteErrorKind`, `MlsErrorKind`, `DeliveryErrorKind`, `TransportErrorKind`)
+  replace `str::contains` matching in `CoreError::kind()`. Build-time grep guard
+  test `kind_has_no_string_matching` prevents regression
+  (`8877f82`, `46e404a`, `60fff74`, `61eacef`, `42ea815`, `cadc102`, `d743f0f`).
+
+### IPC / API polish
+
+- **#7** `MessageRecord.row_id: i64` is now a public field (was silently dropped in
+  `project()`). Additive — no wire-format break (`4afba6c`).
+
+### Hygiene & infra
+
+- **#6** `daemon::clock::now_unix_seconds` replaces five duplicates (one per-module,
+  one retention helper, three integration tests) (`125e6c9`).
+- **#8** `MessageRepo::backfill_body_text` runs its UPDATE loop in one transaction
+  (`bc5b2f6`).
+- **#9** `ReceiveOutcome::New.group_id: [u8; 32]` (was `Vec<u8>`). Group creation
+  uses `MlsGroup::new_with_group_id` with 32 random bytes to establish the
+  invariant at creation time (`3f0286a`).
+- **#10** CI cargo-deny job restored after invalid `--all-features` flag was
+  dropped; job is green (`a28d60a`).
+- **#11** `serial_test` dev-dep replaces a hand-rolled `Mutex` on the socket-path
+  env tests (`033030d`).
+
+### Test counts
+
+347 lib tests (up from 328 at Phase 1.G), zero failures. `cargo deny check`
+clean. `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+clean. `cargo fmt --check` clean.
+
 ## Phase 1.G — Message storage & search
 
 - `storage::messages` gains `search` (FTS5 BM25 + snippet, tokenize-and-AND query escaper),

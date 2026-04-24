@@ -6,7 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Phase 0 is complete; Phase 1.A (frame codec), 1.B (Noise_XK handshake),
 1.C (MLS 2-member groups), 1.D (invite & contact flow), 1.E (delivery
-semantics), 1.F (CLI integration), and 1.G (message storage & search) are done.** Phase 0 shipped all five workstreams (0.A scaffold,
+semantics), 1.F (CLI integration), 1.G (message storage & search), and
+1.H (hardening) are done.** Phase 0 shipped all five workstreams (0.A scaffold,
 0.B identity & crypto, 0.C Arti integration, 0.D storage layer, 0.E
 documentation baseline). Phase 1.A added `transport::frame::FrameCodec`.
 Phase 1.B added `transport::noise::handshake_{initiator,responder}`
@@ -43,6 +44,25 @@ sender-side rows. CLI gained `search` / `export` / `prune`;
 `tail --follow` subscribes to the event stream. Migration 0006 lands
 the schema. The 100k-row benchmark (`crates/core/tests/fts_search_p95.rs`,
 `#[ignore]`-gated) asserts search p95 < 50 ms.
+Phase 1.H closes the 11 items surfaced in 1.G review threads: migration
+0007 adds `messages.envelope_id` + `(group_id, envelope_id)` unique
+index + idempotent startup backfill; send + receive persistence runs
+under one `pool.transaction` via `Group::save_in_tx` +
+`MessageRepo::insert_in_tx` + `OutboxRepo::insert_in_tx` (and
+`receive_in_tx` on the inbound side). `CoreError::kind()` is a pure
+structural match over six subsystem sub-enums (`StorageErrorKind`,
+`ContactErrorKind`, `InviteErrorKind`, `MlsErrorKind`,
+`DeliveryErrorKind`, `TransportErrorKind`); a build-time guard test
+enforces zero `str::contains` in `kind()`.
+`DaemonErrorKind::InvalidArgument` + CLI exit code 2 give operators a
+clean signal for argument-validation errors. `MessageRecord.row_id`
+surfaces the SQLite id for UI correlation;
+`ContactRepo::contact_for_group` fixes unscoped-search outgoing-hit
+contact resolution. `daemon::clock::now_unix_seconds` replaces five
+duplicates; `ReceiveOutcome::New.group_id: [u8; 32]` (group IDs are
+now generated as 32 random bytes at `create_solo`);
+`backfill_body_text` runs in one transaction; the socket-path Mutex is
+replaced by `serial_test`.
 
 `crates/core/src/identity/` is fully implemented (Ed25519, BIP39,
 Argon2id + XChaCha20-Poly1305 vault, HKDF). `crates/core/src/transport/{tor,
@@ -63,7 +83,8 @@ passing. Phase 0 exit criterion (two daemons echo bytes over Tor)
 is exercised by `crates/tests/src/arti_echo.rs`, `#[ignore]`-gated
 (run with `cargo test -p skattr-tests --release -- --ignored`).
 
-Phase 1 is complete; the next workstream is TBD — see
+Phase 1 is complete (1.H merged 2026-04-24); the next workstream is
+Phase 2 (Tauri 2 + SvelteKit UI) — see
 `docs/superpowers/specs/2026-04-21-phase-1-decomposition.md`
 for the original decomposition. The bootstrap prompt remains
 authoritative for file layout, module boundaries, type signatures,
