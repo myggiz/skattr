@@ -354,6 +354,50 @@ impl<'p> MessageRepo<'p> {
             Ok(())
         })
     }
+
+    /// Delete rows with `ts_daemon_recv < before_ts_recv`. `group_id =
+    /// None` prunes globally. Returns the number of rows deleted.
+    pub fn prune_before(&self, group_id: Option<&[u8]>, before_ts_recv: i64) -> Result<u64> {
+        self.pool.with_mut(|c| {
+            let n = if let Some(gid) = group_id {
+                c.execute(
+                    "DELETE FROM messages \
+                     WHERE group_id = ?1 AND ts_daemon_recv < ?2",
+                    rusqlite::params![gid, before_ts_recv],
+                )
+            } else {
+                c.execute(
+                    "DELETE FROM messages WHERE ts_daemon_recv < ?1",
+                    rusqlite::params![before_ts_recv],
+                )
+            }
+            .map_err(|e| CoreError::Storage(format!("prune_before: {e}")))?;
+            Ok(u64::try_from(n).unwrap_or(0))
+        })
+    }
+
+    /// Keep the `keep` newest rows in `group_id`; delete the rest.
+    /// Returns the number of rows deleted.
+    pub fn prune_keep_last(&self, group_id: &[u8], keep: u64) -> Result<u64> {
+        let keep_i = i64::try_from(keep).unwrap_or(i64::MAX);
+        self.pool.with_mut(|c| {
+            let n = c
+                .execute(
+                    "DELETE FROM messages \
+                     WHERE group_id = ?1 \
+                       AND id <= COALESCE( \
+                           (SELECT id FROM messages \
+                            WHERE group_id = ?1 \
+                            ORDER BY id DESC \
+                            LIMIT 1 OFFSET ?2), \
+                           -1 \
+                       )",
+                    rusqlite::params![group_id, keep_i],
+                )
+                .map_err(|e| CoreError::Storage(format!("prune_keep_last: {e}")))?;
+            Ok(u64::try_from(n).unwrap_or(0))
+        })
+    }
 }
 
 #[cfg(test)]
@@ -967,5 +1011,111 @@ mod tests {
         assert_eq!(page3.len(), 1);
         assert!(page1.last().unwrap().id < page2.first().unwrap().id);
         assert!(page2.last().unwrap().id < page3.first().unwrap().id);
+    }
+
+    #[test]
+    fn prune_before_deletes_old_rows_and_cascades_to_fts() {
+        let pool = Pool::in_memory();
+        let gid = [0x50; 32];
+        let repo = MessageRepo::new(&pool);
+        for i in 0..6i64 {
+            let mut env = sample_envelope(&format!("retain-or-prune-{i}"));
+            env.ts = 1000;
+            repo.insert(InsertParams {
+                group_id: &gid,
+                sender: &[0u8; 32],
+                envelope: &env,
+                mls_generation: 0,
+                ts_daemon_recv: i * 100, // 0..500 in steps of 100
+            })
+            .unwrap();
+        }
+
+        let deleted = repo.prune_before(Some(&gid), 250).unwrap();
+        assert_eq!(deleted, 3, "rows with ts_daemon_recv 0/100/200 must go");
+
+        let remaining: i64 = pool
+            .with(|c| {
+                c.query_row(
+                    "SELECT COUNT(*) FROM messages WHERE group_id = ?1",
+                    rusqlite::params![&gid[..]],
+                    |r| r.get(0),
+                )
+                .map_err(|e| crate::error::CoreError::Storage(e.to_string()))
+            })
+            .unwrap();
+        assert_eq!(remaining, 3);
+
+        let fts_rows: i64 = pool
+            .with(|c| {
+                c.query_row(
+                    "SELECT COUNT(*) FROM messages_fts WHERE messages_fts \
+                     MATCH 'retain'",
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(|e| crate::error::CoreError::Storage(e.to_string()))
+            })
+            .unwrap();
+        assert_eq!(fts_rows, 3, "ad trigger must cascade FTS deletes");
+    }
+
+    #[test]
+    fn prune_before_global_when_group_is_none() {
+        let pool = Pool::in_memory();
+        let repo = MessageRepo::new(&pool);
+        for gid in [&[0x60u8; 32][..], &[0x61u8; 32][..]] {
+            for i in 0..3i64 {
+                let mut env = sample_envelope(&format!("g-{i}"));
+                env.ts = 1000;
+                repo.insert(InsertParams {
+                    group_id: gid,
+                    sender: &[0u8; 32],
+                    envelope: &env,
+                    mls_generation: 0,
+                    ts_daemon_recv: i * 100,
+                })
+                .unwrap();
+            }
+        }
+        let deleted = repo.prune_before(None, 150).unwrap();
+        assert_eq!(deleted, 4, "two rows from each of two groups (ts<150)");
+    }
+
+    #[test]
+    fn prune_keep_last_keeps_most_recent() {
+        let pool = Pool::in_memory();
+        let gid = [0x70; 32];
+        let repo = MessageRepo::new(&pool);
+        for i in 0..10i64 {
+            let mut env = sample_envelope(&format!("k-{i}"));
+            env.ts = 1000;
+            repo.insert(InsertParams {
+                group_id: &gid,
+                sender: &[0u8; 32],
+                envelope: &env,
+                mls_generation: u64::try_from(i).unwrap(),
+                ts_daemon_recv: i,
+            })
+            .unwrap();
+        }
+        let deleted = repo.prune_keep_last(&gid, 3).unwrap();
+        assert_eq!(deleted, 7);
+        let remaining_ids: Vec<i64> = pool
+            .with(|c| {
+                let mut stmt = c
+                    .prepare("SELECT id FROM messages WHERE group_id = ?1 ORDER BY id DESC")
+                    .map_err(|e| crate::error::CoreError::Storage(e.to_string()))?;
+                let it = stmt
+                    .query_map(rusqlite::params![&gid[..]], |r| r.get::<_, i64>(0))
+                    .map_err(|e| crate::error::CoreError::Storage(e.to_string()))?;
+                let v: std::result::Result<Vec<_>, _> = it.collect();
+                v.map_err(|e| crate::error::CoreError::Storage(e.to_string()))
+            })
+            .unwrap();
+        assert_eq!(remaining_ids.len(), 3, "exactly 3 rows survive");
+        let max = remaining_ids.iter().copied().max().unwrap();
+        let min = remaining_ids.iter().copied().min().unwrap();
+        assert_eq!(max - min, 2, "the surviving 3 are consecutive at the top");
     }
 }
