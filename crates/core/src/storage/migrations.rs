@@ -47,6 +47,10 @@ const ALL_MIGRATIONS: &[Migration] = &[
         version: 6,
         sql: include_str!("migrations/0006_history_search.sql"),
     },
+    Migration {
+        version: 7,
+        sql: include_str!("migrations/0007_messages_envelope_id.sql"),
+    },
 ];
 
 /// Apply all pending migrations in order. Idempotent — re-running does
@@ -256,7 +260,66 @@ mod tests {
         let v: u32 = conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 6);
+        assert_eq!(v, ALL_MIGRATIONS.iter().map(|m| m.version).max().unwrap());
+    }
+
+    #[test]
+    fn migration_0007_adds_envelope_id_column_trigger_and_unique_index() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        apply(&mut conn).unwrap();
+
+        // Column exists on messages.
+        let cols: Vec<String> = conn
+            .prepare("PRAGMA table_info('messages')")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .map(std::result::Result::unwrap)
+            .collect();
+        assert!(
+            cols.iter().any(|c| c == "envelope_id"),
+            "messages.envelope_id must exist; got {cols:?}"
+        );
+
+        // Trigger present.
+        let trig: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type='trigger' AND name='messages_envelope_id_shape'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(trig, 1, "messages_envelope_id_shape trigger must exist");
+
+        // Unique index present.
+        let idx: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type='index' AND name='messages_group_envelope_uniq'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx, 1, "messages_group_envelope_uniq index must exist");
+
+        // Trigger rejects a bad insert (8-byte envelope_id — wrong shape).
+        let err = conn.execute(
+            "INSERT INTO messages \
+             (group_id, sender, envelope_id, ts, kind, body_blob) \
+             VALUES (?1, ?2, ?3, 0, 'text', NULL)",
+            rusqlite::params![[0u8; 32], [0u8; 32], [0u8; 8]],
+        );
+        assert!(err.is_err(), "trigger must reject non-16-byte envelope_id");
+
+        // A correctly-shaped insert (16-byte envelope_id) must succeed.
+        conn.execute(
+            "INSERT INTO messages \
+             (group_id, sender, envelope_id, ts, kind, body_blob) \
+             VALUES (?1, ?2, ?3, 1, 'text', NULL)",
+            rusqlite::params![[0u8; 32], [0u8; 32], [0u8; 16]],
+        )
+        .unwrap();
     }
 
     #[test]
