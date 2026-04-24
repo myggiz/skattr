@@ -4,6 +4,35 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Phase 1.G — Message storage & search
+
+- `storage::messages` gains `search` (FTS5 BM25 + snippet, tokenize-and-AND query escaper),
+  `unread_count`, `mark_read`, `export_page`, `prune_before`, `prune_keep_last`, and a
+  one-shot `backfill_body_text` startup helper. New `body_text` mirror column +
+  `messages_fts` triggers keep the FTS index in lock-step with `messages`.
+- `storage::read_state` (new): per-group `last_read_message_id` cursor.
+- `messages` table: `mls_generation` and `ts_daemon_recv` columns persist real values
+  (replacing 1.F's `0` / `ts_envelope` placeholders).
+- `delivery::receiver::receive` carries `mls_generation` + `ts_daemon_recv` into a
+  struct `ReceiveOutcome::New`; the `DaemonInbound` caller routes through
+  `receive()` and broadcasts `Event::MessageReceived { contact, record }`.
+- `daemon::commands`: new `Command::SearchMessages` / `MarkRead` / `PruneHistory` /
+  `ExportHistory`, matching `CommandResult` + `SearchHitRecord` wire types,
+  `EventFilter::Messages { contact }`, `Event::MessageReceived` reshaped to
+  `{ contact, record }`, `DaemonErrorKind::SearchSyntax`.
+- `daemon::retention` (new): hourly tokio sweep task driven by
+  `[history] retention_days = 0` (default infinite).
+- `Daemon::run` runs `backfill_body_text` once at startup and spawns the retention
+  sweep before signalling readiness.
+- `daemon::dispatch::send_message` now persists outgoing rows via `MessageRepo::insert`
+  (outbox-only flow in 1.F) so sender-side history populates for export/search/tail.
+- CLI: `skattr search` / `export` / `prune`; `skattr tail --follow` upgraded to
+  subscribe to `Event::MessageReceived` via `EventFilter::Messages`. New CLI dep
+  `time = "0.3"` for RFC3339 parsing on `skattr prune --before` / `skattr export`.
+- Validation: `cargo test -p skattr-core --release --features test-harness \
+  --test fts_search_p95 -- --ignored --nocapture` reports search p95 well
+  under the 50 ms target over 100k synthetic rows.
+
 ## Phase 1.F — CLI integration (2026-04-23)
 
 - Persistent `skattr daemon` owns `Pool` + `DeliveryHub` + `OnionListener` + IPC server.
