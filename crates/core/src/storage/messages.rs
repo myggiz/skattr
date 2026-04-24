@@ -505,7 +505,9 @@ impl<'p> MessageRepo<'p> {
     pub(crate) fn backfill_envelope_id(&self) -> Result<u64> {
         let candidates: Vec<(i64, Vec<u8>)> = self.pool.with(|c| {
             let mut stmt = c
-                .prepare("SELECT id, body_blob FROM messages WHERE envelope_id IS NULL")
+                .prepare(
+                    "SELECT id, body_blob FROM messages WHERE envelope_id IS NULL ORDER BY id ASC",
+                )
                 .map_err(|e| {
                     CoreError::Storage(StorageErrorKind::Other(format!(
                         "prepare backfill_envelope_id: {e}"
@@ -554,7 +556,13 @@ impl<'p> MessageRepo<'p> {
                         if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE =>
                     {
                         // Pre-existing duplicate (group_id, envelope_id) —
-                        // keep the lowest row id, delete this one.
+                        // keep the lowest row id, delete this one. The SELECT
+                        // above uses ORDER BY id ASC, so earlier rows are
+                        // processed first and the UPDATE on the lower-id row
+                        // always succeeds before we reach duplicates here.
+                        // The ORDER BY makes this "earliest wins" invariant
+                        // enforceable rather than relying on SQLite's undefined
+                        // natural-scan order.
                         tracing::warn!(
                             row_id = *row_id,
                             "backfill_envelope_id: duplicate (group_id, envelope_id) \

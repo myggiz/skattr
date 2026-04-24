@@ -114,15 +114,14 @@ impl Daemon {
         }
 
         // Phase 1.H: one-shot backfill for pre-1.H rows missing envelope_id.
-        match crate::storage::MessageRepo::new(&pool).backfill_envelope_id() {
-            Ok(0) => {}
-            Ok(n) => tracing::info!(rows = n, "backfilled envelope_id for pre-1.H rows"),
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "envelope_id backfill failed; uniqueness enforcement may be incomplete"
-                )
-            }
+        // Fail-closed: envelope_id backfill underpins (group_id, envelope_id)
+        // uniqueness for pre-1.H rows. If this errors, continuing would leave
+        // the uniqueness guarantee "advisory" for legacy rows (NULLs compare
+        // distinct in SQLite's UNIQUE index). Contrast with backfill_body_text,
+        // which is FTS-only and safe to warn-and-skip.
+        let n = crate::storage::MessageRepo::new(&pool).backfill_envelope_id()?;
+        if n > 0 {
+            tracing::info!(rows = n, "backfilled envelope_id for pre-1.H rows");
         }
 
         // Phase 1.G: hourly retention sweep.
