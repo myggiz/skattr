@@ -304,6 +304,11 @@ fn event_matches(event: &Event, filter: Option<&EventFilter>) -> bool {
             true
         }
         (EventFilter::Contact(_), Event::ContactUpdated(_)) => true,
+        (EventFilter::Messages { contact: None }, Event::MessageReceived { .. }) => true,
+        (EventFilter::Messages { contact: Some(c) }, Event::MessageReceived { contact, .. }) => {
+            c == contact
+        }
+        (EventFilter::Messages { .. }, _) => false,
         _ => false,
     }
 }
@@ -478,5 +483,81 @@ mod tests {
 
         drop(client);
         handle_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn event_matches_filters_message_received_by_contact() {
+        use crate::daemon::commands::{Direction, MessageRecord};
+        use crate::daemon::events::Event;
+        use crate::daemon::ipc::wire::EventFilter;
+        use crate::envelope::{Kind, MessageId};
+        use crate::identity::PublicKey;
+
+        let alice = PublicKey([0xAA; 32]);
+        let bob = PublicKey([0xBB; 32]);
+
+        let make_record = |id: u8, contact: PublicKey| {
+            MessageRecord::project(
+                i64::from(id),
+                &crate::envelope::Envelope {
+                    v: 1,
+                    id: MessageId([id; 16]),
+                    ts: 1_700_000_000,
+                    reply_to: None,
+                    kind: Kind::Text { body: "x".into() },
+                },
+                contact,
+                1,
+                1_700_000_000,
+                Direction::Incoming,
+            )
+        };
+
+        // Filter scoped to Bob: only Bob's events should pass.
+        let bob_filter = EventFilter::Messages { contact: Some(bob) };
+        let mut survivors = Vec::new();
+        for evt in [
+            Event::MessageReceived {
+                contact: alice,
+                record: make_record(1, alice),
+            },
+            Event::MessageReceived {
+                contact: bob,
+                record: make_record(2, bob),
+            },
+        ] {
+            if event_matches(&evt, Some(&bob_filter)) {
+                survivors.push(evt);
+            }
+        }
+        assert_eq!(survivors.len(), 1);
+
+        // Filter scoped to all: both pass.
+        let all_filter = EventFilter::Messages { contact: None };
+        let mut all = Vec::new();
+        for evt in [
+            Event::MessageReceived {
+                contact: alice,
+                record: make_record(1, alice),
+            },
+            Event::MessageReceived {
+                contact: bob,
+                record: make_record(2, bob),
+            },
+        ] {
+            if event_matches(&evt, Some(&all_filter)) {
+                all.push(evt);
+            }
+        }
+        assert_eq!(all.len(), 2);
+
+        // Empty filter (None) → no events pass through (existing contract).
+        assert!(!event_matches(
+            &Event::MessageReceived {
+                contact: alice,
+                record: make_record(1, alice),
+            },
+            None,
+        ));
     }
 }
