@@ -57,8 +57,11 @@ where
             before_ts_recv,
             keep_last,
         } => prune_history(&handle, contact, before_ts_recv, keep_last).await,
-        // Remaining Phase 1.G handler lands in Task 20.
-        Command::ExportHistory { .. } => Err(IpcError::UnknownCommand),
+        Command::ExportHistory {
+            contact,
+            after_id,
+            limit,
+        } => export_history(&handle, contact, after_id, limit).await,
     }
 }
 
@@ -537,6 +540,82 @@ where
     };
 
     Ok(CommandResult::Pruned { rows_deleted })
+}
+
+async fn export_history<S>(
+    handle: &Arc<DaemonHandle<S>>,
+    contact: crate::identity::PublicKey,
+    after_id: Option<i64>,
+    limit: u32,
+) -> std::result::Result<CommandResult, IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    use crate::daemon::commands::{Direction, MessageRecord};
+    use crate::daemon::error_kind::DaemonErrorKind;
+    use crate::envelope::Envelope;
+    use crate::identity::PublicKey;
+    use crate::storage::{ContactRepo, MessageRepo};
+
+    // Cap limit at 1000 to keep the ExportPage response under the 1 MiB
+    // IPC body cap set in Phase 1.F.
+    const EXPORT_PAGE_MAX: u32 = 1000;
+    let lim = limit.min(EXPORT_PAGE_MAX);
+    let lim_usize = usize::try_from(lim).unwrap_or(0);
+
+    // Resolve contact -> group_id (export is always scoped).
+    let group_id_bytes = match ContactRepo::new(&handle.pool)
+        .get_group_id(&contact)
+        .map_err(map_err)?
+    {
+        Some(bytes) if !bytes.is_empty() => bytes,
+        _ => return Err(IpcError::Daemon(DaemonErrorKind::ContactNotFound)),
+    };
+
+    let rows = MessageRepo::new(&handle.pool)
+        .export_page(&group_id_bytes, after_id, lim_usize)
+        .map_err(map_err)?;
+
+    let my_pubkey: PublicKey = handle.identity.public();
+    let mut records = Vec::with_capacity(rows.len());
+    for row in &rows {
+        // Skip rows whose body_blob fails to decode (matches recent_messages idiom).
+        let Ok(env) = Envelope::decode(row.body_blob.as_deref().unwrap_or(&[])) else {
+            continue;
+        };
+        let mut sender_arr = [0u8; 32];
+        if row.sender.len() == 32 {
+            sender_arr.copy_from_slice(&row.sender);
+        }
+        let sender_pk = PublicKey(sender_arr);
+        let direction = if sender_pk == my_pubkey {
+            Direction::Outgoing
+        } else {
+            Direction::Incoming
+        };
+        records.push(MessageRecord::project(
+            row.id,
+            &env,
+            contact, // scoped to the requested peer
+            u64::try_from(row.mls_generation).unwrap_or(0),
+            row.ts_daemon_recv,
+            direction,
+        ));
+    }
+
+    // Cursor logic: a FULL page (rows.len() == lim_usize) means there may
+    // be more; set next_after_id to the last row's id. A short page means
+    // end-of-stream.
+    let next_after_id = if rows.len() == lim_usize && lim_usize > 0 {
+        rows.last().map(|r| r.id)
+    } else {
+        None
+    };
+
+    Ok(CommandResult::ExportPage {
+        records,
+        next_after_id,
+    })
 }
 
 /// Map any `CoreError` to an `IpcError`. Projects via `CoreError::kind`
@@ -1413,5 +1492,126 @@ mod tests {
         )
         .await;
         assert!(err.is_err(), "keep_last requires a contact");
+    }
+
+    #[tokio::test]
+    async fn export_history_paginates_and_advances_cursor() {
+        let handle = test_handle();
+        let alice = crate::identity::PublicKey([0x77; 32]);
+        let gid = [0x88u8; 32];
+
+        let cr = ContactRepo::new(&handle.pool);
+        cr.upsert(&crate::contact::Contact {
+            identity: alice,
+            display_name: None,
+            added_at: 0,
+            card: None,
+        })
+        .unwrap();
+        cr.set_group_id(&alice, &gid).unwrap();
+
+        let msgs = crate::storage::MessageRepo::new(&handle.pool);
+        for i in 0..5i64 {
+            let env = crate::envelope::Envelope {
+                v: 1,
+                id: crate::envelope::MessageId::generate(),
+                ts: 1_700_000_000 + i,
+                reply_to: None,
+                kind: crate::envelope::Kind::Text {
+                    body: format!("m{i}"),
+                },
+            };
+            msgs.insert(crate::storage::messages::InsertParams {
+                group_id: &gid,
+                sender: &alice.0,
+                envelope: &env,
+                mls_generation: u64::try_from(i).unwrap(),
+                ts_daemon_recv: i,
+            })
+            .unwrap();
+        }
+
+        // Page 1: after_id = None, limit 2 -> 2 rows, next_after_id = Some(last.id).
+        let r1 = execute_command(
+            handle.clone(),
+            Command::ExportHistory {
+                contact: alice,
+                after_id: None,
+                limit: 2,
+            },
+        )
+        .await
+        .unwrap();
+        let (recs1, next1) = match r1 {
+            CommandResult::ExportPage {
+                records,
+                next_after_id,
+            } => (records, next_after_id),
+            other => panic!("expected ExportPage, got {other:?}"),
+        };
+        assert_eq!(recs1.len(), 2);
+        assert!(next1.is_some());
+
+        // Page 2: after_id = next1, limit 2 -> 2 rows, next_after_id = Some(last.id).
+        let r2 = execute_command(
+            handle.clone(),
+            Command::ExportHistory {
+                contact: alice,
+                after_id: next1,
+                limit: 2,
+            },
+        )
+        .await
+        .unwrap();
+        let (recs2, next2) = match r2 {
+            CommandResult::ExportPage {
+                records,
+                next_after_id,
+            } => (records, next_after_id),
+            other => panic!("expected ExportPage, got {other:?}"),
+        };
+        assert_eq!(recs2.len(), 2);
+        assert!(next2.is_some());
+
+        // Page 3: after_id = next2, limit 2 -> 1 row (short page), next_after_id = None.
+        let r3 = execute_command(
+            handle.clone(),
+            Command::ExportHistory {
+                contact: alice,
+                after_id: next2,
+                limit: 2,
+            },
+        )
+        .await
+        .unwrap();
+        let (recs3, next3) = match r3 {
+            CommandResult::ExportPage {
+                records,
+                next_after_id,
+            } => (records, next_after_id),
+            other => panic!("expected ExportPage, got {other:?}"),
+        };
+        assert_eq!(recs3.len(), 1);
+        assert!(next3.is_none(), "short page -> caller stops");
+    }
+
+    #[tokio::test]
+    async fn export_history_unknown_contact_returns_contact_not_found() {
+        let handle = test_handle();
+        let unknown = crate::identity::PublicKey([0xEE; 32]);
+        let err = execute_command(
+            handle,
+            Command::ExportHistory {
+                contact: unknown,
+                after_id: None,
+                limit: 10,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            IpcError::Daemon(crate::daemon::error_kind::DaemonErrorKind::ContactNotFound)
+        ));
     }
 }
