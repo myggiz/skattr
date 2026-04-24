@@ -124,6 +124,26 @@ enum Command {
         #[arg(long)]
         follow: bool,
     },
+    /// Full-text search over message history.
+    Search {
+        /// Query — free-form, tokenize-and-AND on the daemon side.
+        query: String,
+        /// Limit search to one contact (name or hex prefix).
+        #[arg(long)]
+        contact: Option<String>,
+        /// Maximum hits to return.
+        #[arg(long, default_value_t = 20)]
+        limit: u32,
+        /// Skip this many hits.
+        #[arg(long, default_value_t = 0)]
+        offset: u32,
+        /// Order by id DESC instead of BM25.
+        #[arg(long)]
+        newest_first: bool,
+        /// Emit raw JSON instead of the human-readable form.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Resolve the IPC socket path with precedence flag > env > XDG default.
@@ -260,6 +280,25 @@ async fn main() -> Result<()> {
             follow,
         } => tail(contact.as_deref(), limit, follow, socket.as_deref(), json).await,
         Command::Chat { contact } => chat(&contact, socket.as_deref()).await,
+        Command::Search {
+            query,
+            contact,
+            limit,
+            offset,
+            newest_first,
+            json: cmd_json,
+        } => {
+            search(
+                contact.as_deref(),
+                query,
+                limit,
+                offset,
+                newest_first,
+                cmd_json || json,
+                socket.as_deref(),
+            )
+            .await
+        }
     }
 }
 
@@ -1015,6 +1054,90 @@ async fn chat(contact_prefix: &str, sock_flag: Option<&std::path::Path>) -> Resu
     Ok(())
 }
 
+fn render_search_human(hits: &[skattr_core::daemon::commands::SearchHitRecord]) -> String {
+    let mut out = String::new();
+    for h in hits {
+        let id_prefix: String = h
+            .record
+            .message_id
+            .0
+            .iter()
+            .take(3)
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        out.push_str(&format!(
+            "[ts_recv={ts}] (id={id} epoch={epoch}) {snippet}\n",
+            ts = h.record.ts_daemon_recv,
+            id = id_prefix,
+            epoch = h.record.mls_generation,
+            snippet = h.snippet,
+        ));
+    }
+    out
+}
+
+async fn search(
+    contact: Option<&str>,
+    query: String,
+    limit: u32,
+    offset: u32,
+    newest_first: bool,
+    as_json: bool,
+    sock_flag: Option<&std::path::Path>,
+) -> Result<()> {
+    use skattr_core::daemon::commands::CommandResult;
+    use skattr_core::daemon::Command as CoreCommand;
+
+    let mut client = connect_or_exit(sock_flag).await?;
+
+    // Resolve optional contact prefix to a PublicKey via ListContacts.
+    let resolved_pk = if let Some(prefix) = contact {
+        let rows_result = match client.execute(CoreCommand::ListContacts).await {
+            Ok(r) => r,
+            Err(e) => exit_on_ipc_error(e),
+        };
+        let rows = match rows_result {
+            CommandResult::Contacts(rows) => rows,
+            other => anyhow::bail!("unexpected daemon response: {other:?}"),
+        };
+        match resolve_contact(&rows, prefix) {
+            Ok(pk) => Some(pk),
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(6);
+            }
+        }
+    } else {
+        None
+    };
+
+    let resp = match client
+        .execute(CoreCommand::SearchMessages {
+            query,
+            contact: resolved_pk,
+            limit,
+            offset,
+            newest_first,
+        })
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => exit_on_ipc_error(e),
+    };
+
+    match resp {
+        CommandResult::SearchResults(hits) => {
+            if as_json {
+                println!("{}", serde_json::to_string_pretty(&hits)?);
+            } else {
+                print!("{}", render_search_human(&hits));
+            }
+            Ok(())
+        }
+        other => anyhow::bail!("unexpected daemon response: {other:?}"),
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -1215,5 +1338,34 @@ mod tests {
         assert!(!qr.is_empty(), "QR rendering must produce output");
         // Dense1x2 unicode rendering uses U+2580/U+2584 + space.
         assert!(qr.contains('\u{2580}') || qr.contains('\u{2584}') || qr.contains(' '));
+    }
+
+    #[test]
+    fn render_search_results_human_includes_snippet_and_id() {
+        use skattr_core::daemon::commands::{Direction, MessageRecord, SearchHitRecord};
+        use skattr_core::daemon::hex::Hex16;
+        use skattr_core::envelope::Kind;
+        use skattr_core::identity::PublicKey;
+
+        let rec = MessageRecord {
+            message_id: Hex16::from([0xAB; 16]),
+            contact: PublicKey([0x42; 32]),
+            direction: Direction::Incoming,
+            kind: Kind::Text {
+                body: "the merge conflict".into(),
+            },
+            mls_generation: 7,
+            ts_daemon_recv: 1_700_000_000,
+            ts_envelope: 1_700_000_000,
+        };
+        let hit = SearchHitRecord {
+            record: rec,
+            bm25: 0.5,
+            snippet: "...the merge conflict...".to_string(),
+        };
+        let out = render_search_human(&[hit]);
+        assert!(out.contains("merge conflict"));
+        assert!(out.contains("epoch=7"));
+        assert!(out.contains("ababab")); // first chars of message id
     }
 }
