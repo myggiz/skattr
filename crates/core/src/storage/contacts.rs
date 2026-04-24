@@ -297,6 +297,38 @@ impl<'p> ContactRepo<'p> {
         })
     }
 
+    /// 2-member-group reverse lookup: given a group_id, return the peer's
+    /// PublicKey (the member that is not us). Returns `Ok(None)` if no
+    /// contact row has this group_id.
+    ///
+    /// Phase 1.H: scoped to 2-member groups per CLAUDE.md. Multi-member
+    /// groups land in Phase 2+; this method will need a signature change
+    /// at that point to return a list.
+    pub(crate) fn contact_for_group(&self, group_id: &[u8; 32]) -> Result<Option<PublicKey>> {
+        use rusqlite::OptionalExtension;
+        self.pool.with(|c| {
+            let row: Option<Vec<u8>> = c
+                .query_row(
+                    "SELECT identity_pubkey FROM contacts WHERE group_id = ?1 LIMIT 1",
+                    rusqlite::params![&group_id[..]],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!("contact_for_group: {e}")))
+                })?;
+            Ok(row.and_then(|bytes| {
+                if bytes.len() == 32 {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&bytes);
+                    Some(PublicKey(arr))
+                } else {
+                    None
+                }
+            }))
+        })
+    }
+
     /// Read the MLS group id for `identity`. Returns `Ok(None)` if the
     /// contact row is missing; `Ok(Some(Vec::new()))` for a contact that
     /// has not yet been linked to a group (pre-`AddContact`).
@@ -739,5 +771,34 @@ mod tests {
             ),
             "got {err:?}"
         );
+    }
+
+    #[test]
+    fn contact_for_group_returns_peer_for_2_member_group() {
+        let pool = Pool::in_memory();
+        let peer = crate::identity::PublicKey([0x42; 32]);
+        let gid = [0x43u8; 32];
+
+        let repo = ContactRepo::new(&pool);
+        repo.upsert(&crate::contact::Contact {
+            identity: peer,
+            display_name: None,
+            added_at: 0,
+            card: None,
+        })
+        .unwrap();
+        repo.set_group_id(&peer, &gid).unwrap();
+
+        let got = repo.contact_for_group(&gid).unwrap();
+        assert_eq!(got, Some(peer));
+    }
+
+    #[test]
+    fn contact_for_group_returns_none_for_unknown_group() {
+        let pool = Pool::in_memory();
+        let repo = ContactRepo::new(&pool);
+        let gid = [0x44u8; 32];
+        let got = repo.contact_for_group(&gid).unwrap();
+        assert_eq!(got, None);
     }
 }

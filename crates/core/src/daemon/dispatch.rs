@@ -457,7 +457,24 @@ where
             } else {
                 Direction::Incoming
             };
-            let contact_for_record = contact.unwrap_or(sender_pk);
+            let contact_for_record = match contact {
+                Some(pk) => pk,
+                None => {
+                    // Unscoped search: resolve peer via the hit's group_id
+                    // so outgoing rows (where sender == local identity)
+                    // still report the correct peer. 2-member-group scope.
+                    let gid_arr: std::result::Result<[u8; 32], _> =
+                        h.message.group_id[..].try_into();
+                    match gid_arr {
+                        Ok(arr) => ContactRepo::new(&handle.pool)
+                            .contact_for_group(&arr)
+                            .ok()
+                            .flatten()
+                            .unwrap_or(sender_pk),
+                        Err(_) => sender_pk, // group_id length anomaly — fallback
+                    }
+                }
+            };
 
             Some(SearchHitRecord {
                 record: MessageRecord::project(
@@ -1656,5 +1673,70 @@ mod tests {
             err,
             IpcError::Daemon(crate::daemon::error_kind::DaemonErrorKind::ContactNotFound)
         ));
+    }
+
+    #[tokio::test]
+    async fn search_messages_unscoped_resolves_outgoing_contact_via_group() {
+        use crate::daemon::commands::Direction;
+        let handle = test_handle();
+        let my_pubkey = handle.identity.public();
+        let peer = crate::identity::PublicKey([0x55; 32]);
+        let gid = [0x66u8; 32];
+
+        let cr = ContactRepo::new(&handle.pool);
+        cr.upsert(&crate::contact::Contact {
+            identity: peer,
+            display_name: None,
+            added_at: 0,
+            card: None,
+        })
+        .unwrap();
+        cr.set_group_id(&peer, &gid).unwrap();
+
+        // Insert one OUTGOING row: sender == local pubkey.
+        let msgs = crate::storage::MessageRepo::new(&handle.pool);
+        let env = crate::envelope::Envelope {
+            v: 1,
+            id: crate::envelope::MessageId::generate(),
+            ts: 1_700_000_000,
+            reply_to: None,
+            kind: crate::envelope::Kind::Text {
+                body: "outbound hello".into(),
+            },
+        };
+        msgs.insert(crate::storage::messages::InsertParams {
+            group_id: &gid,
+            sender: &my_pubkey.0,
+            envelope: &env,
+            mls_generation: 1,
+            ts_daemon_recv: 1_700_000_000,
+        })
+        .unwrap();
+
+        // Unscoped search that matches the outgoing row.
+        let result = execute_command(
+            handle.clone(),
+            Command::SearchMessages {
+                query: "hello".into(),
+                contact: None,
+                limit: 10,
+                offset: 0,
+                newest_first: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        match result {
+            CommandResult::SearchResults(hits) => {
+                assert_eq!(hits.len(), 1);
+                assert_eq!(hits[0].record.direction, Direction::Outgoing);
+                assert_eq!(
+                    hits[0].record.contact, peer,
+                    "unscoped outgoing hit must resolve contact to peer, not self"
+                );
+            }
+            other => panic!("expected SearchResults, got {other:?}"),
+        }
     }
 }
