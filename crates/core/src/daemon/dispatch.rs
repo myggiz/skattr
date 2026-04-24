@@ -41,6 +41,27 @@ where
             recent_messages(&handle, contact, limit).await
         }
         Command::CreateGroup { .. } => Err(IpcError::UnknownCommand),
+        Command::SearchMessages {
+            query,
+            contact,
+            limit,
+            offset,
+            newest_first,
+        } => search_messages(&handle, query, contact, limit, offset, newest_first).await,
+        Command::MarkRead {
+            contact,
+            up_to_message_id,
+        } => mark_read(&handle, contact, up_to_message_id).await,
+        Command::PruneHistory {
+            contact,
+            before_ts_recv,
+            keep_last,
+        } => prune_history(&handle, contact, before_ts_recv, keep_last).await,
+        Command::ExportHistory {
+            contact,
+            after_id,
+            limit,
+        } => export_history(&handle, contact, after_id, limit).await,
     }
 }
 
@@ -254,6 +275,23 @@ where
     // 5. Persist updated group state after ratchet advance.
     group.save(&group_repo).map_err(map_err)?;
 
+    // 5b. Persist outgoing message row (Phase 1.G: real mls_generation
+    // + ts_daemon_recv). `ts_daemon_recv` is derived from the same
+    // `now_ms` clock read as `envelope.ts` so the two timestamps don't
+    // disagree on which second the message landed in.
+    let mls_generation = group.epoch();
+    let ts_daemon_recv = now_ms / 1000;
+    let msg_repo = crate::storage::MessageRepo::new(&handle.pool);
+    msg_repo
+        .insert(crate::storage::messages::InsertParams {
+            group_id: &group_id_bytes,
+            sender: &handle.identity.public().0,
+            envelope: &envelope,
+            mls_generation,
+            ts_daemon_recv,
+        })
+        .map_err(map_err)?;
+
     // 6. Idempotent outbox insert.
     let outbox_repo = OutboxRepo::new(&handle.pool);
     outbox_repo
@@ -288,7 +326,6 @@ where
 {
     use crate::daemon::commands::{Direction, MessageRecord};
     use crate::daemon::error_kind::DaemonErrorKind;
-    use crate::daemon::hex::Hex16;
     use crate::envelope::Envelope;
     use crate::identity::PublicKey;
     use crate::storage::{ContactRepo, MessageRepo};
@@ -330,19 +367,255 @@ where
             };
             // `contact` field is always the peer — outgoing rows were sent
             // to `peer`; incoming rows were sent by `peer` (the sender).
-            Some(MessageRecord {
-                message_id: Hex16::from(env.id.0),
-                contact: peer,
+            Some(MessageRecord::project(
+                row.id,
+                &env,
+                peer,
+                u64::try_from(row.mls_generation).unwrap_or(0),
+                row.ts_daemon_recv,
                 direction,
-                kind: env.kind,
-                mls_generation: 0,
-                ts_daemon_recv: u64::try_from(row.ts).unwrap_or(0),
-                ts_envelope: env.ts,
-            })
+            ))
         })
         .collect();
 
     Ok(CommandResult::Messages(records))
+}
+
+async fn search_messages<S>(
+    handle: &Arc<DaemonHandle<S>>,
+    query: String,
+    contact: Option<crate::identity::PublicKey>,
+    limit: u32,
+    offset: u32,
+    newest_first: bool,
+) -> std::result::Result<CommandResult, IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    use crate::daemon::commands::{Direction, MessageRecord, SearchHitRecord};
+    use crate::daemon::error_kind::DaemonErrorKind;
+    use crate::envelope::Envelope;
+    use crate::identity::PublicKey;
+    use crate::storage::{ContactRepo, MessageRepo};
+
+    // 1. Resolve optional contact -> group_id scope.
+    let group_id_owned: Option<Vec<u8>> = match contact {
+        Some(pk) => match ContactRepo::new(&handle.pool)
+            .get_group_id(&pk)
+            .map_err(map_err)?
+        {
+            Some(bytes) if !bytes.is_empty() => Some(bytes),
+            _ => return Err(IpcError::Daemon(DaemonErrorKind::ContactNotFound)),
+        },
+        None => None,
+    };
+
+    // 2. Run FTS5 search.
+    let msg_repo = MessageRepo::new(&handle.pool);
+    let hits = msg_repo
+        .search(
+            &query,
+            group_id_owned.as_deref(),
+            usize::try_from(limit).unwrap_or(usize::MAX),
+            usize::try_from(offset).unwrap_or(0),
+            newest_first,
+        )
+        .map_err(map_err)?;
+
+    // 3. Project each hit. Direction computed from sender vs local
+    // pubkey, matching the idiom in `recent_messages`. For the `contact`
+    // field: when the query was scoped to a peer use that peer for every
+    // row; when unscoped fall back to the stored sender (correct for
+    // incoming, best-effort for outgoing — Phase 1.G 2-member-group
+    // scope per CLAUDE.md).
+    let my_pubkey: PublicKey = handle.identity.public();
+    let records: Vec<SearchHitRecord> = hits
+        .into_iter()
+        .filter_map(|h| {
+            let env = Envelope::decode(h.message.body_blob.as_deref().unwrap_or(&[])).ok()?;
+            let mut sender_arr = [0u8; 32];
+            if h.message.sender.len() == 32 {
+                sender_arr.copy_from_slice(&h.message.sender);
+            }
+            let sender_pk = PublicKey(sender_arr);
+            let direction = if sender_pk == my_pubkey {
+                Direction::Outgoing
+            } else {
+                Direction::Incoming
+            };
+            let contact_for_record = contact.unwrap_or(sender_pk);
+
+            Some(SearchHitRecord {
+                record: MessageRecord::project(
+                    h.message.id,
+                    &env,
+                    contact_for_record,
+                    u64::try_from(h.message.mls_generation).unwrap_or(0),
+                    h.message.ts_daemon_recv,
+                    direction,
+                ),
+                bm25: h.bm25,
+                snippet: h.snippet,
+            })
+        })
+        .collect();
+
+    Ok(CommandResult::SearchResults(records))
+}
+
+async fn mark_read<S>(
+    handle: &Arc<DaemonHandle<S>>,
+    contact: crate::identity::PublicKey,
+    up_to_message_id: i64,
+) -> std::result::Result<CommandResult, IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    use crate::daemon::error_kind::DaemonErrorKind;
+    use crate::storage::{ContactRepo, MessageRepo};
+
+    let group_id_bytes = match ContactRepo::new(&handle.pool)
+        .get_group_id(&contact)
+        .map_err(map_err)?
+    {
+        Some(bytes) if !bytes.is_empty() => bytes,
+        _ => return Err(IpcError::Daemon(DaemonErrorKind::ContactNotFound)),
+    };
+
+    MessageRepo::new(&handle.pool)
+        .mark_read(&group_id_bytes, up_to_message_id)
+        .map_err(map_err)?;
+
+    Ok(CommandResult::MarkedRead {
+        up_to: up_to_message_id,
+    })
+}
+
+async fn prune_history<S>(
+    handle: &Arc<DaemonHandle<S>>,
+    contact: Option<crate::identity::PublicKey>,
+    before_ts_recv: Option<i64>,
+    keep_last: Option<u64>,
+) -> std::result::Result<CommandResult, IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    use crate::daemon::error_kind::DaemonErrorKind;
+    use crate::storage::{ContactRepo, MessageRepo};
+
+    // Validate: exactly one of before_ts_recv or keep_last must be Some.
+    match (before_ts_recv, keep_last) {
+        (Some(_), Some(_)) | (None, None) => {
+            return Err(IpcError::Internal(
+                "PruneHistory requires exactly one of before_ts_recv or keep_last".into(),
+            ));
+        }
+        _ => {}
+    }
+
+    // Resolve optional contact to group_id.
+    let group_id_owned: Option<Vec<u8>> = match contact {
+        Some(pk) => match ContactRepo::new(&handle.pool)
+            .get_group_id(&pk)
+            .map_err(map_err)?
+        {
+            Some(bytes) if !bytes.is_empty() => Some(bytes),
+            _ => return Err(IpcError::Daemon(DaemonErrorKind::ContactNotFound)),
+        },
+        None => None,
+    };
+
+    let msg_repo = MessageRepo::new(&handle.pool);
+    let rows_deleted = match (before_ts_recv, keep_last) {
+        (Some(ts), None) => msg_repo
+            .prune_before(group_id_owned.as_deref(), ts)
+            .map_err(map_err)?,
+        (None, Some(k)) => {
+            let gid = group_id_owned.as_deref().ok_or_else(|| {
+                IpcError::Internal("PruneHistory keep_last requires a contact".into())
+            })?;
+            msg_repo.prune_keep_last(gid, k).map_err(map_err)?
+        }
+        _ => unreachable!("validated above"),
+    };
+
+    Ok(CommandResult::Pruned { rows_deleted })
+}
+
+async fn export_history<S>(
+    handle: &Arc<DaemonHandle<S>>,
+    contact: crate::identity::PublicKey,
+    after_id: Option<i64>,
+    limit: u32,
+) -> std::result::Result<CommandResult, IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    use crate::daemon::commands::{Direction, MessageRecord};
+    use crate::daemon::error_kind::DaemonErrorKind;
+    use crate::envelope::Envelope;
+    use crate::identity::PublicKey;
+    use crate::storage::{ContactRepo, MessageRepo};
+
+    // Cap limit at 1000 to keep the ExportPage response under the 1 MiB
+    // IPC body cap set in Phase 1.F.
+    const EXPORT_PAGE_MAX: u32 = 1000;
+    let lim = limit.min(EXPORT_PAGE_MAX);
+    let lim_usize = usize::try_from(lim).unwrap_or(0);
+
+    // Resolve contact -> group_id (export is always scoped).
+    let group_id_bytes = match ContactRepo::new(&handle.pool)
+        .get_group_id(&contact)
+        .map_err(map_err)?
+    {
+        Some(bytes) if !bytes.is_empty() => bytes,
+        _ => return Err(IpcError::Daemon(DaemonErrorKind::ContactNotFound)),
+    };
+
+    let rows = MessageRepo::new(&handle.pool)
+        .export_page(&group_id_bytes, after_id, lim_usize)
+        .map_err(map_err)?;
+
+    let my_pubkey: PublicKey = handle.identity.public();
+    let mut records = Vec::with_capacity(rows.len());
+    for row in &rows {
+        // Skip rows whose body_blob fails to decode (matches recent_messages idiom).
+        let Ok(env) = Envelope::decode(row.body_blob.as_deref().unwrap_or(&[])) else {
+            continue;
+        };
+        let mut sender_arr = [0u8; 32];
+        if row.sender.len() == 32 {
+            sender_arr.copy_from_slice(&row.sender);
+        }
+        let sender_pk = PublicKey(sender_arr);
+        let direction = if sender_pk == my_pubkey {
+            Direction::Outgoing
+        } else {
+            Direction::Incoming
+        };
+        records.push(MessageRecord::project(
+            row.id,
+            &env,
+            contact, // scoped to the requested peer
+            u64::try_from(row.mls_generation).unwrap_or(0),
+            row.ts_daemon_recv,
+            direction,
+        ));
+    }
+
+    // Cursor logic: a FULL page (rows.len() == lim_usize) means there may
+    // be more; set next_after_id to the last row's id. A short page means
+    // end-of-stream.
+    let next_after_id = if rows.len() == lim_usize && lim_usize > 0 {
+        rows.last().map(|r| r.id)
+    } else {
+        None
+    };
+
+    Ok(CommandResult::ExportPage {
+        records,
+        next_after_id,
+    })
 }
 
 /// Map any `CoreError` to an `IpcError`. Projects via `CoreError::kind`
@@ -702,7 +975,14 @@ mod tests {
             reply_to: None,
             kind: Kind::Text { body: "hey".into() },
         };
-        mr.insert(&gid, &peer.0, &env).unwrap();
+        mr.insert(crate::storage::messages::InsertParams {
+            group_id: &gid,
+            sender: &peer.0,
+            envelope: &env,
+            mls_generation: 0,
+            ts_daemon_recv: env.ts,
+        })
+        .unwrap();
 
         let res = execute_command(
             handle.clone(),
@@ -812,5 +1092,526 @@ mod tests {
             }) => {}
             other => panic!("expected MessageSent(Queued), got {other:?}"),
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn send_message_persists_post_encrypt_mls_generation_and_ts_daemon_recv() {
+        // Same Alice/Bob invite dance as the sibling Queued test. After
+        // Bob sends, assert that the outgoing row Bob persisted carries
+        // (a) a non-zero mls_generation (the ratchet advanced on encrypt)
+        // and (b) a real ts_daemon_recv clock value (not the 0 legacy
+        // default or the envelope.ts placeholder).
+        let handle_a = test_handle();
+        handle_a.set_onion("alice.onion".to_string());
+
+        let CommandResult::InviteCreated { url, .. } = execute_command(
+            handle_a.clone(),
+            Command::CreateInvite {
+                nickname: None,
+                ttl_secs: Some(3600),
+            },
+        )
+        .await
+        .unwrap() else {
+            panic!("expected InviteCreated");
+        };
+
+        let handle_b = test_handle();
+        let CommandResult::ContactAdded(summary) =
+            execute_command(handle_b.clone(), Command::AddContact { invite_url: url })
+                .await
+                .unwrap()
+        else {
+            panic!("expected ContactAdded");
+        };
+
+        // Bob sends to Alice; timeout at 3 s (matches the sibling test).
+        let fut = execute_command(
+            handle_b.clone(),
+            Command::SendMessage {
+                contact: summary.pubkey,
+                kind: Kind::Text { body: "hi".into() },
+            },
+        );
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(3), fut)
+            .await
+            .expect("outer 3 s budget");
+
+        // ContactSummary does not carry a group_id, so look it up the
+        // same way the recent_messages handler does.
+        let contact_repo = ContactRepo::new(&handle_b.pool);
+        let group_id = contact_repo
+            .get_group_id(&summary.pubkey)
+            .unwrap()
+            .expect("group_id present after AddContact");
+
+        let (mls_gen, ts_recv): (i64, i64) = handle_b
+            .pool
+            .with(|c| {
+                c.query_row(
+                    "SELECT mls_generation, ts_daemon_recv FROM messages \
+                     WHERE group_id = ?1 ORDER BY id DESC LIMIT 1",
+                    rusqlite::params![&group_id[..]],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .map_err(|e| crate::error::CoreError::Storage(e.to_string()))
+            })
+            .unwrap();
+        assert!(mls_gen > 0, "encrypt advances epoch; got {mls_gen}");
+        assert!(
+            ts_recv > 1_600_000_000,
+            "ts_daemon_recv must be a real clock value; got {ts_recv}"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_messages_returns_bm25_ranked_hits() {
+        let handle = test_handle();
+        let alice = crate::identity::PublicKey([0x77; 32]);
+        let gid = [0x88u8; 32];
+
+        let cr = ContactRepo::new(&handle.pool);
+        cr.upsert(&crate::contact::Contact {
+            identity: alice,
+            display_name: None,
+            added_at: 0,
+            card: None,
+        })
+        .unwrap();
+        cr.set_group_id(&alice, &gid).unwrap();
+
+        let msgs = crate::storage::MessageRepo::new(&handle.pool);
+        for body in ["alpha bravo", "bravo only", "delta only"] {
+            let env = crate::envelope::Envelope {
+                v: 1,
+                id: crate::envelope::MessageId::generate(),
+                ts: 1_700_000_000,
+                reply_to: None,
+                kind: crate::envelope::Kind::Text { body: body.into() },
+            };
+            msgs.insert(crate::storage::messages::InsertParams {
+                group_id: &gid,
+                sender: &alice.0,
+                envelope: &env,
+                mls_generation: 1,
+                ts_daemon_recv: 1_700_000_000,
+            })
+            .unwrap();
+        }
+
+        let result = execute_command(
+            handle.clone(),
+            Command::SearchMessages {
+                query: "bravo".into(),
+                contact: None,
+                limit: 10,
+                offset: 0,
+                newest_first: false,
+            },
+        )
+        .await
+        .unwrap();
+        match result {
+            CommandResult::SearchResults(hits) => {
+                assert_eq!(hits.len(), 2);
+                assert!(hits[0].snippet.contains("bravo"));
+            }
+            other => panic!("expected SearchResults, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn search_messages_empty_query_returns_empty_results() {
+        let handle = test_handle();
+        let result = execute_command(
+            handle,
+            Command::SearchMessages {
+                query: "   ".into(),
+                contact: None,
+                limit: 10,
+                offset: 0,
+                newest_first: false,
+            },
+        )
+        .await
+        .unwrap();
+        match result {
+            CommandResult::SearchResults(v) => assert!(v.is_empty()),
+            other => panic!("expected SearchResults, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn search_messages_unknown_contact_returns_contact_not_found() {
+        let handle = test_handle();
+        let unknown = crate::identity::PublicKey([0xEE; 32]);
+        let err = execute_command(
+            handle,
+            Command::SearchMessages {
+                query: "bravo".into(),
+                contact: Some(unknown),
+                limit: 10,
+                offset: 0,
+                newest_first: false,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            IpcError::Daemon(crate::daemon::error_kind::DaemonErrorKind::ContactNotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn mark_read_advances_cursor() {
+        let handle = test_handle();
+        let alice = crate::identity::PublicKey([0x77; 32]);
+        let gid = [0x88u8; 32];
+
+        let cr = ContactRepo::new(&handle.pool);
+        cr.upsert(&crate::contact::Contact {
+            identity: alice,
+            display_name: None,
+            added_at: 0,
+            card: None,
+        })
+        .unwrap();
+        cr.set_group_id(&alice, &gid).unwrap();
+
+        // Insert a message so the mark_read has an id to point at.
+        let msgs = crate::storage::MessageRepo::new(&handle.pool);
+        let env = crate::envelope::Envelope {
+            v: 1,
+            id: crate::envelope::MessageId::generate(),
+            ts: 1_700_000_000,
+            reply_to: None,
+            kind: crate::envelope::Kind::Text { body: "hi".into() },
+        };
+        let row_id = msgs
+            .insert(crate::storage::messages::InsertParams {
+                group_id: &gid,
+                sender: &alice.0,
+                envelope: &env,
+                mls_generation: 1,
+                ts_daemon_recv: 1_700_000_000,
+            })
+            .unwrap();
+
+        let result = execute_command(
+            handle.clone(),
+            Command::MarkRead {
+                contact: alice,
+                up_to_message_id: row_id,
+            },
+        )
+        .await
+        .unwrap();
+        match result {
+            CommandResult::MarkedRead { up_to } => assert_eq!(up_to, row_id),
+            other => panic!("expected MarkedRead, got {other:?}"),
+        }
+
+        let cur = crate::storage::ReadStateRepo::new(&handle.pool)
+            .get(&gid)
+            .unwrap();
+        assert_eq!(cur, Some(row_id));
+    }
+
+    #[tokio::test]
+    async fn mark_read_unknown_contact_returns_contact_not_found() {
+        let handle = test_handle();
+        let unknown = crate::identity::PublicKey([0xEE; 32]);
+        let err = execute_command(
+            handle,
+            Command::MarkRead {
+                contact: unknown,
+                up_to_message_id: 42,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            IpcError::Daemon(crate::daemon::error_kind::DaemonErrorKind::ContactNotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn prune_history_keep_last_returns_deleted_count() {
+        let handle = test_handle();
+        let alice = crate::identity::PublicKey([0x77; 32]);
+        let gid = [0x88u8; 32];
+
+        let cr = ContactRepo::new(&handle.pool);
+        cr.upsert(&crate::contact::Contact {
+            identity: alice,
+            display_name: None,
+            added_at: 0,
+            card: None,
+        })
+        .unwrap();
+        cr.set_group_id(&alice, &gid).unwrap();
+
+        let msgs = crate::storage::MessageRepo::new(&handle.pool);
+        for i in 0..8i64 {
+            let env = crate::envelope::Envelope {
+                v: 1,
+                id: crate::envelope::MessageId::generate(),
+                ts: 1_700_000_000 + i,
+                reply_to: None,
+                kind: crate::envelope::Kind::Text {
+                    body: format!("m{i}"),
+                },
+            };
+            msgs.insert(crate::storage::messages::InsertParams {
+                group_id: &gid,
+                sender: &alice.0,
+                envelope: &env,
+                mls_generation: u64::try_from(i).unwrap(),
+                ts_daemon_recv: i,
+            })
+            .unwrap();
+        }
+
+        let result = execute_command(
+            handle.clone(),
+            Command::PruneHistory {
+                contact: Some(alice),
+                before_ts_recv: None,
+                keep_last: Some(3),
+            },
+        )
+        .await
+        .unwrap();
+        match result {
+            CommandResult::Pruned { rows_deleted } => assert_eq!(rows_deleted, 5),
+            other => panic!("expected Pruned, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn prune_history_before_ts_returns_deleted_count() {
+        let handle = test_handle();
+        let alice = crate::identity::PublicKey([0x77; 32]);
+        let gid = [0x99u8; 32];
+
+        let cr = ContactRepo::new(&handle.pool);
+        cr.upsert(&crate::contact::Contact {
+            identity: alice,
+            display_name: None,
+            added_at: 0,
+            card: None,
+        })
+        .unwrap();
+        cr.set_group_id(&alice, &gid).unwrap();
+
+        let msgs = crate::storage::MessageRepo::new(&handle.pool);
+        for i in 0..6i64 {
+            let env = crate::envelope::Envelope {
+                v: 1,
+                id: crate::envelope::MessageId::generate(),
+                ts: 1_700_000_000,
+                reply_to: None,
+                kind: crate::envelope::Kind::Text {
+                    body: format!("t{i}"),
+                },
+            };
+            msgs.insert(crate::storage::messages::InsertParams {
+                group_id: &gid,
+                sender: &alice.0,
+                envelope: &env,
+                mls_generation: 0,
+                ts_daemon_recv: i * 100, // 0, 100, 200, 300, 400, 500
+            })
+            .unwrap();
+        }
+
+        let result = execute_command(
+            handle,
+            Command::PruneHistory {
+                contact: Some(alice),
+                before_ts_recv: Some(250),
+                keep_last: None,
+            },
+        )
+        .await
+        .unwrap();
+        match result {
+            CommandResult::Pruned { rows_deleted } => assert_eq!(rows_deleted, 3),
+            other => panic!("expected Pruned, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn prune_history_rejects_both_before_and_keep_last() {
+        let handle = test_handle();
+        let err = execute_command(
+            handle,
+            Command::PruneHistory {
+                contact: None,
+                before_ts_recv: Some(1),
+                keep_last: Some(2),
+            },
+        )
+        .await;
+        assert!(
+            err.is_err(),
+            "exactly one of before_ts_recv / keep_last must be Some"
+        );
+    }
+
+    #[tokio::test]
+    async fn prune_history_rejects_neither() {
+        let handle = test_handle();
+        let err = execute_command(
+            handle,
+            Command::PruneHistory {
+                contact: None,
+                before_ts_recv: None,
+                keep_last: None,
+            },
+        )
+        .await;
+        assert!(
+            err.is_err(),
+            "exactly one of before_ts_recv / keep_last must be Some"
+        );
+    }
+
+    #[tokio::test]
+    async fn prune_history_keep_last_requires_contact() {
+        let handle = test_handle();
+        let err = execute_command(
+            handle,
+            Command::PruneHistory {
+                contact: None, // global
+                before_ts_recv: None,
+                keep_last: Some(3), // but keep_last requires a scoped group
+            },
+        )
+        .await;
+        assert!(err.is_err(), "keep_last requires a contact");
+    }
+
+    #[tokio::test]
+    async fn export_history_paginates_and_advances_cursor() {
+        let handle = test_handle();
+        let alice = crate::identity::PublicKey([0x77; 32]);
+        let gid = [0x88u8; 32];
+
+        let cr = ContactRepo::new(&handle.pool);
+        cr.upsert(&crate::contact::Contact {
+            identity: alice,
+            display_name: None,
+            added_at: 0,
+            card: None,
+        })
+        .unwrap();
+        cr.set_group_id(&alice, &gid).unwrap();
+
+        let msgs = crate::storage::MessageRepo::new(&handle.pool);
+        for i in 0..5i64 {
+            let env = crate::envelope::Envelope {
+                v: 1,
+                id: crate::envelope::MessageId::generate(),
+                ts: 1_700_000_000 + i,
+                reply_to: None,
+                kind: crate::envelope::Kind::Text {
+                    body: format!("m{i}"),
+                },
+            };
+            msgs.insert(crate::storage::messages::InsertParams {
+                group_id: &gid,
+                sender: &alice.0,
+                envelope: &env,
+                mls_generation: u64::try_from(i).unwrap(),
+                ts_daemon_recv: i,
+            })
+            .unwrap();
+        }
+
+        // Page 1: after_id = None, limit 2 -> 2 rows, next_after_id = Some(last.id).
+        let r1 = execute_command(
+            handle.clone(),
+            Command::ExportHistory {
+                contact: alice,
+                after_id: None,
+                limit: 2,
+            },
+        )
+        .await
+        .unwrap();
+        let (recs1, next1) = match r1 {
+            CommandResult::ExportPage {
+                records,
+                next_after_id,
+            } => (records, next_after_id),
+            other => panic!("expected ExportPage, got {other:?}"),
+        };
+        assert_eq!(recs1.len(), 2);
+        assert!(next1.is_some());
+
+        // Page 2: after_id = next1, limit 2 -> 2 rows, next_after_id = Some(last.id).
+        let r2 = execute_command(
+            handle.clone(),
+            Command::ExportHistory {
+                contact: alice,
+                after_id: next1,
+                limit: 2,
+            },
+        )
+        .await
+        .unwrap();
+        let (recs2, next2) = match r2 {
+            CommandResult::ExportPage {
+                records,
+                next_after_id,
+            } => (records, next_after_id),
+            other => panic!("expected ExportPage, got {other:?}"),
+        };
+        assert_eq!(recs2.len(), 2);
+        assert!(next2.is_some());
+
+        // Page 3: after_id = next2, limit 2 -> 1 row (short page), next_after_id = None.
+        let r3 = execute_command(
+            handle.clone(),
+            Command::ExportHistory {
+                contact: alice,
+                after_id: next2,
+                limit: 2,
+            },
+        )
+        .await
+        .unwrap();
+        let (recs3, next3) = match r3 {
+            CommandResult::ExportPage {
+                records,
+                next_after_id,
+            } => (records, next_after_id),
+            other => panic!("expected ExportPage, got {other:?}"),
+        };
+        assert_eq!(recs3.len(), 1);
+        assert!(next3.is_none(), "short page -> caller stops");
+    }
+
+    #[tokio::test]
+    async fn export_history_unknown_contact_returns_contact_not_found() {
+        let handle = test_handle();
+        let unknown = crate::identity::PublicKey([0xEE; 32]);
+        let err = execute_command(
+            handle,
+            Command::ExportHistory {
+                contact: unknown,
+                after_id: None,
+                limit: 10,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            IpcError::Daemon(crate::daemon::error_kind::DaemonErrorKind::ContactNotFound)
+        ));
     }
 }

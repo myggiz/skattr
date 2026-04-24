@@ -28,6 +28,13 @@ pub enum EventFilter {
     Contact(PublicKey),
     /// Only `TorStatusChanged`.
     TorStatus,
+    /// Only `MessageReceived` events. If `contact` is `Some`, restrict
+    /// further to that single peer; if `None`, forward every peer's
+    /// `MessageReceived` events.
+    Messages {
+        /// Optional per-peer narrowing.
+        contact: Option<PublicKey>,
+    },
 }
 
 /// Request frame sent from CLI to daemon.

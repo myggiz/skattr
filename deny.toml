@@ -10,7 +10,23 @@ targets = [
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
-ignore = []
+# All four ignores below are Arti-transitive advisories with no safe
+# upgrade available in the arti-client 0.41 dependency tree. Revisit
+# each when Arti bumps:
+#   - RUSTSEC-2024-0436: `paste 1.0.15` unmaintained; Arti → fs-mistrust
+#     → pwd-grp → paste. Project is archived upstream; no drop-in fix.
+#   - RUSTSEC-2026-0097: `rand` + custom logger unsoundness; depends on
+#     a combination we do not hit in production. Arti's internal use.
+#   - RUSTSEC-2023-0071: `rsa` Marvin timing sidechannel. Arti uses
+#     rsa transitively; we never construct RSA private keys ourselves.
+#   - RUSTSEC-2026-0104: `rustls-webpki` CRL-parsing panic. Arti
+#     transitive; we do not feed attacker-controlled CRLs.
+ignore = [
+    "RUSTSEC-2024-0436",
+    "RUSTSEC-2026-0097",
+    "RUSTSEC-2023-0071",
+    "RUSTSEC-2026-0104",
+]
 
 [licenses]
 allow = [
@@ -27,14 +43,22 @@ allow = [
     "MPL-2.0",
     "OpenSSL",
     "GPL-3.0",
+    "GPL-3.0-or-later",
     "AGPL-3.0",
+    "AGPL-3.0-or-later",
     "CC0-1.0",
+    "Unlicense",
+    "BSL-1.0",
 ]
 confidence-threshold = 0.93
 
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# Workspace-internal path deps (e.g. `skattr-core = { path = "../core" }`)
+# inevitably have a wildcard version — they are unpublished sibling
+# crates pinned by path, not by version. Exempt them explicitly.
+allow-wildcard-paths = true
 highlight = "all"
 
 [sources]

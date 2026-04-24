@@ -104,6 +104,24 @@ impl Daemon {
         // Step 2: open Pool (migrations are applied inside Pool::open).
         let pool = Arc::new(Pool::open(data_dir, &seed)?);
 
+        // Phase 1.G: one-shot backfill for legacy text rows (idempotent).
+        match crate::storage::MessageRepo::new(&pool).backfill_body_text() {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(rows = n, "backfilled body_text for legacy rows"),
+            Err(e) => {
+                tracing::warn!(error = %e, "body_text backfill failed; FTS may be incomplete")
+            }
+        }
+
+        // Phase 1.G: hourly retention sweep.
+        let (sweep_shutdown_tx, sweep_shutdown_rx) = tokio::sync::watch::channel(false);
+        let sweep_handle = crate::daemon::retention::spawn_sweep(
+            pool.clone(),
+            config.history.retention_days,
+            std::time::Duration::from_secs(3600),
+            sweep_shutdown_rx,
+        );
+
         // Step 3: Tor bootstrap + onion publish.
         let cfg = TorConfig {
             state_dir: data_dir.join("arti"),
@@ -165,6 +183,8 @@ impl Daemon {
         // Step 10: tear down.
         let _ = ipc_shutdown_tx.send(());
         let _ = ipc_task.await;
+        let _ = sweep_shutdown_tx.send(true);
+        let _ = sweep_handle.await;
         rt.shutdown().await?;
         // Server::drop removes the socket file automatically.
         Ok(())

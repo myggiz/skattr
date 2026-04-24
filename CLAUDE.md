@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Phase 0 is complete; Phase 1.A (frame codec), 1.B (Noise_XK handshake),
 1.C (MLS 2-member groups), 1.D (invite & contact flow), 1.E (delivery
-semantics), and 1.F (CLI integration) are done.** Phase 0 shipped all five workstreams (0.A scaffold,
+semantics), 1.F (CLI integration), and 1.G (message storage & search) are done.** Phase 0 shipped all five workstreams (0.A scaffold,
 0.B identity & crypto, 0.C Arti integration, 0.D storage layer, 0.E
 documentation baseline). Phase 1.A added `transport::frame::FrameCodec`.
 Phase 1.B added `transport::noise::handshake_{initiator,responder}`
@@ -29,6 +29,20 @@ Phase 1.F added the `skattr daemon` IPC server + `IpcClient`, expanded
 `--passphrase-file` automation, `--qr` invite rendering,
 `--fail-on-timeout` on `send`, and three integration tests
 (`cli_ipc_roundtrip`, `cli_two_daemons`, `cli_real_tor` `#[ignore]`-gated).
+Phase 1.G added FTS5 wiring (triggers off a new `body_text` mirror
+column, `messages_fts` recreated to reference it), persisted
+`mls_generation` and `ts_daemon_recv` on `messages` (replacing 1.F's
+placeholders), `MessageRepo::{search, unread_count, mark_read,
+export_page, prune_before, prune_keep_last, backfill_body_text}`,
+`ReadStateRepo` for per-group last-read cursors, `daemon::retention`
+(hourly sweep + `[history] retention_days`), and IPC for
+`SearchMessages` / `MarkRead` / `PruneHistory` / `ExportHistory` plus
+`Event::MessageReceived` (reshaped to `{ contact, record }`) and
+`EventFilter::Messages`. `daemon::dispatch::send_message` now persists
+sender-side rows. CLI gained `search` / `export` / `prune`;
+`tail --follow` subscribes to the event stream. Migration 0006 lands
+the schema. The 100k-row benchmark (`crates/core/tests/fts_search_p95.rs`,
+`#[ignore]`-gated) asserts search p95 < 50 ms.
 
 `crates/core/src/identity/` is fully implemented (Ed25519, BIP39,
 Argon2id + XChaCha20-Poly1305 vault, HKDF). `crates/core/src/transport/{tor,
@@ -49,11 +63,11 @@ passing. Phase 0 exit criterion (two daemons echo bytes over Tor)
 is exercised by `crates/tests/src/arti_echo.rs`, `#[ignore]`-gated
 (run with `cargo test -p skattr-tests --release -- --ignored`).
 
-Phase 1 continues with 1.G message storage & search — see
-`docs/superpowers/specs/2026-04-21-phase-1-decomposition.md`.
-The bootstrap prompt remains authoritative for
-file layout, module boundaries, type signatures, and visibility rules
-— match it exactly.
+Phase 1 is complete; the next workstream is TBD — see
+`docs/superpowers/specs/2026-04-21-phase-1-decomposition.md`
+for the original decomposition. The bootstrap prompt remains
+authoritative for file layout, module boundaries, type signatures,
+and visibility rules — match it exactly.
 
 ## Authoritative docs (read these first)
 

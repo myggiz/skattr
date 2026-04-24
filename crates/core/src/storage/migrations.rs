@@ -43,6 +43,10 @@ const ALL_MIGRATIONS: &[Migration] = &[
         version: 5,
         sql: include_str!("migrations/0005_contact_group_link.sql"),
     },
+    Migration {
+        version: 6,
+        sql: include_str!("migrations/0006_history_search.sql"),
+    },
 ];
 
 /// Apply all pending migrations in order. Idempotent — re-running does
@@ -184,6 +188,75 @@ mod tests {
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(v, ALL_MIGRATIONS.iter().map(|m| m.version).max().unwrap());
+    }
+
+    #[test]
+    fn migration_0006_adds_history_search_schema() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        apply(&mut conn).unwrap();
+
+        let cols: Vec<String> = conn
+            .prepare("PRAGMA table_info('messages')")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .map(std::result::Result::unwrap)
+            .collect();
+        for col in ["body_text", "mls_generation", "ts_daemon_recv"] {
+            assert!(
+                cols.iter().any(|c| c == col),
+                "messages.{col} must exist; got {cols:?}"
+            );
+        }
+
+        let read_state_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type='table' AND name='read_state'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(read_state_exists, 1, "read_state table must exist");
+
+        let fts_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type='table' AND name='messages_fts'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(fts_exists, 1, "messages_fts virtual table must exist");
+
+        for idx in ["idx_messages_group_gen", "idx_messages_ts_recv"] {
+            let n: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master \
+                     WHERE type='index' AND name=?1",
+                    [idx],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "index {idx} must exist");
+        }
+
+        for trig in ["messages_ai_text", "messages_ad_text", "messages_au_text"] {
+            let n: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master \
+                     WHERE type='trigger' AND name=?1",
+                    [trig],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "trigger {trig} must exist");
+        }
+
+        let v: u32 = conn
+            .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 6);
     }
 
     #[test]

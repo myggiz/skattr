@@ -57,8 +57,9 @@ daemon              long-lived process: owns Tor runtime, storage pool, delivery
   │                 AuthenticatedConnection — done Phase 0.C, 1.A, 1.B
   ├── identity      Ed25519 keypair, BIP39, Argon2id + XChaCha20-Poly1305 vault,
   │                 HKDF derivations — done Phase 0.B
-  └── storage       Pool (age-encrypted), migrations runner (through 0004), 7
-                    repos, backup — done Phase 0.D + extended in 1.C/1.D/1.E
+  └── storage       Pool (age-encrypted), migrations runner (through 0006), 8
+                    repos (incl. read_state), backup — done Phase 0.D + extended
+                    in 1.C/1.D/1.E/1.F/1.G
 ```
 
 **Public API boundary.** Only `daemon`, `error`, `envelope`, `invite`, `contact`, and the key types in `identity` are `pub`. Everything else is `pub(crate)`. Consumers (`cli`, `ui`) talk to the daemon through `Command` / `Event` enums.
@@ -78,7 +79,7 @@ daemon              long-lived process: owns Tor runtime, storage pool, delivery
    f. `OutboxRepo::insert(target, message_id, ciphertext, next_retry_at)` (idempotent),
    g. `DeliveryHub::send(peer, message_id, ciphertext)` kicks the per-peer actor.
 6. `PeerConnection` actor either uses its live `AuthenticatedConnection<DataStream>` or dials the peer's cached onion, completes `Noise_XK` handshake, sends a length-prefixed `FrameType::MlsApp` frame.
-7. Remote peer's `OnionListener` accepts the stream; post-handshake, the stream enters the remote `DeliveryHub`. `DaemonInbound::dispatch` → MLS decrypt → `MessageRepo::insert` → `events_tx.send(Event::MessageReceived { from, envelope })`.
+7. Remote peer's `OnionListener` accepts the stream; post-handshake, the stream enters the remote `DeliveryHub`. `delivery::receiver::receive` decrypts via the MLS group, captures `mls_generation = group.epoch()` and `ts_daemon_recv = now_unix_seconds()`, and `MessageRepo::insert(InsertParams)` persists the row. The FTS5 `au`/`ai` triggers index `body_text` automatically. After persist, `DaemonInbound` projects a `MessageRecord` and broadcasts `Event::MessageReceived { contact, record }` on the daemon's broadcast bus, where `tail --follow` subscribers (with `EventFilter::Messages { contact }`) pick it up.
 8. Remote CLI running `skattr tail --follow` or `skattr chat` receives the event frame and prints the plaintext.
 9. Remote `PeerConnection` sends back `FrameType::Ack { message_id }`; the sender's oneshot resolves, local `dispatch::send_message`'s `tokio::time::timeout(2s, ..)` completes with `SendStatus::Delivered`, `CommandResult::MessageSent { status: Delivered }` is written to the CLI's IPC socket.
 10. CLI prints `<message_id>  delivered` and exits 0.
@@ -98,7 +99,12 @@ daemon              long-lived process: owns Tor runtime, storage pool, delivery
 - `invite::InviteLink` + `contact::ContactCard` parse/verify/sign/
   persist with single-use enforcement on KeyPackages.
 - `mailbox::client` is `todo!()` — offline delivery is Phase 2.
-- `storage::*` is fully implemented (migrations through 0005).
+- `storage::*` is fully implemented (migrations through 0006).
+  `MessageRepo` provides FTS5 search, unread/mark-read, export
+  pagination, and retention pruning; `ReadStateRepo` tracks per-group
+  last-read cursors. The daemon runs `backfill_body_text` once at
+  startup and an hourly `daemon::retention` sweep driven by
+  `[history] retention_days`.
 
 ## Cross-cutting: transport↔MLS binding
 
@@ -138,7 +144,7 @@ The design deliberately uses two separate keypairs (identity vs. onion service �
 | 0.E ✅ | docs | THREAT_MODEL.md, OPERATIONS.md, ARCHITECTURE.md refresh, README update |
 | 1.A–1.E ✅ | mls, delivery, transport::{noise, frame, connection} | Kill-mid-message → reconnect → exactly-once delivery (CI) |
 | 1.F ✅ | daemon::{ipc, dispatch}, cli | `skattr send` through IPC; `cli_ipc_roundtrip` + `cli_two_daemons` CI |
-| 1.G | message storage & search | Full-text search, pagination |
+| 1.G ✅ | storage::messages (FTS5), storage::read_state, daemon::retention, cli::{search,export,prune} | Full-text search p95 < 50 ms over 100k rows; history retention + export |
 | 2 | mailbox (client + server), contact::{card, rotation}, ui | Offline user receives queued messages; Tauri UI shell |
 | 3 | mls (multi-member), delivery::fanout, envelope::kinds (attachments, reactions, edits) | 50-member group passes week-long soak |
 | 4 | hardening — fuzz harnesses, padding, duress mode, reproducible builds | External audit clean |

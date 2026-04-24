@@ -124,6 +124,49 @@ enum Command {
         #[arg(long)]
         follow: bool,
     },
+    /// Export a contact's full message history.
+    Export {
+        /// Contact name or hex pubkey prefix.
+        contact: String,
+        /// Output format: `json` (default) or `text`.
+        #[arg(long, default_value = "json")]
+        format: String,
+        /// Output file path. Refuses to overwrite an existing file.
+        #[arg(long)]
+        output: std::path::PathBuf,
+    },
+    /// Delete history rows. Pass exactly one of --before or --keep-last.
+    Prune {
+        /// Limit to one contact (name or hex prefix).
+        #[arg(long)]
+        contact: Option<String>,
+        /// Delete rows older than this RFC3339 timestamp.
+        #[arg(long)]
+        before: Option<String>,
+        /// Keep only the N newest rows in the contact's group.
+        #[arg(long)]
+        keep_last: Option<u64>,
+    },
+    /// Full-text search over message history.
+    Search {
+        /// Query — free-form, tokenize-and-AND on the daemon side.
+        query: String,
+        /// Limit search to one contact (name or hex prefix).
+        #[arg(long)]
+        contact: Option<String>,
+        /// Maximum hits to return.
+        #[arg(long, default_value_t = 20)]
+        limit: u32,
+        /// Skip this many hits.
+        #[arg(long, default_value_t = 0)]
+        offset: u32,
+        /// Order by id DESC instead of BM25.
+        #[arg(long)]
+        newest_first: bool,
+        /// Emit raw JSON instead of the human-readable form.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Resolve the IPC socket path with precedence flag > env > XDG default.
@@ -206,6 +249,11 @@ fn exit_on_ipc_error(err: skattr_core::daemon::IpcClientError) -> ! {
                 eprintln!("storage error (see daemon logs)");
                 std::process::exit(1);
             }
+            // Task 24 refines this message and may remap the exit code.
+            DaemonErrorKind::SearchSyntax => {
+                eprintln!("search query rejected by FTS5 engine");
+                std::process::exit(6);
+            }
         },
         IpcClientError::Server(other) => {
             eprintln!("ipc: server error: {other:?}");
@@ -255,6 +303,35 @@ async fn main() -> Result<()> {
             follow,
         } => tail(contact.as_deref(), limit, follow, socket.as_deref(), json).await,
         Command::Chat { contact } => chat(&contact, socket.as_deref()).await,
+        Command::Search {
+            query,
+            contact,
+            limit,
+            offset,
+            newest_first,
+            json: cmd_json,
+        } => {
+            search(
+                contact.as_deref(),
+                query,
+                limit,
+                offset,
+                newest_first,
+                cmd_json || json,
+                socket.as_deref(),
+            )
+            .await
+        }
+        Command::Export {
+            contact,
+            format,
+            output,
+        } => export(&contact, format, output, socket.as_deref()).await,
+        Command::Prune {
+            contact,
+            before,
+            keep_last,
+        } => prune(contact.as_deref(), before, keep_last, socket.as_deref()).await,
     }
 }
 
@@ -809,9 +886,32 @@ async fn resolve_optional_contact(
     }
 }
 
-fn render_messages_human(rows: &[skattr_core::daemon::commands::MessageRecord]) -> String {
+fn render_message_record_human(row: &skattr_core::daemon::commands::MessageRecord) -> String {
     use skattr_core::daemon::commands::Direction;
     use skattr_core::envelope::Kind;
+
+    let arrow = match row.direction {
+        Direction::Incoming => "<-",
+        Direction::Outgoing => "->",
+    };
+    let body = match &row.kind {
+        Kind::Text { body } => body.clone(),
+        other => format!("({other:?})"),
+    };
+    let contact_short: String = row
+        .contact
+        .0
+        .iter()
+        .take(4)
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    format!(
+        "[{ts}] {arrow} {contact_short} {body}",
+        ts = row.ts_daemon_recv
+    )
+}
+
+fn render_messages_human(rows: &[skattr_core::daemon::commands::MessageRecord]) -> String {
     use std::fmt::Write;
 
     if rows.is_empty() {
@@ -821,26 +921,7 @@ fn render_messages_human(rows: &[skattr_core::daemon::commands::MessageRecord]) 
     let mut out = String::new();
     // Render oldest-first on stdout (`recent` returns newest-first).
     for row in rows.iter().rev() {
-        let arrow = match row.direction {
-            Direction::Incoming => "<-",
-            Direction::Outgoing => "->",
-        };
-        let body = match &row.kind {
-            Kind::Text { body } => body.clone(),
-            other => format!("({other:?})"),
-        };
-        let contact_short: String = row
-            .contact
-            .0
-            .iter()
-            .take(4)
-            .map(|b| format!("{b:02x}"))
-            .collect();
-        let _ = writeln!(
-            out,
-            "[{ts}] {arrow} {contact_short} {body}",
-            ts = row.ts_daemon_recv
-        );
+        let _ = writeln!(out, "{}", render_message_record_human(row));
     }
     out
 }
@@ -853,7 +934,6 @@ async fn tail_follow(
     use skattr_core::daemon::events::Event;
     use skattr_core::daemon::ipc::wire::EventFilter;
     use skattr_core::daemon::{Command as CoreCommand, CommandResult, IpcClientError};
-    use skattr_core::envelope::Kind;
 
     let mut client = connect_or_exit(sock_flag).await?;
     let target = resolve_optional_contact(&mut client, contact_prefix).await?;
@@ -874,10 +954,7 @@ async fn tail_follow(
     }
 
     // 2. Subscribe.
-    let filter = match target {
-        Some(pk) => EventFilter::Contact(pk),
-        None => EventFilter::All,
-    };
+    let filter = EventFilter::Messages { contact: target };
     match client.subscribe(filter).await {
         Ok(()) => {}
         Err(e) => exit_on_ipc_error(e),
@@ -892,13 +969,8 @@ async fn tail_follow(
             Err(other) => exit_on_ipc_error(other),
         };
         match ev {
-            Event::MessageReceived { from, envelope } => {
-                let short: String = from.0.iter().take(4).map(|b| format!("{b:02x}")).collect();
-                let body = match envelope.kind {
-                    Kind::Text { body } => body,
-                    other => format!("({other:?})"),
-                };
-                println!("[{ts}] <- {short} {body}", ts = envelope.ts);
+            Event::MessageReceived { contact: _, record } => {
+                println!("{}", render_message_record_human(&record));
             }
             Event::DeliveryStatusChanged { message, status } => {
                 let id_hex: String = message.0.iter().map(|b| format!("{b:02x}")).collect();
@@ -958,8 +1030,8 @@ async fn chat(contact_prefix: &str, sock_flag: Option<&std::path::Path>) -> Resu
             // Incoming event from the daemon.
             ev = client.next_event() => {
                 match ev {
-                    Ok(Event::MessageReceived { from: _, envelope }) => {
-                        let body = match envelope.kind {
+                    Ok(Event::MessageReceived { contact: _, record }) => {
+                        let body = match record.kind {
                             Kind::Text { body } => body,
                             other => format!("({other:?})"),
                         };
@@ -1005,6 +1077,270 @@ async fn chat(contact_prefix: &str, sock_flag: Option<&std::path::Path>) -> Resu
     Ok(())
 }
 
+fn render_search_human(hits: &[skattr_core::daemon::commands::SearchHitRecord]) -> String {
+    let mut out = String::new();
+    for h in hits {
+        let id_prefix: String = h
+            .record
+            .message_id
+            .0
+            .iter()
+            .take(3)
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        out.push_str(&format!(
+            "[ts_recv={ts}] (id={id} epoch={epoch}) {snippet}\n",
+            ts = h.record.ts_daemon_recv,
+            id = id_prefix,
+            epoch = h.record.mls_generation,
+            snippet = h.snippet,
+        ));
+    }
+    out
+}
+
+async fn search(
+    contact: Option<&str>,
+    query: String,
+    limit: u32,
+    offset: u32,
+    newest_first: bool,
+    as_json: bool,
+    sock_flag: Option<&std::path::Path>,
+) -> Result<()> {
+    use skattr_core::daemon::commands::CommandResult;
+    use skattr_core::daemon::Command as CoreCommand;
+
+    let mut client = connect_or_exit(sock_flag).await?;
+
+    // Resolve optional contact prefix to a PublicKey via ListContacts.
+    let resolved_pk = if let Some(prefix) = contact {
+        let rows_result = match client.execute(CoreCommand::ListContacts).await {
+            Ok(r) => r,
+            Err(e) => exit_on_ipc_error(e),
+        };
+        let rows = match rows_result {
+            CommandResult::Contacts(rows) => rows,
+            other => anyhow::bail!("unexpected daemon response: {other:?}"),
+        };
+        match resolve_contact(&rows, prefix) {
+            Ok(pk) => Some(pk),
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(6);
+            }
+        }
+    } else {
+        None
+    };
+
+    let resp = match client
+        .execute(CoreCommand::SearchMessages {
+            query,
+            contact: resolved_pk,
+            limit,
+            offset,
+            newest_first,
+        })
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => exit_on_ipc_error(e),
+    };
+
+    match resp {
+        CommandResult::SearchResults(hits) => {
+            if as_json {
+                println!("{}", serde_json::to_string_pretty(&hits)?);
+            } else {
+                print!("{}", render_search_human(&hits));
+            }
+            Ok(())
+        }
+        other => anyhow::bail!("unexpected daemon response: {other:?}"),
+    }
+}
+
+fn chrono_or_naive_iso(ts: u64) -> String {
+    use time::format_description::well_known::Rfc3339;
+    use time::OffsetDateTime;
+    let secs = i64::try_from(ts).unwrap_or(0);
+    OffsetDateTime::from_unix_timestamp(secs)
+        .ok()
+        .and_then(|odt| odt.format(&Rfc3339).ok())
+        .unwrap_or_else(|| format!("{ts}"))
+}
+
+fn render_export_text_line(rec: &skattr_core::daemon::commands::MessageRecord) -> String {
+    use skattr_core::daemon::commands::Direction;
+    let body = match &rec.kind {
+        skattr_core::envelope::Kind::Text { body } => body.clone(),
+        other => format!("<{other:?}>"),
+    };
+    let from = match rec.direction {
+        Direction::Incoming => "peer",
+        Direction::Outgoing => "self",
+    };
+    let ts = chrono_or_naive_iso(rec.ts_daemon_recv);
+    format!("[{ts}] {from}: {body}\n")
+}
+
+async fn export(
+    contact_prefix: &str,
+    format: String,
+    output: std::path::PathBuf,
+    sock_flag: Option<&std::path::Path>,
+) -> Result<()> {
+    use skattr_core::daemon::commands::CommandResult;
+    use skattr_core::daemon::Command as CoreCommand;
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    // Validate format.
+    if format != "json" && format != "text" {
+        anyhow::bail!("unsupported --format {format:?}; use `json` or `text`");
+    }
+
+    let mut client = connect_or_exit(sock_flag).await?;
+
+    // Resolve contact via ListContacts + resolve_contact.
+    let rows_result = match client.execute(CoreCommand::ListContacts).await {
+        Ok(r) => r,
+        Err(e) => exit_on_ipc_error(e),
+    };
+    let rows = match rows_result {
+        CommandResult::Contacts(rows) => rows,
+        other => anyhow::bail!("unexpected daemon response: {other:?}"),
+    };
+    let pk = match resolve_contact(&rows, contact_prefix) {
+        Ok(pk) => pk,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(6);
+        }
+    };
+
+    // Open output with O_CREAT|O_EXCL to refuse clobbering.
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&output)
+        .map_err(|e| anyhow::anyhow!("open {}: {e}", output.display()))?;
+
+    if format == "json" {
+        file.write_all(b"[\n")?;
+    }
+    let mut first_record = true;
+    let mut after_id: Option<i64> = None;
+    loop {
+        let resp = match client
+            .execute(CoreCommand::ExportHistory {
+                contact: pk,
+                after_id,
+                limit: 1000,
+            })
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => exit_on_ipc_error(e),
+        };
+        let (records, next) = match resp {
+            CommandResult::ExportPage {
+                records,
+                next_after_id,
+            } => (records, next_after_id),
+            other => anyhow::bail!("unexpected response: {other:?}"),
+        };
+        for r in &records {
+            if format == "json" {
+                if !first_record {
+                    file.write_all(b",\n")?;
+                }
+                first_record = false;
+                serde_json::to_writer(&mut file, r)?;
+            } else {
+                file.write_all(render_export_text_line(r).as_bytes())?;
+            }
+        }
+        if next.is_none() {
+            break;
+        }
+        after_id = next;
+    }
+    if format == "json" {
+        file.write_all(b"\n]\n")?;
+    }
+    file.sync_all()?;
+    Ok(())
+}
+
+fn parse_rfc3339_to_unix(s: &str) -> anyhow::Result<i64> {
+    use time::format_description::well_known::Rfc3339;
+    use time::OffsetDateTime;
+    let odt = OffsetDateTime::parse(s, &Rfc3339)
+        .map_err(|e| anyhow::anyhow!("invalid RFC3339 timestamp: {e}"))?;
+    Ok(odt.unix_timestamp())
+}
+
+async fn prune(
+    contact: Option<&str>,
+    before: Option<String>,
+    keep_last: Option<u64>,
+    sock_flag: Option<&std::path::Path>,
+) -> Result<()> {
+    use skattr_core::daemon::commands::CommandResult;
+    use skattr_core::daemon::Command as CoreCommand;
+
+    if before.is_some() == keep_last.is_some() {
+        anyhow::bail!("exactly one of --before or --keep-last is required");
+    }
+
+    let mut client = connect_or_exit(sock_flag).await?;
+
+    // Resolve optional contact.
+    let resolved_pk = if let Some(prefix) = contact {
+        let rows_result = match client.execute(CoreCommand::ListContacts).await {
+            Ok(r) => r,
+            Err(e) => exit_on_ipc_error(e),
+        };
+        let rows = match rows_result {
+            CommandResult::Contacts(rows) => rows,
+            other => anyhow::bail!("unexpected daemon response: {other:?}"),
+        };
+        match resolve_contact(&rows, prefix) {
+            Ok(pk) => Some(pk),
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(6);
+            }
+        }
+    } else {
+        None
+    };
+
+    let before_ts_recv = before.map(|s| parse_rfc3339_to_unix(&s)).transpose()?;
+
+    let resp = match client
+        .execute(CoreCommand::PruneHistory {
+            contact: resolved_pk,
+            before_ts_recv,
+            keep_last,
+        })
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => exit_on_ipc_error(e),
+    };
+    match resp {
+        CommandResult::Pruned { rows_deleted } => {
+            println!("Deleted {rows_deleted} messages.");
+            Ok(())
+        }
+        other => anyhow::bail!("unexpected daemon response: {other:?}"),
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -1034,8 +1370,19 @@ mod tests {
         assert!(err.to_string().contains("/does/not/exist"));
     }
 
+    // Serializes the three `resolve_socket_path_*` tests against each
+    // other: they all mutate the process-global SKATTR_SOCKET /
+    // XDG_RUNTIME_DIR env vars and would otherwise race under `cargo
+    // test`'s default thread-pool. One mutex is cheaper than pulling in
+    // a `serial_test` dev-dep.
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
     #[test]
     fn resolve_socket_path_prefers_flag_over_env() {
+        let _g = env_guard();
         let tmp = tempfile::tempdir().unwrap();
         let flag = tmp.path().join("flag.sock");
         let env = tmp.path().join("env.sock");
@@ -1047,9 +1394,13 @@ mod tests {
 
     #[test]
     fn resolve_socket_path_env_fallback() {
+        let _g = env_guard();
         let tmp = tempfile::tempdir().unwrap();
         let env = tmp.path().join("env.sock");
         std::env::set_var("SKATTR_SOCKET", &env);
+        // Prevent a stale XDG_RUNTIME_DIR from a sibling test poisoning
+        // the env-before-xdg precedence check.
+        std::env::remove_var("XDG_RUNTIME_DIR");
         let got = resolve_socket_path(None);
         assert_eq!(got, env);
         std::env::remove_var("SKATTR_SOCKET");
@@ -1057,6 +1408,7 @@ mod tests {
 
     #[test]
     fn resolve_socket_path_xdg_fallback() {
+        let _g = env_guard();
         std::env::remove_var("SKATTR_SOCKET");
         std::env::set_var("XDG_RUNTIME_DIR", "/custom/run/1000");
         let got = resolve_socket_path(None);
@@ -1205,5 +1557,94 @@ mod tests {
         assert!(!qr.is_empty(), "QR rendering must produce output");
         // Dense1x2 unicode rendering uses U+2580/U+2584 + space.
         assert!(qr.contains('\u{2580}') || qr.contains('\u{2584}') || qr.contains(' '));
+    }
+
+    #[test]
+    fn render_export_text_line_contains_body_and_direction_label() {
+        use skattr_core::daemon::commands::{Direction, MessageRecord};
+        use skattr_core::daemon::hex::Hex16;
+        use skattr_core::envelope::Kind;
+        use skattr_core::identity::PublicKey;
+
+        let rec = MessageRecord {
+            message_id: Hex16::from([0xCC; 16]),
+            contact: PublicKey([0x42; 32]),
+            direction: Direction::Incoming,
+            kind: Kind::Text { body: "hi".into() },
+            mls_generation: 1,
+            ts_daemon_recv: 1_700_000_000,
+            ts_envelope: 1_700_000_000,
+        };
+        let line = render_export_text_line(&rec);
+        assert!(line.starts_with('['));
+        assert!(line.contains("peer"));
+        assert!(line.contains("hi"));
+        // Must include the RFC3339 date part for ts_daemon_recv = 1_700_000_000 (2023-11-14T22:13:20Z).
+        assert!(line.contains("2023-11-14"));
+    }
+
+    #[test]
+    fn parse_rfc3339_to_unix_seconds() {
+        let secs = parse_rfc3339_to_unix("2026-01-01T00:00:00Z").unwrap();
+        assert_eq!(secs, 1_767_225_600);
+    }
+
+    #[test]
+    fn parse_rfc3339_rejects_garbage() {
+        assert!(parse_rfc3339_to_unix("not a date").is_err());
+    }
+
+    #[test]
+    fn render_search_results_human_includes_snippet_and_id() {
+        use skattr_core::daemon::commands::{Direction, MessageRecord, SearchHitRecord};
+        use skattr_core::daemon::hex::Hex16;
+        use skattr_core::envelope::Kind;
+        use skattr_core::identity::PublicKey;
+
+        let rec = MessageRecord {
+            message_id: Hex16::from([0xAB; 16]),
+            contact: PublicKey([0x42; 32]),
+            direction: Direction::Incoming,
+            kind: Kind::Text {
+                body: "the merge conflict".into(),
+            },
+            mls_generation: 7,
+            ts_daemon_recv: 1_700_000_000,
+            ts_envelope: 1_700_000_000,
+        };
+        let hit = SearchHitRecord {
+            record: rec,
+            bm25: 0.5,
+            snippet: "...the merge conflict...".to_string(),
+        };
+        let out = render_search_human(&[hit]);
+        assert!(out.contains("merge conflict"));
+        assert!(out.contains("epoch=7"));
+        assert!(out.contains("ababab")); // first chars of message id
+    }
+
+    #[test]
+    fn render_event_message_received_matches_one_shot_format() {
+        use skattr_core::daemon::commands::{Direction, MessageRecord};
+        use skattr_core::daemon::hex::Hex16;
+        use skattr_core::envelope::Kind;
+        use skattr_core::identity::PublicKey;
+
+        let rec = MessageRecord {
+            message_id: Hex16::from([0xDD; 16]),
+            contact: PublicKey([0x42; 32]),
+            direction: Direction::Incoming,
+            kind: Kind::Text {
+                body: "live update".into(),
+            },
+            mls_generation: 11,
+            ts_daemon_recv: 1_700_000_900,
+            ts_envelope: 1_700_000_900,
+        };
+        // Per-row formatter must match exactly what a one-shot dump of a single row produces.
+        let line = render_message_record_human(&rec);
+        let one_shot = render_messages_human(std::slice::from_ref(&rec));
+        assert_eq!(one_shot.trim_end(), line.trim_end());
+        assert!(line.contains("live update"));
     }
 }

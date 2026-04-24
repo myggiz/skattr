@@ -60,6 +60,52 @@ pub enum Command {
     RotateOnion,
     /// Graceful daemon shutdown.
     Shutdown,
+    /// Full-text search over persisted messages.
+    SearchMessages {
+        /// Free-form FTS5 query string. Whitespace-only queries
+        /// short-circuit to an empty `SearchResults(vec![])` without
+        /// hitting FTS5. Malformed queries that reach FTS5 and the
+        /// engine rejects surface as `DaemonErrorKind::SearchSyntax`.
+        query: String,
+        /// If `Some`, restrict results to messages exchanged with this peer.
+        contact: Option<crate::identity::PublicKey>,
+        /// Max rows to return (page size).
+        limit: u32,
+        /// Number of leading rows to skip (paging cursor).
+        offset: u32,
+        /// If `true`, sort newest-first by `ts_daemon_recv`; otherwise FTS rank.
+        newest_first: bool,
+    },
+    /// Advance the per-contact read cursor up to and including
+    /// `up_to_message_id` (the message-table primary key, not the
+    /// 16-byte wire id).
+    MarkRead {
+        /// Peer whose conversation cursor is being advanced.
+        contact: crate::identity::PublicKey,
+        /// Message-table `id` (primary key) up to which messages are
+        /// considered read.
+        up_to_message_id: i64,
+    },
+    /// Delete persisted messages matching the given retention rule.
+    /// Exactly one of `before_ts_recv` / `keep_last` is expected.
+    PruneHistory {
+        /// If `Some`, only prune within this peer's conversation.
+        contact: Option<crate::identity::PublicKey>,
+        /// Delete messages with `ts_daemon_recv < this`. Unix seconds.
+        before_ts_recv: Option<i64>,
+        /// Keep at most this many most-recent rows per conversation.
+        keep_last: Option<u64>,
+    },
+    /// Export a paged window of persisted messages for the given peer.
+    ExportHistory {
+        /// Peer whose history to export.
+        contact: crate::identity::PublicKey,
+        /// Page cursor: return rows with `id > after_id`. `None` starts
+        /// from the beginning.
+        after_id: Option<i64>,
+        /// Max rows per page.
+        limit: u32,
+    },
 }
 
 /// Outcome of a `SendMessage` command after the inline-delivery wait.
@@ -116,6 +162,47 @@ pub struct MessageRecord {
     pub ts_envelope: i64,
 }
 
+impl MessageRecord {
+    /// Project a stored row + decrypt-time metadata into the wire type.
+    ///
+    /// `direction` is `Incoming` for receiver-side rows, `Outgoing` for
+    /// sender-side. `mls_generation` is the post-encrypt/post-decrypt
+    /// epoch. `ts_daemon_recv` is the local clock at persist time. Both
+    /// are carried straight to the wire — no aliasing back to `envelope.ts`.
+    ///
+    /// `row_id` is the SQLite primary key; included for future tracing
+    /// but not part of the wire shape. `contact` is the peer pubkey.
+    pub fn project(
+        _row_id: i64,
+        envelope: &crate::envelope::Envelope,
+        contact: crate::identity::PublicKey,
+        mls_generation: u64,
+        ts_daemon_recv: i64,
+        direction: Direction,
+    ) -> Self {
+        Self {
+            message_id: Hex16::from(envelope.id.0),
+            contact,
+            direction,
+            kind: envelope.kind.clone(),
+            mls_generation,
+            ts_daemon_recv: u64::try_from(ts_daemon_recv).unwrap_or(0),
+            ts_envelope: envelope.ts,
+        }
+    }
+}
+
+/// One full-text search hit returned by `Command::SearchMessages`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchHitRecord {
+    /// Underlying message row projection.
+    pub record: MessageRecord,
+    /// FTS5 BM25 rank score (lower = better; negative is normal for BM25).
+    pub bm25: f64,
+    /// FTS5-rendered snippet around the matched terms.
+    pub snippet: String,
+}
+
 /// Response returned for a completed [`Command`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "result", content = "data", rename_all = "snake_case")]
@@ -148,6 +235,25 @@ pub enum CommandResult {
     Subscribed,
     /// No-payload acknowledgement (rotate, shutdown, etc.).
     Ok,
+    /// [`Command::SearchMessages`] completed.
+    SearchResults(Vec<SearchHitRecord>),
+    /// [`Command::MarkRead`] completed.
+    MarkedRead {
+        /// Message-table `id` (primary key) of the highest message marked read.
+        up_to: i64,
+    },
+    /// [`Command::PruneHistory`] completed.
+    Pruned {
+        /// Number of message rows actually deleted.
+        rows_deleted: u64,
+    },
+    /// One page of [`Command::ExportHistory`] results.
+    ExportPage {
+        /// Records in this page.
+        records: Vec<MessageRecord>,
+        /// Cursor for the next page; `None` if this was the last page.
+        next_after_id: Option<i64>,
+    },
 }
 
 impl From<InviteLink> for CommandResult {
@@ -203,6 +309,37 @@ mod tests {
     }
 
     #[test]
+    fn message_record_project_uses_real_columns_not_placeholders() {
+        use crate::envelope::{Envelope, Kind, MessageId};
+        use crate::identity::PublicKey;
+
+        let env = Envelope {
+            v: 1,
+            id: MessageId([0xAA; 16]),
+            ts: 1_700_000_000,
+            reply_to: None,
+            kind: Kind::Text { body: "hi".into() },
+        };
+        let contact = PublicKey([0x33; 32]);
+
+        let rec = MessageRecord::project(
+            42, // row id (not used on the wire — only for tracing)
+            &env,
+            contact,
+            7,             // mls_generation (must be carried, not zeroed)
+            1_700_000_500, // ts_daemon_recv (must be carried, not aliased to env.ts)
+            Direction::Incoming,
+        );
+
+        assert_eq!(rec.mls_generation, 7);
+        assert_eq!(rec.ts_daemon_recv, 1_700_000_500);
+        assert_eq!(rec.ts_envelope, 1_700_000_000);
+        assert!(matches!(rec.direction, Direction::Incoming));
+        assert!(matches!(rec.kind, Kind::Text { .. }));
+        assert_eq!(rec.contact.0, [0x33; 32]);
+    }
+
+    #[test]
     fn new_result_variants_serde_roundtrip() {
         let results: Vec<CommandResult> = vec![
             CommandResult::Contacts(vec![ContactSummary {
@@ -235,5 +372,84 @@ mod tests {
         for r in &results {
             let _back: CommandResult = roundtrip(r);
         }
+    }
+}
+
+#[cfg(test)]
+mod phase_1g_wire_tests {
+    use super::*;
+
+    #[test]
+    fn search_messages_command_round_trips_cbor() {
+        let cmd = Command::SearchMessages {
+            query: "alpha bravo".into(),
+            contact: None,
+            limit: 20,
+            offset: 0,
+            newest_first: false,
+        };
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&cmd, &mut buf).unwrap();
+        let back: Command = ciborium::de::from_reader(&buf[..]).unwrap();
+        assert!(matches!(back, Command::SearchMessages { .. }));
+    }
+
+    #[test]
+    fn mark_read_command_round_trips_cbor() {
+        let cmd = Command::MarkRead {
+            contact: crate::identity::PublicKey([0x11; 32]),
+            up_to_message_id: 42,
+        };
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&cmd, &mut buf).unwrap();
+        let back: Command = ciborium::de::from_reader(&buf[..]).unwrap();
+        assert!(matches!(
+            back,
+            Command::MarkRead {
+                up_to_message_id: 42,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn prune_history_command_round_trips_cbor() {
+        let cmd = Command::PruneHistory {
+            contact: None,
+            before_ts_recv: Some(1_700_000_000),
+            keep_last: None,
+        };
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&cmd, &mut buf).unwrap();
+        let back: Command = ciborium::de::from_reader(&buf[..]).unwrap();
+        assert!(matches!(back, Command::PruneHistory { .. }));
+    }
+
+    #[test]
+    fn export_history_command_round_trips_cbor() {
+        let cmd = Command::ExportHistory {
+            contact: crate::identity::PublicKey([0x22; 32]),
+            after_id: Some(100),
+            limit: 1000,
+        };
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&cmd, &mut buf).unwrap();
+        let back: Command = ciborium::de::from_reader(&buf[..]).unwrap();
+        assert!(matches!(
+            back,
+            Command::ExportHistory {
+                after_id: Some(100),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn search_results_round_trips() {
+        let res = CommandResult::SearchResults(vec![]);
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&res, &mut buf).unwrap();
+        let back: CommandResult = ciborium::de::from_reader(&buf[..]).unwrap();
+        assert!(matches!(back, CommandResult::SearchResults(_)));
     }
 }

@@ -22,7 +22,26 @@ pub const REPLAY_WINDOW_MS: i64 = 60 * 60 * 1000;
 #[derive(Debug, Clone)]
 pub enum ReceiveOutcome {
     /// Fresh message persisted; caller should surface to UI and send an ACK.
-    New(Envelope),
+    /// Carries the persisted `row_id`, the `(sender, group_id)` key,
+    /// and the authoritative ordering/arrival metadata so the
+    /// `InboundDispatch` caller can broadcast `Event::MessageReceived`
+    /// after the ACK succeeds.
+    New {
+        /// The decrypted envelope that was persisted.
+        envelope: Envelope,
+        /// SQLite `rowid` of the inserted `messages` row.
+        row_id: i64,
+        /// Noise static public key of the sending peer.
+        sender: PublicKey,
+        /// MLS group id (opaque bytes) that authored this message.
+        group_id: Vec<u8>,
+        /// MLS epoch of the decrypting group at decrypt time — the
+        /// authoritative ordering signal (not `envelope.ts`).
+        mls_generation: u64,
+        /// Local daemon wall-clock arrival time, in seconds since the
+        /// UNIX epoch. Used for retention sweeps and diagnostics.
+        ts_daemon_recv: i64,
+    },
     /// We've already seen `(sender, message_id)`; caller should still send
     /// an ACK (the sender may have retried because their ACK was lost).
     Duplicate,
@@ -35,11 +54,25 @@ pub enum ReceiveOutcome {
 /// Does not perform MLS decryption — callers have already run
 /// `Group::decrypt` on the ciphertext. Pure side effects on
 /// `seen_messages` and `messages`.
+///
+/// Parameters:
+/// - `now_ms`: local clock in **milliseconds** since the UNIX epoch,
+///   used for the ±1h replay window check against `envelope.ts`
+///   (both are millis per [`Envelope::ts`](crate::envelope::Envelope)).
+/// - `mls_generation`: the decrypting group's epoch at the moment of
+///   decrypt — authoritative ordering, not the envelope `ts`.
+/// - `ts_daemon_recv`: the local daemon's wall-clock arrival time in
+///   **seconds** since the UNIX epoch. Persisted on the messages row
+///   and surfaced on the wire in `MessageRecord`; used for retention
+///   sweeps and diagnostics.
+#[allow(clippy::too_many_arguments)]
 pub fn receive(
     sender: &PublicKey,
     group_id: &[u8],
     envelope: Envelope,
     now_ms: i64,
+    mls_generation: u64,
+    ts_daemon_recv: i64,
     seen: &SeenMessagesRepo<'_>,
     messages: &MessageRepo<'_>,
 ) -> Result<ReceiveOutcome> {
@@ -53,8 +86,21 @@ pub fn receive(
     if !is_new {
         return Ok(ReceiveOutcome::Duplicate);
     }
-    let _ = messages.insert(group_id, &sender.0, &envelope)?;
-    Ok(ReceiveOutcome::New(envelope))
+    let row_id = messages.insert(crate::storage::messages::InsertParams {
+        group_id,
+        sender: &sender.0,
+        envelope: &envelope,
+        mls_generation,
+        ts_daemon_recv,
+    })?;
+    Ok(ReceiveOutcome::New {
+        envelope,
+        row_id,
+        sender: *sender,
+        group_id: group_id.to_vec(),
+        mls_generation,
+        ts_daemon_recv,
+    })
 }
 
 /// Build an ACK frame payload for `message_id`.
@@ -64,7 +110,7 @@ pub fn build_ack(message_id: MessageId) -> MessageId {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use crate::envelope::{Kind, MessageId};
@@ -88,8 +134,18 @@ mod tests {
         let seen = SeenMessagesRepo::new(&pool);
         let msgs = MessageRepo::new(&pool);
         let sender = PublicKey([0xAA; 32]);
-        let out = receive(&sender, &[0x01; 16], env(0x01, 1000), 1000, &seen, &msgs).unwrap();
-        assert!(matches!(out, ReceiveOutcome::New(_)));
+        let out = receive(
+            &sender,
+            &[0x01; 16],
+            env(0x01, 1000),
+            1000,
+            0,
+            1000,
+            &seen,
+            &msgs,
+        )
+        .unwrap();
+        assert!(matches!(out, ReceiveOutcome::New { .. }));
         assert!(seen.contains(&sender.0, &[0x01; 16]).unwrap());
     }
 
@@ -100,8 +156,8 @@ mod tests {
         let msgs = MessageRepo::new(&pool);
         let sender = PublicKey([0xAA; 32]);
         let e = env(0x01, 1000);
-        receive(&sender, &[0x01; 16], e.clone(), 1000, &seen, &msgs).unwrap();
-        let out = receive(&sender, &[0x01; 16], e, 1000, &seen, &msgs).unwrap();
+        receive(&sender, &[0x01; 16], e.clone(), 1000, 0, 1000, &seen, &msgs).unwrap();
+        let out = receive(&sender, &[0x01; 16], e, 1000, 0, 1000, &seen, &msgs).unwrap();
         assert!(matches!(out, ReceiveOutcome::Duplicate));
         let rows = msgs.recent(&[0x01; 16], 10).unwrap();
         assert_eq!(rows.len(), 1, "dup must not insert a second messages row");
@@ -115,7 +171,17 @@ mod tests {
         let sender = PublicKey([0xAA; 32]);
         let now = 10_000_000i64;
         let old = now - (REPLAY_WINDOW_MS + 1);
-        let out = receive(&sender, &[0x01; 16], env(0x01, old), now, &seen, &msgs).unwrap();
+        let out = receive(
+            &sender,
+            &[0x01; 16],
+            env(0x01, old),
+            now,
+            0,
+            now,
+            &seen,
+            &msgs,
+        )
+        .unwrap();
         assert!(matches!(out, ReceiveOutcome::Rejected(_)));
         assert!(!seen.contains(&sender.0, &[0x01; 16]).unwrap());
     }
@@ -128,7 +194,17 @@ mod tests {
         let sender = PublicKey([0xAA; 32]);
         let now = 10_000_000i64;
         let future = now + (REPLAY_WINDOW_MS + 1);
-        let out = receive(&sender, &[0x01; 16], env(0x01, future), now, &seen, &msgs).unwrap();
+        let out = receive(
+            &sender,
+            &[0x01; 16],
+            env(0x01, future),
+            now,
+            0,
+            now,
+            &seen,
+            &msgs,
+        )
+        .unwrap();
         assert!(matches!(out, ReceiveOutcome::Rejected(_)));
     }
 
@@ -136,5 +212,39 @@ mod tests {
     fn build_ack_returns_input_id() {
         let id = MessageId([0x77; 16]);
         assert_eq!(build_ack(id), id);
+    }
+
+    #[test]
+    fn receive_carries_mls_generation_and_ts_daemon_recv_into_outcome() {
+        let pool = Pool::in_memory();
+        let seen = SeenMessagesRepo::new(&pool);
+        let msgs = MessageRepo::new(&pool);
+        let sender = PublicKey([0xAA; 32]);
+
+        let out = receive(
+            &sender,
+            &[0x01; 16],
+            env(0x01, 1000),
+            1000,          // now_ms (replay window check)
+            9,             // mls_generation
+            1_700_000_777, // ts_daemon_recv (seconds, local clock)
+            &seen,
+            &msgs,
+        )
+        .unwrap();
+
+        match out {
+            ReceiveOutcome::New {
+                row_id,
+                mls_generation,
+                ts_daemon_recv,
+                ..
+            } => {
+                assert!(row_id > 0);
+                assert_eq!(mls_generation, 9);
+                assert_eq!(ts_daemon_recv, 1_700_000_777);
+            }
+            other => panic!("expected New, got {other:?}"),
+        }
     }
 }

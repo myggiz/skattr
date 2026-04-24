@@ -103,6 +103,11 @@ impl CoreError {
             CoreError::Transport(s) if s.contains("not ready") || s.contains("bootstrap") => {
                 Some(K::TorNotReady)
             }
+            CoreError::Storage(s)
+                if s.contains("fts5: syntax error") || s.contains("malformed MATCH") =>
+            {
+                Some(K::SearchSyntax)
+            }
             CoreError::Sqlite(_) | CoreError::Storage(_) => Some(K::StorageError),
             _ => None,
         }

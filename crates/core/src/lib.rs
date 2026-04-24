@@ -53,7 +53,9 @@ pub use error::{CoreError, Result};
 pub mod test_exports {
     pub use crate::transport::{OnionListener, TorConfig, TorRuntime, TorStatus};
     // Phase 0.D additions:
-    pub use crate::storage::{ContactRepo, MessageRepo, Pool, SeenMessagesRepo};
+    pub use crate::storage::{
+        ContactRepo, InsertParams, MessageRepo, Pool, ReadStateRepo, SeenMessagesRepo,
+    };
     // Phase 1.A additions:
     pub use crate::transport::{Frame, FrameCodec, FrameType, MAX_FRAME_SIZE};
     // Phase 1.B additions:
@@ -83,6 +85,9 @@ pub mod test_exports {
         wire::{EventFilter, IpcError, IpcRequest, IpcResponse, MAX_IPC_BODY},
     };
     pub use crate::daemon::state::Ready;
+
+    // Phase 1.G additions:
+    pub use crate::daemon::retention::spawn_sweep;
 
     /// Test-only helper: convert an `IdentityKey` to its X25519 static
     /// public key for use as `peer_static_x25519` in

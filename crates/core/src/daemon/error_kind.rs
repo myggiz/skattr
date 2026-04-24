@@ -37,6 +37,8 @@ pub enum DaemonErrorKind {
     TorNotReady,
     /// Storage-layer failure that the CLI can't disambiguate further.
     StorageError,
+    /// Search query was empty after FTS5 escaping or the engine rejected it.
+    SearchSyntax,
 }
 
 #[cfg(test)]
@@ -72,5 +74,18 @@ mod tests {
     fn delivery_timeout_maps() {
         let e = CoreError::Delivery("delivery: timeout waiting for ACK".into());
         assert_eq!(e.kind(), Some(DaemonErrorKind::DeliveryTimeout));
+    }
+
+    #[test]
+    fn search_syntax_maps() {
+        let e = CoreError::Storage("fts5: syntax error near '\"'".into());
+        assert_eq!(e.kind(), Some(DaemonErrorKind::SearchSyntax));
+
+        let e2 = CoreError::Storage("storage: malformed MATCH expression".into());
+        assert_eq!(e2.kind(), Some(DaemonErrorKind::SearchSyntax));
+
+        // Control: plain storage errors still project as StorageError.
+        let e3 = CoreError::Storage("disk full".into());
+        assert_eq!(e3.kind(), Some(DaemonErrorKind::StorageError));
     }
 }
