@@ -36,8 +36,8 @@ pub enum CoreError {
     Invite(String),
 
     /// Contact / ContactCard / rotation problem.
-    #[error("contact: {0}")]
-    Contact(String),
+    #[error("{0}")]
+    Contact(#[from] crate::contact::ContactErrorKind),
 
     /// Mailbox wire protocol problem.
     #[error("mailbox: {0}")]
@@ -90,11 +90,13 @@ impl CoreError {
     pub fn kind(&self) -> Option<crate::daemon::error_kind::DaemonErrorKind> {
         use crate::daemon::error_kind::DaemonErrorKind as K;
         match self {
-            CoreError::Contact(s) if s.contains("not found") => Some(K::ContactNotFound),
-            CoreError::Contact(s) if s.contains("ambiguous") => {
-                let matches = extract_matches_count(s).unwrap_or(0);
-                Some(K::ContactAmbiguous { matches })
+            CoreError::Contact(crate::contact::ContactErrorKind::NotFound) => {
+                Some(K::ContactNotFound)
             }
+            CoreError::Contact(crate::contact::ContactErrorKind::Ambiguous { matches }) => {
+                Some(K::ContactAmbiguous { matches: *matches })
+            }
+            CoreError::Contact(crate::contact::ContactErrorKind::Other(_)) => None,
             CoreError::Invite(s) if s.contains("expired") => Some(K::InviteExpired),
             CoreError::Invite(s) if s.contains("consumed") => Some(K::InviteConsumed),
             CoreError::Invite(s) if s.contains("signature") => Some(K::InviteSignatureInvalid),
@@ -116,17 +118,35 @@ impl CoreError {
     }
 }
 
-fn extract_matches_count(s: &str) -> Option<u32> {
-    // Format expected: "... (N matches)" — find "(N" and parse N.
-    let open = s.find('(')? + 1;
-    let rest = &s[open..];
-    let end = rest.find(|c: char| !c.is_ascii_digit())?;
-    rest[..end].parse().ok()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn contact_not_found_projects_to_contact_not_found() {
+        use crate::contact::ContactErrorKind;
+        use crate::daemon::error_kind::DaemonErrorKind;
+        let e = CoreError::Contact(ContactErrorKind::NotFound);
+        assert_eq!(e.kind(), Some(DaemonErrorKind::ContactNotFound));
+    }
+
+    #[test]
+    fn contact_ambiguous_projects_with_match_count() {
+        use crate::contact::ContactErrorKind;
+        use crate::daemon::error_kind::DaemonErrorKind;
+        let e = CoreError::Contact(ContactErrorKind::Ambiguous { matches: 3 });
+        assert!(matches!(
+            e.kind(),
+            Some(DaemonErrorKind::ContactAmbiguous { matches: 3 })
+        ));
+    }
+
+    #[test]
+    fn contact_other_does_not_project() {
+        use crate::contact::ContactErrorKind;
+        let e = CoreError::Contact(ContactErrorKind::Other("unknown".into()));
+        assert_eq!(e.kind(), None);
+    }
 
     #[test]
     fn storage_fts_syntax_projects_to_search_syntax() {

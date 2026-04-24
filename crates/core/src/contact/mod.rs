@@ -8,6 +8,9 @@
 //! [`card::ContactCard`] we've verified — the card is the signed
 //! self-published routing record (onion address, mailboxes, version).
 
+mod error_kind;
+pub(crate) use error_kind::ContactErrorKind;
+
 pub mod card;
 // Spec names this file `contact.rs` under `contact/`; clippy's
 // module_inception lint doesn't like the layout but the prompt is explicit.

@@ -48,7 +48,8 @@ mod tests {
 
     #[test]
     fn contact_not_found_maps() {
-        let e = CoreError::Contact("contact: lookup: not found (pubkey=ab…)".into());
+        use crate::contact::ContactErrorKind;
+        let e = CoreError::Contact(ContactErrorKind::NotFound);
         assert_eq!(e.kind(), Some(DaemonErrorKind::ContactNotFound));
     }
 

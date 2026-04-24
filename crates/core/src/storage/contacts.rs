@@ -8,6 +8,7 @@
 use super::StorageErrorKind;
 use crate::contact::Contact;
 use crate::contact::ContactCard;
+use crate::contact::ContactErrorKind;
 use crate::error::{CoreError, Result};
 use crate::identity::PublicKey;
 use crate::storage::Pool;
@@ -209,12 +210,16 @@ impl<'p> ContactRepo<'p> {
     /// the contact row doesn't exist.
     pub fn put_card(&self, card: &ContactCard) -> Result<()> {
         let identity_bytes = card.body.identity.0;
-        let version_i: i64 = i64::try_from(card.body.version)
-            .map_err(|_| CoreError::Contact("contact: card: version overflows i64".into()))?;
+        let version_i: i64 = i64::try_from(card.body.version).map_err(|_| {
+            CoreError::Contact(ContactErrorKind::Other(
+                "card: version overflows i64".into(),
+            ))
+        })?;
 
         let mut blob = Vec::new();
-        ciborium::ser::into_writer(card, &mut blob)
-            .map_err(|e| CoreError::Contact(format!("contact: card: cbor encode: {e}")))?;
+        ciborium::ser::into_writer(card, &mut blob).map_err(|e| {
+            CoreError::Contact(ContactErrorKind::Other(format!("card: cbor encode: {e}")))
+        })?;
 
         let verified_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -231,11 +236,13 @@ impl<'p> ContactRepo<'p> {
             ) {
                 Ok(id) => id,
                 Err(rusqlite::Error::QueryReturnedNoRows) => {
-                    return Err(CoreError::Contact(
-                        "contact: card: contact not found".into(),
-                    ));
+                    return Err(CoreError::Contact(ContactErrorKind::NotFound));
                 }
-                Err(e) => return Err(CoreError::Contact(format!("contact: card: lookup: {e}"))),
+                Err(e) => {
+                    return Err(CoreError::Contact(ContactErrorKind::Other(format!(
+                        "card: lookup: {e}"
+                    ))))
+                }
             };
 
             // Compare against the stored max version; reject if not strictly greater.
@@ -246,12 +253,16 @@ impl<'p> ContactRepo<'p> {
                     |r| r.get::<_, Option<i64>>(0),
                 )
                 .map_err(|e| {
-                    CoreError::Contact(format!("contact: card: max-version lookup: {e}"))
+                    CoreError::Contact(ContactErrorKind::Other(format!(
+                        "card: max-version lookup: {e}"
+                    )))
                 })?;
 
             if let Some(max_v) = max_version {
                 if version_i <= max_v {
-                    return Err(CoreError::Contact("contact: card: stale version".into()));
+                    return Err(CoreError::Contact(ContactErrorKind::Other(
+                        "card: stale version".into(),
+                    )));
                 }
             }
 
@@ -260,7 +271,9 @@ impl<'p> ContactRepo<'p> {
                  VALUES (?1, ?2, ?3, ?4)",
                 rusqlite::params![contact_id, version_i, &blob, verified_at],
             )
-            .map_err(|e| CoreError::Contact(format!("contact: card: insert: {e}")))?;
+            .map_err(|e| {
+                CoreError::Contact(ContactErrorKind::Other(format!("card: insert: {e}")))
+            })?;
             Ok(())
         })
     }
@@ -278,9 +291,7 @@ impl<'p> ContactRepo<'p> {
                     CoreError::Storage(StorageErrorKind::Other(format!("set group_id: {e}")))
                 })?;
             if changed == 0 {
-                return Err(CoreError::Contact(
-                    "contact: group_id: contact not found".into(),
-                ));
+                return Err(CoreError::Contact(ContactErrorKind::NotFound));
             }
             Ok(())
         })
@@ -313,12 +324,14 @@ impl<'p> ContactRepo<'p> {
     /// non-hex characters.
     pub fn lookup_by_prefix(&self, prefix: &str) -> Result<Vec<PublicKey>> {
         if prefix.is_empty() {
-            return Err(CoreError::Contact("contact: lookup: empty prefix".into()));
+            return Err(CoreError::Contact(ContactErrorKind::Other(
+                "lookup: empty prefix".into(),
+            )));
         }
         if !prefix.chars().all(|c| c.is_ascii_hexdigit()) {
-            return Err(CoreError::Contact(format!(
-                "contact: lookup: non-hex prefix {prefix:?}"
-            )));
+            return Err(CoreError::Contact(ContactErrorKind::Other(format!(
+                "lookup: non-hex prefix {prefix:?}"
+            ))));
         }
         let lower = prefix.to_ascii_lowercase();
         self.pool.with(|c| {
@@ -366,12 +379,16 @@ impl<'p> ContactRepo<'p> {
             match result {
                 Ok(blob) => {
                     let card: ContactCard = ciborium::de::from_reader(&blob[..]).map_err(|e| {
-                        CoreError::Contact(format!("contact: card: cbor decode: {e}"))
+                        CoreError::Contact(ContactErrorKind::Other(format!(
+                            "card: cbor decode: {e}"
+                        )))
                     })?;
                     Ok(Some(card))
                 }
                 Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-                Err(e) => Err(CoreError::Contact(format!("contact: card: latest: {e}"))),
+                Err(e) => Err(CoreError::Contact(ContactErrorKind::Other(format!(
+                    "card: latest: {e}"
+                )))),
             }
         })
     }
@@ -501,7 +518,10 @@ mod tests {
             .put_card(&sample_card(11, 5))
             .expect_err("same version");
         assert!(
-            matches!(err, CoreError::Contact(ref s) if s.contains("stale version")),
+            matches!(
+                err,
+                CoreError::Contact(ContactErrorKind::Other(ref s)) if s.contains("stale version")
+            ),
             "got: {err:?}"
         );
 
@@ -509,7 +529,10 @@ mod tests {
             .put_card(&sample_card(11, 4))
             .expect_err("older version");
         assert!(
-            matches!(err, CoreError::Contact(ref s) if s.contains("stale version")),
+            matches!(
+                err,
+                CoreError::Contact(ContactErrorKind::Other(ref s)) if s.contains("stale version")
+            ),
             "got: {err:?}"
         );
     }
@@ -521,7 +544,7 @@ mod tests {
         // No upsert — the contact row isn't there.
         let err = repo.put_card(&sample_card(12, 1)).expect_err("no contact");
         assert!(
-            matches!(err, CoreError::Contact(ref s) if s.contains("contact not found")),
+            matches!(err, CoreError::Contact(ContactErrorKind::NotFound)),
             "got: {err:?}"
         );
     }
@@ -696,7 +719,10 @@ mod tests {
         let repo = ContactRepo::new(&pool);
         let err = repo.lookup_by_prefix("").expect_err("empty prefix");
         assert!(
-            matches!(err, CoreError::Contact(ref s) if s.contains("empty")),
+            matches!(
+                err,
+                CoreError::Contact(ContactErrorKind::Other(ref s)) if s.contains("empty")
+            ),
             "got {err:?}"
         );
     }
@@ -707,7 +733,10 @@ mod tests {
         let repo = ContactRepo::new(&pool);
         let err = repo.lookup_by_prefix("zz").expect_err("non-hex prefix");
         assert!(
-            matches!(err, CoreError::Contact(ref s) if s.contains("hex")),
+            matches!(
+                err,
+                CoreError::Contact(ContactErrorKind::Other(ref s)) if s.contains("hex")
+            ),
             "got {err:?}"
         );
     }

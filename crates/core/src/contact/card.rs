@@ -12,6 +12,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::contact::ContactErrorKind;
 use crate::error::Result;
 use crate::identity::{IdentityKey, PublicKey, Signature};
 
@@ -51,10 +52,14 @@ impl ContactCard {
     ) -> Result<Self> {
         let expires_at = now
             .checked_add(i64::try_from(ttl_secs).map_err(|_| {
-                crate::error::CoreError::Contact("contact: card: ttl overflows i64".into())
+                crate::error::CoreError::Contact(ContactErrorKind::Other(
+                    "card: ttl overflows i64".into(),
+                ))
             })?)
             .ok_or_else(|| {
-                crate::error::CoreError::Contact("contact: card: expires_at overflows i64".into())
+                crate::error::CoreError::Contact(ContactErrorKind::Other(
+                    "card: expires_at overflows i64".into(),
+                ))
             })?;
 
         let body = ContactCardBody {
@@ -73,15 +78,15 @@ impl ContactCard {
     /// known contact).
     pub fn verify(&self, now: i64) -> Result<PublicKey> {
         if now > self.body.expires_at {
-            return Err(crate::error::CoreError::Contact(
-                "contact: card: expired".into(),
-            ));
+            return Err(crate::error::CoreError::Contact(ContactErrorKind::Other(
+                "card: expired".into(),
+            )));
         }
         IdentityKey::verify_cbor(&self.body.identity, &self.body, &self.signature).map_err(
             |_| {
-                crate::error::CoreError::Contact(
-                    "contact: card: signature verification failed".into(),
-                )
+                crate::error::CoreError::Contact(ContactErrorKind::Other(
+                    "card: signature verification failed".into(),
+                ))
             },
         )?;
         Ok(self.body.identity)
@@ -92,6 +97,7 @@ impl ContactCard {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use crate::contact::ContactErrorKind;
 
     #[test]
     fn sign_fills_body_fields_and_signature_is_64_bytes() {
@@ -140,8 +146,10 @@ mod tests {
         let card = fresh_card(1, 1_003_600, &signer);
         let err = card.verify(1_003_601).expect_err("must reject expired");
         match err {
-            crate::error::CoreError::Contact(s) => assert!(s.contains("expired"), "got: {s}"),
-            other => panic!("expected Contact, got {other:?}"),
+            crate::error::CoreError::Contact(ContactErrorKind::Other(ref s)) => {
+                assert!(s.contains("expired"), "got: {s}")
+            }
+            other => panic!("expected Contact(Other(expired)), got {other:?}"),
         }
     }
 
@@ -152,10 +160,10 @@ mod tests {
         card.signature.0[0] ^= 0xFF;
         let err = card.verify(1_000_000).expect_err("tampered");
         match err {
-            crate::error::CoreError::Contact(s) => {
+            crate::error::CoreError::Contact(ContactErrorKind::Other(ref s)) => {
                 assert!(s.contains("signature verification failed"), "got: {s}");
             }
-            crate::error::CoreError::Identity(s) => {
+            crate::error::CoreError::Identity(ref s) => {
                 assert!(s.contains("verification failed"), "got: {s}");
             }
             other => panic!("expected Contact/Identity, got {other:?}"),
@@ -173,10 +181,10 @@ mod tests {
         card.body.identity = other.public();
         let err = card.verify(1_000_000).expect_err("wrong signer");
         match err {
-            crate::error::CoreError::Contact(s) => {
+            crate::error::CoreError::Contact(ContactErrorKind::Other(ref s)) => {
                 assert!(s.contains("signature verification failed"), "got: {s}");
             }
-            crate::error::CoreError::Identity(s) => {
+            crate::error::CoreError::Identity(ref s) => {
                 assert!(s.contains("verification failed"), "got: {s}");
             }
             other => panic!("expected Contact/Identity, got {other:?}"),
