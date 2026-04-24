@@ -10,7 +10,7 @@ use qrcode::render::svg;
 use qrcode::{EcLevel, QrCode};
 
 use crate::error::{CoreError, Result};
-use crate::invite::InviteLink;
+use crate::invite::{InviteErrorKind, InviteLink};
 
 /// Render an [`InviteLink`] to SVG markup.
 ///
@@ -19,9 +19,9 @@ use crate::invite::InviteLink;
 pub fn render_svg(invite: &InviteLink) -> Result<String> {
     let url = invite
         .to_url()
-        .map_err(|e| CoreError::Invite(format!("invite: qr: url: {e}")))?;
+        .map_err(|e| CoreError::Invite(InviteErrorKind::Other(format!("qr: url: {e}"))))?;
     let code = QrCode::with_error_correction_level(url.as_bytes(), EcLevel::M)
-        .map_err(|e| CoreError::Invite(format!("invite: qr: encode: {e}")))?;
+        .map_err(|e| CoreError::Invite(InviteErrorKind::Other(format!("qr: encode: {e}"))))?;
     Ok(code
         .render::<svg::Color<'_>>()
         .min_dimensions(200, 200)

@@ -32,8 +32,8 @@ pub enum CoreError {
     Mls(String),
 
     /// Invite-link parsing or signature verification problem.
-    #[error("invite: {0}")]
-    Invite(String),
+    #[error("{0}")]
+    Invite(#[from] crate::invite::InviteErrorKind),
 
     /// Contact / ContactCard / rotation problem.
     #[error("{0}")]
@@ -82,10 +82,10 @@ impl CoreError {
     /// the CLI can act on — the IPC layer turns those into
     /// `IpcError::Internal` and logs the full `CoreError` server-side.
     ///
-    /// Matching is string-based for now because library error payloads
-    /// are free-form `String`s rather than structured variants. If this
-    /// grows unwieldy, Phase 2 can restructure the subsystem error
-    /// strings into dedicated sub-enums with `thiserror` `#[from]`.
+    /// Matching is structural where subsystems have typed error kinds
+    /// (`StorageErrorKind`, `ContactErrorKind`, `InviteErrorKind`).
+    /// Remaining subsystems still use free-form `String`s and are matched
+    /// via `str::contains` until Phase 1.H sweeps them.
     #[must_use]
     pub fn kind(&self) -> Option<crate::daemon::error_kind::DaemonErrorKind> {
         use crate::daemon::error_kind::DaemonErrorKind as K;
@@ -97,9 +97,12 @@ impl CoreError {
                 Some(K::ContactAmbiguous { matches: *matches })
             }
             CoreError::Contact(crate::contact::ContactErrorKind::Other(_)) => None,
-            CoreError::Invite(s) if s.contains("expired") => Some(K::InviteExpired),
-            CoreError::Invite(s) if s.contains("consumed") => Some(K::InviteConsumed),
-            CoreError::Invite(s) if s.contains("signature") => Some(K::InviteSignatureInvalid),
+            CoreError::Invite(crate::invite::InviteErrorKind::Expired) => Some(K::InviteExpired),
+            CoreError::Invite(crate::invite::InviteErrorKind::Consumed) => Some(K::InviteConsumed),
+            CoreError::Invite(crate::invite::InviteErrorKind::SignatureInvalid) => {
+                Some(K::InviteSignatureInvalid)
+            }
+            CoreError::Invite(crate::invite::InviteErrorKind::Other(_)) => None,
             CoreError::Mls(s) if s.contains("corrupt") => Some(K::GroupCorrupt),
             CoreError::Delivery(s) if s.contains("timeout") => Some(K::DeliveryTimeout),
             CoreError::Transport(s) if s.contains("not ready") || s.contains("bootstrap") => {
@@ -170,5 +173,35 @@ mod tests {
         use crate::storage::StorageErrorKind;
         let e = CoreError::Storage(StorageErrorKind::Other("prepare failed".into()));
         assert_eq!(e.kind(), Some(DaemonErrorKind::StorageError));
+    }
+
+    #[test]
+    fn invite_expired_projects_to_invite_expired() {
+        use crate::daemon::error_kind::DaemonErrorKind;
+        let e = CoreError::Invite(crate::invite::InviteErrorKind::Expired);
+        assert!(matches!(e.kind(), Some(DaemonErrorKind::InviteExpired)));
+    }
+
+    #[test]
+    fn invite_consumed_projects_to_invite_consumed() {
+        use crate::daemon::error_kind::DaemonErrorKind;
+        let e = CoreError::Invite(crate::invite::InviteErrorKind::Consumed);
+        assert!(matches!(e.kind(), Some(DaemonErrorKind::InviteConsumed)));
+    }
+
+    #[test]
+    fn invite_signature_invalid_projects_to_signature_invalid() {
+        use crate::daemon::error_kind::DaemonErrorKind;
+        let e = CoreError::Invite(crate::invite::InviteErrorKind::SignatureInvalid);
+        assert!(matches!(
+            e.kind(),
+            Some(DaemonErrorKind::InviteSignatureInvalid)
+        ));
+    }
+
+    #[test]
+    fn invite_other_does_not_project() {
+        let e = CoreError::Invite(crate::invite::InviteErrorKind::Other("x".into()));
+        assert_eq!(e.kind(), None);
     }
 }

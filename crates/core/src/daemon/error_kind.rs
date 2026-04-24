@@ -55,13 +55,13 @@ mod tests {
 
     #[test]
     fn invite_expired_maps() {
-        let e = CoreError::Invite("invite: expired at 1700000000".into());
+        let e = CoreError::Invite(crate::invite::InviteErrorKind::Expired);
         assert_eq!(e.kind(), Some(DaemonErrorKind::InviteExpired));
     }
 
     #[test]
     fn invite_consumed_maps() {
-        let e = CoreError::Invite("invite: key package already consumed".into());
+        let e = CoreError::Invite(crate::invite::InviteErrorKind::Consumed);
         assert_eq!(e.kind(), Some(DaemonErrorKind::InviteConsumed));
     }
 
