@@ -28,8 +28,8 @@ pub enum CoreError {
     Transport(String),
 
     /// MLS protocol problem (ciphersuite, keystore, state machine).
-    #[error("mls: {0}")]
-    Mls(String),
+    #[error("{0}")]
+    Mls(#[from] crate::mls::MlsErrorKind),
 
     /// Invite-link parsing or signature verification problem.
     #[error("{0}")]
@@ -103,7 +103,8 @@ impl CoreError {
                 Some(K::InviteSignatureInvalid)
             }
             CoreError::Invite(crate::invite::InviteErrorKind::Other(_)) => None,
-            CoreError::Mls(s) if s.contains("corrupt") => Some(K::GroupCorrupt),
+            CoreError::Mls(crate::mls::MlsErrorKind::GroupCorrupt) => Some(K::GroupCorrupt),
+            CoreError::Mls(crate::mls::MlsErrorKind::Other(_)) => None,
             CoreError::Delivery(s) if s.contains("timeout") => Some(K::DeliveryTimeout),
             CoreError::Transport(s) if s.contains("not ready") || s.contains("bootstrap") => {
                 Some(K::TorNotReady)
@@ -202,6 +203,19 @@ mod tests {
     #[test]
     fn invite_other_does_not_project() {
         let e = CoreError::Invite(crate::invite::InviteErrorKind::Other("x".into()));
+        assert_eq!(e.kind(), None);
+    }
+
+    #[test]
+    fn mls_group_corrupt_projects_to_group_corrupt() {
+        use crate::daemon::error_kind::DaemonErrorKind;
+        let e = CoreError::Mls(crate::mls::MlsErrorKind::GroupCorrupt);
+        assert!(matches!(e.kind(), Some(DaemonErrorKind::GroupCorrupt)));
+    }
+
+    #[test]
+    fn mls_other_does_not_project() {
+        let e = CoreError::Mls(crate::mls::MlsErrorKind::Other("decrypt failed".into()));
         assert_eq!(e.kind(), None);
     }
 }

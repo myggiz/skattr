@@ -11,10 +11,13 @@
 //! corrupting MLS internals.
 
 pub(crate) mod ciphersuite;
+mod error_kind;
 pub(crate) mod group;
 pub(crate) mod key_package;
 pub(crate) mod provider;
 pub(crate) mod state_machine;
+
+pub(crate) use error_kind::MlsErrorKind;
 
 #[cfg(not(feature = "test-harness"))]
 pub(crate) use ciphersuite::CIPHERSUITE;

@@ -12,6 +12,7 @@ use tls_codec::{Deserialize as _, Serialize as _};
 use crate::envelope::Envelope;
 use crate::error::{CoreError, Result};
 use crate::identity::IdentityKey;
+use crate::mls::error_kind::MlsErrorKind;
 use crate::mls::key_package::{
     credential_with_key, signer_from_identity, KeyPackage, MLS_CIPHERSUITE,
 };
@@ -58,7 +59,7 @@ impl Group {
             &group_create_config,
             cwk,
         )
-        .map_err(|e| CoreError::Mls(format!("mls: builder: {e:?}")))?;
+        .map_err(|e| CoreError::from(MlsErrorKind::Other(format!("mls: builder: {e:?}"))))?;
 
         let gid = GroupId(inner.group_id().to_vec());
 
@@ -84,7 +85,7 @@ impl Group {
     ) -> Result<(WelcomeBytes, CommitBytes)> {
         // Guard against 3rd member (2-member only for 1.C).
         if self.inner.members().count() >= 2 {
-            return Err(CoreError::Mls("mls: add_member: already 2-member".into()));
+            return Err(MlsErrorKind::Other("mls: add_member: already 2-member".into()).into());
         }
 
         if let Some(psk_bytes) = psk {
@@ -92,7 +93,11 @@ impl Group {
             let signer = load_signer(&self.provider, &own_public_key(&self.inner)?)?;
             self.inner
                 .propose_external_psk(self.provider.as_openmls(), &signer, psk_id)
-                .map_err(|e| CoreError::Mls(format!("mls: propose external psk: {e:?}")))?;
+                .map_err(|e| {
+                    CoreError::from(MlsErrorKind::Other(format!(
+                        "mls: propose external psk: {e:?}"
+                    )))
+                })?;
         }
 
         let signer = load_signer(&self.provider, &own_public_key(&self.inner)?)?;
@@ -105,21 +110,27 @@ impl Group {
                 &signer,
                 &[invitee_kp.as_openmls().clone()],
             )
-            .map_err(|e| CoreError::Mls(format!("mls: add_members: {e:?}")))?;
+            .map_err(|e| {
+                CoreError::from(MlsErrorKind::Other(format!("mls: add_members: {e:?}")))
+            })?;
 
         // Merge the staged Commit *before* shipping — 2-member has no
         // conflicting proposal source. Phase 2's PendingCommit state
         // removes this eager-merge.
         self.inner
             .merge_pending_commit(self.provider.as_openmls())
-            .map_err(|e| CoreError::Mls(format!("mls: merge_pending_commit: {e:?}")))?;
+            .map_err(|e| {
+                CoreError::from(MlsErrorKind::Other(format!(
+                    "mls: merge_pending_commit: {e:?}"
+                )))
+            })?;
 
-        let welcome_bytes = welcome_out
-            .tls_serialize_detached()
-            .map_err(|e| CoreError::Mls(format!("mls: welcome serialize: {e}")))?;
-        let commit_bytes = commit_out
-            .tls_serialize_detached()
-            .map_err(|e| CoreError::Mls(format!("mls: commit serialize: {e}")))?;
+        let welcome_bytes = welcome_out.tls_serialize_detached().map_err(|e| {
+            CoreError::from(MlsErrorKind::Other(format!("mls: welcome serialize: {e}")))
+        })?;
+        let commit_bytes = commit_out.tls_serialize_detached().map_err(|e| {
+            CoreError::from(MlsErrorKind::Other(format!("mls: commit serialize: {e}")))
+        })?;
 
         self.state = GroupState::Active {
             epoch: self.inner.epoch().as_u64(),
@@ -145,11 +156,14 @@ impl Group {
             register_external_psk(&provider, psk_bytes)?;
         }
 
-        let welcome_msg = MlsMessageIn::tls_deserialize_exact(welcome)
-            .map_err(|e| CoreError::Mls(format!("mls: welcome deserialize: {e}")))?;
+        let welcome_msg = MlsMessageIn::tls_deserialize_exact(welcome).map_err(|e| {
+            CoreError::from(MlsErrorKind::Other(format!(
+                "mls: welcome deserialize: {e}"
+            )))
+        })?;
         let welcome_inner = match welcome_msg.extract() {
             MlsMessageBodyIn::Welcome(w) => w,
-            _ => return Err(CoreError::Mls("mls: welcome: wrong message type".into())),
+            _ => return Err(MlsErrorKind::Other("mls: welcome: wrong message type".into()).into()),
         };
 
         // Note: welcome_inner.ciphersuite() is pub(crate) in openmls 0.8.1 and
@@ -166,11 +180,15 @@ impl Group {
             welcome_inner,
             None,
         )
-        .map_err(|e| CoreError::Mls(format!("mls: welcome process: {e:?}")))?;
+        .map_err(|e| {
+            CoreError::from(MlsErrorKind::Other(format!("mls: welcome process: {e:?}")))
+        })?;
 
-        let inner = staged
-            .into_group(provider.as_openmls())
-            .map_err(|e| CoreError::Mls(format!("mls: welcome into_group: {e:?}")))?;
+        let inner = staged.into_group(provider.as_openmls()).map_err(|e| {
+            CoreError::from(MlsErrorKind::Other(format!(
+                "mls: welcome into_group: {e:?}"
+            )))
+        })?;
 
         let gid = GroupId(inner.group_id().to_vec());
         let epoch = inner.epoch().as_u64();
@@ -185,10 +203,11 @@ impl Group {
     /// Encrypt `envelope` as an MLS application message. Returns TLS-encoded ciphertext.
     pub fn encrypt(&mut self, envelope: &Envelope) -> Result<Vec<u8>> {
         if !self.state.can_send() {
-            return Err(CoreError::Mls(format!(
+            return Err(MlsErrorKind::Other(format!(
                 "mls: encrypt: invalid state {:?}",
                 self.state
-            )));
+            ))
+            .into());
         }
 
         let signer = load_signer(&self.provider, &own_public_key(&self.inner)?)?;
@@ -197,53 +216,64 @@ impl Group {
         let out = self
             .inner
             .create_message(self.provider.as_openmls(), &signer, &plaintext)
-            .map_err(|e| CoreError::Mls(format!("mls: encrypt: {e:?}")))?;
+            .map_err(|e| CoreError::from(MlsErrorKind::Other(format!("mls: encrypt: {e:?}"))))?;
 
-        out.tls_serialize_detached()
-            .map_err(|e| CoreError::Mls(format!("mls: encrypt: serialize: {e}")))
+        out.tls_serialize_detached().map_err(|e| {
+            CoreError::from(MlsErrorKind::Other(format!("mls: encrypt: serialize: {e}")))
+        })
     }
 
     /// Decrypt a TLS-encoded MLS application message. Returns the decoded `Envelope`.
     pub fn decrypt(&mut self, ciphertext: &[u8]) -> Result<Envelope> {
         if !self.state.can_send() {
-            return Err(CoreError::Mls(format!(
+            return Err(MlsErrorKind::Other(format!(
                 "mls: decrypt: invalid state {:?}",
                 self.state
-            )));
+            ))
+            .into());
         }
 
-        let msg_in = MlsMessageIn::tls_deserialize_exact(ciphertext)
-            .map_err(|e| CoreError::Mls(format!("mls: decrypt: deserialize: {e}")))?;
+        let msg_in = MlsMessageIn::tls_deserialize_exact(ciphertext).map_err(|e| {
+            CoreError::from(MlsErrorKind::Other(format!(
+                "mls: decrypt: deserialize: {e}"
+            )))
+        })?;
         let protocol_message: ProtocolMessage = match msg_in.extract() {
             MlsMessageBodyIn::PrivateMessage(pm) => pm.into(),
             MlsMessageBodyIn::PublicMessage(pm) => pm.into(),
             _ => {
-                return Err(CoreError::Mls(
-                    "mls: decrypt: unsupported message type".into(),
-                ))
+                return Err(
+                    MlsErrorKind::Other("mls: decrypt: unsupported message type".into()).into(),
+                )
             }
         };
 
         let processed = self
             .inner
             .process_message(self.provider.as_openmls(), protocol_message)
-            .map_err(|e| CoreError::Mls(format!("mls: authentication failed: {e:?}")))?;
+            .map_err(|e| {
+                CoreError::from(MlsErrorKind::Other(format!(
+                    "mls: authentication failed: {e:?}"
+                )))
+            })?;
 
         let plaintext_bytes = match processed.into_content() {
             ProcessedMessageContent::ApplicationMessage(app) => app.into_bytes(),
             ProcessedMessageContent::StagedCommitMessage(_) => {
-                return Err(CoreError::Mls(
+                return Err(MlsErrorKind::Other(
                     "mls: decrypt: received Commit on encrypt path — route to process_incoming_commit"
                         .into(),
-                ));
+                )
+                .into());
             }
             ProcessedMessageContent::ProposalMessage(_) => {
-                return Err(CoreError::Mls("mls: decrypt: received Proposal".into()));
+                return Err(MlsErrorKind::Other("mls: decrypt: received Proposal".into()).into());
             }
             ProcessedMessageContent::ExternalJoinProposalMessage(_) => {
-                return Err(CoreError::Mls(
+                return Err(MlsErrorKind::Other(
                     "mls: decrypt: received ExternalJoinProposal".into(),
-                ));
+                )
+                .into());
             }
         };
 
@@ -252,46 +282,58 @@ impl Group {
 
     /// Process a TLS-encoded Commit message from the peer and merge it.
     pub fn process_incoming_commit(&mut self, commit: &[u8]) -> Result<()> {
-        let msg_in = MlsMessageIn::tls_deserialize_exact(commit)
-            .map_err(|e| CoreError::Mls(format!("mls: process_commit: deserialize: {e}")))?;
+        let msg_in = MlsMessageIn::tls_deserialize_exact(commit).map_err(|e| {
+            CoreError::from(MlsErrorKind::Other(format!(
+                "mls: process_commit: deserialize: {e}"
+            )))
+        })?;
         let protocol_message: ProtocolMessage = match msg_in.extract() {
             MlsMessageBodyIn::PublicMessage(pm) => pm.into(),
             MlsMessageBodyIn::PrivateMessage(pm) => pm.into(),
             _ => {
-                return Err(CoreError::Mls(
-                    "mls: process_commit: wrong message type".into(),
-                ));
+                return Err(
+                    MlsErrorKind::Other("mls: process_commit: wrong message type".into()).into(),
+                );
             }
         };
 
         let processed = self
             .inner
             .process_message(self.provider.as_openmls(), protocol_message)
-            .map_err(|e| CoreError::Mls(format!("mls: authentication failed: {e:?}")))?;
+            .map_err(|e| {
+                CoreError::from(MlsErrorKind::Other(format!(
+                    "mls: authentication failed: {e:?}"
+                )))
+            })?;
 
         match processed.into_content() {
             ProcessedMessageContent::StagedCommitMessage(staged) => {
                 self.inner
                     .merge_staged_commit(self.provider.as_openmls(), *staged)
-                    .map_err(|e| CoreError::Mls(format!("mls: merge_staged_commit: {e:?}")))?;
+                    .map_err(|e| {
+                        CoreError::from(MlsErrorKind::Other(format!(
+                            "mls: merge_staged_commit: {e:?}"
+                        )))
+                    })?;
                 self.state = GroupState::Active {
                     epoch: self.inner.epoch().as_u64(),
                 };
                 Ok(())
             }
-            _ => Err(CoreError::Mls(
-                "mls: process_commit: not a Commit message".into(),
-            )),
+            _ => {
+                Err(MlsErrorKind::Other("mls: process_commit: not a Commit message".into()).into())
+            }
         }
     }
 
     /// Ratchet our leaf key via a self-update Commit (PCS). Returns the TLS-encoded Commit.
     pub fn advance_epoch(&mut self) -> Result<Vec<u8>> {
         if !self.state.can_send() {
-            return Err(CoreError::Mls(format!(
+            return Err(MlsErrorKind::Other(format!(
                 "mls: advance_epoch: invalid state {:?}",
                 self.state
-            )));
+            ))
+            .into());
         }
 
         let signer = load_signer(&self.provider, &own_public_key(&self.inner)?)?;
@@ -302,17 +344,25 @@ impl Group {
                 &signer,
                 LeafNodeParameters::default(),
             )
-            .map_err(|e| CoreError::Mls(format!("mls: self_update: {e:?}")))?;
+            .map_err(|e| {
+                CoreError::from(MlsErrorKind::Other(format!("mls: self_update: {e:?}")))
+            })?;
 
         let (commit_out, _welcome_opt, _group_info_opt) = bundle.into_messages();
 
         self.inner
             .merge_pending_commit(self.provider.as_openmls())
-            .map_err(|e| CoreError::Mls(format!("mls: merge_pending_commit: {e:?}")))?;
+            .map_err(|e| {
+                CoreError::from(MlsErrorKind::Other(format!(
+                    "mls: merge_pending_commit: {e:?}"
+                )))
+            })?;
 
-        let bytes = commit_out
-            .tls_serialize_detached()
-            .map_err(|e| CoreError::Mls(format!("mls: advance_epoch: serialize: {e}")))?;
+        let bytes = commit_out.tls_serialize_detached().map_err(|e| {
+            CoreError::from(MlsErrorKind::Other(format!(
+                "mls: advance_epoch: serialize: {e}"
+            )))
+        })?;
         self.state = GroupState::Active {
             epoch: self.inner.epoch().as_u64(),
         };
@@ -349,8 +399,8 @@ impl Group {
         let provider = MlsProvider::load(&blob)?;
         let openmls_gid = openmls::prelude::GroupId::from_slice(&group_id.0);
         let inner = openmls::group::MlsGroup::load(provider.as_openmls().storage(), &openmls_gid)
-            .map_err(|e| CoreError::Mls(format!("mls: load: {e:?}")))?
-            .ok_or_else(|| CoreError::Mls("mls: load: corrupt state blob".into()))?;
+            .map_err(|e| CoreError::from(MlsErrorKind::Other(format!("mls: load: {e:?}"))))?
+            .ok_or_else(|| CoreError::from(MlsErrorKind::GroupCorrupt))?;
 
         Ok(Some(Self {
             id: group_id.clone(),
@@ -394,14 +444,20 @@ fn load_signer(
         public_key,
         openmls::prelude::SignatureScheme::ED25519,
     )
-    .ok_or_else(|| CoreError::Mls("mls: load_signer: missing signer".into()))
+    .ok_or_else(|| {
+        CoreError::from(MlsErrorKind::Other(
+            "mls: load_signer: missing signer".into(),
+        ))
+    })
 }
 
 /// Extract our own signature public key from the group.
 fn own_public_key(group: &openmls::group::MlsGroup) -> Result<Vec<u8>> {
-    let own_leaf = group
-        .own_leaf_node()
-        .ok_or_else(|| CoreError::Mls("mls: own_public_key: no own leaf".into()))?;
+    let own_leaf = group.own_leaf_node().ok_or_else(|| {
+        CoreError::from(MlsErrorKind::Other(
+            "mls: own_public_key: no own leaf".into(),
+        ))
+    })?;
     Ok(own_leaf.signature_key().as_slice().to_vec())
 }
 
@@ -419,7 +475,7 @@ fn register_external_psk(provider: &MlsProvider, psk: &[u8; 32]) -> Result<PreSh
     let psk_id = PreSharedKeyId::external(PSK_ID_BYTES.to_vec(), vec![0u8; 32]);
     psk_id
         .store(provider.as_openmls(), psk)
-        .map_err(|e| CoreError::Mls(format!("mls: psk register: {e:?}")))?;
+        .map_err(|e| CoreError::from(MlsErrorKind::Other(format!("mls: psk register: {e:?}"))))?;
     Ok(psk_id)
 }
 
@@ -478,7 +534,8 @@ mod tests {
             Err(e) => e,
         };
         match err {
-            CoreError::Mls(s) => assert!(s.starts_with("mls: load") || s.starts_with("mls:")),
+            CoreError::Mls(MlsErrorKind::GroupCorrupt) | CoreError::Mls(MlsErrorKind::Other(_)) => {
+            }
             other => panic!("expected CoreError::Mls, got {other:?}"),
         }
     }
@@ -594,7 +651,7 @@ mod tests {
             Err(e) => e,
         };
         match err {
-            CoreError::Mls(s) => {
+            CoreError::Mls(MlsErrorKind::Other(s)) => {
                 assert!(
                     s.contains("external PSK mismatch")
                         || s.contains("authentication")
@@ -602,7 +659,7 @@ mod tests {
                     "unexpected message: {s}"
                 );
             }
-            other => panic!("expected CoreError::Mls, got {other:?}"),
+            other => panic!("expected CoreError::Mls(Other(_)), got {other:?}"),
         }
     }
 
@@ -655,8 +712,10 @@ mod tests {
             Err(e) => e,
         };
         match err {
-            CoreError::Mls(s) => assert!(s.contains("already 2-member"), "got: {s}"),
-            other => panic!("expected CoreError::Mls, got {other:?}"),
+            CoreError::Mls(MlsErrorKind::Other(s)) => {
+                assert!(s.contains("already 2-member"), "got: {s}")
+            }
+            other => panic!("expected CoreError::Mls(Other(_)), got {other:?}"),
         }
     }
 
@@ -674,8 +733,10 @@ mod tests {
             Err(e) => e,
         };
         match err {
-            CoreError::Mls(s) => assert!(s.starts_with("mls: encrypt: invalid state")),
-            other => panic!("expected CoreError::Mls, got {other:?}"),
+            CoreError::Mls(MlsErrorKind::Other(s)) => {
+                assert!(s.starts_with("mls: encrypt: invalid state"))
+            }
+            other => panic!("expected CoreError::Mls(Other(_)), got {other:?}"),
         }
     }
 
@@ -690,8 +751,10 @@ mod tests {
             Err(e) => e,
         };
         match err {
-            CoreError::Mls(s) => assert!(s.starts_with("mls: advance_epoch: invalid state")),
-            other => panic!("expected CoreError::Mls, got {other:?}"),
+            CoreError::Mls(MlsErrorKind::Other(s)) => {
+                assert!(s.starts_with("mls: advance_epoch: invalid state"))
+            }
+            other => panic!("expected CoreError::Mls(Other(_)), got {other:?}"),
         }
     }
 

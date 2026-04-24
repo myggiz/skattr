@@ -28,7 +28,7 @@ use crate::delivery::receiver::{receive_in_tx, ReceiveOutcome};
 use crate::envelope::MessageId;
 use crate::error::{CoreError, Result};
 use crate::identity::PublicKey;
-use crate::mls::{Group, GroupId};
+use crate::mls::{Group, GroupId, MlsErrorKind};
 use crate::storage::seen_messages::SeenMessagesRepo;
 use crate::storage::{ContactRepo, MessageRepo, MlsGroupRepo, Pool};
 
@@ -54,7 +54,11 @@ impl DaemonInbound {
         let group_id = contact_repo
             .get_group_id(&from)?
             .filter(|b| !b.is_empty())
-            .ok_or_else(|| CoreError::Mls("mls: inbound: no group for peer".into()))?;
+            .ok_or_else(|| {
+                CoreError::from(MlsErrorKind::Other(
+                    "mls: inbound: no group for peer".into(),
+                ))
+            })?;
         self.dispatch_for_group(from, &group_id, ciphertext)
     }
 
@@ -71,8 +75,9 @@ impl DaemonInbound {
     ) -> Result<MessageId> {
         let group_repo = MlsGroupRepo::new(&self.pool);
         let gid = GroupId(group_id.to_vec());
-        let mut group = Group::load(&gid, &group_repo)?
-            .ok_or_else(|| CoreError::Mls("mls: inbound: unknown group_id".into()))?;
+        let mut group = Group::load(&gid, &group_repo)?.ok_or_else(|| {
+            CoreError::from(MlsErrorKind::Other("mls: inbound: unknown group_id".into()))
+        })?;
 
         let envelope = group.decrypt(ciphertext)?;
 
