@@ -20,6 +20,8 @@ mod cli_real_tor;
 #[cfg(test)]
 mod cli_search;
 #[cfg(test)]
+mod cli_tail_follow;
+#[cfg(test)]
 mod cli_two_daemons;
 #[cfg(test)]
 mod delivery_kill_mid_message;
