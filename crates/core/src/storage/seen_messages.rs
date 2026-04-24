@@ -27,22 +27,43 @@ impl<'p> SeenMessagesRepo<'p> {
         Self { pool }
     }
 
+    /// Mark a message as seen inside the caller's transaction. Returns
+    /// `true` if this is new (insert succeeded) or `false` if we've
+    /// already seen it (PRIMARY KEY conflict). Use this when the seen-row
+    /// must commit atomically with other rows (e.g. MLS snapshot +
+    /// messages insert in one transaction).
+    pub(crate) fn insert_in_tx(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        sender: &[u8],
+        message_id: &[u8],
+        seen_at: i64,
+    ) -> Result<bool> {
+        let changed = tx
+            .execute(
+                "INSERT OR IGNORE INTO seen_messages (sender, message_id, seen_at) \
+                 VALUES (?1, ?2, ?3)",
+                rusqlite::params![sender, message_id, seen_at],
+            )
+            .map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!("insert seen: {e}")))
+            })?;
+        Ok(changed > 0)
+    }
+
     /// Mark a message as seen. Returns `true` if this is new (insert
     /// succeeded) or `false` if we've already seen it (PRIMARY KEY
     /// conflict).
     pub fn insert(&self, sender: &[u8], message_id: &[u8], seen_at: i64) -> Result<bool> {
-        self.pool.with_mut(|c| {
-            let changed = c
-                .execute(
-                    "INSERT OR IGNORE INTO seen_messages (sender, message_id, seen_at) \
-                     VALUES (?1, ?2, ?3)",
-                    rusqlite::params![sender, message_id, seen_at],
-                )
-                .map_err(|e| {
-                    CoreError::Storage(StorageErrorKind::Other(format!("insert seen: {e}")))
-                })?;
-            Ok(changed > 0)
-        })
+        self.pool
+            .transaction(|tx| self.insert_in_tx(tx, sender, message_id, seen_at))
+    }
+
+    /// Borrow the underlying pool. Used by `delivery::receiver::receive`
+    /// to open a transaction that wraps both the seen-messages insert and
+    /// the messages insert atomically.
+    pub(crate) fn pool(&self) -> &Pool {
+        self.pool
     }
 
     /// Has this (sender, message_id) been seen?

@@ -24,7 +24,7 @@ use tokio::sync::broadcast;
 use crate::daemon::commands::{Direction, MessageRecord};
 use crate::daemon::events::Event;
 use crate::delivery::peer::InboundDispatch;
-use crate::delivery::receiver::{receive, ReceiveOutcome};
+use crate::delivery::receiver::{receive_in_tx, ReceiveOutcome};
 use crate::envelope::MessageId;
 use crate::error::{CoreError, Result};
 use crate::identity::PublicKey;
@@ -75,32 +75,42 @@ impl DaemonInbound {
             .ok_or_else(|| CoreError::Mls("mls: inbound: unknown group_id".into()))?;
 
         let envelope = group.decrypt(ciphertext)?;
-        group.save(&group_repo)?;
 
         // MLS generation is captured *after* decrypt so the broadcast
         // event reflects the epoch under which this message was
         // authenticated. Likewise `ts_daemon_recv` is the local clock at
         // the moment we successfully decoded the payload.
-        let msg_id = envelope.id; // capture before receive() consumes envelope
+        let msg_id = envelope.id; // capture before receive_in_tx() consumes envelope
         let mls_generation = group.epoch();
         let ts_daemon_recv = now_unix_seconds();
-        // `receive()` uses milliseconds for the ±1h replay window check;
-        // see `delivery::receiver::receive` docs.
+        // `receive_in_tx()` uses milliseconds for the ±1h replay window
+        // check; see `delivery::receiver::receive` docs.
         let now_ms = ts_daemon_recv.saturating_mul(1000);
 
         let msg_repo = MessageRepo::new(&self.pool);
         let seen_repo = SeenMessagesRepo::new(&self.pool);
 
-        let outcome = receive(
-            &from,
-            group_id,
-            envelope,
-            now_ms,
-            mls_generation,
-            ts_daemon_recv,
-            &seen_repo,
-            &msg_repo,
-        )?;
+        // Wrap MLS ratchet save + seen_messages insert + messages insert
+        // in one atomic transaction. If receive_in_tx fails after
+        // save_in_tx, the entire tx rolls back — the ratchet does not
+        // advance on disk without a corresponding history row.
+        //
+        // Event broadcast stays OUTSIDE this block; a failed subscriber
+        // must not roll back the persisted message.
+        let outcome = self.pool.transaction(|tx| {
+            group.save_in_tx(&group_repo, tx)?;
+            receive_in_tx(
+                tx,
+                &from,
+                group_id,
+                envelope,
+                now_ms,
+                mls_generation,
+                ts_daemon_recv,
+                &seen_repo,
+                &msg_repo,
+            )
+        })?;
 
         match &outcome {
             ReceiveOutcome::New {
@@ -406,5 +416,89 @@ mod tests {
         // The InboundDispatch impl must return None (not panic).
         let mid = InboundDispatch::dispatch(&inbound, peer, garbage_ct);
         assert!(mid.is_none());
+    }
+
+    /// Rollback test: when `receive_in_tx` rejects the envelope (ts outside
+    /// ±1h replay window), the wrapping transaction rolls back and the MLS
+    /// ratchet epoch on disk must NOT advance.
+    ///
+    /// This exercises the atomicity guarantee introduced in Task 9: before
+    /// this change, `group.save` committed before `receive()` ran, leaving
+    /// the ratchet ahead of the history table on rejection. Now both writes
+    /// are in one transaction and roll back together.
+    #[tokio::test]
+    async fn dispatch_for_group_rollback_leaves_group_epoch_unchanged() {
+        use crate::mls::key_package::KeyPackage;
+        use crate::storage::key_packages::KeyPackageRepo;
+
+        let pool = Arc::new(Pool::in_memory());
+        let (events_tx, _rx) = broadcast::channel::<Event>(16);
+
+        // Identities.
+        let alice_seed = crate::identity::Seed::generate().unwrap();
+        let alice_id = crate::identity::IdentityKey::from_seed(&alice_seed).unwrap();
+        let bob_seed = crate::identity::Seed::generate().unwrap();
+        let bob_id = crate::identity::IdentityKey::from_seed(&bob_seed).unwrap();
+        let peer = bob_id.public();
+
+        // Build 2-member group.
+        let bob_provider = MlsProvider::new();
+        let kp_repo = KeyPackageRepo::new(&pool);
+        let bob_kp = KeyPackage::generate(&bob_id, &bob_provider, &kp_repo).unwrap();
+        let mut alice_group =
+            crate::mls::Group::create_solo(&alice_id, None, MlsProvider::new()).unwrap();
+        let (welcome, _commit) = alice_group.add_member(&bob_kp, None).unwrap();
+        let group_id_bytes = alice_group.id().0.clone();
+        let mut bob_group =
+            crate::mls::Group::join_from_welcome(&bob_id, &welcome, None, bob_provider).unwrap();
+
+        // Bob encrypts an envelope with a ts that is 10 hours in the past —
+        // far outside the ±1h replay window. `dispatch_for_group` must
+        // reject it and roll back.
+        let stale_ts_ms: i64 = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0),
+        )
+        .unwrap_or(0)
+            - 10 * 3600 * 1000; // 10 hours ago
+
+        let env = crate::envelope::Envelope {
+            v: 1,
+            id: MessageId::generate(),
+            ts: stale_ts_ms,
+            reply_to: None,
+            kind: Kind::Text {
+                body: "stale".into(),
+            },
+        };
+        let ciphertext = bob_group.encrypt(&env).unwrap();
+
+        // Persist alice's initial group state and capture the pre-dispatch epoch.
+        let group_repo = MlsGroupRepo::new(&pool);
+        alice_group.save(&group_repo).unwrap();
+        let epoch_before = alice_group.epoch();
+
+        let inbound = DaemonInbound::new(pool.clone(), events_tx);
+
+        // dispatch_for_group must return Err (rejected envelope).
+        let result = inbound.dispatch_for_group(peer, &group_id_bytes, &ciphertext);
+        assert!(
+            result.is_err(),
+            "expected Err for stale-ts envelope, got Ok"
+        );
+
+        // The transaction must have rolled back: reload alice's group from
+        // disk and assert the epoch is unchanged (ratchet did not advance).
+        let gid = crate::mls::GroupId(group_id_bytes.clone());
+        let reloaded = crate::mls::Group::load(&gid, &group_repo)
+            .unwrap()
+            .expect("alice's group must still exist on disk after rollback");
+        assert_eq!(
+            reloaded.epoch(),
+            epoch_before,
+            "group epoch must not advance when dispatch_for_group rolls back"
+        );
     }
 }

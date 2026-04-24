@@ -49,6 +49,58 @@ pub enum ReceiveOutcome {
     Rejected(String),
 }
 
+/// Ingest one decrypted envelope from `sender` into storage, inside
+/// the caller's transaction.
+///
+/// This is the transactional core of `receive`: it writes to
+/// `seen_messages` and `messages` using the provided `tx` without
+/// opening a new pool transaction. Use this when the seen-row and
+/// message row must commit atomically with other operations (e.g.
+/// MLS snapshot via `Group::save_in_tx`).
+///
+/// Parameters are the same as [`receive`]; see that function for docs.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn receive_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    sender: &PublicKey,
+    group_id: &[u8],
+    envelope: Envelope,
+    now_ms: i64,
+    mls_generation: u64,
+    ts_daemon_recv: i64,
+    seen: &SeenMessagesRepo<'_>,
+    messages: &MessageRepo<'_>,
+) -> Result<ReceiveOutcome> {
+    if envelope.ts.saturating_sub(now_ms).saturating_abs() > REPLAY_WINDOW_MS {
+        return Ok(ReceiveOutcome::Rejected(format!(
+            "ts outside ±1h window: envelope ts={}, now={}",
+            envelope.ts, now_ms
+        )));
+    }
+    let is_new = seen.insert_in_tx(tx, &sender.0, &envelope.id.0, now_ms)?;
+    if !is_new {
+        return Ok(ReceiveOutcome::Duplicate);
+    }
+    let row_id = messages.insert_in_tx(
+        tx,
+        crate::storage::messages::InsertParams {
+            group_id,
+            sender: &sender.0,
+            envelope: &envelope,
+            mls_generation,
+            ts_daemon_recv,
+        },
+    )?;
+    Ok(ReceiveOutcome::New {
+        envelope,
+        row_id,
+        sender: *sender,
+        group_id: group_id.to_vec(),
+        mls_generation,
+        ts_daemon_recv,
+    })
+}
+
 /// Ingest one decrypted envelope from `sender` into storage.
 ///
 /// Does not perform MLS decryption — callers have already run
@@ -76,30 +128,18 @@ pub fn receive(
     seen: &SeenMessagesRepo<'_>,
     messages: &MessageRepo<'_>,
 ) -> Result<ReceiveOutcome> {
-    if envelope.ts.saturating_sub(now_ms).saturating_abs() > REPLAY_WINDOW_MS {
-        return Ok(ReceiveOutcome::Rejected(format!(
-            "ts outside ±1h window: envelope ts={}, now={}",
-            envelope.ts, now_ms
-        )));
-    }
-    let is_new = seen.insert(&sender.0, &envelope.id.0, now_ms)?;
-    if !is_new {
-        return Ok(ReceiveOutcome::Duplicate);
-    }
-    let row_id = messages.insert(crate::storage::messages::InsertParams {
-        group_id,
-        sender: &sender.0,
-        envelope: &envelope,
-        mls_generation,
-        ts_daemon_recv,
-    })?;
-    Ok(ReceiveOutcome::New {
-        envelope,
-        row_id,
-        sender: *sender,
-        group_id: group_id.to_vec(),
-        mls_generation,
-        ts_daemon_recv,
+    seen.pool().transaction(|tx| {
+        receive_in_tx(
+            tx,
+            sender,
+            group_id,
+            envelope,
+            now_ms,
+            mls_generation,
+            ts_daemon_recv,
+            seen,
+            messages,
+        )
     })
 }
 
