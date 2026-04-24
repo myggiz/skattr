@@ -48,8 +48,11 @@ where
             offset,
             newest_first,
         } => search_messages(&handle, query, contact, limit, offset, newest_first).await,
-        // Remaining Phase 1.G handlers land in Tasks 18–20.
-        Command::MarkRead { .. } => Err(IpcError::UnknownCommand),
+        Command::MarkRead {
+            contact,
+            up_to_message_id,
+        } => mark_read(&handle, contact, up_to_message_id).await,
+        // Remaining Phase 1.G handlers land in Tasks 19–20.
         Command::PruneHistory { .. } => Err(IpcError::UnknownCommand),
         Command::ExportHistory { .. } => Err(IpcError::UnknownCommand),
     }
@@ -451,6 +454,34 @@ where
         .collect();
 
     Ok(CommandResult::SearchResults(records))
+}
+
+async fn mark_read<S>(
+    handle: &Arc<DaemonHandle<S>>,
+    contact: crate::identity::PublicKey,
+    up_to_message_id: i64,
+) -> std::result::Result<CommandResult, IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    use crate::daemon::error_kind::DaemonErrorKind;
+    use crate::storage::{ContactRepo, MessageRepo};
+
+    let group_id_bytes = match ContactRepo::new(&handle.pool)
+        .get_group_id(&contact)
+        .map_err(map_err)?
+    {
+        Some(bytes) if !bytes.is_empty() => bytes,
+        _ => return Err(IpcError::Daemon(DaemonErrorKind::ContactNotFound)),
+    };
+
+    MessageRepo::new(&handle.pool)
+        .mark_read(&group_id_bytes, up_to_message_id)
+        .map_err(map_err)?;
+
+    Ok(CommandResult::MarkedRead {
+        up_to: up_to_message_id,
+    })
 }
 
 /// Map any `CoreError` to an `IpcError`. Projects via `CoreError::kind`
@@ -1088,6 +1119,80 @@ mod tests {
                 limit: 10,
                 offset: 0,
                 newest_first: false,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            IpcError::Daemon(crate::daemon::error_kind::DaemonErrorKind::ContactNotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn mark_read_advances_cursor() {
+        let handle = test_handle();
+        let alice = crate::identity::PublicKey([0x77; 32]);
+        let gid = [0x88u8; 32];
+
+        let cr = ContactRepo::new(&handle.pool);
+        cr.upsert(&crate::contact::Contact {
+            identity: alice,
+            display_name: None,
+            added_at: 0,
+            card: None,
+        })
+        .unwrap();
+        cr.set_group_id(&alice, &gid).unwrap();
+
+        // Insert a message so the mark_read has an id to point at.
+        let msgs = crate::storage::MessageRepo::new(&handle.pool);
+        let env = crate::envelope::Envelope {
+            v: 1,
+            id: crate::envelope::MessageId::generate(),
+            ts: 1_700_000_000,
+            reply_to: None,
+            kind: crate::envelope::Kind::Text { body: "hi".into() },
+        };
+        let row_id = msgs
+            .insert(crate::storage::messages::InsertParams {
+                group_id: &gid,
+                sender: &alice.0,
+                envelope: &env,
+                mls_generation: 1,
+                ts_daemon_recv: 1_700_000_000,
+            })
+            .unwrap();
+
+        let result = execute_command(
+            handle.clone(),
+            Command::MarkRead {
+                contact: alice,
+                up_to_message_id: row_id,
+            },
+        )
+        .await
+        .unwrap();
+        match result {
+            CommandResult::MarkedRead { up_to } => assert_eq!(up_to, row_id),
+            other => panic!("expected MarkedRead, got {other:?}"),
+        }
+
+        let cur = crate::storage::ReadStateRepo::new(&handle.pool)
+            .get(&gid)
+            .unwrap();
+        assert_eq!(cur, Some(row_id));
+    }
+
+    #[tokio::test]
+    async fn mark_read_unknown_contact_returns_contact_not_found() {
+        let handle = test_handle();
+        let unknown = crate::identity::PublicKey([0xEE; 32]);
+        let err = execute_command(
+            handle,
+            Command::MarkRead {
+                contact: unknown,
+                up_to_message_id: 42,
             },
         )
         .await
