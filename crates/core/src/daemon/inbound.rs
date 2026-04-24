@@ -131,9 +131,19 @@ impl DaemonInbound {
             ReceiveOutcome::Duplicate => {
                 // Already seen; no event. Still ACK via the returned
                 // `msg_id` so the sender stops retrying (1.E idempotency).
+                tracing::debug!(
+                    peer = ?from,
+                    msg_id = ?msg_id,
+                    "inbound: duplicate, acking without event",
+                );
             }
             ReceiveOutcome::Rejected(reason) => {
-                return Err(CoreError::Mls(format!("inbound: rejected: {reason}")));
+                tracing::warn!(
+                    peer = ?from,
+                    reason = %reason,
+                    "inbound: rejected by receiver (replay window or dedup)",
+                );
+                return Err(CoreError::Delivery(format!("inbound: rejected: {reason}")));
             }
         }
 
