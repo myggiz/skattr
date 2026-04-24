@@ -135,6 +135,18 @@ enum Command {
         #[arg(long)]
         output: std::path::PathBuf,
     },
+    /// Delete history rows. Pass exactly one of --before or --keep-last.
+    Prune {
+        /// Limit to one contact (name or hex prefix).
+        #[arg(long)]
+        contact: Option<String>,
+        /// Delete rows older than this RFC3339 timestamp.
+        #[arg(long)]
+        before: Option<String>,
+        /// Keep only the N newest rows in the contact's group.
+        #[arg(long)]
+        keep_last: Option<u64>,
+    },
     /// Full-text search over message history.
     Search {
         /// Query — free-form, tokenize-and-AND on the daemon side.
@@ -315,6 +327,11 @@ async fn main() -> Result<()> {
             format,
             output,
         } => export(&contact, format, output, socket.as_deref()).await,
+        Command::Prune {
+            contact,
+            before,
+            keep_last,
+        } => prune(contact.as_deref(), before, keep_last, socket.as_deref()).await,
     }
 }
 
@@ -1268,6 +1285,72 @@ async fn export(
     Ok(())
 }
 
+fn parse_rfc3339_to_unix(s: &str) -> anyhow::Result<i64> {
+    use time::format_description::well_known::Rfc3339;
+    use time::OffsetDateTime;
+    let odt = OffsetDateTime::parse(s, &Rfc3339)
+        .map_err(|e| anyhow::anyhow!("invalid RFC3339 timestamp: {e}"))?;
+    Ok(odt.unix_timestamp())
+}
+
+async fn prune(
+    contact: Option<&str>,
+    before: Option<String>,
+    keep_last: Option<u64>,
+    sock_flag: Option<&std::path::Path>,
+) -> Result<()> {
+    use skattr_core::daemon::commands::CommandResult;
+    use skattr_core::daemon::Command as CoreCommand;
+
+    if before.is_some() == keep_last.is_some() {
+        anyhow::bail!("exactly one of --before or --keep-last is required");
+    }
+
+    let mut client = connect_or_exit(sock_flag).await?;
+
+    // Resolve optional contact.
+    let resolved_pk = if let Some(prefix) = contact {
+        let rows_result = match client.execute(CoreCommand::ListContacts).await {
+            Ok(r) => r,
+            Err(e) => exit_on_ipc_error(e),
+        };
+        let rows = match rows_result {
+            CommandResult::Contacts(rows) => rows,
+            other => anyhow::bail!("unexpected daemon response: {other:?}"),
+        };
+        match resolve_contact(&rows, prefix) {
+            Ok(pk) => Some(pk),
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(6);
+            }
+        }
+    } else {
+        None
+    };
+
+    let before_ts_recv = before.map(|s| parse_rfc3339_to_unix(&s)).transpose()?;
+
+    let resp = match client
+        .execute(CoreCommand::PruneHistory {
+            contact: resolved_pk,
+            before_ts_recv,
+            keep_last,
+        })
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => exit_on_ipc_error(e),
+    };
+    match resp {
+        CommandResult::Pruned { rows_deleted } => {
+            println!("Deleted {rows_deleted} messages.");
+            Ok(())
+        }
+        other => anyhow::bail!("unexpected daemon response: {other:?}"),
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -1492,6 +1575,17 @@ mod tests {
         assert!(line.contains("hi"));
         // Must include the RFC3339 date part for ts_daemon_recv = 1_700_000_000 (2023-11-14T22:13:20Z).
         assert!(line.contains("2023-11-14"));
+    }
+
+    #[test]
+    fn parse_rfc3339_to_unix_seconds() {
+        let secs = parse_rfc3339_to_unix("2026-01-01T00:00:00Z").unwrap();
+        assert_eq!(secs, 1_767_225_600);
+    }
+
+    #[test]
+    fn parse_rfc3339_rejects_garbage() {
+        assert!(parse_rfc3339_to_unix("not a date").is_err());
     }
 
     #[test]
