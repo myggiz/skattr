@@ -56,9 +56,7 @@ fn alice_mints_invite_bob_parses_records_and_consumes() {
     assert!(
         matches!(
             err,
-            skattr_core::error::CoreError::Invite(
-                skattr_core::invite::InviteErrorKind::Expired
-            )
+            skattr_core::error::CoreError::Invite(skattr_core::invite::InviteErrorKind::Expired)
         ),
         "expected InviteErrorKind::Expired, got {err:?}"
     );
