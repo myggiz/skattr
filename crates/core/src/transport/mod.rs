@@ -15,11 +15,14 @@
 //!    the session manager.
 
 pub(crate) mod connection;
+mod error_kind;
 pub(crate) mod frame;
 pub(crate) mod hs_key;
 pub(crate) mod listener;
 pub(crate) mod noise;
 pub(crate) mod tor;
+
+pub(crate) use error_kind::TransportErrorKind;
 
 #[cfg(not(feature = "test-harness"))]
 pub(crate) use connection::AuthenticatedConnection;

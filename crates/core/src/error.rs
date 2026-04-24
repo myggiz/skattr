@@ -24,8 +24,8 @@ pub enum CoreError {
     Identity(String),
 
     /// Transport-layer problem (Tor, Noise).
-    #[error("transport: {0}")]
-    Transport(String),
+    #[error("{0}")]
+    Transport(#[from] crate::transport::TransportErrorKind),
 
     /// MLS protocol problem (ciphersuite, keystore, state machine).
     #[error("{0}")]
@@ -82,10 +82,9 @@ impl CoreError {
     /// the CLI can act on — the IPC layer turns those into
     /// `IpcError::Internal` and logs the full `CoreError` server-side.
     ///
-    /// Matching is structural where subsystems have typed error kinds
-    /// (`StorageErrorKind`, `ContactErrorKind`, `InviteErrorKind`).
-    /// Remaining subsystems still use free-form `String`s and are matched
-    /// via `str::contains` until Phase 1.H sweeps them.
+    /// Matching is a pure structural match over typed sub-enums for all six
+    /// subsystems (Storage, Contact, Invite, Mls, Delivery, Transport).
+    /// No `str::contains` is used — see Phase 1.H item #5.
     #[must_use]
     pub fn kind(&self) -> Option<crate::daemon::error_kind::DaemonErrorKind> {
         use crate::daemon::error_kind::DaemonErrorKind as K;
@@ -109,9 +108,10 @@ impl CoreError {
                 Some(K::DeliveryTimeout)
             }
             CoreError::Delivery(crate::delivery::DeliveryErrorKind::Other(_)) => None,
-            CoreError::Transport(s) if s.contains("not ready") || s.contains("bootstrap") => {
+            CoreError::Transport(crate::transport::TransportErrorKind::TorNotReady) => {
                 Some(K::TorNotReady)
             }
+            CoreError::Transport(crate::transport::TransportErrorKind::Other(_)) => None,
             CoreError::Storage(crate::storage::StorageErrorKind::FtsSyntax(_)) => {
                 Some(K::SearchSyntax)
             }
@@ -126,6 +126,7 @@ impl CoreError {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -233,5 +234,43 @@ mod tests {
     fn delivery_other_does_not_project() {
         let e = CoreError::Delivery(crate::delivery::DeliveryErrorKind::Other("nack".into()));
         assert_eq!(e.kind(), None);
+    }
+
+    #[test]
+    fn transport_tor_not_ready_projects_to_tor_not_ready() {
+        use crate::daemon::error_kind::DaemonErrorKind;
+        let e = CoreError::Transport(crate::transport::TransportErrorKind::TorNotReady);
+        assert!(matches!(e.kind(), Some(DaemonErrorKind::TorNotReady)));
+    }
+
+    #[test]
+    fn transport_other_does_not_project() {
+        let e = CoreError::Transport(crate::transport::TransportErrorKind::Other(
+            "connect refused".into(),
+        ));
+        assert_eq!(e.kind(), None);
+    }
+
+    #[test]
+    fn kind_has_no_string_matching() {
+        // Phase 1.H item #5: CoreError::kind() must not use str::contains.
+        // All subsystem errors project via typed sub-enum variants. If this
+        // test fails, someone re-introduced string matching — they should
+        // add a typed variant to the offending subsystem's *ErrorKind enum
+        // instead.
+        const SRC: &str = include_str!("error.rs");
+        let fn_start = SRC.find("pub fn kind").expect("kind() in source");
+        // Advance past the declaration line, then find the next `fn ` to
+        // delimit the body of kind() precisely — the test module follows it.
+        let after_decl = fn_start + "pub fn kind".len();
+        let next_fn = SRC[after_decl..]
+            .find("\n    fn ")
+            .map(|off| after_decl + off)
+            .unwrap_or(SRC.len());
+        let kind_body = &SRC[fn_start..next_fn];
+        assert!(
+            !kind_body.contains(".contains("),
+            "CoreError::kind() must not call str::contains — use typed sub-enums instead"
+        );
     }
 }

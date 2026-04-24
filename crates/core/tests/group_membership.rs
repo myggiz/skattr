@@ -7,5 +7,6 @@
 
 #[test]
 fn group_membership_stub_compiles() {
-    let _ = skattr_core::error::CoreError::Mls("noop".into());
+    // Stub: filled in during Phase 3.A.
+    let _: Option<skattr_core::error::CoreError> = None;
 }

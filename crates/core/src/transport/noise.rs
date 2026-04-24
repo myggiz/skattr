@@ -31,6 +31,7 @@ use crate::identity::derive::{hkdf_expand, INFO_TRANSPORT_BINDING_V1};
 use crate::identity::IdentityKey;
 use crate::transport::connection::AuthenticatedConnection;
 use crate::transport::frame::{Frame, FrameCodec};
+use crate::transport::TransportErrorKind;
 
 /// Base Noise pattern string (no PSK modifier).
 pub(crate) const NOISE_PATTERN: &str = "Noise_XK_25519_ChaChaPoly_BLAKE2s";
@@ -69,7 +70,7 @@ pub struct HandshakeOutcome {
 const NOISE_SCRATCH: usize = 65535;
 
 fn map_snow<E: std::fmt::Display>(kind: &str, e: E) -> CoreError {
-    CoreError::Transport(format!("handshake: {kind}: {e}"))
+    CoreError::Transport(TransportErrorKind::Other(format!("handshake: {kind}: {e}")))
 }
 
 /// Pick the Noise pattern name based on whether a PSK is in use.
@@ -141,15 +142,17 @@ where
     let frame = framed
         .next()
         .await
-        .ok_or_else(|| CoreError::Transport("handshake: stream closed".into()))?
+        .ok_or_else(|| {
+            CoreError::Transport(TransportErrorKind::Other("handshake: stream closed".into()))
+        })?
         .map_err(|e| map_snow("malformed", e))?;
     let msg2 = match frame {
         Frame::NoiseResp(p) => p,
         other => {
-            return Err(CoreError::Transport(format!(
+            return Err(CoreError::Transport(TransportErrorKind::Other(format!(
                 "handshake: malformed: unexpected frame type 0x{:02X}",
                 other.frame_type() as u8
-            )));
+            ))));
         }
     };
     let mut in_buf = vec![0u8; NOISE_SCRATCH];
@@ -184,15 +187,15 @@ where
         .await
         .map_err(|e| match e.kind() {
             std::io::ErrorKind::UnexpectedEof => {
-                CoreError::Transport("handshake: stream closed".into())
+                CoreError::Transport(TransportErrorKind::Other("handshake: stream closed".into()))
             }
             _ => map_snow("stream", e),
         })?;
     if ver[0] != PROTOCOL_VERSION {
-        return Err(CoreError::Transport(format!(
+        return Err(CoreError::Transport(TransportErrorKind::Other(format!(
             "handshake: unsupported version: {:#04x}",
             ver[0]
-        )));
+        ))));
     }
 
     let mut handshake = build_handshake(identity, None, invite_psk, false)?;
@@ -202,15 +205,17 @@ where
     let frame = framed
         .next()
         .await
-        .ok_or_else(|| CoreError::Transport("handshake: stream closed".into()))?
+        .ok_or_else(|| {
+            CoreError::Transport(TransportErrorKind::Other("handshake: stream closed".into()))
+        })?
         .map_err(|e| map_snow("malformed", e))?;
     let msg1 = match frame {
         Frame::NoiseInit(p) => p,
         other => {
-            return Err(CoreError::Transport(format!(
+            return Err(CoreError::Transport(TransportErrorKind::Other(format!(
                 "handshake: malformed: unexpected frame type 0x{:02X}",
                 other.frame_type() as u8
-            )));
+            ))));
         }
     };
     let mut in_buf = vec![0u8; NOISE_SCRATCH];
@@ -232,15 +237,17 @@ where
     let frame = framed
         .next()
         .await
-        .ok_or_else(|| CoreError::Transport("handshake: stream closed".into()))?
+        .ok_or_else(|| {
+            CoreError::Transport(TransportErrorKind::Other("handshake: stream closed".into()))
+        })?
         .map_err(|e| map_snow("malformed", e))?;
     let msg3 = match frame {
         Frame::NoiseInit(p) => p,
         other => {
-            return Err(CoreError::Transport(format!(
+            return Err(CoreError::Transport(TransportErrorKind::Other(format!(
                 "handshake: malformed: unexpected frame type 0x{:02X}",
                 other.frame_type() as u8
-            )));
+            ))));
         }
     };
     handshake
@@ -264,9 +271,11 @@ where
     // Peer's X25519 static public is what snow cached during msg3 (initiator)
     // or msg3 decryption (responder). Snow exposes it via
     // `get_remote_static`.
-    let peer_x25519_slice = handshake
-        .get_remote_static()
-        .ok_or_else(|| CoreError::Transport("handshake: builder: missing remote static".into()))?;
+    let peer_x25519_slice = handshake.get_remote_static().ok_or_else(|| {
+        CoreError::Transport(TransportErrorKind::Other(
+            "handshake: builder: missing remote static".into(),
+        ))
+    })?;
     let mut peer_x25519 = [0u8; 32];
     peer_x25519.copy_from_slice(peer_x25519_slice);
 
@@ -310,7 +319,7 @@ where
         do_initiator(stream, identity, peer_static_x25519, invite_psk),
     )
     .await
-    .map_err(|_| CoreError::Transport("handshake: timeout".into()))?
+    .map_err(|_| CoreError::Transport(TransportErrorKind::Other("handshake: timeout".into())))?
 }
 
 /// Drive the responder side of Noise_XK over `stream`.
@@ -332,7 +341,7 @@ where
         do_responder(stream, identity, invite_psk),
     )
     .await
-    .map_err(|_| CoreError::Transport("handshake: timeout".into()))?
+    .map_err(|_| CoreError::Transport(TransportErrorKind::Other("handshake: timeout".into())))?
 }
 
 #[cfg(test)]
@@ -340,6 +349,7 @@ where
 mod tests {
     use super::*;
     use crate::identity::IdentityKey;
+    use crate::transport::TransportErrorKind;
     use zeroize::Zeroizing;
 
     /// Drive both sides of a no-PSK handshake over a tokio duplex
@@ -469,7 +479,7 @@ mod tests {
             .err()
             .expect("responder must fail with mismatched PSK");
         match resp_err {
-            CoreError::Transport(s) => assert!(
+            CoreError::Transport(TransportErrorKind::Other(s)) => assert!(
                 s.starts_with("handshake: authentication failed")
                     || s == "handshake: stream closed",
                 "unexpected responder error message: {s}"
@@ -480,7 +490,7 @@ mod tests {
         // If the initiator did fail, its error must also be a Transport variant.
         if let Err(init_err) = init_r {
             match init_err {
-                CoreError::Transport(s) => assert!(
+                CoreError::Transport(TransportErrorKind::Other(s)) => assert!(
                     s.starts_with("handshake: authentication failed")
                         || s == "handshake: stream closed",
                     "unexpected initiator error message: {s}"
@@ -526,7 +536,7 @@ mod tests {
         writer.await.unwrap();
 
         match resp_err {
-            CoreError::Transport(s) => assert!(
+            CoreError::Transport(TransportErrorKind::Other(s)) => assert!(
                 s.starts_with("handshake: unsupported version: 0x02"),
                 "got: {s}"
             ),
@@ -560,7 +570,7 @@ mod tests {
         writer.await.unwrap();
 
         match resp_err {
-            CoreError::Transport(s) => assert!(
+            CoreError::Transport(TransportErrorKind::Other(s)) => assert!(
                 s.starts_with("handshake: malformed: unexpected frame type 0x07"),
                 "got: {s}"
             ),
@@ -583,7 +593,9 @@ mod tests {
             .expect("responder must fail on EOF");
 
         match resp_err {
-            CoreError::Transport(s) => assert!(s == "handshake: stream closed", "got: {s}"),
+            CoreError::Transport(TransportErrorKind::Other(s)) => {
+                assert!(s == "handshake: stream closed", "got: {s}")
+            }
             other => panic!("expected CoreError::Transport, got {other:?}"),
         }
     }
@@ -606,7 +618,7 @@ mod tests {
         // msg2 comes back mangled, or may fail on msg3 encryption; the
         // responder is guaranteed to fail on msg1 or msg3 decrypt.)
         let any_auth_fail = [&init_r, &resp_r].iter().any(|r| match r {
-            Err(CoreError::Transport(s)) => {
+            Err(CoreError::Transport(TransportErrorKind::Other(s))) => {
                 s.starts_with("handshake: authentication failed") || s == "handshake: stream closed"
             }
             _ => false,
@@ -677,7 +689,9 @@ mod tests {
 
         let result = handle.await.expect("task must not panic");
         match result {
-            Err(CoreError::Transport(s)) => assert_eq!(s, "handshake: timeout"),
+            Err(CoreError::Transport(TransportErrorKind::Other(s))) => {
+                assert_eq!(s, "handshake: timeout")
+            }
             Err(other) => panic!("expected Transport(timeout), got {other:?}"),
             Ok(_) => panic!("expected timeout, got Ok"),
         }

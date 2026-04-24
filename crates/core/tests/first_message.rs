@@ -7,5 +7,7 @@
 
 #[test]
 fn first_message_stub_compiles() {
-    let _ = skattr_core::error::CoreError::Mls("noop".into());
+    // Stub: filled in during Phase 1.C.
+    // CoreError is accessible from public API.
+    let _: Option<skattr_core::error::CoreError> = None;
 }
