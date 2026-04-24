@@ -259,6 +259,23 @@ where
     // 5. Persist updated group state after ratchet advance.
     group.save(&group_repo).map_err(map_err)?;
 
+    // 5b. Persist outgoing message row (Phase 1.G: real mls_generation
+    // + ts_daemon_recv). `ts_daemon_recv` is derived from the same
+    // `now_ms` clock read as `envelope.ts` so the two timestamps don't
+    // disagree on which second the message landed in.
+    let mls_generation = group.epoch();
+    let ts_daemon_recv = now_ms / 1000;
+    let msg_repo = crate::storage::MessageRepo::new(&handle.pool);
+    msg_repo
+        .insert(crate::storage::messages::InsertParams {
+            group_id: &group_id_bytes,
+            sender: &handle.identity.public().0,
+            envelope: &envelope,
+            mls_generation,
+            ts_daemon_recv,
+        })
+        .map_err(map_err)?;
+
     // 6. Idempotent outbox insert.
     let outbox_repo = OutboxRepo::new(&handle.pool);
     outbox_repo
@@ -822,5 +839,75 @@ mod tests {
             }) => {}
             other => panic!("expected MessageSent(Queued), got {other:?}"),
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn send_message_persists_post_encrypt_mls_generation_and_ts_daemon_recv() {
+        // Same Alice/Bob invite dance as the sibling Queued test. After
+        // Bob sends, assert that the outgoing row Bob persisted carries
+        // (a) a non-zero mls_generation (the ratchet advanced on encrypt)
+        // and (b) a real ts_daemon_recv clock value (not the 0 legacy
+        // default or the envelope.ts placeholder).
+        let handle_a = test_handle();
+        handle_a.set_onion("alice.onion".to_string());
+
+        let CommandResult::InviteCreated { url, .. } = execute_command(
+            handle_a.clone(),
+            Command::CreateInvite {
+                nickname: None,
+                ttl_secs: Some(3600),
+            },
+        )
+        .await
+        .unwrap() else {
+            panic!("expected InviteCreated");
+        };
+
+        let handle_b = test_handle();
+        let CommandResult::ContactAdded(summary) =
+            execute_command(handle_b.clone(), Command::AddContact { invite_url: url })
+                .await
+                .unwrap()
+        else {
+            panic!("expected ContactAdded");
+        };
+
+        // Bob sends to Alice; timeout at 3 s (matches the sibling test).
+        let fut = execute_command(
+            handle_b.clone(),
+            Command::SendMessage {
+                contact: summary.pubkey,
+                kind: Kind::Text { body: "hi".into() },
+            },
+        );
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(3), fut)
+            .await
+            .expect("outer 3 s budget");
+
+        // ContactSummary does not carry a group_id, so look it up the
+        // same way the recent_messages handler does.
+        let contact_repo = ContactRepo::new(&handle_b.pool);
+        let group_id = contact_repo
+            .get_group_id(&summary.pubkey)
+            .unwrap()
+            .expect("group_id present after AddContact");
+
+        let (mls_gen, ts_recv): (i64, i64) = handle_b
+            .pool
+            .with(|c| {
+                c.query_row(
+                    "SELECT mls_generation, ts_daemon_recv FROM messages \
+                     WHERE group_id = ?1 ORDER BY id DESC LIMIT 1",
+                    rusqlite::params![&group_id[..]],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .map_err(|e| crate::error::CoreError::Storage(e.to_string()))
+            })
+            .unwrap();
+        assert!(mls_gen > 0, "encrypt advances epoch; got {mls_gen}");
+        assert!(
+            ts_recv > 1_600_000_000,
+            "ts_daemon_recv must be a real clock value; got {ts_recv}"
+        );
     }
 }
