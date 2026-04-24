@@ -20,23 +20,33 @@ impl<'p> MlsGroupRepo<'p> {
         Self { pool }
     }
 
-    /// Save or update the serialized MLS state for a group.
-    pub fn put(&self, group_id: &[u8], state_blob: &[u8], epoch: u64) -> Result<()> {
+    /// Save or update the serialized MLS state inside the caller's
+    /// transaction. Use this when the MLS snapshot must commit
+    /// atomically with other row inserts (e.g. message + outbox).
+    pub(crate) fn put_in_tx(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        group_id: &[u8],
+        state_blob: &[u8],
+        epoch: u64,
+    ) -> Result<()> {
         let epoch_i = i64::try_from(epoch).map_err(|_| {
             CoreError::Storage(StorageErrorKind::Other("epoch overflows i64".into()))
         })?;
-        self.pool.with_mut(|c| {
-            c.execute(
-                "INSERT INTO mls_groups (group_id, state_blob, epoch) VALUES (?1, ?2, ?3) \
-                 ON CONFLICT(group_id) DO UPDATE SET state_blob=excluded.state_blob, \
-                                                     epoch=excluded.epoch",
-                rusqlite::params![group_id, state_blob, epoch_i],
-            )
-            .map_err(|e| {
-                CoreError::Storage(StorageErrorKind::Other(format!("put mls group: {e}")))
-            })?;
-            Ok(())
-        })
+        tx.execute(
+            "INSERT INTO mls_groups (group_id, state_blob, epoch) VALUES (?1, ?2, ?3) \
+             ON CONFLICT(group_id) DO UPDATE SET state_blob=excluded.state_blob, \
+                                                 epoch=excluded.epoch",
+            rusqlite::params![group_id, state_blob, epoch_i],
+        )
+        .map_err(|e| CoreError::Storage(StorageErrorKind::Other(format!("put mls group: {e}"))))?;
+        Ok(())
+    }
+
+    /// Save or update the serialized MLS state for a group.
+    pub fn put(&self, group_id: &[u8], state_blob: &[u8], epoch: u64) -> Result<()> {
+        self.pool
+            .transaction(|tx| self.put_in_tx(tx, group_id, state_blob, epoch))
     }
 
     /// Load the serialized state for a group. None if unknown.

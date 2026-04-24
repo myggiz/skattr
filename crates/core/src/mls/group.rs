@@ -327,6 +327,20 @@ impl Group {
         repo.put(&self.id.0, &blob, self.inner.epoch().as_u64())
     }
 
+    /// Transactional companion to [`save`](Self::save). Writes the MLS
+    /// snapshot inside the caller's `tx` without opening a new pool
+    /// transaction. Use this from `daemon::dispatch::send_message` and
+    /// `daemon::inbound::dispatch_for_group` so the advanced MLS ratchet
+    /// and the message-row / outbox insert commit atomically.
+    pub(crate) fn save_in_tx(
+        &self,
+        repo: &MlsGroupRepo<'_>,
+        tx: &rusqlite::Transaction<'_>,
+    ) -> Result<()> {
+        let blob = self.provider.snapshot()?;
+        repo.put_in_tx(tx, &self.id.0, &blob, self.inner.epoch().as_u64())
+    }
+
     /// Restore from persisted state. Returns `None` if `group_id` is unknown.
     pub fn load(group_id: &GroupId, repo: &MlsGroupRepo<'_>) -> Result<Option<Self>> {
         let Some(blob) = repo.get(&group_id.0)? else {
@@ -679,5 +693,49 @@ mod tests {
             CoreError::Mls(s) => assert!(s.starts_with("mls: advance_epoch: invalid state")),
             other => panic!("expected CoreError::Mls, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn save_in_tx_rolls_back_on_abort() {
+        let pool = Pool::in_memory();
+        let repo = MlsGroupRepo::new(&pool);
+        let id = alice();
+        let group = Group::create_solo(&id, None, MlsProvider::new()).unwrap();
+
+        // Run save_in_tx inside a tx we explicitly roll back.
+        let result: crate::error::Result<()> = pool.transaction(|tx| {
+            group.save_in_tx(&repo, tx).unwrap();
+            // Sanity-check: the row is visible inside this tx.
+            let n: i64 = tx
+                .query_row(
+                    "SELECT COUNT(*) FROM mls_groups WHERE group_id = ?1",
+                    rusqlite::params![&group.id().0[..]],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "snapshot must be visible inside the tx");
+            // Force rollback via Err.
+            Err(crate::error::CoreError::Storage(
+                crate::storage::StorageErrorKind::Other("rollback test".into()),
+            ))
+        });
+        assert!(result.is_err(), "transaction must have returned Err");
+
+        // After rollback the row must not exist.
+        let n: i64 = pool
+            .with(|c| {
+                c.query_row(
+                    "SELECT COUNT(*) FROM mls_groups WHERE group_id = ?1",
+                    rusqlite::params![&group.id().0[..]],
+                    |r| r.get(0),
+                )
+                .map_err(|e| {
+                    crate::error::CoreError::Storage(crate::storage::StorageErrorKind::Other(
+                        e.to_string(),
+                    ))
+                })
+            })
+            .unwrap();
+        assert_eq!(n, 0, "tx rollback must leave mls_groups empty");
     }
 }
