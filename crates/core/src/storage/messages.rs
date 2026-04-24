@@ -41,6 +41,11 @@ pub struct StoredMessage {
     pub body_blob: Option<Vec<u8>>,
     pub ts: i64,
     pub delivered_at: Option<i64>,
+    /// MLS group epoch at persist time. 0 for legacy rows written
+    /// before Phase 1.G when the column did not yet exist.
+    pub mls_generation: i64,
+    /// Local-clock unix seconds at persist time. 0 for legacy rows.
+    pub ts_daemon_recv: i64,
 }
 
 /// All fields required to persist a single message row.
@@ -133,7 +138,8 @@ impl<'p> MessageRepo<'p> {
         self.pool.with(|c| {
             let mut stmt = c
                 .prepare(
-                    "SELECT id, group_id, sender, kind, body_blob, ts, delivered_at \
+                    "SELECT id, group_id, sender, kind, body_blob, ts, delivered_at, \
+                            mls_generation, ts_daemon_recv \
                      FROM messages \
                      WHERE group_id = ?1 \
                      ORDER BY mls_generation DESC, id DESC LIMIT ?2",
@@ -151,6 +157,8 @@ impl<'p> MessageRepo<'p> {
                             body_blob: r.get(4)?,
                             ts: r.get(5)?,
                             delivered_at: r.get(6)?,
+                            mls_generation: r.get(7)?,
+                            ts_daemon_recv: r.get(8)?,
                         })
                     },
                 )
@@ -195,6 +203,7 @@ impl<'p> MessageRepo<'p> {
         let sql = format!(
             "SELECT messages.id, messages.group_id, messages.sender, messages.kind, \
                     messages.body_blob, messages.ts, messages.delivered_at, \
+                    messages.mls_generation, messages.ts_daemon_recv, \
                     bm25(messages_fts) AS rank, \
                     snippet(messages_fts, 0, char(2), char(3), '...', 32) AS snippet \
              FROM messages_fts \
@@ -226,9 +235,11 @@ impl<'p> MessageRepo<'p> {
                         body_blob: r.get(4)?,
                         ts: r.get(5)?,
                         delivered_at: r.get(6)?,
+                        mls_generation: r.get(7)?,
+                        ts_daemon_recv: r.get(8)?,
                     },
-                    bm25: r.get::<_, f64>(7).unwrap_or(0.0),
-                    snippet: r.get::<_, String>(8).unwrap_or_default(),
+                    bm25: r.get::<_, f64>(9).unwrap_or(0.0),
+                    snippet: r.get::<_, String>(10).unwrap_or_default(),
                 })
             };
 
@@ -311,7 +322,8 @@ impl<'p> MessageRepo<'p> {
         self.pool.with(|c| {
             let mut stmt = c
                 .prepare(
-                    "SELECT id, group_id, sender, kind, body_blob, ts, delivered_at \
+                    "SELECT id, group_id, sender, kind, body_blob, ts, delivered_at, \
+                            mls_generation, ts_daemon_recv \
                      FROM messages \
                      WHERE group_id = ?1 AND id > ?2 \
                      ORDER BY id ASC \
@@ -334,6 +346,8 @@ impl<'p> MessageRepo<'p> {
                             body_blob: r.get(4)?,
                             ts: r.get(5)?,
                             delivered_at: r.get(6)?,
+                            mls_generation: r.get(7)?,
+                            ts_daemon_recv: r.get(8)?,
                         })
                     },
                 )

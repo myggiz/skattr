@@ -160,6 +160,36 @@ pub struct MessageRecord {
     pub ts_envelope: i64,
 }
 
+impl MessageRecord {
+    /// Project a stored row + decrypt-time metadata into the wire type.
+    ///
+    /// `direction` is `Incoming` for receiver-side rows, `Outgoing` for
+    /// sender-side. `mls_generation` is the post-encrypt/post-decrypt
+    /// epoch. `ts_daemon_recv` is the local clock at persist time. Both
+    /// are carried straight to the wire — no aliasing back to `envelope.ts`.
+    ///
+    /// `row_id` is the SQLite primary key; included for future tracing
+    /// but not part of the wire shape. `contact` is the peer pubkey.
+    pub fn project(
+        _row_id: i64,
+        envelope: &crate::envelope::Envelope,
+        contact: crate::identity::PublicKey,
+        mls_generation: u64,
+        ts_daemon_recv: i64,
+        direction: Direction,
+    ) -> Self {
+        Self {
+            message_id: Hex16::from(envelope.id.0),
+            contact,
+            direction,
+            kind: envelope.kind.clone(),
+            mls_generation,
+            ts_daemon_recv: u64::try_from(ts_daemon_recv).unwrap_or(0),
+            ts_envelope: envelope.ts,
+        }
+    }
+}
+
 /// One full-text search hit returned by `Command::SearchMessages`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchHitRecord {
@@ -274,6 +304,37 @@ mod tests {
         for cmd in &cmds {
             let _back: Command = roundtrip(cmd);
         }
+    }
+
+    #[test]
+    fn message_record_project_uses_real_columns_not_placeholders() {
+        use crate::envelope::{Envelope, Kind, MessageId};
+        use crate::identity::PublicKey;
+
+        let env = Envelope {
+            v: 1,
+            id: MessageId([0xAA; 16]),
+            ts: 1_700_000_000,
+            reply_to: None,
+            kind: Kind::Text { body: "hi".into() },
+        };
+        let contact = PublicKey([0x33; 32]);
+
+        let rec = MessageRecord::project(
+            42, // row id (not used on the wire — only for tracing)
+            &env,
+            contact,
+            7,             // mls_generation (must be carried, not zeroed)
+            1_700_000_500, // ts_daemon_recv (must be carried, not aliased to env.ts)
+            Direction::Incoming,
+        );
+
+        assert_eq!(rec.mls_generation, 7);
+        assert_eq!(rec.ts_daemon_recv, 1_700_000_500);
+        assert_eq!(rec.ts_envelope, 1_700_000_000);
+        assert!(matches!(rec.direction, Direction::Incoming));
+        assert!(matches!(rec.kind, Kind::Text { .. }));
+        assert_eq!(rec.contact.0, [0x33; 32]);
     }
 
     #[test]

@@ -293,7 +293,6 @@ where
 {
     use crate::daemon::commands::{Direction, MessageRecord};
     use crate::daemon::error_kind::DaemonErrorKind;
-    use crate::daemon::hex::Hex16;
     use crate::envelope::Envelope;
     use crate::identity::PublicKey;
     use crate::storage::{ContactRepo, MessageRepo};
@@ -335,15 +334,14 @@ where
             };
             // `contact` field is always the peer — outgoing rows were sent
             // to `peer`; incoming rows were sent by `peer` (the sender).
-            Some(MessageRecord {
-                message_id: Hex16::from(env.id.0),
-                contact: peer,
+            Some(MessageRecord::project(
+                row.id,
+                &env,
+                peer,
+                u64::try_from(row.mls_generation).unwrap_or(0),
+                row.ts_daemon_recv,
                 direction,
-                kind: env.kind,
-                mls_generation: 0,
-                ts_daemon_recv: u64::try_from(row.ts).unwrap_or(0),
-                ts_envelope: env.ts,
-            })
+            ))
         })
         .collect();
 
