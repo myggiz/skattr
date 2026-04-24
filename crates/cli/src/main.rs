@@ -886,9 +886,32 @@ async fn resolve_optional_contact(
     }
 }
 
-fn render_messages_human(rows: &[skattr_core::daemon::commands::MessageRecord]) -> String {
+fn render_message_record_human(row: &skattr_core::daemon::commands::MessageRecord) -> String {
     use skattr_core::daemon::commands::Direction;
     use skattr_core::envelope::Kind;
+
+    let arrow = match row.direction {
+        Direction::Incoming => "<-",
+        Direction::Outgoing => "->",
+    };
+    let body = match &row.kind {
+        Kind::Text { body } => body.clone(),
+        other => format!("({other:?})"),
+    };
+    let contact_short: String = row
+        .contact
+        .0
+        .iter()
+        .take(4)
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    format!(
+        "[{ts}] {arrow} {contact_short} {body}",
+        ts = row.ts_daemon_recv
+    )
+}
+
+fn render_messages_human(rows: &[skattr_core::daemon::commands::MessageRecord]) -> String {
     use std::fmt::Write;
 
     if rows.is_empty() {
@@ -898,26 +921,7 @@ fn render_messages_human(rows: &[skattr_core::daemon::commands::MessageRecord]) 
     let mut out = String::new();
     // Render oldest-first on stdout (`recent` returns newest-first).
     for row in rows.iter().rev() {
-        let arrow = match row.direction {
-            Direction::Incoming => "<-",
-            Direction::Outgoing => "->",
-        };
-        let body = match &row.kind {
-            Kind::Text { body } => body.clone(),
-            other => format!("({other:?})"),
-        };
-        let contact_short: String = row
-            .contact
-            .0
-            .iter()
-            .take(4)
-            .map(|b| format!("{b:02x}"))
-            .collect();
-        let _ = writeln!(
-            out,
-            "[{ts}] {arrow} {contact_short} {body}",
-            ts = row.ts_daemon_recv
-        );
+        let _ = writeln!(out, "{}", render_message_record_human(row));
     }
     out
 }
@@ -930,7 +934,6 @@ async fn tail_follow(
     use skattr_core::daemon::events::Event;
     use skattr_core::daemon::ipc::wire::EventFilter;
     use skattr_core::daemon::{Command as CoreCommand, CommandResult, IpcClientError};
-    use skattr_core::envelope::Kind;
 
     let mut client = connect_or_exit(sock_flag).await?;
     let target = resolve_optional_contact(&mut client, contact_prefix).await?;
@@ -951,10 +954,7 @@ async fn tail_follow(
     }
 
     // 2. Subscribe.
-    let filter = match target {
-        Some(pk) => EventFilter::Contact(pk),
-        None => EventFilter::All,
-    };
+    let filter = EventFilter::Messages { contact: target };
     match client.subscribe(filter).await {
         Ok(()) => {}
         Err(e) => exit_on_ipc_error(e),
@@ -969,18 +969,8 @@ async fn tail_follow(
             Err(other) => exit_on_ipc_error(other),
         };
         match ev {
-            Event::MessageReceived { contact, record } => {
-                let short: String = contact
-                    .0
-                    .iter()
-                    .take(4)
-                    .map(|b| format!("{b:02x}"))
-                    .collect();
-                let body = match record.kind {
-                    Kind::Text { body } => body,
-                    other => format!("({other:?})"),
-                };
-                println!("[{ts}] <- {short} {body}", ts = record.ts_envelope);
+            Event::MessageReceived { contact: _, record } => {
+                println!("{}", render_message_record_human(&record));
             }
             Event::DeliveryStatusChanged { message, status } => {
                 let id_hex: String = message.0.iter().map(|b| format!("{b:02x}")).collect();
@@ -1615,5 +1605,30 @@ mod tests {
         assert!(out.contains("merge conflict"));
         assert!(out.contains("epoch=7"));
         assert!(out.contains("ababab")); // first chars of message id
+    }
+
+    #[test]
+    fn render_event_message_received_matches_one_shot_format() {
+        use skattr_core::daemon::commands::{Direction, MessageRecord};
+        use skattr_core::daemon::hex::Hex16;
+        use skattr_core::envelope::Kind;
+        use skattr_core::identity::PublicKey;
+
+        let rec = MessageRecord {
+            message_id: Hex16::from([0xDD; 16]),
+            contact: PublicKey([0x42; 32]),
+            direction: Direction::Incoming,
+            kind: Kind::Text {
+                body: "live update".into(),
+            },
+            mls_generation: 11,
+            ts_daemon_recv: 1_700_000_900,
+            ts_envelope: 1_700_000_900,
+        };
+        // Per-row formatter must match exactly what a one-shot dump of a single row produces.
+        let line = render_message_record_human(&rec);
+        let one_shot = render_messages_human(std::slice::from_ref(&rec));
+        assert_eq!(one_shot.trim_end(), line.trim_end());
+        assert!(line.contains("live update"));
     }
 }
