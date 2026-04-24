@@ -44,8 +44,8 @@ pub enum CoreError {
     Mailbox(String),
 
     /// Delivery (outbox, retry, dedup) problem.
-    #[error("delivery: {0}")]
-    Delivery(String),
+    #[error("{0}")]
+    Delivery(#[from] crate::delivery::DeliveryErrorKind),
 
     /// Storage / migration / serialization problem.
     #[error("{0}")]
@@ -105,7 +105,10 @@ impl CoreError {
             CoreError::Invite(crate::invite::InviteErrorKind::Other(_)) => None,
             CoreError::Mls(crate::mls::MlsErrorKind::GroupCorrupt) => Some(K::GroupCorrupt),
             CoreError::Mls(crate::mls::MlsErrorKind::Other(_)) => None,
-            CoreError::Delivery(s) if s.contains("timeout") => Some(K::DeliveryTimeout),
+            CoreError::Delivery(crate::delivery::DeliveryErrorKind::Timeout) => {
+                Some(K::DeliveryTimeout)
+            }
+            CoreError::Delivery(crate::delivery::DeliveryErrorKind::Other(_)) => None,
             CoreError::Transport(s) if s.contains("not ready") || s.contains("bootstrap") => {
                 Some(K::TorNotReady)
             }
@@ -216,6 +219,19 @@ mod tests {
     #[test]
     fn mls_other_does_not_project() {
         let e = CoreError::Mls(crate::mls::MlsErrorKind::Other("decrypt failed".into()));
+        assert_eq!(e.kind(), None);
+    }
+
+    #[test]
+    fn delivery_timeout_projects_to_delivery_timeout() {
+        use crate::daemon::error_kind::DaemonErrorKind;
+        let e = CoreError::Delivery(crate::delivery::DeliveryErrorKind::Timeout);
+        assert!(matches!(e.kind(), Some(DaemonErrorKind::DeliveryTimeout)));
+    }
+
+    #[test]
+    fn delivery_other_does_not_project() {
+        let e = CoreError::Delivery(crate::delivery::DeliveryErrorKind::Other("nack".into()));
         assert_eq!(e.kind(), None);
     }
 }

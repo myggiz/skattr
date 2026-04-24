@@ -129,7 +129,11 @@ impl DaemonInbound {
                         reason = %reason,
                         "inbound: rejected by receiver (replay window or dedup)",
                     );
-                    Err(CoreError::Delivery(format!("inbound: rejected: {reason}")))
+                    Err(CoreError::Delivery(
+                        crate::delivery::DeliveryErrorKind::Other(format!(
+                            "inbound: rejected: {reason}"
+                        )),
+                    ))
                 }
                 _ => Ok(out),
             }

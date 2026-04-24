@@ -73,7 +73,7 @@ mod tests {
 
     #[test]
     fn delivery_timeout_maps() {
-        let e = CoreError::Delivery("delivery: timeout waiting for ACK".into());
+        let e = CoreError::Delivery(crate::delivery::DeliveryErrorKind::Timeout);
         assert_eq!(e.kind(), Some(DaemonErrorKind::DeliveryTimeout));
     }
 

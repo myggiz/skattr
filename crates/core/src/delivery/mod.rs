@@ -4,6 +4,8 @@
 //! Send/receive plumbing: outbox queue, retry, dedup, ACK handling.
 
 pub(crate) mod backoff;
+mod error_kind;
+pub(crate) use error_kind::DeliveryErrorKind;
 pub(crate) mod hub;
 pub(crate) mod outbox;
 pub(crate) mod peer;

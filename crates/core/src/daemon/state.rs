@@ -219,7 +219,9 @@ impl Daemon {
         // bypasses Daemon and drives DeliveryHub directly through
         // test_exports.
         Err(crate::error::CoreError::Delivery(
-            "Daemon::send requires 1.F CLI integration".into(),
+            crate::delivery::DeliveryErrorKind::Other(
+                "Daemon::send requires 1.F CLI integration".into(),
+            ),
         ))
     }
 }
