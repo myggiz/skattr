@@ -254,6 +254,10 @@ fn exit_on_ipc_error(err: skattr_core::daemon::IpcClientError) -> ! {
                 eprintln!("search query rejected by FTS5 engine");
                 std::process::exit(6);
             }
+            DaemonErrorKind::InvalidArgument { message } => {
+                eprintln!("argument error: {message}");
+                std::process::exit(2);
+            }
         },
         IpcClientError::Server(other) => {
             eprintln!("ipc: server error: {other:?}");

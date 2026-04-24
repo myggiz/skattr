@@ -39,6 +39,13 @@ pub enum DaemonErrorKind {
     StorageError,
     /// Search query was empty after FTS5 escaping or the engine rejected it.
     SearchSyntax,
+    /// Client-supplied arguments failed validation in the daemon.
+    /// Surfaces as exit code 2 in the CLI, distinct from the internal-
+    /// error exit code 1.
+    InvalidArgument {
+        /// Human-readable description of the argument error.
+        message: String,
+    },
 }
 
 #[cfg(test)]

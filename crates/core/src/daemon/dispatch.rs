@@ -520,8 +520,10 @@ where
     // Validate: exactly one of before_ts_recv or keep_last must be Some.
     match (before_ts_recv, keep_last) {
         (Some(_), Some(_)) | (None, None) => {
-            return Err(IpcError::Internal(
-                "PruneHistory requires exactly one of before_ts_recv or keep_last".into(),
+            return Err(IpcError::Daemon(
+                crate::daemon::error_kind::DaemonErrorKind::InvalidArgument {
+                    message: "exactly one of before_ts_recv or keep_last must be Some".into(),
+                },
             ));
         }
         _ => {}
@@ -546,7 +548,11 @@ where
             .map_err(map_err)?,
         (None, Some(k)) => {
             let gid = group_id_owned.as_deref().ok_or_else(|| {
-                IpcError::Internal("PruneHistory keep_last requires a contact".into())
+                IpcError::Daemon(
+                    crate::daemon::error_kind::DaemonErrorKind::InvalidArgument {
+                        message: "keep_last requires a contact".into(),
+                    },
+                )
             })?;
             msg_repo.prune_keep_last(gid, k).map_err(map_err)?
         }
@@ -1470,10 +1476,16 @@ mod tests {
                 keep_last: Some(2),
             },
         )
-        .await;
+        .await
+        .unwrap_err();
         assert!(
-            err.is_err(),
-            "exactly one of before_ts_recv / keep_last must be Some"
+            matches!(
+                err,
+                IpcError::Daemon(
+                    crate::daemon::error_kind::DaemonErrorKind::InvalidArgument { .. }
+                )
+            ),
+            "expected InvalidArgument, got {err:?}"
         );
     }
 
@@ -1488,10 +1500,16 @@ mod tests {
                 keep_last: None,
             },
         )
-        .await;
+        .await
+        .unwrap_err();
         assert!(
-            err.is_err(),
-            "exactly one of before_ts_recv / keep_last must be Some"
+            matches!(
+                err,
+                IpcError::Daemon(
+                    crate::daemon::error_kind::DaemonErrorKind::InvalidArgument { .. }
+                )
+            ),
+            "expected InvalidArgument, got {err:?}"
         );
     }
 
@@ -1506,8 +1524,17 @@ mod tests {
                 keep_last: Some(3), // but keep_last requires a scoped group
             },
         )
-        .await;
-        assert!(err.is_err(), "keep_last requires a contact");
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                IpcError::Daemon(
+                    crate::daemon::error_kind::DaemonErrorKind::InvalidArgument { .. }
+                )
+            ),
+            "expected InvalidArgument, got {err:?}"
+        );
     }
 
     #[tokio::test]
