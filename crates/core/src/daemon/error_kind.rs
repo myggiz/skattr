@@ -78,14 +78,19 @@ mod tests {
 
     #[test]
     fn search_syntax_maps() {
-        let e = CoreError::Storage("fts5: syntax error near '\"'".into());
+        // FtsSyntax variant projects to SearchSyntax regardless of message content.
+        let e = CoreError::Storage(crate::storage::StorageErrorKind::FtsSyntax(
+            "fts5: syntax error near '\"'".into(),
+        ));
         assert_eq!(e.kind(), Some(DaemonErrorKind::SearchSyntax));
 
-        let e2 = CoreError::Storage("storage: malformed MATCH expression".into());
+        let e2 = CoreError::Storage(crate::storage::StorageErrorKind::FtsSyntax(
+            "malformed MATCH expression".into(),
+        ));
         assert_eq!(e2.kind(), Some(DaemonErrorKind::SearchSyntax));
 
         // Control: plain storage errors still project as StorageError.
-        let e3 = CoreError::Storage("disk full".into());
+        let e3 = CoreError::Storage(crate::storage::StorageErrorKind::Other("disk full".into()));
         assert_eq!(e3.kind(), Some(DaemonErrorKind::StorageError));
     }
 }

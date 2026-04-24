@@ -11,6 +11,7 @@
 //! surfacing it to the UI. `sweep_older_than(cutoff)` is called
 //! periodically to garbage-collect rows outside the window.
 
+use super::StorageErrorKind;
 use crate::error::{CoreError, Result};
 use crate::storage::Pool;
 
@@ -37,7 +38,9 @@ impl<'p> SeenMessagesRepo<'p> {
                      VALUES (?1, ?2, ?3)",
                     rusqlite::params![sender, message_id, seen_at],
                 )
-                .map_err(|e| CoreError::Storage(format!("insert seen: {e}")))?;
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!("insert seen: {e}")))
+                })?;
             Ok(changed > 0)
         })
     }
@@ -51,7 +54,9 @@ impl<'p> SeenMessagesRepo<'p> {
                     rusqlite::params![sender, message_id],
                     |r| r.get(0),
                 )
-                .map_err(|e| CoreError::Storage(format!("contains seen: {e}")))?;
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!("contains seen: {e}")))
+                })?;
             Ok(count > 0)
         })
     }
@@ -64,7 +69,9 @@ impl<'p> SeenMessagesRepo<'p> {
                     "DELETE FROM seen_messages WHERE seen_at < ?1",
                     rusqlite::params![cutoff],
                 )
-                .map_err(|e| CoreError::Storage(format!("sweep seen: {e}")))?;
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!("sweep seen: {e}")))
+                })?;
             Ok(n as u64)
         })
     }

@@ -5,6 +5,7 @@
 
 //! Repository for MLS group state blobs.
 
+use super::StorageErrorKind;
 use crate::error::{CoreError, Result};
 use crate::storage::Pool;
 
@@ -21,8 +22,9 @@ impl<'p> MlsGroupRepo<'p> {
 
     /// Save or update the serialized MLS state for a group.
     pub fn put(&self, group_id: &[u8], state_blob: &[u8], epoch: u64) -> Result<()> {
-        let epoch_i =
-            i64::try_from(epoch).map_err(|_| CoreError::Storage("epoch overflows i64".into()))?;
+        let epoch_i = i64::try_from(epoch).map_err(|_| {
+            CoreError::Storage(StorageErrorKind::Other("epoch overflows i64".into()))
+        })?;
         self.pool.with_mut(|c| {
             c.execute(
                 "INSERT INTO mls_groups (group_id, state_blob, epoch) VALUES (?1, ?2, ?3) \
@@ -30,7 +32,9 @@ impl<'p> MlsGroupRepo<'p> {
                                                      epoch=excluded.epoch",
                 rusqlite::params![group_id, state_blob, epoch_i],
             )
-            .map_err(|e| CoreError::Storage(format!("put mls group: {e}")))?;
+            .map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!("put mls group: {e}")))
+            })?;
             Ok(())
         })
     }
@@ -46,7 +50,9 @@ impl<'p> MlsGroupRepo<'p> {
             match result {
                 Ok(b) => Ok(Some(b)),
                 Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-                Err(e) => Err(CoreError::Storage(format!("get mls group: {e}"))),
+                Err(e) => Err(CoreError::Storage(StorageErrorKind::Other(format!(
+                    "get mls group: {e}"
+                )))),
             }
         })
     }
@@ -56,16 +62,22 @@ impl<'p> MlsGroupRepo<'p> {
         self.pool.with(|c| {
             let mut stmt = c
                 .prepare("SELECT group_id, epoch FROM mls_groups ORDER BY id")
-                .map_err(|e| CoreError::Storage(format!("prepare list mls: {e}")))?;
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!("prepare list mls: {e}")))
+                })?;
             let rows = stmt
                 .query_map([], |r| {
                     let gid: Vec<u8> = r.get(0)?;
                     let epoch: i64 = r.get(1)?;
                     Ok((gid, u64::try_from(epoch).unwrap_or(0)))
                 })
-                .map_err(|e| CoreError::Storage(format!("query list mls: {e}")))?;
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!("query list mls: {e}")))
+                })?;
             let out: std::result::Result<Vec<_>, _> = rows.collect();
-            out.map_err(|e| CoreError::Storage(format!("collect mls list: {e}")))
+            out.map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!("collect mls list: {e}")))
+            })
         })
     }
 }

@@ -18,6 +18,7 @@ use crate::daemon::commands::{Command, CommandResult};
 use crate::daemon::handle::DaemonHandle;
 use crate::daemon::ipc::wire::IpcError;
 use crate::error::CoreError;
+use crate::storage::StorageErrorKind;
 
 /// Execute one command against `handle`. Every per-variant handler
 /// lives in this module (small private fns); we keep them colocated so
@@ -1154,7 +1155,9 @@ mod tests {
                     rusqlite::params![&group_id[..]],
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )
-                .map_err(|e| crate::error::CoreError::Storage(e.to_string()))
+                .map_err(|e| {
+                    crate::error::CoreError::Storage(StorageErrorKind::Other(e.to_string()))
+                })
             })
             .unwrap();
         assert!(mls_gen > 0, "encrypt advances epoch; got {mls_gen}");

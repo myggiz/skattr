@@ -48,8 +48,8 @@ pub enum CoreError {
     Delivery(String),
 
     /// Storage / migration / serialization problem.
-    #[error("storage: {0}")]
-    Storage(String),
+    #[error("{0}")]
+    Storage(#[from] crate::storage::StorageErrorKind),
 
     /// Frame codec (length-prefix, type byte, payload parse) problem.
     #[error("frame codec: {0}")]
@@ -103,12 +103,14 @@ impl CoreError {
             CoreError::Transport(s) if s.contains("not ready") || s.contains("bootstrap") => {
                 Some(K::TorNotReady)
             }
-            CoreError::Storage(s)
-                if s.contains("fts5: syntax error") || s.contains("malformed MATCH") =>
-            {
+            CoreError::Storage(crate::storage::StorageErrorKind::FtsSyntax(_)) => {
                 Some(K::SearchSyntax)
             }
-            CoreError::Sqlite(_) | CoreError::Storage(_) => Some(K::StorageError),
+            CoreError::Storage(crate::storage::StorageErrorKind::DuplicateMessage) => {
+                Some(K::StorageError) // Phase 1.H: no dedicated Daemon variant; storage-level signal only
+            }
+            CoreError::Storage(crate::storage::StorageErrorKind::Other(_))
+            | CoreError::Sqlite(_) => Some(K::StorageError),
             _ => None,
         }
     }
@@ -120,4 +122,33 @@ fn extract_matches_count(s: &str) -> Option<u32> {
     let rest = &s[open..];
     let end = rest.find(|c: char| !c.is_ascii_digit())?;
     rest[..end].parse().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn storage_fts_syntax_projects_to_search_syntax() {
+        use crate::daemon::error_kind::DaemonErrorKind;
+        use crate::storage::StorageErrorKind;
+        let e = CoreError::Storage(StorageErrorKind::FtsSyntax("near \"foo\"".into()));
+        assert_eq!(e.kind(), Some(DaemonErrorKind::SearchSyntax));
+    }
+
+    #[test]
+    fn storage_duplicate_message_projects_to_storage_error() {
+        use crate::daemon::error_kind::DaemonErrorKind;
+        use crate::storage::StorageErrorKind;
+        let e = CoreError::Storage(StorageErrorKind::DuplicateMessage);
+        assert_eq!(e.kind(), Some(DaemonErrorKind::StorageError));
+    }
+
+    #[test]
+    fn storage_other_projects_to_storage_error() {
+        use crate::daemon::error_kind::DaemonErrorKind;
+        use crate::storage::StorageErrorKind;
+        let e = CoreError::Storage(StorageErrorKind::Other("prepare failed".into()));
+        assert_eq!(e.kind(), Some(DaemonErrorKind::StorageError));
+    }
 }

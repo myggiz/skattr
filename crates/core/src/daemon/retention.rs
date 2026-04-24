@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use crate::storage::messages::MessageRepo;
 use crate::storage::Pool;
+use crate::storage::StorageErrorKind;
 
 /// Spawn the retention sweep on the current Tokio runtime.
 ///
@@ -101,7 +102,9 @@ mod tests {
         let n: i64 = pool
             .with(|c| {
                 c.query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
-                    .map_err(|e| crate::error::CoreError::Storage(e.to_string()))
+                    .map_err(|e| {
+                        crate::error::CoreError::Storage(StorageErrorKind::Other(e.to_string()))
+                    })
             })
             .unwrap();
         assert_eq!(n, 1, "retention_days=0 must not delete anything");
@@ -140,7 +143,9 @@ mod tests {
         let n: i64 = pool
             .with(|c| {
                 c.query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
-                    .map_err(|e| crate::error::CoreError::Storage(e.to_string()))
+                    .map_err(|e| {
+                        crate::error::CoreError::Storage(StorageErrorKind::Other(e.to_string()))
+                    })
             })
             .unwrap();
         assert!(

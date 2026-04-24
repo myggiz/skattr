@@ -14,6 +14,9 @@
 //! [`crate::identity::derive::INFO_STORAGE_V1`]). Migrations are
 //! `include_str!`'d from `migrations/`.
 
+mod error_kind;
+pub(crate) use error_kind::StorageErrorKind;
+
 pub(crate) mod backup;
 pub(crate) mod contacts;
 pub(crate) mod groups;

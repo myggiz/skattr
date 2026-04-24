@@ -5,6 +5,7 @@
 
 //! Repository for `contacts` and `onion_addresses` tables.
 
+use super::StorageErrorKind;
 use crate::contact::Contact;
 use crate::contact::ContactCard;
 use crate::error::{CoreError, Result};
@@ -35,7 +36,9 @@ impl<'p> ContactRepo<'p> {
                     contact.added_at,
                 ],
             )
-            .map_err(|e| CoreError::Storage(format!("upsert contact: {e}")))?;
+            .map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!("upsert contact: {e}")))
+            })?;
             Ok(())
         })
     }
@@ -60,7 +63,9 @@ impl<'p> ContactRepo<'p> {
             match result {
                 Ok(contact) => Ok(Some(contact)),
                 Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-                Err(e) => Err(CoreError::Storage(format!("get contact: {e}"))),
+                Err(e) => Err(CoreError::Storage(StorageErrorKind::Other(format!(
+                    "get contact: {e}"
+                )))),
             }
         })?;
         let Some(mut contact) = base else {
@@ -80,7 +85,11 @@ impl<'p> ContactRepo<'p> {
                     "SELECT identity_pubkey, display_name, added_at FROM contacts \
                      ORDER BY display_name IS NULL, display_name COLLATE NOCASE",
                 )
-                .map_err(|e| CoreError::Storage(format!("prepare list contacts: {e}")))?;
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!(
+                        "prepare list contacts: {e}"
+                    )))
+                })?;
             let rows = stmt
                 .query_map([], |r| {
                     let pub_bytes: Vec<u8> = r.get(0)?;
@@ -95,9 +104,13 @@ impl<'p> ContactRepo<'p> {
                         card: None,
                     })
                 })
-                .map_err(|e| CoreError::Storage(format!("query list contacts: {e}")))?;
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!("query list contacts: {e}")))
+                })?;
             let out: std::result::Result<Vec<_>, _> = rows.collect();
-            out.map_err(|e| CoreError::Storage(format!("collect contacts: {e}")))
+            out.map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!("collect contacts: {e}")))
+            })
         })?;
 
         // Hydrate each contact's latest_card. For small contact lists
@@ -116,7 +129,9 @@ impl<'p> ContactRepo<'p> {
                 "DELETE FROM contacts WHERE identity_pubkey = ?1",
                 rusqlite::params![&identity.0[..]],
             )
-            .map_err(|e| CoreError::Storage(format!("delete contact: {e}")))?;
+            .map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!("delete contact: {e}")))
+            })?;
             Ok(())
         })
     }
@@ -135,7 +150,7 @@ impl<'p> ContactRepo<'p> {
                  VALUES ((SELECT id FROM contacts WHERE identity_pubkey = ?1), ?2, ?3, 1)",
                 rusqlite::params![&identity.0[..], address, seen_at],
             )
-            .map_err(|e| CoreError::Storage(format!("add onion: {e}")))?;
+            .map_err(|e| CoreError::Storage(StorageErrorKind::Other(format!("add onion: {e}"))))?;
             Ok(())
         })
     }
@@ -149,14 +164,18 @@ impl<'p> ContactRepo<'p> {
                  WHERE contact_id = (SELECT id FROM contacts WHERE identity_pubkey = ?1)",
                 rusqlite::params![&identity.0[..]],
             )
-            .map_err(|e| CoreError::Storage(format!("demote old onions: {e}")))?;
+            .map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!("demote old onions: {e}")))
+            })?;
             tx.execute(
                 "UPDATE onion_addresses SET is_current = 1 \
                  WHERE contact_id = (SELECT id FROM contacts WHERE identity_pubkey = ?1) \
                  AND address = ?2",
                 rusqlite::params![&identity.0[..], address],
             )
-            .map_err(|e| CoreError::Storage(format!("promote new onion: {e}")))?;
+            .map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!("promote new onion: {e}")))
+            })?;
             Ok(())
         })
     }
@@ -175,7 +194,9 @@ impl<'p> ContactRepo<'p> {
             match result {
                 Ok(s) => Ok(Some(s)),
                 Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-                Err(e) => Err(CoreError::Storage(format!("current_onion: {e}"))),
+                Err(e) => Err(CoreError::Storage(StorageErrorKind::Other(format!(
+                    "current_onion: {e}"
+                )))),
             }
         })
     }
@@ -253,7 +274,9 @@ impl<'p> ContactRepo<'p> {
                     "UPDATE contacts SET group_id = ?1 WHERE identity_pubkey = ?2",
                     rusqlite::params![group_id, &identity.0[..]],
                 )
-                .map_err(|e| CoreError::Storage(format!("set group_id: {e}")))?;
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!("set group_id: {e}")))
+                })?;
             if changed == 0 {
                 return Err(CoreError::Contact(
                     "contact: group_id: contact not found".into(),
@@ -276,7 +299,9 @@ impl<'p> ContactRepo<'p> {
             match result {
                 Ok(v) => Ok(Some(v)),
                 Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-                Err(e) => Err(CoreError::Storage(format!("get group_id: {e}"))),
+                Err(e) => Err(CoreError::Storage(StorageErrorKind::Other(format!(
+                    "get group_id: {e}"
+                )))),
             }
         })
     }
@@ -299,13 +324,19 @@ impl<'p> ContactRepo<'p> {
         self.pool.with(|c| {
             let mut stmt = c
                 .prepare("SELECT identity_pubkey FROM contacts")
-                .map_err(|e| CoreError::Storage(format!("prepare lookup: {e}")))?;
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!("prepare lookup: {e}")))
+                })?;
             let rows = stmt
                 .query_map([], |r| r.get::<_, Vec<u8>>(0))
-                .map_err(|e| CoreError::Storage(format!("query lookup: {e}")))?;
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!("query lookup: {e}")))
+                })?;
             let mut out = Vec::new();
             for row in rows {
-                let bytes = row.map_err(|e| CoreError::Storage(format!("row lookup: {e}")))?;
+                let bytes = row.map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!("row lookup: {e}")))
+                })?;
                 if bytes.len() != 32 {
                     continue;
                 }
@@ -418,7 +449,7 @@ mod tests {
         let count: i64 = pool
             .with(|c| {
                 c.query_row("SELECT COUNT(*) FROM onion_addresses", [], |r| r.get(0))
-                    .map_err(|e| CoreError::Storage(e.to_string()))
+                    .map_err(|e| CoreError::Storage(StorageErrorKind::Other(e.to_string())))
             })
             .unwrap();
         assert_eq!(count, 0);
@@ -531,7 +562,7 @@ mod tests {
         let count: i64 = pool
             .with(|c| {
                 c.query_row("SELECT COUNT(*) FROM contact_cards", [], |r| r.get(0))
-                    .map_err(|e| CoreError::Storage(e.to_string()))
+                    .map_err(|e| CoreError::Storage(StorageErrorKind::Other(e.to_string())))
             })
             .unwrap();
         assert_eq!(count, 0);
