@@ -99,10 +99,18 @@ impl<'p> MessageRepo<'p> {
         Self { pool }
     }
 
-    /// Insert a message and return its rowid. Populates `body_text` for
-    /// text-kind envelopes (NULL otherwise), letting the FTS5 triggers
-    /// index the row automatically.
-    pub fn insert(&self, p: InsertParams<'_>) -> Result<i64> {
+    /// Insert a message inside the caller's transaction and return its
+    /// rowid. Use this when the message row must commit atomically with
+    /// other rows (e.g. MLS snapshot + outbox in one transaction).
+    ///
+    /// Preserves the exact error taxonomy from `insert`:
+    /// - `SQLITE_CONSTRAINT_UNIQUE` → `StorageErrorKind::DuplicateMessage`
+    /// - Other sqlite errors → `StorageErrorKind::Other("messages INSERT: …")`
+    pub(crate) fn insert_in_tx(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        p: InsertParams<'_>,
+    ) -> Result<i64> {
         let body = p.envelope.encode()?;
         let kind = match &p.envelope.kind {
             crate::envelope::Kind::Text { .. } => "text",
@@ -118,38 +126,43 @@ impl<'p> MessageRepo<'p> {
         };
         let mls_gen_signed = i64::try_from(p.mls_generation).unwrap_or(i64::MAX);
         let envelope_id = &p.envelope.id.0[..];
-        self.pool.with_mut(|c| {
-            match c.execute(
-                "INSERT INTO messages \
-                     (group_id, sender, envelope_id, kind, body_blob, body_text, ts, \
-                      mls_generation, ts_daemon_recv) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                rusqlite::params![
-                    p.group_id,
-                    p.sender,
-                    envelope_id,
-                    kind,
-                    body,
-                    body_text,
-                    p.envelope.ts,
-                    mls_gen_signed,
-                    p.ts_daemon_recv,
-                ],
-            ) {
-                Ok(_) => {}
-                Err(rusqlite::Error::SqliteFailure(e, _))
-                    if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE =>
-                {
-                    return Err(CoreError::Storage(StorageErrorKind::DuplicateMessage));
-                }
-                Err(e) => {
-                    return Err(CoreError::Storage(StorageErrorKind::Other(format!(
-                        "messages INSERT: {e}"
-                    ))));
-                }
+        match tx.execute(
+            "INSERT INTO messages \
+                 (group_id, sender, envelope_id, kind, body_blob, body_text, ts, \
+                  mls_generation, ts_daemon_recv) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                p.group_id,
+                p.sender,
+                envelope_id,
+                kind,
+                body,
+                body_text,
+                p.envelope.ts,
+                mls_gen_signed,
+                p.ts_daemon_recv,
+            ],
+        ) {
+            Ok(_) => {}
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE =>
+            {
+                return Err(CoreError::Storage(StorageErrorKind::DuplicateMessage));
             }
-            Ok(c.last_insert_rowid())
-        })
+            Err(e) => {
+                return Err(CoreError::Storage(StorageErrorKind::Other(format!(
+                    "messages INSERT: {e}"
+                ))));
+            }
+        }
+        Ok(tx.last_insert_rowid())
+    }
+
+    /// Insert a message and return its rowid. Populates `body_text` for
+    /// text-kind envelopes (NULL otherwise), letting the FTS5 triggers
+    /// index the row automatically.
+    pub fn insert(&self, p: InsertParams<'_>) -> Result<i64> {
+        self.pool.transaction(|tx| self.insert_in_tx(tx, p))
     }
 
     /// Most-recent-first list of messages in a group.

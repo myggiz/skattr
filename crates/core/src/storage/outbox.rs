@@ -26,6 +26,39 @@ impl<'p> OutboxRepo<'p> {
         Self { pool }
     }
 
+    /// Idempotent insert inside the caller's transaction. Returns
+    /// `Some(rowid)` on a fresh insert, `None` if a row with this
+    /// `(target, message_id)` pair already exists (idempotency via
+    /// `INSERT OR IGNORE` over the `idx_outbox_target_message_id`
+    /// unique index from migration 0004).
+    ///
+    /// Use this when the outbox row must commit atomically with other
+    /// rows (e.g. MLS snapshot + message in one transaction).
+    pub(crate) fn insert_in_tx(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        target: &[u8],
+        message_id: &[u8; 16],
+        payload: &[u8],
+        next_retry_at: i64,
+    ) -> Result<Option<i64>> {
+        let changed = tx
+            .execute(
+                "INSERT OR IGNORE INTO outbox \
+                 (target, message_id, payload, attempts, next_retry_at) \
+                 VALUES (?1, ?2, ?3, 0, ?4)",
+                rusqlite::params![target, message_id.as_slice(), payload, next_retry_at],
+            )
+            .map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!("insert outbox: {e}")))
+            })?;
+        Ok(if changed == 0 {
+            None
+        } else {
+            Some(tx.last_insert_rowid())
+        })
+    }
+
     /// Idempotent insert. Returns `Some(rowid)` on a fresh insert,
     /// `None` if a row with this `(target, message_id)` pair already
     /// exists. Relies on the `idx_outbox_target_message_id` unique
@@ -37,23 +70,8 @@ impl<'p> OutboxRepo<'p> {
         payload: &[u8],
         next_retry_at: i64,
     ) -> Result<Option<i64>> {
-        self.pool.with_mut(|c| {
-            let changed = c
-                .execute(
-                    "INSERT OR IGNORE INTO outbox \
-                     (target, message_id, payload, attempts, next_retry_at) \
-                     VALUES (?1, ?2, ?3, 0, ?4)",
-                    rusqlite::params![target, message_id.as_slice(), payload, next_retry_at],
-                )
-                .map_err(|e| {
-                    CoreError::Storage(StorageErrorKind::Other(format!("insert outbox: {e}")))
-                })?;
-            Ok(if changed == 0 {
-                None
-            } else {
-                Some(c.last_insert_rowid())
-            })
-        })
+        self.pool
+            .transaction(|tx| self.insert_in_tx(tx, target, message_id, payload, next_retry_at))
     }
 
     /// Fetch entries whose `next_retry_at` has passed.
