@@ -470,7 +470,7 @@ impl<'p> MessageRepo<'p> {
         }
 
         let mut updated = 0u64;
-        self.pool.with_mut(|c| {
+        self.pool.transaction(|tx| {
             for (id, blob) in &candidates {
                 let env = match crate::envelope::Envelope::decode(blob) {
                     Ok(e) => e,
@@ -482,7 +482,7 @@ impl<'p> MessageRepo<'p> {
                     }
                 };
                 if let crate::envelope::Kind::Text { body } = env.kind {
-                    c.execute(
+                    tx.execute(
                         "UPDATE messages SET body_text = ?1 WHERE id = ?2",
                         rusqlite::params![body, id],
                     )
