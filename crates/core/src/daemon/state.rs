@@ -113,6 +113,18 @@ impl Daemon {
             }
         }
 
+        // Phase 1.H: one-shot backfill for pre-1.H rows missing envelope_id.
+        match crate::storage::MessageRepo::new(&pool).backfill_envelope_id() {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(rows = n, "backfilled envelope_id for pre-1.H rows"),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "envelope_id backfill failed; uniqueness enforcement may be incomplete"
+                )
+            }
+        }
+
         // Phase 1.G: hourly retention sweep.
         let (sweep_shutdown_tx, sweep_shutdown_rx) = tokio::sync::watch::channel(false);
         let sweep_handle = crate::daemon::retention::spawn_sweep(

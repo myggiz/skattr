@@ -486,6 +486,93 @@ impl<'p> MessageRepo<'p> {
         Ok(updated)
     }
 
+    /// One-shot startup helper: populate `envelope_id` for any row whose
+    /// column is NULL (pre-1.H rows). Decodes `body_blob`, extracts the
+    /// envelope id, writes it in place. Skips rows whose blob fails to
+    /// decode. Wrapped in a single transaction so all N updates commit
+    /// atomically. Returns the number of rows backfilled. Idempotent.
+    pub(crate) fn backfill_envelope_id(&self) -> Result<u64> {
+        let candidates: Vec<(i64, Vec<u8>)> = self.pool.with(|c| {
+            let mut stmt = c
+                .prepare(
+                    "SELECT id, body_blob FROM messages WHERE envelope_id IS NULL",
+                )
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!(
+                        "prepare backfill_envelope_id: {e}"
+                    )))
+                })?;
+            let it = stmt
+                .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!(
+                        "query backfill_envelope_id: {e}"
+                    )))
+                })?;
+            let v: std::result::Result<Vec<_>, _> = it.collect();
+            v.map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!(
+                    "collect backfill_envelope_id: {e}"
+                )))
+            })
+        })?;
+
+        if candidates.is_empty() {
+            return Ok(0);
+        }
+
+        let mut updated = 0u64;
+        self.pool.transaction(|tx| {
+            for (row_id, blob) in &candidates {
+                let env = match crate::envelope::Envelope::decode(blob) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        tracing::warn!(
+                            row_id = *row_id,
+                            error = %e,
+                            "backfill_envelope_id: skipping row whose body_blob \
+                             failed to decode"
+                        );
+                        continue;
+                    }
+                };
+                match tx.execute(
+                    "UPDATE messages SET envelope_id = ?1 WHERE id = ?2",
+                    rusqlite::params![&env.id.0[..], row_id],
+                ) {
+                    Ok(_) => updated += 1,
+                    Err(rusqlite::Error::SqliteFailure(e, _))
+                        if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE =>
+                    {
+                        // Pre-existing duplicate (group_id, envelope_id) —
+                        // keep the lowest row id, delete this one.
+                        tracing::warn!(
+                            row_id = *row_id,
+                            "backfill_envelope_id: duplicate (group_id, envelope_id) \
+                             detected; deleting higher-id duplicate"
+                        );
+                        tx.execute(
+                            "DELETE FROM messages WHERE id = ?1",
+                            rusqlite::params![row_id],
+                        )
+                        .map_err(|e| {
+                            CoreError::Storage(StorageErrorKind::Other(format!(
+                                "backfill dedupe delete: {e}"
+                            )))
+                        })?;
+                    }
+                    Err(e) => {
+                        return Err(CoreError::Storage(StorageErrorKind::Other(format!(
+                            "backfill UPDATE: {e}"
+                        ))));
+                    }
+                }
+            }
+            Ok(())
+        })?;
+        Ok(updated)
+    }
+
     /// Keep the `keep` newest rows in `group_id`; delete the rest.
     /// Returns the number of rows deleted.
     pub fn prune_keep_last(&self, group_id: &[u8], keep: u64) -> Result<u64> {
@@ -1338,6 +1425,98 @@ mod tests {
         .unwrap();
         // body_text already populated by insert; backfill must do nothing.
         let n = repo.backfill_body_text().unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn backfill_envelope_id_populates_null_rows_from_body_blob() {
+        let pool = Pool::in_memory();
+        let gid = [0x70u8; 32];
+        let sender = [0x71u8; 32];
+
+        // Insert a row with body_blob set but envelope_id NULL — simulates
+        // a pre-1.H row. Bypass the trigger by inserting envelope_id as a
+        // dummy 16-byte value, then NULL it out (the trigger fires on
+        // INSERT, not UPDATE).
+        let env = crate::envelope::Envelope {
+            v: 1,
+            id: crate::envelope::MessageId::generate(),
+            ts: 1_700_000_000,
+            reply_to: None,
+            kind: crate::envelope::Kind::Text { body: "hi".into() },
+        };
+        let expected_id = env.id.0;
+
+        pool.with_mut(|c| {
+            c.execute(
+                "INSERT INTO messages \
+                 (group_id, sender, envelope_id, ts, ts_daemon_recv, \
+                  mls_generation, kind, body_blob, body_text) \
+                 VALUES (?1, ?2, ?3, ?4, 0, 0, 'text', ?5, 'hi')",
+                rusqlite::params![
+                    &gid[..],
+                    &sender[..],
+                    &[0u8; 16][..], // dummy 16 bytes to satisfy trigger
+                    env.ts,
+                    env.encode().unwrap(),
+                ],
+            )
+            .unwrap();
+            // Now NULL the envelope_id (UPDATE bypasses the BEFORE-INSERT trigger).
+            c.execute(
+                "UPDATE messages SET envelope_id = NULL WHERE group_id = ?1",
+                rusqlite::params![&gid[..]],
+            )
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
+
+        let n = MessageRepo::new(&pool).backfill_envelope_id().unwrap();
+        assert_eq!(n, 1, "exactly one row backfilled");
+
+        let got: Vec<u8> = pool
+            .with(|c| {
+                c.query_row(
+                    "SELECT envelope_id FROM messages WHERE group_id = ?1",
+                    rusqlite::params![&gid[..]],
+                    |r| r.get::<_, Vec<u8>>(0),
+                )
+                .map_err(|e| {
+                    crate::error::CoreError::Storage(
+                        crate::storage::StorageErrorKind::Other(e.to_string()),
+                    )
+                })
+            })
+            .unwrap();
+        assert_eq!(got, expected_id, "backfilled envelope_id must match body_blob");
+    }
+
+    #[test]
+    #[ignore = "requires Task 4: MessageRepo::insert must populate envelope_id \
+                before this test can call repo.insert() without triggering the \
+                BEFORE-INSERT shape check"]
+    fn backfill_envelope_id_is_idempotent() {
+        let pool = Pool::in_memory();
+        let gid = [0x72u8; 32];
+        let repo = MessageRepo::new(&pool);
+        repo.insert(InsertParams {
+            group_id: &gid,
+            sender: &[0x73u8; 32],
+            envelope: &crate::envelope::Envelope {
+                v: 1,
+                id: crate::envelope::MessageId::generate(),
+                ts: 0,
+                reply_to: None,
+                kind: crate::envelope::Kind::Text { body: "a".into() },
+            },
+            mls_generation: 0,
+            ts_daemon_recv: 0,
+        })
+        .unwrap();
+        // Row already has envelope_id populated by insert (Task 4 wires that).
+        // Backfill must do nothing.
+        let n = repo.backfill_envelope_id().unwrap();
         assert_eq!(n, 0);
     }
 }
