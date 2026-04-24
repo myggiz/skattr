@@ -20,6 +20,7 @@ use zeroize::Zeroizing;
 use crate::error::{CoreError, Result};
 use crate::identity::derive::{hkdf_expand, INFO_HS_STORAGE_V1};
 use crate::identity::Seed;
+use crate::transport::TransportErrorKind;
 
 /// Raw bytes of a v3 HS signing key (Ed25519 secret).
 pub(crate) type HsSecretBytes = Zeroizing<[u8; 32]>;
@@ -60,14 +61,14 @@ fn save(path: &Path, seed: &Seed, bytes: &[u8; 32]) -> Result<()> {
     let mut ciphertext = Vec::new();
     let mut writer = encryptor
         .wrap_output(&mut ciphertext)
-        .map_err(|e| CoreError::Transport(format!("age wrap: {e}")))?;
+        .map_err(|e| CoreError::Transport(TransportErrorKind::Other(format!("age wrap: {e}"))))?;
     use std::io::Write;
     writer
         .write_all(bytes)
-        .map_err(|e| CoreError::Transport(format!("age write: {e}")))?;
+        .map_err(|e| CoreError::Transport(TransportErrorKind::Other(format!("age write: {e}"))))?;
     writer
         .finish()
-        .map_err(|e| CoreError::Transport(format!("age finish: {e}")))?;
+        .map_err(|e| CoreError::Transport(TransportErrorKind::Other(format!("age finish: {e}"))))?;
 
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -83,29 +84,36 @@ fn load(path: &Path, seed: &Seed) -> Result<HsSecretBytes> {
 
     // age 0.11: Decryptor is no longer an enum; use scrypt::Identity as the
     // identity and pass it via an iterator to decrypt().
-    let decryptor = age::Decryptor::new_buffered(&ciphertext[..])
-        .map_err(|e| CoreError::Transport(format!("age decryptor: {e}")))?;
+    let decryptor = age::Decryptor::new_buffered(&ciphertext[..]).map_err(|e| {
+        CoreError::Transport(TransportErrorKind::Other(format!("age decryptor: {e}")))
+    })?;
 
     if !decryptor.is_scrypt() {
-        return Err(CoreError::Transport("unexpected age recipient type".into()));
+        return Err(CoreError::Transport(TransportErrorKind::Other(
+            "unexpected age recipient type".into(),
+        )));
     }
 
     let identity = age::scrypt::Identity::new(passphrase);
     let mut reader = decryptor
         .decrypt(std::iter::once(&identity as &dyn age::Identity))
-        .map_err(|e| CoreError::Transport(format!("age decrypt: {e}")))?;
+        .map_err(|e| {
+            CoreError::Transport(TransportErrorKind::Other(format!("age decrypt: {e}")))
+        })?;
 
     use std::io::Read;
     let mut buf = Zeroizing::new([0u8; 32]);
     reader
         .read_exact(buf.as_mut())
-        .map_err(|e| CoreError::Transport(format!("age read: {e}")))?;
+        .map_err(|e| CoreError::Transport(TransportErrorKind::Other(format!("age read: {e}"))))?;
 
     // Guard against larger plaintexts (would indicate corruption or a
     // different-format file at the expected path).
     let mut tail = [0u8; 1];
     if reader.read(&mut tail).unwrap_or(0) > 0 {
-        return Err(CoreError::Transport("hs key has unexpected length".into()));
+        return Err(CoreError::Transport(TransportErrorKind::Other(
+            "hs key has unexpected length".into(),
+        )));
     }
 
     Ok(buf)

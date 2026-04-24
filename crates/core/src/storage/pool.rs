@@ -28,6 +28,7 @@ use std::sync::Mutex;
 
 use zeroize::Zeroizing;
 
+use super::StorageErrorKind;
 use crate::error::{CoreError, Result};
 use crate::identity::derive::{hkdf_expand, INFO_STORAGE_V1};
 use crate::identity::Seed;
@@ -57,8 +58,9 @@ impl Pool {
             decrypt_db(&encrypted_path, &working_path, &passphrase)?;
         }
 
-        let mut conn = rusqlite::Connection::open(&working_path)
-            .map_err(|e| CoreError::Storage(format!("open sqlite: {e}")))?;
+        let mut conn = rusqlite::Connection::open(&working_path).map_err(|e| {
+            CoreError::Storage(StorageErrorKind::Other(format!("open sqlite: {e}")))
+        })?;
 
         apply_pragmas(&conn)?;
         crate::storage::migrations::apply(&mut conn)?;
@@ -76,10 +78,9 @@ impl Pool {
     where
         F: FnOnce(&rusqlite::Connection) -> Result<R>,
     {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| CoreError::Storage("pool mutex poisoned".into()))?;
+        let conn = self.conn.lock().map_err(|_| {
+            CoreError::Storage(StorageErrorKind::Other("pool mutex poisoned".into()))
+        })?;
         f(&conn)
     }
 
@@ -89,10 +90,9 @@ impl Pool {
     where
         F: FnOnce(&mut rusqlite::Connection) -> Result<R>,
     {
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|_| CoreError::Storage("pool mutex poisoned".into()))?;
+        let mut conn = self.conn.lock().map_err(|_| {
+            CoreError::Storage(StorageErrorKind::Other("pool mutex poisoned".into()))
+        })?;
         f(&mut conn)
     }
 
@@ -102,31 +102,32 @@ impl Pool {
     where
         F: FnOnce(&rusqlite::Transaction<'_>) -> Result<R>,
     {
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|_| CoreError::Storage("pool mutex poisoned".into()))?;
+        let mut conn = self.conn.lock().map_err(|_| {
+            CoreError::Storage(StorageErrorKind::Other("pool mutex poisoned".into()))
+        })?;
         let tx = conn
             .transaction()
-            .map_err(|e| CoreError::Storage(format!("begin tx: {e}")))?;
+            .map_err(|e| CoreError::Storage(StorageErrorKind::Other(format!("begin tx: {e}"))))?;
         let result = f(&tx)?;
         tx.commit()
-            .map_err(|e| CoreError::Storage(format!("commit: {e}")))?;
+            .map_err(|e| CoreError::Storage(StorageErrorKind::Other(format!("commit: {e}"))))?;
         Ok(result)
     }
 
     /// Graceful shutdown: close the connection, encrypt plaintext →
     /// ciphertext, remove the plaintext file.
     pub fn close(self) -> Result<()> {
-        let conn = self
-            .conn
-            .into_inner()
-            .map_err(|_| CoreError::Storage("pool mutex poisoned during close".into()))?;
+        let conn = self.conn.into_inner().map_err(|_| {
+            CoreError::Storage(StorageErrorKind::Other(
+                "pool mutex poisoned during close".into(),
+            ))
+        })?;
         drop(conn);
 
         encrypt_db(&self.working_path, &self.encrypted_path, &self.passphrase)?;
-        std::fs::remove_file(&self.working_path)
-            .map_err(|e| CoreError::Storage(format!("remove plaintext db: {e}")))?;
+        std::fs::remove_file(&self.working_path).map_err(|e| {
+            CoreError::Storage(StorageErrorKind::Other(format!("remove plaintext db: {e}")))
+        })?;
         Ok(())
     }
 
@@ -150,46 +151,54 @@ impl Pool {
 
 fn apply_pragmas(conn: &rusqlite::Connection) -> Result<()> {
     conn.pragma_update(None, "foreign_keys", "ON")
-        .map_err(|e| CoreError::Storage(format!("pragma foreign_keys: {e}")))?;
+        .map_err(|e| {
+            CoreError::Storage(StorageErrorKind::Other(format!("pragma foreign_keys: {e}")))
+        })?;
     conn.pragma_update(None, "journal_mode", "WAL")
-        .map_err(|e| CoreError::Storage(format!("pragma journal_mode: {e}")))?;
+        .map_err(|e| {
+            CoreError::Storage(StorageErrorKind::Other(format!("pragma journal_mode: {e}")))
+        })?;
     conn.pragma_update(None, "synchronous", "NORMAL")
-        .map_err(|e| CoreError::Storage(format!("pragma synchronous: {e}")))?;
+        .map_err(|e| {
+            CoreError::Storage(StorageErrorKind::Other(format!("pragma synchronous: {e}")))
+        })?;
     Ok(())
 }
 
 fn decrypt_db(encrypted: &Path, plaintext: &Path, passphrase: &Zeroizing<String>) -> Result<()> {
     let ciphertext = std::fs::read(encrypted)?;
     let decryptor = age::Decryptor::new_buffered(&ciphertext[..])
-        .map_err(|e| CoreError::Storage(format!("age decryptor: {e}")))?;
+        .map_err(|e| CoreError::Storage(StorageErrorKind::Other(format!("age decryptor: {e}"))))?;
     if !decryptor.is_scrypt() {
-        return Err(CoreError::Storage(
+        return Err(CoreError::Storage(StorageErrorKind::Other(
             "unexpected age recipient type on storage DB".into(),
-        ));
+        )));
     }
     let identity = age::scrypt::Identity::new(age::secrecy::SecretString::from(
         passphrase.as_str().to_string(),
     ));
     let mut reader = decryptor
         .decrypt(std::iter::once(&identity as &dyn age::Identity))
-        .map_err(|e| CoreError::Storage(format!("age decrypt: {e}")))?;
+        .map_err(|e| CoreError::Storage(StorageErrorKind::Other(format!("age decrypt: {e}"))))?;
 
     use std::io::{Read, Write};
-    let mut out = std::fs::File::create(plaintext)
-        .map_err(|e| CoreError::Storage(format!("create plaintext: {e}")))?;
+    let mut out = std::fs::File::create(plaintext).map_err(|e| {
+        CoreError::Storage(StorageErrorKind::Other(format!("create plaintext: {e}")))
+    })?;
     let mut buf = [0u8; 8192];
     loop {
         let n = reader
             .read(&mut buf)
-            .map_err(|e| CoreError::Storage(format!("age read: {e}")))?;
+            .map_err(|e| CoreError::Storage(StorageErrorKind::Other(format!("age read: {e}"))))?;
         if n == 0 {
             break;
         }
-        out.write_all(&buf[..n])
-            .map_err(|e| CoreError::Storage(format!("write plaintext: {e}")))?;
+        out.write_all(&buf[..n]).map_err(|e| {
+            CoreError::Storage(StorageErrorKind::Other(format!("write plaintext: {e}")))
+        })?;
     }
     out.sync_all()
-        .map_err(|e| CoreError::Storage(format!("sync plaintext: {e}")))?;
+        .map_err(|e| CoreError::Storage(StorageErrorKind::Other(format!("sync plaintext: {e}"))))?;
     Ok(())
 }
 
@@ -202,21 +211,25 @@ fn encrypt_db(plaintext: &Path, encrypted: &Path, passphrase: &Zeroizing<String>
     let mut ciphertext = Vec::new();
     let mut writer = encryptor
         .wrap_output(&mut ciphertext)
-        .map_err(|e| CoreError::Storage(format!("age wrap: {e}")))?;
+        .map_err(|e| CoreError::Storage(StorageErrorKind::Other(format!("age wrap: {e}"))))?;
     use std::io::Write;
     writer
         .write_all(&plaintext_bytes)
-        .map_err(|e| CoreError::Storage(format!("age write: {e}")))?;
+        .map_err(|e| CoreError::Storage(StorageErrorKind::Other(format!("age write: {e}"))))?;
     writer
         .finish()
-        .map_err(|e| CoreError::Storage(format!("age finish: {e}")))?;
+        .map_err(|e| CoreError::Storage(StorageErrorKind::Other(format!("age finish: {e}"))))?;
 
     // Atomic replace via tempfile + rename.
     let tmp_path = encrypted.with_extension("age.tmp");
-    std::fs::write(&tmp_path, &ciphertext)
-        .map_err(|e| CoreError::Storage(format!("write ciphertext tmp: {e}")))?;
-    std::fs::rename(&tmp_path, encrypted)
-        .map_err(|e| CoreError::Storage(format!("rename ciphertext: {e}")))?;
+    std::fs::write(&tmp_path, &ciphertext).map_err(|e| {
+        CoreError::Storage(StorageErrorKind::Other(format!(
+            "write ciphertext tmp: {e}"
+        )))
+    })?;
+    std::fs::rename(&tmp_path, encrypted).map_err(|e| {
+        CoreError::Storage(StorageErrorKind::Other(format!("rename ciphertext: {e}")))
+    })?;
     Ok(())
 }
 
@@ -234,7 +247,7 @@ mod tests {
                     [],
                     |r| r.get(0),
                 )
-                .map_err(|e| CoreError::Storage(e.to_string()))
+                .map_err(|e| CoreError::Storage(StorageErrorKind::Other(e.to_string())))
             })
             .unwrap();
         assert_eq!(count, 1);
@@ -252,7 +265,7 @@ mod tests {
                 "INSERT INTO identity (id, public_key, created_at) VALUES (1, ?1, ?2)",
                 rusqlite::params![&[0xAAu8; 32][..], 12345i64],
             )
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
+            .map_err(|e| CoreError::Storage(StorageErrorKind::Other(e.to_string())))?;
             Ok(())
         })
         .unwrap();
@@ -271,7 +284,7 @@ mod tests {
                     [],
                     |r| Ok((r.get::<_, i64>(0)? as usize, r.get(1)?)),
                 )
-                .map_err(|e| CoreError::Storage(e.to_string()))
+                .map_err(|e| CoreError::Storage(StorageErrorKind::Other(e.to_string())))
             })
             .unwrap();
         assert_eq!(pub_len, 32);
@@ -302,14 +315,14 @@ mod tests {
                 "INSERT INTO identity (id, public_key, created_at) VALUES (1, ?1, ?2)",
                 rusqlite::params![&[0xBBu8; 32][..], 999i64],
             )
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
+            .map_err(|e| CoreError::Storage(StorageErrorKind::Other(e.to_string())))?;
             Ok(())
         })
         .unwrap();
         let count: i64 = pool
             .with(|c| {
                 c.query_row("SELECT COUNT(*) FROM identity", [], |r| r.get(0))
-                    .map_err(|e| CoreError::Storage(e.to_string()))
+                    .map_err(|e| CoreError::Storage(StorageErrorKind::Other(e.to_string())))
             })
             .unwrap();
         assert_eq!(count, 1);
@@ -323,14 +336,16 @@ mod tests {
                 "INSERT INTO identity (id, public_key, created_at) VALUES (1, ?1, ?2)",
                 rusqlite::params![&[0xCCu8; 32][..], 100i64],
             )
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
-            Err(CoreError::Storage("force rollback".into()))
+            .map_err(|e| CoreError::Storage(StorageErrorKind::Other(e.to_string())))?;
+            Err(CoreError::Storage(StorageErrorKind::Other(
+                "force rollback".into(),
+            )))
         });
         assert!(err.is_err());
         let count: i64 = pool
             .with(|c| {
                 c.query_row("SELECT COUNT(*) FROM identity", [], |r| r.get(0))
-                    .map_err(|e| CoreError::Storage(e.to_string()))
+                    .map_err(|e| CoreError::Storage(StorageErrorKind::Other(e.to_string())))
             })
             .unwrap();
         assert_eq!(count, 0, "transaction closure Err must roll back");

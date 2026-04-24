@@ -20,6 +20,7 @@ use openmls_rust_crypto::OpenMlsRustCrypto;
 use openmls_traits::OpenMlsProvider as _;
 
 use crate::error::{CoreError, Result};
+use crate::mls::error_kind::MlsErrorKind;
 
 /// Crypto + storage provider for OpenMLS.
 #[derive(Debug)]
@@ -49,30 +50,36 @@ impl MlsProvider {
     /// Serialize the in-memory key-value storage into a ciborium blob.
     pub(crate) fn snapshot(&self) -> Result<Vec<u8>> {
         let storage = self.inner.storage();
-        let guard = storage
-            .values
-            .read()
-            .map_err(|_| CoreError::Mls("mls: snapshot: poisoned storage lock".into()))?;
+        let guard = storage.values.read().map_err(|_| {
+            CoreError::from(MlsErrorKind::Other(
+                "mls: snapshot: poisoned storage lock".into(),
+            ))
+        })?;
         let map: HashMap<Vec<u8>, Vec<u8>> = guard.clone();
         drop(guard);
 
         let mut out = Vec::new();
-        ciborium::ser::into_writer(&map, &mut out)
-            .map_err(|e| CoreError::Mls(format!("mls: snapshot: cbor encode: {e}")))?;
+        ciborium::ser::into_writer(&map, &mut out).map_err(|e| {
+            CoreError::from(MlsErrorKind::Other(format!(
+                "mls: snapshot: cbor encode: {e}"
+            )))
+        })?;
         Ok(out)
     }
 
     /// Rehydrate a provider from a ciborium snapshot.
     pub(crate) fn load(bytes: &[u8]) -> Result<Self> {
-        let map: HashMap<Vec<u8>, Vec<u8>> = ciborium::de::from_reader(bytes)
-            .map_err(|e| CoreError::Mls(format!("mls: load: cbor decode: {e}")))?;
+        let map: HashMap<Vec<u8>, Vec<u8>> = ciborium::de::from_reader(bytes).map_err(|e| {
+            CoreError::from(MlsErrorKind::Other(format!("mls: load: cbor decode: {e}")))
+        })?;
         let provider = Self::new();
         {
             let storage = provider.inner.storage();
-            let mut guard = storage
-                .values
-                .write()
-                .map_err(|_| CoreError::Mls("mls: load: poisoned storage lock".into()))?;
+            let mut guard = storage.values.write().map_err(|_| {
+                CoreError::from(MlsErrorKind::Other(
+                    "mls: load: poisoned storage lock".into(),
+                ))
+            })?;
             *guard = map;
         }
         Ok(provider)
@@ -127,8 +134,8 @@ mod tests {
         let err = MlsProvider::load(&[0xFF, 0xFF, 0xFF, 0xFF])
             .expect_err("load must reject non-ciborium bytes");
         match err {
-            CoreError::Mls(s) => assert!(s.starts_with("mls: load:")),
-            other => panic!("expected CoreError::Mls, got {other:?}"),
+            CoreError::Mls(MlsErrorKind::Other(s)) => assert!(s.starts_with("mls: load:")),
+            other => panic!("expected CoreError::Mls(Other(_)), got {other:?}"),
         }
     }
 }

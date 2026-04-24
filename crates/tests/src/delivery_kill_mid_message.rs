@@ -13,9 +13,10 @@ use std::time::Duration;
 use skattr_core::envelope::{Envelope, Kind, MessageId};
 use skattr_core::identity::IdentityKey;
 use skattr_core::test_exports::{
-    handshake_initiator, handshake_responder, noise_public_of, receive, DeliveryHub, Group,
-    GroupId, InboundDispatch, KeyPackage, KeyPackageRepo, KillSwitch, KillableStream, MessageRepo,
-    MlsGroupRepo, MlsProvider, Outbox, Pool, ReceiveOutcome, SeenMessagesRepo,
+    handshake_initiator, handshake_responder, noise_public_of, now_unix_seconds, receive,
+    DeliveryHub, Group, GroupId, InboundDispatch, KeyPackage, KeyPackageRepo, KillSwitch,
+    KillableStream, MessageRepo, MlsGroupRepo, MlsProvider, Outbox, Pool, ReceiveOutcome,
+    SeenMessagesRepo,
 };
 
 /// Integration-test `InboundDispatch` that reloads the MLS group from
@@ -81,13 +82,7 @@ impl InboundDispatch for MlsInboundDispatch {
         }
 
         let now_ms = ts_now_ms();
-        let ts_daemon_recv = i64::try_from(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0),
-        )
-        .unwrap_or(0);
+        let ts_daemon_recv = now_unix_seconds();
         let seen = SeenMessagesRepo::new(&self.pool);
         let msgs = MessageRepo::new(&self.pool);
         match receive(

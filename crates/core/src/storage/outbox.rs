@@ -10,6 +10,7 @@
 //! idempotent and ACK lookup is a single index probe. Migration 0004
 //! added the `message_id` column.
 
+use super::StorageErrorKind;
 use crate::error::{CoreError, Result};
 use crate::storage::Pool;
 
@@ -25,6 +26,39 @@ impl<'p> OutboxRepo<'p> {
         Self { pool }
     }
 
+    /// Idempotent insert inside the caller's transaction. Returns
+    /// `Some(rowid)` on a fresh insert, `None` if a row with this
+    /// `(target, message_id)` pair already exists (idempotency via
+    /// `INSERT OR IGNORE` over the `idx_outbox_target_message_id`
+    /// unique index from migration 0004).
+    ///
+    /// Use this when the outbox row must commit atomically with other
+    /// rows (e.g. MLS snapshot + message in one transaction).
+    pub(crate) fn insert_in_tx(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        target: &[u8],
+        message_id: &[u8; 16],
+        payload: &[u8],
+        next_retry_at: i64,
+    ) -> Result<Option<i64>> {
+        let changed = tx
+            .execute(
+                "INSERT OR IGNORE INTO outbox \
+                 (target, message_id, payload, attempts, next_retry_at) \
+                 VALUES (?1, ?2, ?3, 0, ?4)",
+                rusqlite::params![target, message_id.as_slice(), payload, next_retry_at],
+            )
+            .map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!("insert outbox: {e}")))
+            })?;
+        Ok(if changed == 0 {
+            None
+        } else {
+            Some(tx.last_insert_rowid())
+        })
+    }
+
     /// Idempotent insert. Returns `Some(rowid)` on a fresh insert,
     /// `None` if a row with this `(target, message_id)` pair already
     /// exists. Relies on the `idx_outbox_target_message_id` unique
@@ -36,21 +70,8 @@ impl<'p> OutboxRepo<'p> {
         payload: &[u8],
         next_retry_at: i64,
     ) -> Result<Option<i64>> {
-        self.pool.with_mut(|c| {
-            let changed = c
-                .execute(
-                    "INSERT OR IGNORE INTO outbox \
-                     (target, message_id, payload, attempts, next_retry_at) \
-                     VALUES (?1, ?2, ?3, 0, ?4)",
-                    rusqlite::params![target, message_id.as_slice(), payload, next_retry_at],
-                )
-                .map_err(|e| CoreError::Storage(format!("insert outbox: {e}")))?;
-            Ok(if changed == 0 {
-                None
-            } else {
-                Some(c.last_insert_rowid())
-            })
-        })
+        self.pool
+            .transaction(|tx| self.insert_in_tx(tx, target, message_id, payload, next_retry_at))
     }
 
     /// Fetch entries whose `next_retry_at` has passed.
@@ -62,7 +83,9 @@ impl<'p> OutboxRepo<'p> {
                      WHERE next_retry_at <= ?1 \
                      ORDER BY next_retry_at LIMIT ?2",
                 )
-                .map_err(|e| CoreError::Storage(format!("prepare due: {e}")))?;
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!("prepare due: {e}")))
+                })?;
             let rows = stmt
                 .query_map(
                     rusqlite::params![now, i64::try_from(limit).unwrap_or(i64::MAX)],
@@ -85,9 +108,13 @@ impl<'p> OutboxRepo<'p> {
                         ))
                     },
                 )
-                .map_err(|e| CoreError::Storage(format!("query due: {e}")))?;
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!("query due: {e}")))
+                })?;
             let out: std::result::Result<Vec<_>, _> = rows.collect();
-            out.map_err(|e| CoreError::Storage(format!("collect due: {e}")))
+            out.map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!("collect due: {e}")))
+            })
         })
     }
 
@@ -100,7 +127,9 @@ impl<'p> OutboxRepo<'p> {
                     "DELETE FROM outbox WHERE target = ?1 AND message_id = ?2",
                     rusqlite::params![target, message_id.as_slice()],
                 )
-                .map_err(|e| CoreError::Storage(format!("ack outbox: {e}")))?;
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!("ack outbox: {e}")))
+                })?;
             Ok(n > 0)
         })
     }
@@ -113,7 +142,9 @@ impl<'p> OutboxRepo<'p> {
                 "UPDATE outbox SET attempts = attempts + 1, next_retry_at = ?1 WHERE id = ?2",
                 rusqlite::params![next_retry_at, id],
             )
-            .map_err(|e| CoreError::Storage(format!("reschedule outbox: {e}")))?;
+            .map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!("reschedule outbox: {e}")))
+            })?;
             Ok(())
         })
     }

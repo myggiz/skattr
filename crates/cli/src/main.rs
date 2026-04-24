@@ -254,6 +254,10 @@ fn exit_on_ipc_error(err: skattr_core::daemon::IpcClientError) -> ! {
                 eprintln!("search query rejected by FTS5 engine");
                 std::process::exit(6);
             }
+            DaemonErrorKind::InvalidArgument { message } => {
+                eprintln!("argument error: {message}");
+                std::process::exit(2);
+            }
         },
         IpcClientError::Server(other) => {
             eprintln!("ipc: server error: {other:?}");
@@ -1370,19 +1374,9 @@ mod tests {
         assert!(err.to_string().contains("/does/not/exist"));
     }
 
-    // Serializes the three `resolve_socket_path_*` tests against each
-    // other: they all mutate the process-global SKATTR_SOCKET /
-    // XDG_RUNTIME_DIR env vars and would otherwise race under `cargo
-    // test`'s default thread-pool. One mutex is cheaper than pulling in
-    // a `serial_test` dev-dep.
-    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        LOCK.lock().unwrap_or_else(|p| p.into_inner())
-    }
-
     #[test]
+    #[serial_test::serial(resolve_socket_path_env)]
     fn resolve_socket_path_prefers_flag_over_env() {
-        let _g = env_guard();
         let tmp = tempfile::tempdir().unwrap();
         let flag = tmp.path().join("flag.sock");
         let env = tmp.path().join("env.sock");
@@ -1393,8 +1387,8 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(resolve_socket_path_env)]
     fn resolve_socket_path_env_fallback() {
-        let _g = env_guard();
         let tmp = tempfile::tempdir().unwrap();
         let env = tmp.path().join("env.sock");
         std::env::set_var("SKATTR_SOCKET", &env);
@@ -1407,8 +1401,8 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(resolve_socket_path_env)]
     fn resolve_socket_path_xdg_fallback() {
-        let _g = env_guard();
         std::env::remove_var("SKATTR_SOCKET");
         std::env::set_var("XDG_RUNTIME_DIR", "/custom/run/1000");
         let got = resolve_socket_path(None);
@@ -1525,6 +1519,7 @@ mod tests {
         use skattr_core::envelope::Kind;
         use skattr_core::identity::PublicKey;
         let rows = vec![MessageRecord {
+            row_id: 0, // row_id irrelevant in this test
             message_id: Hex16::from([2; 16]),
             contact: PublicKey([7; 32]),
             direction: Direction::Incoming,
@@ -1567,6 +1562,7 @@ mod tests {
         use skattr_core::identity::PublicKey;
 
         let rec = MessageRecord {
+            row_id: 0, // row_id irrelevant in this test
             message_id: Hex16::from([0xCC; 16]),
             contact: PublicKey([0x42; 32]),
             direction: Direction::Incoming,
@@ -1602,6 +1598,7 @@ mod tests {
         use skattr_core::identity::PublicKey;
 
         let rec = MessageRecord {
+            row_id: 0, // row_id irrelevant in this test
             message_id: Hex16::from([0xAB; 16]),
             contact: PublicKey([0x42; 32]),
             direction: Direction::Incoming,
@@ -1631,6 +1628,7 @@ mod tests {
         use skattr_core::identity::PublicKey;
 
         let rec = MessageRecord {
+            row_id: 0, // row_id irrelevant in this test
             message_id: Hex16::from([0xDD; 16]),
             contact: PublicKey([0x42; 32]),
             direction: Direction::Incoming,

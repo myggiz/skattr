@@ -5,8 +5,10 @@
 
 //! Repository for `contacts` and `onion_addresses` tables.
 
+use super::StorageErrorKind;
 use crate::contact::Contact;
 use crate::contact::ContactCard;
+use crate::contact::ContactErrorKind;
 use crate::error::{CoreError, Result};
 use crate::identity::PublicKey;
 use crate::storage::Pool;
@@ -35,7 +37,9 @@ impl<'p> ContactRepo<'p> {
                     contact.added_at,
                 ],
             )
-            .map_err(|e| CoreError::Storage(format!("upsert contact: {e}")))?;
+            .map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!("upsert contact: {e}")))
+            })?;
             Ok(())
         })
     }
@@ -60,7 +64,9 @@ impl<'p> ContactRepo<'p> {
             match result {
                 Ok(contact) => Ok(Some(contact)),
                 Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-                Err(e) => Err(CoreError::Storage(format!("get contact: {e}"))),
+                Err(e) => Err(CoreError::Storage(StorageErrorKind::Other(format!(
+                    "get contact: {e}"
+                )))),
             }
         })?;
         let Some(mut contact) = base else {
@@ -80,7 +86,11 @@ impl<'p> ContactRepo<'p> {
                     "SELECT identity_pubkey, display_name, added_at FROM contacts \
                      ORDER BY display_name IS NULL, display_name COLLATE NOCASE",
                 )
-                .map_err(|e| CoreError::Storage(format!("prepare list contacts: {e}")))?;
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!(
+                        "prepare list contacts: {e}"
+                    )))
+                })?;
             let rows = stmt
                 .query_map([], |r| {
                     let pub_bytes: Vec<u8> = r.get(0)?;
@@ -95,9 +105,13 @@ impl<'p> ContactRepo<'p> {
                         card: None,
                     })
                 })
-                .map_err(|e| CoreError::Storage(format!("query list contacts: {e}")))?;
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!("query list contacts: {e}")))
+                })?;
             let out: std::result::Result<Vec<_>, _> = rows.collect();
-            out.map_err(|e| CoreError::Storage(format!("collect contacts: {e}")))
+            out.map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!("collect contacts: {e}")))
+            })
         })?;
 
         // Hydrate each contact's latest_card. For small contact lists
@@ -116,7 +130,9 @@ impl<'p> ContactRepo<'p> {
                 "DELETE FROM contacts WHERE identity_pubkey = ?1",
                 rusqlite::params![&identity.0[..]],
             )
-            .map_err(|e| CoreError::Storage(format!("delete contact: {e}")))?;
+            .map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!("delete contact: {e}")))
+            })?;
             Ok(())
         })
     }
@@ -135,7 +151,7 @@ impl<'p> ContactRepo<'p> {
                  VALUES ((SELECT id FROM contacts WHERE identity_pubkey = ?1), ?2, ?3, 1)",
                 rusqlite::params![&identity.0[..], address, seen_at],
             )
-            .map_err(|e| CoreError::Storage(format!("add onion: {e}")))?;
+            .map_err(|e| CoreError::Storage(StorageErrorKind::Other(format!("add onion: {e}"))))?;
             Ok(())
         })
     }
@@ -149,14 +165,18 @@ impl<'p> ContactRepo<'p> {
                  WHERE contact_id = (SELECT id FROM contacts WHERE identity_pubkey = ?1)",
                 rusqlite::params![&identity.0[..]],
             )
-            .map_err(|e| CoreError::Storage(format!("demote old onions: {e}")))?;
+            .map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!("demote old onions: {e}")))
+            })?;
             tx.execute(
                 "UPDATE onion_addresses SET is_current = 1 \
                  WHERE contact_id = (SELECT id FROM contacts WHERE identity_pubkey = ?1) \
                  AND address = ?2",
                 rusqlite::params![&identity.0[..], address],
             )
-            .map_err(|e| CoreError::Storage(format!("promote new onion: {e}")))?;
+            .map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!("promote new onion: {e}")))
+            })?;
             Ok(())
         })
     }
@@ -175,7 +195,9 @@ impl<'p> ContactRepo<'p> {
             match result {
                 Ok(s) => Ok(Some(s)),
                 Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-                Err(e) => Err(CoreError::Storage(format!("current_onion: {e}"))),
+                Err(e) => Err(CoreError::Storage(StorageErrorKind::Other(format!(
+                    "current_onion: {e}"
+                )))),
             }
         })
     }
@@ -188,12 +210,16 @@ impl<'p> ContactRepo<'p> {
     /// the contact row doesn't exist.
     pub fn put_card(&self, card: &ContactCard) -> Result<()> {
         let identity_bytes = card.body.identity.0;
-        let version_i: i64 = i64::try_from(card.body.version)
-            .map_err(|_| CoreError::Contact("contact: card: version overflows i64".into()))?;
+        let version_i: i64 = i64::try_from(card.body.version).map_err(|_| {
+            CoreError::Contact(ContactErrorKind::Other(
+                "card: version overflows i64".into(),
+            ))
+        })?;
 
         let mut blob = Vec::new();
-        ciborium::ser::into_writer(card, &mut blob)
-            .map_err(|e| CoreError::Contact(format!("contact: card: cbor encode: {e}")))?;
+        ciborium::ser::into_writer(card, &mut blob).map_err(|e| {
+            CoreError::Contact(ContactErrorKind::Other(format!("card: cbor encode: {e}")))
+        })?;
 
         let verified_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -210,11 +236,13 @@ impl<'p> ContactRepo<'p> {
             ) {
                 Ok(id) => id,
                 Err(rusqlite::Error::QueryReturnedNoRows) => {
-                    return Err(CoreError::Contact(
-                        "contact: card: contact not found".into(),
-                    ));
+                    return Err(CoreError::Contact(ContactErrorKind::NotFound));
                 }
-                Err(e) => return Err(CoreError::Contact(format!("contact: card: lookup: {e}"))),
+                Err(e) => {
+                    return Err(CoreError::Contact(ContactErrorKind::Other(format!(
+                        "card: lookup: {e}"
+                    ))))
+                }
             };
 
             // Compare against the stored max version; reject if not strictly greater.
@@ -225,12 +253,16 @@ impl<'p> ContactRepo<'p> {
                     |r| r.get::<_, Option<i64>>(0),
                 )
                 .map_err(|e| {
-                    CoreError::Contact(format!("contact: card: max-version lookup: {e}"))
+                    CoreError::Contact(ContactErrorKind::Other(format!(
+                        "card: max-version lookup: {e}"
+                    )))
                 })?;
 
             if let Some(max_v) = max_version {
                 if version_i <= max_v {
-                    return Err(CoreError::Contact("contact: card: stale version".into()));
+                    return Err(CoreError::Contact(ContactErrorKind::Other(
+                        "card: stale version".into(),
+                    )));
                 }
             }
 
@@ -239,7 +271,9 @@ impl<'p> ContactRepo<'p> {
                  VALUES (?1, ?2, ?3, ?4)",
                 rusqlite::params![contact_id, version_i, &blob, verified_at],
             )
-            .map_err(|e| CoreError::Contact(format!("contact: card: insert: {e}")))?;
+            .map_err(|e| {
+                CoreError::Contact(ContactErrorKind::Other(format!("card: insert: {e}")))
+            })?;
             Ok(())
         })
     }
@@ -253,13 +287,45 @@ impl<'p> ContactRepo<'p> {
                     "UPDATE contacts SET group_id = ?1 WHERE identity_pubkey = ?2",
                     rusqlite::params![group_id, &identity.0[..]],
                 )
-                .map_err(|e| CoreError::Storage(format!("set group_id: {e}")))?;
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!("set group_id: {e}")))
+                })?;
             if changed == 0 {
-                return Err(CoreError::Contact(
-                    "contact: group_id: contact not found".into(),
-                ));
+                return Err(CoreError::Contact(ContactErrorKind::NotFound));
             }
             Ok(())
+        })
+    }
+
+    /// 2-member-group reverse lookup: given a group_id, return the peer's
+    /// PublicKey (the member that is not us). Returns `Ok(None)` if no
+    /// contact row has this group_id.
+    ///
+    /// Phase 1.H: scoped to 2-member groups per CLAUDE.md. Multi-member
+    /// groups land in Phase 2+; this method will need a signature change
+    /// at that point to return a list.
+    pub(crate) fn contact_for_group(&self, group_id: &[u8; 32]) -> Result<Option<PublicKey>> {
+        use rusqlite::OptionalExtension;
+        self.pool.with(|c| {
+            let row: Option<Vec<u8>> = c
+                .query_row(
+                    "SELECT identity_pubkey FROM contacts WHERE group_id = ?1 LIMIT 1",
+                    rusqlite::params![&group_id[..]],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!("contact_for_group: {e}")))
+                })?;
+            Ok(row.and_then(|bytes| {
+                if bytes.len() == 32 {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&bytes);
+                    Some(PublicKey(arr))
+                } else {
+                    None
+                }
+            }))
         })
     }
 
@@ -276,7 +342,9 @@ impl<'p> ContactRepo<'p> {
             match result {
                 Ok(v) => Ok(Some(v)),
                 Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-                Err(e) => Err(CoreError::Storage(format!("get group_id: {e}"))),
+                Err(e) => Err(CoreError::Storage(StorageErrorKind::Other(format!(
+                    "get group_id: {e}"
+                )))),
             }
         })
     }
@@ -288,24 +356,32 @@ impl<'p> ContactRepo<'p> {
     /// non-hex characters.
     pub fn lookup_by_prefix(&self, prefix: &str) -> Result<Vec<PublicKey>> {
         if prefix.is_empty() {
-            return Err(CoreError::Contact("contact: lookup: empty prefix".into()));
+            return Err(CoreError::Contact(ContactErrorKind::Other(
+                "lookup: empty prefix".into(),
+            )));
         }
         if !prefix.chars().all(|c| c.is_ascii_hexdigit()) {
-            return Err(CoreError::Contact(format!(
-                "contact: lookup: non-hex prefix {prefix:?}"
-            )));
+            return Err(CoreError::Contact(ContactErrorKind::Other(format!(
+                "lookup: non-hex prefix {prefix:?}"
+            ))));
         }
         let lower = prefix.to_ascii_lowercase();
         self.pool.with(|c| {
             let mut stmt = c
                 .prepare("SELECT identity_pubkey FROM contacts")
-                .map_err(|e| CoreError::Storage(format!("prepare lookup: {e}")))?;
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!("prepare lookup: {e}")))
+                })?;
             let rows = stmt
                 .query_map([], |r| r.get::<_, Vec<u8>>(0))
-                .map_err(|e| CoreError::Storage(format!("query lookup: {e}")))?;
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!("query lookup: {e}")))
+                })?;
             let mut out = Vec::new();
             for row in rows {
-                let bytes = row.map_err(|e| CoreError::Storage(format!("row lookup: {e}")))?;
+                let bytes = row.map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!("row lookup: {e}")))
+                })?;
                 if bytes.len() != 32 {
                     continue;
                 }
@@ -335,12 +411,16 @@ impl<'p> ContactRepo<'p> {
             match result {
                 Ok(blob) => {
                     let card: ContactCard = ciborium::de::from_reader(&blob[..]).map_err(|e| {
-                        CoreError::Contact(format!("contact: card: cbor decode: {e}"))
+                        CoreError::Contact(ContactErrorKind::Other(format!(
+                            "card: cbor decode: {e}"
+                        )))
                     })?;
                     Ok(Some(card))
                 }
                 Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-                Err(e) => Err(CoreError::Contact(format!("contact: card: latest: {e}"))),
+                Err(e) => Err(CoreError::Contact(ContactErrorKind::Other(format!(
+                    "card: latest: {e}"
+                )))),
             }
         })
     }
@@ -418,7 +498,7 @@ mod tests {
         let count: i64 = pool
             .with(|c| {
                 c.query_row("SELECT COUNT(*) FROM onion_addresses", [], |r| r.get(0))
-                    .map_err(|e| CoreError::Storage(e.to_string()))
+                    .map_err(|e| CoreError::Storage(StorageErrorKind::Other(e.to_string())))
             })
             .unwrap();
         assert_eq!(count, 0);
@@ -470,7 +550,10 @@ mod tests {
             .put_card(&sample_card(11, 5))
             .expect_err("same version");
         assert!(
-            matches!(err, CoreError::Contact(ref s) if s.contains("stale version")),
+            matches!(
+                err,
+                CoreError::Contact(ContactErrorKind::Other(ref s)) if s.contains("stale version")
+            ),
             "got: {err:?}"
         );
 
@@ -478,7 +561,10 @@ mod tests {
             .put_card(&sample_card(11, 4))
             .expect_err("older version");
         assert!(
-            matches!(err, CoreError::Contact(ref s) if s.contains("stale version")),
+            matches!(
+                err,
+                CoreError::Contact(ContactErrorKind::Other(ref s)) if s.contains("stale version")
+            ),
             "got: {err:?}"
         );
     }
@@ -490,7 +576,7 @@ mod tests {
         // No upsert — the contact row isn't there.
         let err = repo.put_card(&sample_card(12, 1)).expect_err("no contact");
         assert!(
-            matches!(err, CoreError::Contact(ref s) if s.contains("contact not found")),
+            matches!(err, CoreError::Contact(ContactErrorKind::NotFound)),
             "got: {err:?}"
         );
     }
@@ -531,7 +617,7 @@ mod tests {
         let count: i64 = pool
             .with(|c| {
                 c.query_row("SELECT COUNT(*) FROM contact_cards", [], |r| r.get(0))
-                    .map_err(|e| CoreError::Storage(e.to_string()))
+                    .map_err(|e| CoreError::Storage(StorageErrorKind::Other(e.to_string())))
             })
             .unwrap();
         assert_eq!(count, 0);
@@ -665,7 +751,10 @@ mod tests {
         let repo = ContactRepo::new(&pool);
         let err = repo.lookup_by_prefix("").expect_err("empty prefix");
         assert!(
-            matches!(err, CoreError::Contact(ref s) if s.contains("empty")),
+            matches!(
+                err,
+                CoreError::Contact(ContactErrorKind::Other(ref s)) if s.contains("empty")
+            ),
             "got {err:?}"
         );
     }
@@ -676,8 +765,40 @@ mod tests {
         let repo = ContactRepo::new(&pool);
         let err = repo.lookup_by_prefix("zz").expect_err("non-hex prefix");
         assert!(
-            matches!(err, CoreError::Contact(ref s) if s.contains("hex")),
+            matches!(
+                err,
+                CoreError::Contact(ContactErrorKind::Other(ref s)) if s.contains("hex")
+            ),
             "got {err:?}"
         );
+    }
+
+    #[test]
+    fn contact_for_group_returns_peer_for_2_member_group() {
+        let pool = Pool::in_memory();
+        let peer = crate::identity::PublicKey([0x42; 32]);
+        let gid = [0x43u8; 32];
+
+        let repo = ContactRepo::new(&pool);
+        repo.upsert(&crate::contact::Contact {
+            identity: peer,
+            display_name: None,
+            added_at: 0,
+            card: None,
+        })
+        .unwrap();
+        repo.set_group_id(&peer, &gid).unwrap();
+
+        let got = repo.contact_for_group(&gid).unwrap();
+        assert_eq!(got, Some(peer));
+    }
+
+    #[test]
+    fn contact_for_group_returns_none_for_unknown_group() {
+        let pool = Pool::in_memory();
+        let repo = ContactRepo::new(&pool);
+        let gid = [0x44u8; 32];
+        let got = repo.contact_for_group(&gid).unwrap();
+        assert_eq!(got, None);
     }
 }

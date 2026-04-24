@@ -5,6 +5,7 @@
 
 //! Repository for the `mailboxes` table.
 
+use super::StorageErrorKind;
 use crate::error::{CoreError, Result};
 use crate::storage::Pool;
 
@@ -29,7 +30,9 @@ impl MailboxRole {
         match s {
             "mine" => Ok(MailboxRole::Mine),
             "theirs" => Ok(MailboxRole::Theirs),
-            other => Err(CoreError::Storage(format!("unknown mailbox role: {other}"))),
+            other => Err(CoreError::Storage(StorageErrorKind::Other(format!(
+                "unknown mailbox role: {other}"
+            )))),
         }
     }
 }
@@ -49,7 +52,9 @@ impl<'p> MailboxRepo<'p> {
                 "INSERT OR IGNORE INTO mailboxes (onion, registered_at, role) VALUES (?1, ?2, ?3)",
                 rusqlite::params![onion, registered_at, role.as_sql()],
             )
-            .map_err(|e| CoreError::Storage(format!("insert mailbox: {e}")))?;
+            .map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!("insert mailbox: {e}")))
+            })?;
             Ok(c.last_insert_rowid())
         })
     }
@@ -58,12 +63,22 @@ impl<'p> MailboxRepo<'p> {
         self.pool.with(|c| {
             let mut stmt = c
                 .prepare("SELECT onion FROM mailboxes WHERE role = ?1 ORDER BY registered_at")
-                .map_err(|e| CoreError::Storage(format!("prepare list mailboxes: {e}")))?;
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!(
+                        "prepare list mailboxes: {e}"
+                    )))
+                })?;
             let rows = stmt
                 .query_map(rusqlite::params![role.as_sql()], |r| r.get::<_, String>(0))
-                .map_err(|e| CoreError::Storage(format!("query list mailboxes: {e}")))?;
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!(
+                        "query list mailboxes: {e}"
+                    )))
+                })?;
             let out: std::result::Result<Vec<_>, _> = rows.collect();
-            out.map_err(|e| CoreError::Storage(format!("collect mailboxes: {e}")))
+            out.map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!("collect mailboxes: {e}")))
+            })
         })
     }
 
@@ -73,7 +88,9 @@ impl<'p> MailboxRepo<'p> {
                 "DELETE FROM mailboxes WHERE onion = ?1 AND role = ?2",
                 rusqlite::params![onion, role.as_sql()],
             )
-            .map_err(|e| CoreError::Storage(format!("delete mailbox: {e}")))?;
+            .map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!("delete mailbox: {e}")))
+            })?;
             Ok(())
         })
     }

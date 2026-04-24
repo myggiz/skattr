@@ -14,6 +14,7 @@ use crate::error::{CoreError, Result};
 use crate::identity::PublicKey;
 use crate::transport::connection::AuthenticatedConnection;
 use crate::transport::frame::Frame;
+use crate::transport::TransportErrorKind;
 
 /// Control messages sent by the hub to a running peer actor.
 pub enum PeerCtrl<S>
@@ -160,7 +161,9 @@ where
                         tracing::warn!(ty = ?other, "peer: dropping unexpected inbound frame");
                     }
                     Ok(None) => {
-                        return Err(CoreError::Transport("peer: EOF".into()));
+                        return Err(CoreError::Transport(TransportErrorKind::Other(
+                            "peer: EOF".into(),
+                        )));
                     }
                     Err(e) => {
                         return Err(e);

@@ -113,6 +113,17 @@ impl Daemon {
             }
         }
 
+        // Phase 1.H: one-shot backfill for pre-1.H rows missing envelope_id.
+        // Fail-closed: envelope_id backfill underpins (group_id, envelope_id)
+        // uniqueness for pre-1.H rows. If this errors, continuing would leave
+        // the uniqueness guarantee "advisory" for legacy rows (NULLs compare
+        // distinct in SQLite's UNIQUE index). Contrast with backfill_body_text,
+        // which is FTS-only and safe to warn-and-skip.
+        let n = crate::storage::MessageRepo::new(&pool).backfill_envelope_id()?;
+        if n > 0 {
+            tracing::info!(rows = n, "backfilled envelope_id for pre-1.H rows");
+        }
+
         // Phase 1.G: hourly retention sweep.
         let (sweep_shutdown_tx, sweep_shutdown_rx) = tokio::sync::watch::channel(false);
         let sweep_handle = crate::daemon::retention::spawn_sweep(
@@ -208,7 +219,9 @@ impl Daemon {
         // bypasses Daemon and drives DeliveryHub directly through
         // test_exports.
         Err(crate::error::CoreError::Delivery(
-            "Daemon::send requires 1.F CLI integration".into(),
+            crate::delivery::DeliveryErrorKind::Other(
+                "Daemon::send requires 1.F CLI integration".into(),
+            ),
         ))
     }
 }

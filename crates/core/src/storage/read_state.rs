@@ -9,6 +9,7 @@
 //! with `id > last_read_message_id` for a given `group_id`; the cursor
 //! advances via `mark_read`.
 
+use super::StorageErrorKind;
 use crate::error::{CoreError, Result};
 use crate::storage::Pool;
 
@@ -34,7 +35,9 @@ impl<'p> ReadStateRepo<'p> {
             ) {
                 Ok(v) => Ok(Some(v)),
                 Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-                Err(e) => Err(CoreError::Storage(format!("read_state get: {e}"))),
+                Err(e) => Err(CoreError::Storage(StorageErrorKind::Other(format!(
+                    "read_state get: {e}"
+                )))),
             }
         })
     }
@@ -50,7 +53,9 @@ impl<'p> ReadStateRepo<'p> {
                      updated_at = excluded.updated_at",
                 rusqlite::params![group_id, last_read_message_id, updated_at],
             )
-            .map_err(|e| CoreError::Storage(format!("read_state set: {e}")))?;
+            .map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!("read_state set: {e}")))
+            })?;
             Ok(())
         })
     }

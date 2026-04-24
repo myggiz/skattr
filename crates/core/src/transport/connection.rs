@@ -25,6 +25,7 @@ use zeroize::Zeroizing;
 
 use crate::error::{CoreError, Result};
 use crate::transport::frame::{Frame, FrameCodec};
+use crate::transport::TransportErrorKind;
 
 /// A Noise-protected, framed stream to a peer whose X25519 static
 /// public key has been verified via the Noise_XK handshake.
@@ -91,23 +92,23 @@ where
         // chunked send path.
         const NOISE_MAX_OUTER: usize = 65519;
         if inner.len() > NOISE_MAX_OUTER {
-            return Err(CoreError::Transport(format!(
+            return Err(CoreError::Transport(TransportErrorKind::Other(format!(
                 "send: inner frame too large for single Noise message: {} bytes",
                 inner.len()
-            )));
+            ))));
         }
 
         let mut cipher = vec![0u8; inner.len() + 16];
         let n = self
             .transport
             .write_message(&inner, &mut cipher)
-            .map_err(|e| CoreError::Transport(format!("send: {e}")))?;
+            .map_err(|e| CoreError::Transport(TransportErrorKind::Other(format!("send: {e}"))))?;
         cipher.truncate(n);
 
         self.framed
             .send(Frame::MlsApp(cipher))
             .await
-            .map_err(|e| CoreError::Transport(format!("send: {e}")))?;
+            .map_err(|e| CoreError::Transport(TransportErrorKind::Other(format!("send: {e}"))))?;
         Ok(())
     }
 
@@ -126,10 +127,10 @@ where
         let cipher = match next {
             Frame::MlsApp(bytes) => bytes,
             other => {
-                return Err(CoreError::Transport(format!(
+                return Err(CoreError::Transport(TransportErrorKind::Other(format!(
                     "recv: expected MlsApp, got type 0x{:02X}",
                     other.frame_type() as u8
-                )));
+                ))));
             }
         };
 
@@ -137,7 +138,11 @@ where
         let n = self
             .transport
             .read_message(&cipher, &mut clear)
-            .map_err(|e| CoreError::Transport(format!("recv: authentication failed: {e}")))?;
+            .map_err(|e| {
+                CoreError::Transport(TransportErrorKind::Other(format!(
+                    "recv: authentication failed: {e}"
+                )))
+            })?;
         clear.truncate(n);
 
         // Decode the inner frame using a fresh FrameCodec.
@@ -146,15 +151,15 @@ where
         match codec.decode(&mut buf)? {
             Some(inner) => {
                 if !buf.is_empty() {
-                    return Err(CoreError::Transport(
+                    return Err(CoreError::Transport(TransportErrorKind::Other(
                         "recv: inner frame left trailing bytes".into(),
-                    ));
+                    )));
                 }
                 Ok(Some(inner))
             }
-            None => Err(CoreError::Transport(
+            None => Err(CoreError::Transport(TransportErrorKind::Other(
                 "recv: inner frame was incomplete".into(),
-            )),
+            ))),
         }
     }
 

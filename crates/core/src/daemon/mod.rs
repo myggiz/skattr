@@ -10,6 +10,7 @@
 //! [`Event`]s — intentionally the same narrow interface for both.
 
 pub mod backup;
+pub(crate) mod clock;
 pub mod commands;
 pub mod config;
 pub(crate) mod dispatch;

@@ -18,6 +18,7 @@ use crate::daemon::commands::{Command, CommandResult};
 use crate::daemon::handle::DaemonHandle;
 use crate::daemon::ipc::wire::IpcError;
 use crate::error::CoreError;
+use crate::storage::StorageErrorKind;
 
 /// Execute one command against `handle`. Every per-variant handler
 /// lives in this module (small private fns); we keep them colocated so
@@ -237,7 +238,7 @@ where
     use crate::envelope::{Envelope, MessageId};
     use crate::mls::group::{Group, GroupId};
     use crate::storage::outbox::OutboxRepo;
-    use crate::storage::{ContactRepo, MlsGroupRepo};
+    use crate::storage::{ContactRepo, MessageRepo, MlsGroupRepo};
 
     // 1. Resolve group_id from contact.
     let contact_repo = ContactRepo::new(&handle.pool);
@@ -272,33 +273,46 @@ where
     // 4. MLS-encrypt (ratchet advances).
     let ciphertext = group.encrypt(&envelope).map_err(map_err)?;
 
-    // 5. Persist updated group state after ratchet advance.
-    group.save(&group_repo).map_err(map_err)?;
-
-    // 5b. Persist outgoing message row (Phase 1.G: real mls_generation
-    // + ts_daemon_recv). `ts_daemon_recv` is derived from the same
-    // `now_ms` clock read as `envelope.ts` so the two timestamps don't
-    // disagree on which second the message landed in.
+    // 5. Atomic: persist advanced ratchet + message row + outbox entry in
+    // one transaction. If any sub-operation fails the whole tx rolls back,
+    // including the MLS snapshot, so the caller sees a clean error and can
+    // retry without the ratchet having advanced on disk.
     let mls_generation = group.epoch();
     let ts_daemon_recv = now_ms / 1000;
-    let msg_repo = crate::storage::MessageRepo::new(&handle.pool);
-    msg_repo
-        .insert(crate::storage::messages::InsertParams {
-            group_id: &group_id_bytes,
-            sender: &handle.identity.public().0,
-            envelope: &envelope,
-            mls_generation,
-            ts_daemon_recv,
-        })
-        .map_err(map_err)?;
-
-    // 6. Idempotent outbox insert.
+    let msg_repo = MessageRepo::new(&handle.pool);
     let outbox_repo = OutboxRepo::new(&handle.pool);
-    outbox_repo
-        .insert(&contact.0, &message_id.0, &ciphertext, 0)
-        .map_err(map_err)?;
 
-    // 7. Kick the delivery hub, wait up to 2 s for an ACK.
+    let insert_result: crate::error::Result<()> = handle.pool.transaction(|tx| {
+        group.save_in_tx(&group_repo, tx)?;
+        let _ = msg_repo.insert_in_tx(
+            tx,
+            crate::storage::messages::InsertParams {
+                group_id: &group_id_bytes,
+                sender: &handle.identity.public().0,
+                envelope: &envelope,
+                mls_generation,
+                ts_daemon_recv,
+            },
+        )?;
+        let _ = outbox_repo.insert_in_tx(tx, &contact.0, &message_id.0, &ciphertext, 0)?;
+        Ok(())
+    });
+
+    match insert_result {
+        Ok(()) => { /* continue to hub.send below */ }
+        Err(CoreError::Storage(StorageErrorKind::DuplicateMessage)) => {
+            // Idempotent retry: this envelope_id was already persisted by a
+            // prior attempt. Treat as Delivered — the outbox row from the
+            // earlier attempt still owns delivery.
+            return Ok(CommandResult::MessageSent {
+                message_id: Hex16::from(message_id.0),
+                status: SendStatus::Delivered,
+            });
+        }
+        Err(e) => return Err(map_err(e)),
+    }
+
+    // 6. Kick the delivery hub, wait up to 2 s for an ACK.
     let ack_rx = handle
         .hub
         .send(contact, message_id, ciphertext)
@@ -443,7 +457,24 @@ where
             } else {
                 Direction::Incoming
             };
-            let contact_for_record = contact.unwrap_or(sender_pk);
+            let contact_for_record = match contact {
+                Some(pk) => pk,
+                None => {
+                    // Unscoped search: resolve peer via the hit's group_id
+                    // so outgoing rows (where sender == local identity)
+                    // still report the correct peer. 2-member-group scope.
+                    let gid_arr: std::result::Result<[u8; 32], _> =
+                        h.message.group_id[..].try_into();
+                    match gid_arr {
+                        Ok(arr) => ContactRepo::new(&handle.pool)
+                            .contact_for_group(&arr)
+                            .ok()
+                            .flatten()
+                            .unwrap_or(sender_pk),
+                        Err(_) => sender_pk, // group_id length anomaly — fallback
+                    }
+                }
+            };
 
             Some(SearchHitRecord {
                 record: MessageRecord::project(
@@ -506,8 +537,10 @@ where
     // Validate: exactly one of before_ts_recv or keep_last must be Some.
     match (before_ts_recv, keep_last) {
         (Some(_), Some(_)) | (None, None) => {
-            return Err(IpcError::Internal(
-                "PruneHistory requires exactly one of before_ts_recv or keep_last".into(),
+            return Err(IpcError::Daemon(
+                crate::daemon::error_kind::DaemonErrorKind::InvalidArgument {
+                    message: "exactly one of before_ts_recv or keep_last must be Some".into(),
+                },
             ));
         }
         _ => {}
@@ -532,7 +565,11 @@ where
             .map_err(map_err)?,
         (None, Some(k)) => {
             let gid = group_id_owned.as_deref().ok_or_else(|| {
-                IpcError::Internal("PruneHistory keep_last requires a contact".into())
+                IpcError::Daemon(
+                    crate::daemon::error_kind::DaemonErrorKind::InvalidArgument {
+                        message: "keep_last requires a contact".into(),
+                    },
+                )
             })?;
             msg_repo.prune_keep_last(gid, k).map_err(map_err)?
         }
@@ -1004,6 +1041,10 @@ mod tests {
                     matches!(records[0].kind, Kind::Text { .. }),
                     "expected Text kind"
                 );
+                assert_ne!(
+                    records[0].row_id, 0,
+                    "row_id must be the SQLite id, not a placeholder"
+                );
             }
             other => panic!("expected Messages, got {other:?}"),
         }
@@ -1154,7 +1195,9 @@ mod tests {
                     rusqlite::params![&group_id[..]],
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )
-                .map_err(|e| crate::error::CoreError::Storage(e.to_string()))
+                .map_err(|e| {
+                    crate::error::CoreError::Storage(StorageErrorKind::Other(e.to_string()))
+                })
             })
             .unwrap();
         assert!(mls_gen > 0, "encrypt advances epoch; got {mls_gen}");
@@ -1454,10 +1497,16 @@ mod tests {
                 keep_last: Some(2),
             },
         )
-        .await;
+        .await
+        .unwrap_err();
         assert!(
-            err.is_err(),
-            "exactly one of before_ts_recv / keep_last must be Some"
+            matches!(
+                err,
+                IpcError::Daemon(
+                    crate::daemon::error_kind::DaemonErrorKind::InvalidArgument { .. }
+                )
+            ),
+            "expected InvalidArgument, got {err:?}"
         );
     }
 
@@ -1472,10 +1521,16 @@ mod tests {
                 keep_last: None,
             },
         )
-        .await;
+        .await
+        .unwrap_err();
         assert!(
-            err.is_err(),
-            "exactly one of before_ts_recv / keep_last must be Some"
+            matches!(
+                err,
+                IpcError::Daemon(
+                    crate::daemon::error_kind::DaemonErrorKind::InvalidArgument { .. }
+                )
+            ),
+            "expected InvalidArgument, got {err:?}"
         );
     }
 
@@ -1490,8 +1545,17 @@ mod tests {
                 keep_last: Some(3), // but keep_last requires a scoped group
             },
         )
-        .await;
-        assert!(err.is_err(), "keep_last requires a contact");
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                IpcError::Daemon(
+                    crate::daemon::error_kind::DaemonErrorKind::InvalidArgument { .. }
+                )
+            ),
+            "expected InvalidArgument, got {err:?}"
+        );
     }
 
     #[tokio::test]
@@ -1613,5 +1677,70 @@ mod tests {
             err,
             IpcError::Daemon(crate::daemon::error_kind::DaemonErrorKind::ContactNotFound)
         ));
+    }
+
+    #[tokio::test]
+    async fn search_messages_unscoped_resolves_outgoing_contact_via_group() {
+        use crate::daemon::commands::Direction;
+        let handle = test_handle();
+        let my_pubkey = handle.identity.public();
+        let peer = crate::identity::PublicKey([0x55; 32]);
+        let gid = [0x66u8; 32];
+
+        let cr = ContactRepo::new(&handle.pool);
+        cr.upsert(&crate::contact::Contact {
+            identity: peer,
+            display_name: None,
+            added_at: 0,
+            card: None,
+        })
+        .unwrap();
+        cr.set_group_id(&peer, &gid).unwrap();
+
+        // Insert one OUTGOING row: sender == local pubkey.
+        let msgs = crate::storage::MessageRepo::new(&handle.pool);
+        let env = crate::envelope::Envelope {
+            v: 1,
+            id: crate::envelope::MessageId::generate(),
+            ts: 1_700_000_000,
+            reply_to: None,
+            kind: crate::envelope::Kind::Text {
+                body: "outbound hello".into(),
+            },
+        };
+        msgs.insert(crate::storage::messages::InsertParams {
+            group_id: &gid,
+            sender: &my_pubkey.0,
+            envelope: &env,
+            mls_generation: 1,
+            ts_daemon_recv: 1_700_000_000,
+        })
+        .unwrap();
+
+        // Unscoped search that matches the outgoing row.
+        let result = execute_command(
+            handle.clone(),
+            Command::SearchMessages {
+                query: "hello".into(),
+                contact: None,
+                limit: 10,
+                offset: 0,
+                newest_first: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        match result {
+            CommandResult::SearchResults(hits) => {
+                assert_eq!(hits.len(), 1);
+                assert_eq!(hits[0].record.direction, Direction::Outgoing);
+                assert_eq!(
+                    hits[0].record.contact, peer,
+                    "unscoped outgoing hit must resolve contact to peer, not self"
+                );
+            }
+            other => panic!("expected SearchResults, got {other:?}"),
+        }
     }
 }

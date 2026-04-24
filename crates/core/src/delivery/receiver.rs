@@ -9,7 +9,7 @@
 //! replay window).
 
 use crate::envelope::{Envelope, MessageId};
-use crate::error::Result;
+use crate::error::{CoreError, Result};
 use crate::identity::PublicKey;
 use crate::storage::messages::MessageRepo;
 use crate::storage::seen_messages::SeenMessagesRepo;
@@ -34,7 +34,7 @@ pub enum ReceiveOutcome {
         /// Noise static public key of the sending peer.
         sender: PublicKey,
         /// MLS group id (opaque bytes) that authored this message.
-        group_id: Vec<u8>,
+        group_id: [u8; 32],
         /// MLS epoch of the decrypting group at decrypt time — the
         /// authoritative ordering signal (not `envelope.ts`).
         mls_generation: u64,
@@ -47,6 +47,63 @@ pub enum ReceiveOutcome {
     Duplicate,
     /// Rejected (ts out of replay window). Caller must NOT ACK.
     Rejected(String),
+}
+
+/// Ingest one decrypted envelope from `sender` into storage, inside
+/// the caller's transaction.
+///
+/// This is the transactional core of `receive`: it writes to
+/// `seen_messages` and `messages` using the provided `tx` without
+/// opening a new pool transaction. Use this when the seen-row and
+/// message row must commit atomically with other operations (e.g.
+/// MLS snapshot via `Group::save_in_tx`).
+///
+/// Parameters are the same as [`receive`]; see that function for docs.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn receive_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    sender: &PublicKey,
+    group_id: &[u8],
+    envelope: Envelope,
+    now_ms: i64,
+    mls_generation: u64,
+    ts_daemon_recv: i64,
+    seen: &SeenMessagesRepo<'_>,
+    messages: &MessageRepo<'_>,
+) -> Result<ReceiveOutcome> {
+    if envelope.ts.saturating_sub(now_ms).saturating_abs() > REPLAY_WINDOW_MS {
+        return Ok(ReceiveOutcome::Rejected(format!(
+            "ts outside ±1h window: envelope ts={}, now={}",
+            envelope.ts, now_ms
+        )));
+    }
+    let is_new = seen.insert_in_tx(tx, &sender.0, &envelope.id.0, now_ms)?;
+    if !is_new {
+        return Ok(ReceiveOutcome::Duplicate);
+    }
+    let gid_arr: [u8; 32] = group_id.try_into().map_err(|_| {
+        CoreError::Storage(crate::storage::StorageErrorKind::Other(
+            "group_id must be 32 bytes".into(),
+        ))
+    })?;
+    let row_id = messages.insert_in_tx(
+        tx,
+        crate::storage::messages::InsertParams {
+            group_id,
+            sender: &sender.0,
+            envelope: &envelope,
+            mls_generation,
+            ts_daemon_recv,
+        },
+    )?;
+    Ok(ReceiveOutcome::New {
+        envelope,
+        row_id,
+        sender: *sender,
+        group_id: gid_arr,
+        mls_generation,
+        ts_daemon_recv,
+    })
 }
 
 /// Ingest one decrypted envelope from `sender` into storage.
@@ -76,30 +133,18 @@ pub fn receive(
     seen: &SeenMessagesRepo<'_>,
     messages: &MessageRepo<'_>,
 ) -> Result<ReceiveOutcome> {
-    if envelope.ts.saturating_sub(now_ms).saturating_abs() > REPLAY_WINDOW_MS {
-        return Ok(ReceiveOutcome::Rejected(format!(
-            "ts outside ±1h window: envelope ts={}, now={}",
-            envelope.ts, now_ms
-        )));
-    }
-    let is_new = seen.insert(&sender.0, &envelope.id.0, now_ms)?;
-    if !is_new {
-        return Ok(ReceiveOutcome::Duplicate);
-    }
-    let row_id = messages.insert(crate::storage::messages::InsertParams {
-        group_id,
-        sender: &sender.0,
-        envelope: &envelope,
-        mls_generation,
-        ts_daemon_recv,
-    })?;
-    Ok(ReceiveOutcome::New {
-        envelope,
-        row_id,
-        sender: *sender,
-        group_id: group_id.to_vec(),
-        mls_generation,
-        ts_daemon_recv,
+    seen.pool().transaction(|tx| {
+        receive_in_tx(
+            tx,
+            sender,
+            group_id,
+            envelope,
+            now_ms,
+            mls_generation,
+            ts_daemon_recv,
+            seen,
+            messages,
+        )
     })
 }
 
@@ -136,7 +181,7 @@ mod tests {
         let sender = PublicKey([0xAA; 32]);
         let out = receive(
             &sender,
-            &[0x01; 16],
+            &[0x01; 32],
             env(0x01, 1000),
             1000,
             0,
@@ -156,10 +201,10 @@ mod tests {
         let msgs = MessageRepo::new(&pool);
         let sender = PublicKey([0xAA; 32]);
         let e = env(0x01, 1000);
-        receive(&sender, &[0x01; 16], e.clone(), 1000, 0, 1000, &seen, &msgs).unwrap();
-        let out = receive(&sender, &[0x01; 16], e, 1000, 0, 1000, &seen, &msgs).unwrap();
+        receive(&sender, &[0x01; 32], e.clone(), 1000, 0, 1000, &seen, &msgs).unwrap();
+        let out = receive(&sender, &[0x01; 32], e, 1000, 0, 1000, &seen, &msgs).unwrap();
         assert!(matches!(out, ReceiveOutcome::Duplicate));
-        let rows = msgs.recent(&[0x01; 16], 10).unwrap();
+        let rows = msgs.recent(&[0x01; 32], 10).unwrap();
         assert_eq!(rows.len(), 1, "dup must not insert a second messages row");
     }
 
@@ -173,7 +218,7 @@ mod tests {
         let old = now - (REPLAY_WINDOW_MS + 1);
         let out = receive(
             &sender,
-            &[0x01; 16],
+            &[0x01; 32],
             env(0x01, old),
             now,
             0,
@@ -196,7 +241,7 @@ mod tests {
         let future = now + (REPLAY_WINDOW_MS + 1);
         let out = receive(
             &sender,
-            &[0x01; 16],
+            &[0x01; 32],
             env(0x01, future),
             now,
             0,
@@ -223,7 +268,7 @@ mod tests {
 
         let out = receive(
             &sender,
-            &[0x01; 16],
+            &[0x01; 32],
             env(0x01, 1000),
             1000,          // now_ms (replay window check)
             9,             // mls_generation

@@ -11,6 +11,9 @@
 
 pub mod link;
 
+mod error_kind;
+pub use error_kind::InviteErrorKind;
+
 #[cfg(feature = "qr")]
 pub mod qr;
 

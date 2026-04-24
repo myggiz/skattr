@@ -17,6 +17,7 @@ use tokio::sync::watch;
 use tor_rtcompat::tokio::TokioRustlsRuntime;
 
 use crate::error::{CoreError, Result};
+use crate::transport::TransportErrorKind;
 
 /// Observable Tor bootstrap state.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,18 +70,23 @@ impl TorRuntime {
         let tor_config: TorClientConfig =
             TorClientConfigBuilder::from_directories(&config.state_dir, &cache_dir)
                 .build()
-                .map_err(|e| CoreError::Transport(format!("arti config: {e}")))?;
+                .map_err(|e| {
+                    CoreError::Transport(TransportErrorKind::Other(format!("arti config: {e}")))
+                })?;
 
         // Attach to the already-running Tokio reactor (we are inside `#[tokio::main]`
         // or a `#[tokio::test]`).
-        let runtime = TokioRustlsRuntime::current()
-            .map_err(|e| CoreError::Transport(format!("arti runtime: {e}")))?;
+        let runtime = TokioRustlsRuntime::current().map_err(|e| {
+            CoreError::Transport(TransportErrorKind::Other(format!("arti runtime: {e}")))
+        })?;
 
         let client = TorClient::with_runtime(runtime)
             .config(tor_config)
             .create_unbootstrapped_async()
             .await
-            .map_err(|e| CoreError::Transport(format!("arti client: {e}")))?;
+            .map_err(|e| {
+                CoreError::Transport(TransportErrorKind::Other(format!("arti client: {e}")))
+            })?;
 
         let (status_tx, _status_rx) = watch::channel(TorStatus::Idle);
 
@@ -110,7 +116,7 @@ impl TorRuntime {
             }
             Err(e) => {
                 let _ = status_tx.send(TorStatus::Failed(format!("{e}")));
-                return Err(CoreError::Transport(format!("bootstrap: {e}")));
+                return Err(CoreError::Transport(TransportErrorKind::TorNotReady));
             }
         }
 
@@ -163,14 +169,18 @@ impl TorRuntime {
         // persist, or decrypt from disk under the seed.
         let hs_secret = crate::transport::hs_key::load_or_create(hs_key_path, seed)?;
 
-        let nickname_parsed = nickname
-            .parse::<tor_hsservice::HsNickname>()
-            .map_err(|e| CoreError::Transport(format!("invalid HS nickname '{nickname}': {e}")))?;
+        let nickname_parsed = nickname.parse::<tor_hsservice::HsNickname>().map_err(|e| {
+            CoreError::Transport(TransportErrorKind::Other(format!(
+                "invalid HS nickname '{nickname}': {e}"
+            )))
+        })?;
 
         let config = tor_hsservice::config::OnionServiceConfigBuilder::default()
             .nickname(nickname_parsed.clone())
             .build()
-            .map_err(|e| CoreError::Transport(format!("HS config: {e}")))?;
+            .map_err(|e| {
+                CoreError::Transport(TransportErrorKind::Other(format!("HS config: {e}")))
+            })?;
 
         // 3. Inject the HS identity key into Arti's keystore (probe-before-
         // insert: no-op if the key is already present), then launch the
@@ -182,14 +192,14 @@ impl TorRuntime {
             std::pin::Pin<
                 Box<dyn futures::Stream<Item = tor_hsservice::RendRequest> + Send + Sync>,
             >,
-        ) = match self
-            .client
-            .launch_onion_service(config)
-            .map_err(|e| CoreError::Transport(format!("HS launch: {e}")))?
-        {
+        ) = match self.client.launch_onion_service(config).map_err(|e| {
+            CoreError::Transport(TransportErrorKind::Other(format!("HS launch: {e}")))
+        })? {
             Some((svc, stream)) => (svc, Box::pin(stream)),
             None => {
-                return Err(CoreError::Transport("HS disabled in config".into()));
+                return Err(CoreError::Transport(TransportErrorKind::Other(
+                    "HS disabled in config".into(),
+                )));
             }
         };
 
@@ -202,7 +212,11 @@ impl TorRuntime {
                 use safelog::DisplayRedacted as _;
                 id.display_unredacted().to_string()
             })
-            .ok_or_else(|| CoreError::Transport("HS has no address after launch".into()))?;
+            .ok_or_else(|| {
+                CoreError::Transport(TransportErrorKind::Other(
+                    "HS has no address after launch".into(),
+                ))
+            })?;
 
         self.hs_service = Some(svc);
         self.rend_requests = Some(rend_stream);
@@ -229,10 +243,9 @@ impl TorRuntime {
     /// `transport::connection::AuthenticatedConnection`).
     pub async fn connect(&self, onion: &str, port: u16) -> Result<arti_client::DataStream> {
         let target = format!("{onion}:{port}");
-        self.client
-            .connect(target.as_str())
-            .await
-            .map_err(|e| CoreError::Transport(format!("connect {target}: {e}")))
+        self.client.connect(target.as_str()).await.map_err(|e| {
+            CoreError::Transport(TransportErrorKind::Other(format!("connect {target}: {e}")))
+        })
     }
 
     /// Gracefully shut down Arti. Drops the TorClient (which stops its
@@ -296,9 +309,11 @@ fn inject_hs_secret(
 ) -> Result<()> {
     let spec = tor_hsservice::HsIdKeypairSpecifier::new(nickname.clone());
 
-    let keymgr = client
-        .keymgr()
-        .map_err(|e| CoreError::Transport(format!("keymgr unavailable: {e}")))?;
+    let keymgr = client.keymgr().map_err(|e| {
+        CoreError::Transport(TransportErrorKind::Other(format!(
+            "keymgr unavailable: {e}"
+        )))
+    })?;
 
     // Probe the keymgr BEFORE inserting: if an HS identity keypair for
     // this nickname already exists, launch_onion_service will pick it up
@@ -313,14 +328,18 @@ fn inject_hs_secret(
         }
         Ok(None) => { /* slot empty — proceed to insert below */ }
         Err(e) => {
-            return Err(CoreError::Transport(format!("keymgr get: {e}")));
+            return Err(CoreError::Transport(TransportErrorKind::Other(format!(
+                "keymgr get: {e}"
+            ))));
         }
     }
 
     let kp = hs_id_keypair_from_secret(secret);
     keymgr
         .insert(kp, &spec, arti_client::KeystoreSelector::Primary, false)
-        .map_err(|e| CoreError::Transport(format!("keymgr insert: {e}")))?;
+        .map_err(|e| {
+            CoreError::Transport(TransportErrorKind::Other(format!("keymgr insert: {e}")))
+        })?;
     Ok(())
 }
 

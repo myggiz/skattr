@@ -39,6 +39,13 @@ pub enum DaemonErrorKind {
     StorageError,
     /// Search query was empty after FTS5 escaping or the engine rejected it.
     SearchSyntax,
+    /// Client-supplied arguments failed validation in the daemon.
+    /// Surfaces as exit code 2 in the CLI, distinct from the internal-
+    /// error exit code 1.
+    InvalidArgument {
+        /// Human-readable description of the argument error.
+        message: String,
+    },
 }
 
 #[cfg(test)]
@@ -48,19 +55,20 @@ mod tests {
 
     #[test]
     fn contact_not_found_maps() {
-        let e = CoreError::Contact("contact: lookup: not found (pubkey=ab…)".into());
+        use crate::contact::ContactErrorKind;
+        let e = CoreError::Contact(ContactErrorKind::NotFound);
         assert_eq!(e.kind(), Some(DaemonErrorKind::ContactNotFound));
     }
 
     #[test]
     fn invite_expired_maps() {
-        let e = CoreError::Invite("invite: expired at 1700000000".into());
+        let e = CoreError::Invite(crate::invite::InviteErrorKind::Expired);
         assert_eq!(e.kind(), Some(DaemonErrorKind::InviteExpired));
     }
 
     #[test]
     fn invite_consumed_maps() {
-        let e = CoreError::Invite("invite: key package already consumed".into());
+        let e = CoreError::Invite(crate::invite::InviteErrorKind::Consumed);
         assert_eq!(e.kind(), Some(DaemonErrorKind::InviteConsumed));
     }
 
@@ -72,20 +80,25 @@ mod tests {
 
     #[test]
     fn delivery_timeout_maps() {
-        let e = CoreError::Delivery("delivery: timeout waiting for ACK".into());
+        let e = CoreError::Delivery(crate::delivery::DeliveryErrorKind::Timeout);
         assert_eq!(e.kind(), Some(DaemonErrorKind::DeliveryTimeout));
     }
 
     #[test]
     fn search_syntax_maps() {
-        let e = CoreError::Storage("fts5: syntax error near '\"'".into());
+        // FtsSyntax variant projects to SearchSyntax regardless of message content.
+        let e = CoreError::Storage(crate::storage::StorageErrorKind::FtsSyntax(
+            "fts5: syntax error near '\"'".into(),
+        ));
         assert_eq!(e.kind(), Some(DaemonErrorKind::SearchSyntax));
 
-        let e2 = CoreError::Storage("storage: malformed MATCH expression".into());
+        let e2 = CoreError::Storage(crate::storage::StorageErrorKind::FtsSyntax(
+            "malformed MATCH expression".into(),
+        ));
         assert_eq!(e2.kind(), Some(DaemonErrorKind::SearchSyntax));
 
         // Control: plain storage errors still project as StorageError.
-        let e3 = CoreError::Storage("disk full".into());
+        let e3 = CoreError::Storage(crate::storage::StorageErrorKind::Other("disk full".into()));
         assert_eq!(e3.kind(), Some(DaemonErrorKind::StorageError));
     }
 }

@@ -11,7 +11,20 @@
 
 use crate::envelope::Envelope;
 use crate::error::{CoreError, Result};
-use crate::storage::Pool;
+use crate::storage::{Pool, StorageErrorKind};
+
+/// Map a message string to either a [`StorageErrorKind::FtsSyntax`] or
+/// [`StorageErrorKind::Other`] `CoreError::Storage` variant.
+///
+/// Called only from the FTS5 search path, where sqlite can surface
+/// both `fts5: syntax error` and `malformed MATCH` strings.
+fn fts_or_other(msg: String) -> CoreError {
+    if msg.contains("fts5: syntax error") || msg.contains("malformed MATCH") {
+        CoreError::Storage(StorageErrorKind::FtsSyntax(msg))
+    } else {
+        CoreError::Storage(StorageErrorKind::Other(msg))
+    }
+}
 
 /// Convert a free-form user query into an FTS5 MATCH expression using
 /// the tokenize-and-AND strategy: split on whitespace, wrap each token
@@ -86,10 +99,18 @@ impl<'p> MessageRepo<'p> {
         Self { pool }
     }
 
-    /// Insert a message and return its rowid. Populates `body_text` for
-    /// text-kind envelopes (NULL otherwise), letting the FTS5 triggers
-    /// index the row automatically.
-    pub fn insert(&self, p: InsertParams<'_>) -> Result<i64> {
+    /// Insert a message inside the caller's transaction and return its
+    /// rowid. Use this when the message row must commit atomically with
+    /// other rows (e.g. MLS snapshot + outbox in one transaction).
+    ///
+    /// Preserves the exact error taxonomy from `insert`:
+    /// - `SQLITE_CONSTRAINT_UNIQUE` → `StorageErrorKind::DuplicateMessage`
+    /// - Other sqlite errors → `StorageErrorKind::Other("messages INSERT: …")`
+    pub(crate) fn insert_in_tx(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        p: InsertParams<'_>,
+    ) -> Result<i64> {
         let body = p.envelope.encode()?;
         let kind = match &p.envelope.kind {
             crate::envelope::Kind::Text { .. } => "text",
@@ -104,26 +125,44 @@ impl<'p> MessageRepo<'p> {
             _ => None,
         };
         let mls_gen_signed = i64::try_from(p.mls_generation).unwrap_or(i64::MAX);
-        self.pool.with_mut(|c| {
-            c.execute(
-                "INSERT INTO messages \
-                     (group_id, sender, kind, body_blob, body_text, ts, \
-                      mls_generation, ts_daemon_recv) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                rusqlite::params![
-                    p.group_id,
-                    p.sender,
-                    kind,
-                    body,
-                    body_text,
-                    p.envelope.ts,
-                    mls_gen_signed,
-                    p.ts_daemon_recv,
-                ],
-            )
-            .map_err(|e| CoreError::Storage(format!("insert message: {e}")))?;
-            Ok(c.last_insert_rowid())
-        })
+        let envelope_id = &p.envelope.id.0[..];
+        match tx.execute(
+            "INSERT INTO messages \
+                 (group_id, sender, envelope_id, kind, body_blob, body_text, ts, \
+                  mls_generation, ts_daemon_recv) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                p.group_id,
+                p.sender,
+                envelope_id,
+                kind,
+                body,
+                body_text,
+                p.envelope.ts,
+                mls_gen_signed,
+                p.ts_daemon_recv,
+            ],
+        ) {
+            Ok(_) => {}
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE =>
+            {
+                return Err(CoreError::Storage(StorageErrorKind::DuplicateMessage));
+            }
+            Err(e) => {
+                return Err(CoreError::Storage(StorageErrorKind::Other(format!(
+                    "messages INSERT: {e}"
+                ))));
+            }
+        }
+        Ok(tx.last_insert_rowid())
+    }
+
+    /// Insert a message and return its rowid. Populates `body_text` for
+    /// text-kind envelopes (NULL otherwise), letting the FTS5 triggers
+    /// index the row automatically.
+    pub fn insert(&self, p: InsertParams<'_>) -> Result<i64> {
+        self.pool.transaction(|tx| self.insert_in_tx(tx, p))
     }
 
     /// Most-recent-first list of messages in a group.
@@ -144,7 +183,9 @@ impl<'p> MessageRepo<'p> {
                      WHERE group_id = ?1 \
                      ORDER BY mls_generation DESC, id DESC LIMIT ?2",
                 )
-                .map_err(|e| CoreError::Storage(format!("prepare recent: {e}")))?;
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!("prepare recent: {e}")))
+                })?;
             let rows = stmt
                 .query_map(
                     rusqlite::params![group_id, i64::try_from(limit).unwrap_or(i64::MAX)],
@@ -162,9 +203,13 @@ impl<'p> MessageRepo<'p> {
                         })
                     },
                 )
-                .map_err(|e| CoreError::Storage(format!("query recent: {e}")))?;
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!("query recent: {e}")))
+                })?;
             let out: std::result::Result<Vec<_>, _> = rows.collect();
-            out.map_err(|e| CoreError::Storage(format!("collect recent: {e}")))
+            out.map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!("collect recent: {e}")))
+            })
         })
     }
 
@@ -220,7 +265,7 @@ impl<'p> MessageRepo<'p> {
         self.pool.with(|c| {
             let mut stmt = c
                 .prepare(&sql)
-                .map_err(|e| CoreError::Storage(format!("prepare search: {e}")))?;
+                .map_err(|e| fts_or_other(format!("prepare search: {e}")))?;
 
             let limit_i = i64::try_from(limit).unwrap_or(i64::MAX);
             let offset_i = i64::try_from(offset).unwrap_or(0);
@@ -251,10 +296,10 @@ impl<'p> MessageRepo<'p> {
             } else {
                 stmt.query_map(rusqlite::params![match_expr, limit_i, offset_i], map_row)
             }
-            .map_err(|e| CoreError::Storage(format!("query search: {e}")))?;
+            .map_err(|e| fts_or_other(format!("query search: {e}")))?;
 
             let out: std::result::Result<Vec<_>, _> = rows.collect();
-            out.map_err(|e| CoreError::Storage(format!("collect search: {e}")))
+            out.map_err(|e| fts_or_other(format!("collect search: {e}")))
         })
     }
 
@@ -269,7 +314,11 @@ impl<'p> MessageRepo<'p> {
             ) {
                 Ok(v) => Some(v),
                 Err(rusqlite::Error::QueryReturnedNoRows) => None,
-                Err(e) => return Err(CoreError::Storage(format!("unread_count cursor: {e}"))),
+                Err(e) => {
+                    return Err(CoreError::Storage(StorageErrorKind::Other(format!(
+                        "unread_count cursor: {e}"
+                    ))))
+                }
             };
 
             let n: i64 = match cursor {
@@ -280,14 +329,18 @@ impl<'p> MessageRepo<'p> {
                         rusqlite::params![group_id, cur],
                         |r| r.get(0),
                     )
-                    .map_err(|e| CoreError::Storage(format!("unread_count: {e}")))?,
+                    .map_err(|e| {
+                        CoreError::Storage(StorageErrorKind::Other(format!("unread_count: {e}")))
+                    })?,
                 None => c
                     .query_row(
                         "SELECT COUNT(*) FROM messages WHERE group_id = ?1",
                         rusqlite::params![group_id],
                         |r| r.get(0),
                     )
-                    .map_err(|e| CoreError::Storage(format!("unread_count: {e}")))?,
+                    .map_err(|e| {
+                        CoreError::Storage(StorageErrorKind::Other(format!("unread_count: {e}")))
+                    })?,
             };
             Ok(u64::try_from(n).unwrap_or(0))
         })
@@ -329,7 +382,9 @@ impl<'p> MessageRepo<'p> {
                      ORDER BY id ASC \
                      LIMIT ?3",
                 )
-                .map_err(|e| CoreError::Storage(format!("prepare export_page: {e}")))?;
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!("prepare export_page: {e}")))
+                })?;
             let rows = stmt
                 .query_map(
                     rusqlite::params![
@@ -351,9 +406,13 @@ impl<'p> MessageRepo<'p> {
                         })
                     },
                 )
-                .map_err(|e| CoreError::Storage(format!("query export_page: {e}")))?;
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!("query export_page: {e}")))
+                })?;
             let out: std::result::Result<Vec<_>, _> = rows.collect();
-            out.map_err(|e| CoreError::Storage(format!("collect export_page: {e}")))
+            out.map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!("collect export_page: {e}")))
+            })
         })
     }
 
@@ -364,7 +423,9 @@ impl<'p> MessageRepo<'p> {
                 "UPDATE messages SET delivered_at = ?1 WHERE id = ?2",
                 rusqlite::params![delivered_at, id],
             )
-            .map_err(|e| CoreError::Storage(format!("mark delivered: {e}")))?;
+            .map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!("mark delivered: {e}")))
+            })?;
             Ok(())
         })
     }
@@ -385,7 +446,9 @@ impl<'p> MessageRepo<'p> {
                     rusqlite::params![before_ts_recv],
                 )
             }
-            .map_err(|e| CoreError::Storage(format!("prune_before: {e}")))?;
+            .map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!("prune_before: {e}")))
+            })?;
             Ok(u64::try_from(n).unwrap_or(0))
         })
     }
@@ -401,12 +464,18 @@ impl<'p> MessageRepo<'p> {
                     "SELECT id, body_blob FROM messages \
                      WHERE kind = 'text' AND body_text IS NULL",
                 )
-                .map_err(|e| CoreError::Storage(format!("prepare backfill: {e}")))?;
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!("prepare backfill: {e}")))
+                })?;
             let it = stmt
                 .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))
-                .map_err(|e| CoreError::Storage(format!("query backfill: {e}")))?;
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!("query backfill: {e}")))
+                })?;
             let v: std::result::Result<Vec<_>, _> = it.collect();
-            v.map_err(|e| CoreError::Storage(format!("collect backfill: {e}")))
+            v.map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!("collect backfill: {e}")))
+            })
         })?;
 
         if candidates.is_empty() {
@@ -414,7 +483,7 @@ impl<'p> MessageRepo<'p> {
         }
 
         let mut updated = 0u64;
-        self.pool.with_mut(|c| {
+        self.pool.transaction(|tx| {
             for (id, blob) in &candidates {
                 let env = match crate::envelope::Envelope::decode(blob) {
                     Ok(e) => e,
@@ -426,12 +495,107 @@ impl<'p> MessageRepo<'p> {
                     }
                 };
                 if let crate::envelope::Kind::Text { body } = env.kind {
-                    c.execute(
+                    tx.execute(
                         "UPDATE messages SET body_text = ?1 WHERE id = ?2",
                         rusqlite::params![body, id],
                     )
-                    .map_err(|e| CoreError::Storage(format!("backfill UPDATE: {e}")))?;
+                    .map_err(|e| {
+                        CoreError::Storage(StorageErrorKind::Other(format!("backfill UPDATE: {e}")))
+                    })?;
                     updated += 1;
+                }
+            }
+            Ok(())
+        })?;
+        Ok(updated)
+    }
+
+    /// One-shot startup helper: populate `envelope_id` for any row whose
+    /// column is NULL (pre-1.H rows). Decodes `body_blob`, extracts the
+    /// envelope id, writes it in place. Skips rows whose blob fails to
+    /// decode. Wrapped in a single transaction so all N updates commit
+    /// atomically. Returns the number of rows backfilled. Idempotent.
+    pub(crate) fn backfill_envelope_id(&self) -> Result<u64> {
+        let candidates: Vec<(i64, Vec<u8>)> = self.pool.with(|c| {
+            let mut stmt = c
+                .prepare(
+                    "SELECT id, body_blob FROM messages WHERE envelope_id IS NULL ORDER BY id ASC",
+                )
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!(
+                        "prepare backfill_envelope_id: {e}"
+                    )))
+                })?;
+            let it = stmt
+                .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!(
+                        "query backfill_envelope_id: {e}"
+                    )))
+                })?;
+            let v: std::result::Result<Vec<_>, _> = it.collect();
+            v.map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!(
+                    "collect backfill_envelope_id: {e}"
+                )))
+            })
+        })?;
+
+        if candidates.is_empty() {
+            return Ok(0);
+        }
+
+        let mut updated = 0u64;
+        self.pool.transaction(|tx| {
+            for (row_id, blob) in &candidates {
+                let env = match crate::envelope::Envelope::decode(blob) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        tracing::warn!(
+                            row_id = *row_id,
+                            error = %e,
+                            "backfill_envelope_id: skipping row whose body_blob \
+                             failed to decode"
+                        );
+                        continue;
+                    }
+                };
+                match tx.execute(
+                    "UPDATE messages SET envelope_id = ?1 WHERE id = ?2",
+                    rusqlite::params![&env.id.0[..], row_id],
+                ) {
+                    Ok(_) => updated += 1,
+                    Err(rusqlite::Error::SqliteFailure(e, _))
+                        if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE =>
+                    {
+                        // Pre-existing duplicate (group_id, envelope_id) —
+                        // keep the lowest row id, delete this one. The SELECT
+                        // above uses ORDER BY id ASC, so earlier rows are
+                        // processed first and the UPDATE on the lower-id row
+                        // always succeeds before we reach duplicates here.
+                        // The ORDER BY makes this "earliest wins" invariant
+                        // enforceable rather than relying on SQLite's undefined
+                        // natural-scan order.
+                        tracing::warn!(
+                            row_id = *row_id,
+                            "backfill_envelope_id: duplicate (group_id, envelope_id) \
+                             detected; deleting higher-id duplicate"
+                        );
+                        tx.execute(
+                            "DELETE FROM messages WHERE id = ?1",
+                            rusqlite::params![row_id],
+                        )
+                        .map_err(|e| {
+                            CoreError::Storage(StorageErrorKind::Other(format!(
+                                "backfill dedupe delete: {e}"
+                            )))
+                        })?;
+                    }
+                    Err(e) => {
+                        return Err(CoreError::Storage(StorageErrorKind::Other(format!(
+                            "backfill UPDATE: {e}"
+                        ))));
+                    }
                 }
             }
             Ok(())
@@ -457,7 +621,9 @@ impl<'p> MessageRepo<'p> {
                        )",
                     rusqlite::params![group_id, keep_i],
                 )
-                .map_err(|e| CoreError::Storage(format!("prune_keep_last: {e}")))?;
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!("prune_keep_last: {e}")))
+                })?;
             Ok(u64::try_from(n).unwrap_or(0))
         })
     }
@@ -717,7 +883,9 @@ mod tests {
                     rusqlite::params![id],
                     |r| r.get(0),
                 )
-                .map_err(|e| crate::error::CoreError::Storage(e.to_string()))
+                .map_err(|e| {
+                    crate::error::CoreError::Storage(StorageErrorKind::Other(e.to_string()))
+                })
             })
             .unwrap();
         assert_eq!(body_text.as_deref(), Some("hello full text search"));
@@ -730,7 +898,9 @@ mod tests {
                     [],
                     |r| r.get(0),
                 )
-                .map_err(|e| crate::error::CoreError::Storage(e.to_string()))
+                .map_err(|e| {
+                    crate::error::CoreError::Storage(StorageErrorKind::Other(e.to_string()))
+                })
             })
             .unwrap();
         assert_eq!(fts_hits, 1, "trigger must have indexed the new row");
@@ -743,7 +913,9 @@ mod tests {
                     rusqlite::params![id],
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )
-                .map_err(|e| crate::error::CoreError::Storage(e.to_string()))
+                .map_err(|e| {
+                    crate::error::CoreError::Storage(StorageErrorKind::Other(e.to_string()))
+                })
             })
             .unwrap();
         assert_eq!(gen, 7);
@@ -775,7 +947,9 @@ mod tests {
                     rusqlite::params![id],
                     |r| r.get(0),
                 )
-                .map_err(|e| crate::error::CoreError::Storage(e.to_string()))
+                .map_err(|e| {
+                    crate::error::CoreError::Storage(StorageErrorKind::Other(e.to_string()))
+                })
             })
             .unwrap();
         assert_eq!(body_text, None, "non-text kinds must leave body_text NULL");
@@ -891,7 +1065,9 @@ mod tests {
                     rusqlite::params![&gid[..]],
                     |r| r.get(0),
                 )
-                .map_err(|e| crate::error::CoreError::Storage(e.to_string()))
+                .map_err(|e| {
+                    crate::error::CoreError::Storage(StorageErrorKind::Other(e.to_string()))
+                })
             })
             .unwrap();
         ReadStateRepo::new(&pool)
@@ -915,7 +1091,9 @@ mod tests {
                     rusqlite::params![&gid[..]],
                     |r| r.get(0),
                 )
-                .map_err(|e| crate::error::CoreError::Storage(e.to_string()))
+                .map_err(|e| {
+                    crate::error::CoreError::Storage(StorageErrorKind::Other(e.to_string()))
+                })
             })
             .unwrap();
         ReadStateRepo::new(&pool)
@@ -954,12 +1132,18 @@ mod tests {
                         "SELECT id FROM messages WHERE group_id = ?1 \
                      ORDER BY mls_generation DESC, id DESC",
                     )
-                    .map_err(|e| crate::error::CoreError::Storage(e.to_string()))?;
+                    .map_err(|e| {
+                        crate::error::CoreError::Storage(StorageErrorKind::Other(e.to_string()))
+                    })?;
                 let it = stmt
                     .query_map(rusqlite::params![&gid[..]], |r| r.get::<_, i64>(0))
-                    .map_err(|e| crate::error::CoreError::Storage(e.to_string()))?;
+                    .map_err(|e| {
+                        crate::error::CoreError::Storage(StorageErrorKind::Other(e.to_string()))
+                    })?;
                 let v: std::result::Result<Vec<_>, _> = it.collect();
-                v.map_err(|e| crate::error::CoreError::Storage(e.to_string()))
+                v.map_err(|e| {
+                    crate::error::CoreError::Storage(StorageErrorKind::Other(e.to_string()))
+                })
             })
             .unwrap();
         // Highest mls_generation first → "third-yet-older-gen" (gen=5),
@@ -969,12 +1153,16 @@ mod tests {
             .with(|c| {
                 let mut stmt = c
                     .prepare("SELECT body_text FROM messages WHERE id = ?1")
-                    .map_err(|e| crate::error::CoreError::Storage(e.to_string()))?;
+                    .map_err(|e| {
+                        crate::error::CoreError::Storage(StorageErrorKind::Other(e.to_string()))
+                    })?;
                 let mut out = Vec::new();
                 for id in &rows {
                     let body: String = stmt
                         .query_row(rusqlite::params![id], |r| r.get(0))
-                        .map_err(|e| crate::error::CoreError::Storage(e.to_string()))?;
+                        .map_err(|e| {
+                            crate::error::CoreError::Storage(StorageErrorKind::Other(e.to_string()))
+                        })?;
                     out.push(body);
                 }
                 Ok(out)
@@ -1104,7 +1292,9 @@ mod tests {
                     rusqlite::params![&gid[..]],
                     |r| r.get(0),
                 )
-                .map_err(|e| crate::error::CoreError::Storage(e.to_string()))
+                .map_err(|e| {
+                    crate::error::CoreError::Storage(StorageErrorKind::Other(e.to_string()))
+                })
             })
             .unwrap();
         assert_eq!(remaining, 3);
@@ -1117,7 +1307,9 @@ mod tests {
                     [],
                     |r| r.get(0),
                 )
-                .map_err(|e| crate::error::CoreError::Storage(e.to_string()))
+                .map_err(|e| {
+                    crate::error::CoreError::Storage(StorageErrorKind::Other(e.to_string()))
+                })
             })
             .unwrap();
         assert_eq!(fts_rows, 3, "ad trigger must cascade FTS deletes");
@@ -1168,12 +1360,18 @@ mod tests {
             .with(|c| {
                 let mut stmt = c
                     .prepare("SELECT id FROM messages WHERE group_id = ?1 ORDER BY id DESC")
-                    .map_err(|e| crate::error::CoreError::Storage(e.to_string()))?;
+                    .map_err(|e| {
+                        crate::error::CoreError::Storage(StorageErrorKind::Other(e.to_string()))
+                    })?;
                 let it = stmt
                     .query_map(rusqlite::params![&gid[..]], |r| r.get::<_, i64>(0))
-                    .map_err(|e| crate::error::CoreError::Storage(e.to_string()))?;
+                    .map_err(|e| {
+                        crate::error::CoreError::Storage(StorageErrorKind::Other(e.to_string()))
+                    })?;
                 let v: std::result::Result<Vec<_>, _> = it.collect();
-                v.map_err(|e| crate::error::CoreError::Storage(e.to_string()))
+                v.map_err(|e| {
+                    crate::error::CoreError::Storage(StorageErrorKind::Other(e.to_string()))
+                })
             })
             .unwrap();
         assert_eq!(remaining_ids.len(), 3, "exactly 3 rows survive");
@@ -1188,18 +1386,23 @@ mod tests {
         let gid = [0x80u8; 32];
 
         // Insert a row directly with body_text NULL (simulating a pre-1.G row).
+        // Migration 0007 adds envelope_id with a BEFORE-INSERT trigger that
+        // requires the 16-byte value; provide it here so the INSERT succeeds
+        // even though we're simulating a legacy row (body_text NULL).
         let env = sample_envelope("legacy hello world");
         let blob = env.encode().unwrap();
         let sender = [0u8; 32];
         pool.with_mut(|c| {
             c.execute(
                 "INSERT INTO messages \
-                     (group_id, sender, kind, body_blob, body_text, ts, \
+                     (group_id, sender, envelope_id, kind, body_blob, body_text, ts, \
                       mls_generation, ts_daemon_recv) \
-                 VALUES (?1, ?2, 'text', ?3, NULL, ?4, 0, 0)",
-                rusqlite::params![&gid[..], &sender[..], blob, env.ts],
+                 VALUES (?1, ?2, ?3, 'text', ?4, NULL, ?5, 0, 0)",
+                rusqlite::params![&gid[..], &sender[..], &env.id.0[..], blob, env.ts],
             )
-            .map_err(|e| crate::error::CoreError::Storage(e.to_string()))?;
+            .map_err(|e| {
+                crate::error::CoreError::Storage(StorageErrorKind::Other(e.to_string()))
+            })?;
             Ok(())
         })
         .unwrap();
@@ -1213,7 +1416,9 @@ mod tests {
                     [],
                     |r| r.get(0),
                 )
-                .map_err(|e| crate::error::CoreError::Storage(e.to_string()))
+                .map_err(|e| {
+                    crate::error::CoreError::Storage(StorageErrorKind::Other(e.to_string()))
+                })
             })
             .unwrap();
         assert_eq!(pre, 0);
@@ -1230,7 +1435,9 @@ mod tests {
                     [],
                     |r| r.get(0),
                 )
-                .map_err(|e| crate::error::CoreError::Storage(e.to_string()))
+                .map_err(|e| {
+                    crate::error::CoreError::Storage(StorageErrorKind::Other(e.to_string()))
+                })
             })
             .unwrap();
         assert_eq!(post, 1, "au trigger must have indexed the row");
@@ -1251,6 +1458,181 @@ mod tests {
         .unwrap();
         // body_text already populated by insert; backfill must do nothing.
         let n = repo.backfill_body_text().unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn backfill_envelope_id_populates_null_rows_from_body_blob() {
+        let pool = Pool::in_memory();
+        let gid = [0x70u8; 32];
+        let sender = [0x71u8; 32];
+
+        // Insert a row with body_blob set but envelope_id NULL — simulates
+        // a pre-1.H row. Bypass the trigger by inserting envelope_id as a
+        // dummy 16-byte value, then NULL it out (the trigger fires on
+        // INSERT, not UPDATE).
+        let env = crate::envelope::Envelope {
+            v: 1,
+            id: crate::envelope::MessageId::generate(),
+            ts: 1_700_000_000,
+            reply_to: None,
+            kind: crate::envelope::Kind::Text { body: "hi".into() },
+        };
+        let expected_id = env.id.0;
+
+        pool.with_mut(|c| {
+            c.execute(
+                "INSERT INTO messages \
+                 (group_id, sender, envelope_id, ts, ts_daemon_recv, \
+                  mls_generation, kind, body_blob, body_text) \
+                 VALUES (?1, ?2, ?3, ?4, 0, 0, 'text', ?5, 'hi')",
+                rusqlite::params![
+                    &gid[..],
+                    &sender[..],
+                    &[0u8; 16][..], // dummy 16 bytes to satisfy trigger
+                    env.ts,
+                    env.encode().unwrap(),
+                ],
+            )
+            .unwrap();
+            // Now NULL the envelope_id (UPDATE bypasses the BEFORE-INSERT trigger).
+            c.execute(
+                "UPDATE messages SET envelope_id = NULL WHERE group_id = ?1",
+                rusqlite::params![&gid[..]],
+            )
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
+
+        let n = MessageRepo::new(&pool).backfill_envelope_id().unwrap();
+        assert_eq!(n, 1, "exactly one row backfilled");
+
+        let got: Vec<u8> = pool
+            .with(|c| {
+                c.query_row(
+                    "SELECT envelope_id FROM messages WHERE group_id = ?1",
+                    rusqlite::params![&gid[..]],
+                    |r| r.get::<_, Vec<u8>>(0),
+                )
+                .map_err(|e| {
+                    crate::error::CoreError::Storage(crate::storage::StorageErrorKind::Other(
+                        e.to_string(),
+                    ))
+                })
+            })
+            .unwrap();
+        assert_eq!(
+            got, expected_id,
+            "backfilled envelope_id must match body_blob"
+        );
+    }
+
+    #[test]
+    fn insert_populates_envelope_id_column() {
+        let pool = Pool::in_memory();
+        let gid = [0x74u8; 32];
+        let sender = [0x75u8; 32];
+        let env = crate::envelope::Envelope {
+            v: 1,
+            id: crate::envelope::MessageId::generate(),
+            ts: 0,
+            reply_to: None,
+            kind: crate::envelope::Kind::Text { body: "x".into() },
+        };
+        let expected = env.id.0;
+
+        let repo = MessageRepo::new(&pool);
+        repo.insert(InsertParams {
+            group_id: &gid,
+            sender: &sender,
+            envelope: &env,
+            mls_generation: 0,
+            ts_daemon_recv: 0,
+        })
+        .unwrap();
+
+        let got: Vec<u8> = pool
+            .with(|c| {
+                c.query_row(
+                    "SELECT envelope_id FROM messages WHERE group_id = ?1",
+                    rusqlite::params![&gid[..]],
+                    |r| r.get::<_, Vec<u8>>(0),
+                )
+                .map_err(|e| {
+                    crate::error::CoreError::Storage(crate::storage::StorageErrorKind::Other(
+                        e.to_string(),
+                    ))
+                })
+            })
+            .unwrap();
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn insert_duplicate_envelope_id_returns_duplicate_message_error() {
+        use crate::error::CoreError;
+        use crate::storage::StorageErrorKind;
+
+        let pool = Pool::in_memory();
+        let gid = [0x76u8; 32];
+        let sender = [0x77u8; 32];
+        let env = crate::envelope::Envelope {
+            v: 1,
+            id: crate::envelope::MessageId::generate(),
+            ts: 0,
+            reply_to: None,
+            kind: crate::envelope::Kind::Text { body: "y".into() },
+        };
+
+        let repo = MessageRepo::new(&pool);
+        repo.insert(InsertParams {
+            group_id: &gid,
+            sender: &sender,
+            envelope: &env,
+            mls_generation: 0,
+            ts_daemon_recv: 0,
+        })
+        .unwrap();
+
+        let err = repo
+            .insert(InsertParams {
+                group_id: &gid,
+                sender: &sender,
+                envelope: &env, // same envelope.id as above
+                mls_generation: 1,
+                ts_daemon_recv: 1,
+            })
+            .unwrap_err();
+
+        assert!(
+            matches!(err, CoreError::Storage(StorageErrorKind::DuplicateMessage)),
+            "expected DuplicateMessage, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn backfill_envelope_id_is_idempotent() {
+        let pool = Pool::in_memory();
+        let gid = [0x72u8; 32];
+        let repo = MessageRepo::new(&pool);
+        repo.insert(InsertParams {
+            group_id: &gid,
+            sender: &[0x73u8; 32],
+            envelope: &crate::envelope::Envelope {
+                v: 1,
+                id: crate::envelope::MessageId::generate(),
+                ts: 0,
+                reply_to: None,
+                kind: crate::envelope::Kind::Text { body: "a".into() },
+            },
+            mls_generation: 0,
+            ts_daemon_recv: 0,
+        })
+        .unwrap();
+        // Row already has envelope_id populated by insert (Task 4 wires that).
+        // Backfill must do nothing.
+        let n = repo.backfill_envelope_id().unwrap();
         assert_eq!(n, 0);
     }
 }

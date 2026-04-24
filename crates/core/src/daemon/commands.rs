@@ -146,6 +146,9 @@ pub struct ContactSummary {
 /// Wire-safe projection of a persisted message row.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessageRecord {
+    /// SQLite primary key — stable within one node; used by UI for scroll
+    /// anchoring, mark_read cursor targeting, and trace correlation.
+    pub row_id: i64,
     /// 16-byte per-message id.
     pub message_id: Hex16,
     /// Peer identity pubkey.
@@ -170,10 +173,11 @@ impl MessageRecord {
     /// epoch. `ts_daemon_recv` is the local clock at persist time. Both
     /// are carried straight to the wire — no aliasing back to `envelope.ts`.
     ///
-    /// `row_id` is the SQLite primary key; included for future tracing
-    /// but not part of the wire shape. `contact` is the peer pubkey.
+    /// `row_id` is the SQLite primary key surfaced for UI scroll anchoring,
+    /// mark_read cursor targeting, and trace correlation. `contact` is the
+    /// peer pubkey.
     pub fn project(
-        _row_id: i64,
+        row_id: i64,
         envelope: &crate::envelope::Envelope,
         contact: crate::identity::PublicKey,
         mls_generation: u64,
@@ -181,6 +185,7 @@ impl MessageRecord {
         direction: Direction,
     ) -> Self {
         Self {
+            row_id,
             message_id: Hex16::from(envelope.id.0),
             contact,
             direction,
@@ -350,6 +355,7 @@ mod tests {
                 added_at: 1_700_000_000,
             }]),
             CommandResult::Messages(vec![MessageRecord {
+                row_id: 0, // row_id irrelevant in this test
                 message_id: crate::daemon::hex::Hex16::from([2; 16]),
                 contact: crate::identity::PublicKey([7; 32]),
                 direction: Direction::Incoming,

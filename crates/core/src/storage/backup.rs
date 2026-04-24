@@ -28,6 +28,7 @@ use std::path::Path;
 
 use zeroize::Zeroizing;
 
+use super::StorageErrorKind;
 use crate::error::{CoreError, Result};
 use crate::identity::derive::{hkdf_expand, INFO_BACKUP_V1};
 use crate::identity::Seed;
@@ -40,10 +41,10 @@ pub(crate) fn export_backup(data_dir: &Path, out_path: &Path, seed: &Seed) -> Re
     for name in BACKUP_FILES {
         let p = data_dir.join(name);
         if !p.exists() {
-            return Err(CoreError::Storage(format!(
+            return Err(CoreError::Storage(StorageErrorKind::Other(format!(
                 "missing backup input: {}",
                 p.display()
-            )));
+            ))));
         }
     }
 
@@ -54,14 +55,16 @@ pub(crate) fn export_backup(data_dir: &Path, out_path: &Path, seed: &Seed) -> Re
         let mut builder = tar::Builder::new(gz);
         for name in BACKUP_FILES {
             let src = data_dir.join(name);
-            builder
-                .append_path_with_name(&src, name)
-                .map_err(|e| CoreError::Storage(format!("tar append {name}: {e}")))?;
+            builder.append_path_with_name(&src, name).map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!("tar append {name}: {e}")))
+            })?;
         }
         builder
             .into_inner()
             .and_then(|gz| gz.finish())
-            .map_err(|e| CoreError::Storage(format!("tar/gz finish: {e}")))?;
+            .map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!("tar/gz finish: {e}")))
+            })?;
     }
 
     // Age-encrypt the gzipped tarball.
@@ -72,15 +75,15 @@ pub(crate) fn export_backup(data_dir: &Path, out_path: &Path, seed: &Seed) -> Re
     ));
 
     let mut ciphertext = Vec::new();
-    let mut writer = encryptor
-        .wrap_output(&mut ciphertext)
-        .map_err(|e| CoreError::Storage(format!("age wrap backup: {e}")))?;
-    writer
-        .write_all(&tar_gz)
-        .map_err(|e| CoreError::Storage(format!("age write backup: {e}")))?;
-    writer
-        .finish()
-        .map_err(|e| CoreError::Storage(format!("age finish backup: {e}")))?;
+    let mut writer = encryptor.wrap_output(&mut ciphertext).map_err(|e| {
+        CoreError::Storage(StorageErrorKind::Other(format!("age wrap backup: {e}")))
+    })?;
+    writer.write_all(&tar_gz).map_err(|e| {
+        CoreError::Storage(StorageErrorKind::Other(format!("age write backup: {e}")))
+    })?;
+    writer.finish().map_err(|e| {
+        CoreError::Storage(StorageErrorKind::Other(format!("age finish backup: {e}")))
+    })?;
 
     // Atomic write.
     let tmp_path = out_path.with_extension("tmp");
@@ -96,10 +99,10 @@ pub(crate) fn export_backup(data_dir: &Path, out_path: &Path, seed: &Seed) -> Re
 pub(crate) fn import_backup(archive_path: &Path, data_dir: &Path, seed: &Seed) -> Result<()> {
     for name in BACKUP_FILES {
         if data_dir.join(name).exists() {
-            return Err(CoreError::Storage(format!(
+            return Err(CoreError::Storage(StorageErrorKind::Other(format!(
                 "refusing to overwrite existing {}; restore into a clean data_dir",
                 name
-            )));
+            ))));
         }
     }
 
@@ -107,24 +110,31 @@ pub(crate) fn import_backup(archive_path: &Path, data_dir: &Path, seed: &Seed) -
     let key = hkdf_expand::<32>(seed.as_bytes(), INFO_BACKUP_V1)?;
     let passphrase = Zeroizing::new(hex::encode(key.as_ref()));
 
-    let decryptor = age::Decryptor::new_buffered(&ciphertext[..])
-        .map_err(|e| CoreError::Storage(format!("age decryptor backup: {e}")))?;
+    let decryptor = age::Decryptor::new_buffered(&ciphertext[..]).map_err(|e| {
+        CoreError::Storage(StorageErrorKind::Other(format!(
+            "age decryptor backup: {e}"
+        )))
+    })?;
     if !decryptor.is_scrypt() {
-        return Err(CoreError::Storage(
+        return Err(CoreError::Storage(StorageErrorKind::Other(
             "unexpected age recipient type on backup".into(),
-        ));
+        )));
     }
     let identity = age::scrypt::Identity::new(age::secrecy::SecretString::from(
         passphrase.as_str().to_string(),
     ));
     let mut reader = decryptor
         .decrypt(std::iter::once(&identity as &dyn age::Identity))
-        .map_err(|e| CoreError::Storage(format!("age decrypt backup: {e}")))?;
+        .map_err(|e| {
+            CoreError::Storage(StorageErrorKind::Other(format!("age decrypt backup: {e}")))
+        })?;
 
     let mut tar_gz = Vec::new();
-    reader
-        .read_to_end(&mut tar_gz)
-        .map_err(|e| CoreError::Storage(format!("read backup plaintext: {e}")))?;
+    reader.read_to_end(&mut tar_gz).map_err(|e| {
+        CoreError::Storage(StorageErrorKind::Other(format!(
+            "read backup plaintext: {e}"
+        )))
+    })?;
 
     // Extract gzipped tarball.
     std::fs::create_dir_all(data_dir)?;
@@ -132,23 +142,26 @@ pub(crate) fn import_backup(archive_path: &Path, data_dir: &Path, seed: &Seed) -
     let mut archive = tar::Archive::new(gz);
     for entry in archive
         .entries()
-        .map_err(|e| CoreError::Storage(format!("tar entries: {e}")))?
+        .map_err(|e| CoreError::Storage(StorageErrorKind::Other(format!("tar entries: {e}"))))?
     {
-        let mut entry = entry.map_err(|e| CoreError::Storage(format!("tar entry: {e}")))?;
+        let mut entry = entry
+            .map_err(|e| CoreError::Storage(StorageErrorKind::Other(format!("tar entry: {e}"))))?;
         let name = entry
             .path()
-            .map_err(|e| CoreError::Storage(format!("tar entry path: {e}")))?
+            .map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!("tar entry path: {e}")))
+            })?
             .to_string_lossy()
             .into_owned();
         if !BACKUP_FILES.contains(&name.as_str()) {
-            return Err(CoreError::Storage(format!(
+            return Err(CoreError::Storage(StorageErrorKind::Other(format!(
                 "unexpected backup entry: {name}"
-            )));
+            ))));
         }
         let dest = data_dir.join(&name);
-        entry
-            .unpack(&dest)
-            .map_err(|e| CoreError::Storage(format!("extract {name}: {e}")))?;
+        entry.unpack(&dest).map_err(|e| {
+            CoreError::Storage(StorageErrorKind::Other(format!("extract {name}: {e}")))
+        })?;
     }
     Ok(())
 }

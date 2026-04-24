@@ -8,6 +8,7 @@
 //! cache received KPs for out-of-order use. `consumed` is flipped by
 //! 1.D's invite flow on successful single-use join; 1.C only persists.
 
+use super::StorageErrorKind;
 use crate::error::{CoreError, Result};
 use crate::storage::Pool;
 
@@ -35,7 +36,9 @@ impl<'p> KeyPackageRepo<'p> {
                  VALUES (?1, ?2, ?3, 0, ?4)",
                 rusqlite::params![hash, bytes, direction, now],
             )
-            .map_err(|e| CoreError::Storage(format!("insert key_package: {e}")))?;
+            .map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!("insert key_package: {e}")))
+            })?;
             Ok(())
         })
     }
@@ -55,7 +58,9 @@ impl<'p> KeyPackageRepo<'p> {
             match result {
                 Ok(row) => Ok(Some(row)),
                 Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-                Err(e) => Err(CoreError::Storage(format!("get key_package: {e}"))),
+                Err(e) => Err(CoreError::Storage(StorageErrorKind::Other(format!(
+                    "get key_package: {e}"
+                )))),
             }
         })
     }
@@ -67,7 +72,9 @@ impl<'p> KeyPackageRepo<'p> {
                 "UPDATE key_packages SET consumed = 1 WHERE kp_hash = ?1",
                 rusqlite::params![hash],
             )
-            .map_err(|e| CoreError::Storage(format!("mark_consumed: {e}")))?;
+            .map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!("mark_consumed: {e}")))
+            })?;
             Ok(())
         })
     }
@@ -128,8 +135,10 @@ mod tests {
             .insert(&hash, b"kp", "sideways")
             .expect_err("CHECK (direction IN ('ours', 'theirs')) must reject 'sideways'");
         match err {
-            CoreError::Storage(s) => assert!(s.contains("CHECK")),
-            other => panic!("expected Storage, got {other:?}"),
+            CoreError::Storage(crate::storage::StorageErrorKind::Other(s)) => {
+                assert!(s.contains("CHECK"))
+            }
+            other => panic!("expected Storage(Other), got {other:?}"),
         }
     }
 }

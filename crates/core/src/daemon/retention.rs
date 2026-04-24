@@ -12,8 +12,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::daemon::clock::now_unix_seconds;
 use crate::storage::messages::MessageRepo;
 use crate::storage::Pool;
+use crate::storage::StorageErrorKind;
 
 /// Spawn the retention sweep on the current Tokio runtime.
 ///
@@ -33,7 +35,7 @@ pub fn spawn_sweep(
                     if retention_days == 0 {
                         continue;
                     }
-                    let cutoff = now_secs()
+                    let cutoff = now_unix_seconds()
                         .saturating_sub(i64::from(retention_days).saturating_mul(86_400));
                     match MessageRepo::new(&pool).prune_before(None, cutoff) {
                         Ok(n) if n > 0 => tracing::info!(
@@ -51,16 +53,6 @@ pub fn spawn_sweep(
             }
         }
     })
-}
-
-fn now_secs() -> i64 {
-    i64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0),
-    )
-    .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -101,7 +93,9 @@ mod tests {
         let n: i64 = pool
             .with(|c| {
                 c.query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
-                    .map_err(|e| crate::error::CoreError::Storage(e.to_string()))
+                    .map_err(|e| {
+                        crate::error::CoreError::Storage(StorageErrorKind::Other(e.to_string()))
+                    })
             })
             .unwrap();
         assert_eq!(n, 1, "retention_days=0 must not delete anything");
@@ -110,7 +104,7 @@ mod tests {
     #[tokio::test]
     async fn sweep_deletes_rows_older_than_cutoff() {
         let pool = Arc::new(Pool::in_memory());
-        let now = now_secs();
+        let now = now_unix_seconds();
 
         // Three rows: 2 days old, 1 day old, just-now.
         for (i, ts_offset) in [(-2 * 86_400, 0), (-86_400, 1), (0, 2)].iter().enumerate() {
@@ -140,7 +134,9 @@ mod tests {
         let n: i64 = pool
             .with(|c| {
                 c.query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
-                    .map_err(|e| crate::error::CoreError::Storage(e.to_string()))
+                    .map_err(|e| {
+                        crate::error::CoreError::Storage(StorageErrorKind::Other(e.to_string()))
+                    })
             })
             .unwrap();
         assert!(

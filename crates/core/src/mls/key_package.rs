@@ -17,6 +17,7 @@ use tls_codec::{Deserialize as _, Serialize as _};
 use crate::error::{CoreError, Result};
 use crate::identity::IdentityKey;
 use crate::mls::ciphersuite::CIPHERSUITE;
+use crate::mls::error_kind::MlsErrorKind;
 use crate::mls::provider::MlsProvider;
 use crate::storage::KeyPackageRepo;
 
@@ -49,12 +50,18 @@ impl KeyPackage {
 
         let kp_bundle = openmls::key_packages::KeyPackage::builder()
             .build(MLS_CIPHERSUITE, provider.as_openmls(), &signer, cwk)
-            .map_err(|e| CoreError::Mls(format!("mls: key_package builder: {e:?}")))?;
+            .map_err(|e| {
+                CoreError::from(MlsErrorKind::Other(format!(
+                    "mls: key_package builder: {e:?}"
+                )))
+            })?;
         let kp = kp_bundle.key_package().clone();
 
-        let bytes = kp
-            .tls_serialize_detached()
-            .map_err(|e| CoreError::Mls(format!("mls: key_package serialize: {e}")))?;
+        let bytes = kp.tls_serialize_detached().map_err(|e| {
+            CoreError::from(MlsErrorKind::Other(format!(
+                "mls: key_package serialize: {e}"
+            )))
+        })?;
         let hash = sha256(&bytes);
         kp_repo.insert(&hash, &bytes, "ours")?;
 
@@ -63,29 +70,40 @@ impl KeyPackage {
 
     /// Serialize to TLS-codec wire bytes for transmission.
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        self.inner
-            .tls_serialize_detached()
-            .map_err(|e| CoreError::Mls(format!("mls: key_package serialize: {e}")))
+        self.inner.tls_serialize_detached().map_err(|e| {
+            CoreError::from(MlsErrorKind::Other(format!(
+                "mls: key_package serialize: {e}"
+            )))
+        })
     }
 
     /// Deserialize from TLS-codec wire bytes. Validates the KeyPackage
     /// via OpenMLS's verification step (signature + ciphersuite).
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        let kp_in = openmls::key_packages::KeyPackageIn::tls_deserialize_exact(bytes)
-            .map_err(|e| CoreError::Mls(format!("mls: key_package deserialize: {e}")))?;
+        let kp_in =
+            openmls::key_packages::KeyPackageIn::tls_deserialize_exact(bytes).map_err(|e| {
+                CoreError::from(MlsErrorKind::Other(format!(
+                    "mls: key_package deserialize: {e}"
+                )))
+            })?;
         let crypto = openmls_rust_crypto::OpenMlsRustCrypto::default();
         let kp = kp_in
             .validate(crypto.crypto(), ProtocolVersion::Mls10)
-            .map_err(|e| CoreError::Mls(format!("mls: key_package validate: {e:?}")))?;
+            .map_err(|e| {
+                CoreError::from(MlsErrorKind::Other(format!(
+                    "mls: key_package validate: {e:?}"
+                )))
+            })?;
         Ok(Self { inner: kp })
     }
 
     /// 32-byte SHA-256 of the TLS-codec serialization.
     pub fn hash(&self) -> Result<[u8; 32]> {
-        let bytes = self
-            .inner
-            .tls_serialize_detached()
-            .map_err(|e| CoreError::Mls(format!("mls: key_package hash serialize: {e}")))?;
+        let bytes = self.inner.tls_serialize_detached().map_err(|e| {
+            CoreError::from(MlsErrorKind::Other(format!(
+                "mls: key_package hash serialize: {e}"
+            )))
+        })?;
         Ok(sha256(&bytes))
     }
 
@@ -114,7 +132,7 @@ pub(crate) fn signer_from_identity(
     );
     signer
         .store(provider.as_openmls().storage())
-        .map_err(|e| CoreError::Mls(format!("mls: signer store: {e:?}")))?;
+        .map_err(|e| CoreError::from(MlsErrorKind::Other(format!("mls: signer store: {e:?}"))))?;
     Ok(signer)
 }
 
@@ -205,8 +223,8 @@ mod tests {
     fn from_bytes_rejects_garbage() {
         let err = KeyPackage::from_bytes(&[0u8, 1, 2, 3]).expect_err("must reject garbage");
         match err {
-            CoreError::Mls(s) => assert!(s.starts_with("mls: key_package")),
-            other => panic!("expected CoreError::Mls, got {other:?}"),
+            CoreError::Mls(MlsErrorKind::Other(s)) => assert!(s.starts_with("mls: key_package")),
+            other => panic!("expected CoreError::Mls(Other(_)), got {other:?}"),
         }
     }
 }
