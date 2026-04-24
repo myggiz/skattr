@@ -376,6 +376,55 @@ impl<'p> MessageRepo<'p> {
         })
     }
 
+    /// One-shot startup helper: decode CBOR for any text-kind row whose
+    /// `body_text` column is NULL (i.e., predates Phase 1.G), populate
+    /// it, and let the AU trigger cascade into `messages_fts`. Returns
+    /// the number of rows backfilled. Idempotent.
+    pub(crate) fn backfill_body_text(&self) -> Result<u64> {
+        let candidates: Vec<(i64, Vec<u8>)> = self.pool.with(|c| {
+            let mut stmt = c
+                .prepare(
+                    "SELECT id, body_blob FROM messages \
+                     WHERE kind = 'text' AND body_text IS NULL",
+                )
+                .map_err(|e| CoreError::Storage(format!("prepare backfill: {e}")))?;
+            let it = stmt
+                .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))
+                .map_err(|e| CoreError::Storage(format!("query backfill: {e}")))?;
+            let v: std::result::Result<Vec<_>, _> = it.collect();
+            v.map_err(|e| CoreError::Storage(format!("collect backfill: {e}")))
+        })?;
+
+        if candidates.is_empty() {
+            return Ok(0);
+        }
+
+        let mut updated = 0u64;
+        self.pool.with_mut(|c| {
+            for (id, blob) in &candidates {
+                let env = match crate::envelope::Envelope::decode(blob) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        tracing::warn!(row_id = id, error = %e,
+                            "backfill_body_text: skipping row whose body_blob \
+                             failed to decode");
+                        continue;
+                    }
+                };
+                if let crate::envelope::Kind::Text { body } = env.kind {
+                    c.execute(
+                        "UPDATE messages SET body_text = ?1 WHERE id = ?2",
+                        rusqlite::params![body, id],
+                    )
+                    .map_err(|e| CoreError::Storage(format!("backfill UPDATE: {e}")))?;
+                    updated += 1;
+                }
+            }
+            Ok(())
+        })?;
+        Ok(updated)
+    }
+
     /// Keep the `keep` newest rows in `group_id`; delete the rest.
     /// Returns the number of rows deleted.
     pub fn prune_keep_last(&self, group_id: &[u8], keep: u64) -> Result<u64> {
@@ -1117,5 +1166,77 @@ mod tests {
         let max = remaining_ids.iter().copied().max().unwrap();
         let min = remaining_ids.iter().copied().min().unwrap();
         assert_eq!(max - min, 2, "the surviving 3 are consecutive at the top");
+    }
+
+    #[test]
+    fn backfill_body_text_decodes_legacy_text_rows_and_indexes_fts() {
+        let pool = Pool::in_memory();
+        let gid = [0x80u8; 32];
+
+        // Insert a row directly with body_text NULL (simulating a pre-1.G row).
+        let env = sample_envelope("legacy hello world");
+        let blob = env.encode().unwrap();
+        let sender = [0u8; 32];
+        pool.with_mut(|c| {
+            c.execute(
+                "INSERT INTO messages \
+                     (group_id, sender, kind, body_blob, body_text, ts, \
+                      mls_generation, ts_daemon_recv) \
+                 VALUES (?1, ?2, 'text', ?3, NULL, ?4, 0, 0)",
+                rusqlite::params![&gid[..], &sender[..], blob, env.ts],
+            )
+            .map_err(|e| crate::error::CoreError::Storage(e.to_string()))?;
+            Ok(())
+        })
+        .unwrap();
+
+        // Sanity: FTS index is empty before backfill.
+        let pre: i64 = pool
+            .with(|c| {
+                c.query_row(
+                    "SELECT COUNT(*) FROM messages_fts \
+                     WHERE messages_fts MATCH 'legacy'",
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(|e| crate::error::CoreError::Storage(e.to_string()))
+            })
+            .unwrap();
+        assert_eq!(pre, 0);
+
+        let n = MessageRepo::new(&pool).backfill_body_text().unwrap();
+        assert_eq!(n, 1);
+
+        // Backfilled row's body_text populated; FTS index now finds it.
+        let post: i64 = pool
+            .with(|c| {
+                c.query_row(
+                    "SELECT COUNT(*) FROM messages_fts \
+                     WHERE messages_fts MATCH 'legacy'",
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(|e| crate::error::CoreError::Storage(e.to_string()))
+            })
+            .unwrap();
+        assert_eq!(post, 1, "au trigger must have indexed the row");
+    }
+
+    #[test]
+    fn backfill_body_text_is_idempotent() {
+        let pool = Pool::in_memory();
+        let gid = [0x81u8; 32];
+        let repo = MessageRepo::new(&pool);
+        repo.insert(InsertParams {
+            group_id: &gid,
+            sender: &[0u8; 32],
+            envelope: &sample_envelope("already populated"),
+            mls_generation: 0,
+            ts_daemon_recv: 0,
+        })
+        .unwrap();
+        // body_text already populated by insert; backfill must do nothing.
+        let n = repo.backfill_body_text().unwrap();
+        assert_eq!(n, 0);
     }
 }
