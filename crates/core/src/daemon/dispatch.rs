@@ -41,6 +41,11 @@ where
             recent_messages(&handle, contact, limit).await
         }
         Command::CreateGroup { .. } => Err(IpcError::UnknownCommand),
+        // Phase 1.G handlers land in Tasks 17–20.
+        Command::SearchMessages { .. } => Err(IpcError::UnknownCommand),
+        Command::MarkRead { .. } => Err(IpcError::UnknownCommand),
+        Command::PruneHistory { .. } => Err(IpcError::UnknownCommand),
+        Command::ExportHistory { .. } => Err(IpcError::UnknownCommand),
     }
 }
 

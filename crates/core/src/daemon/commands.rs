@@ -60,6 +60,50 @@ pub enum Command {
     RotateOnion,
     /// Graceful daemon shutdown.
     Shutdown,
+    /// Full-text search over persisted messages.
+    SearchMessages {
+        /// Free-form FTS5 query string. Empty queries are rejected
+        /// at the dispatch layer with `DaemonErrorKind::SearchSyntax`.
+        query: String,
+        /// If `Some`, restrict results to messages exchanged with this peer.
+        contact: Option<crate::identity::PublicKey>,
+        /// Max rows to return (page size).
+        limit: u32,
+        /// Number of leading rows to skip (paging cursor).
+        offset: u32,
+        /// If `true`, sort newest-first by `ts_daemon_recv`; otherwise FTS rank.
+        newest_first: bool,
+    },
+    /// Advance the per-contact read cursor up to and including
+    /// `up_to_message_id` (the message-table primary key, not the
+    /// 16-byte wire id).
+    MarkRead {
+        /// Peer whose conversation cursor is being advanced.
+        contact: crate::identity::PublicKey,
+        /// Message-table `id` (primary key) up to which messages are
+        /// considered read.
+        up_to_message_id: i64,
+    },
+    /// Delete persisted messages matching the given retention rule.
+    /// Exactly one of `before_ts_recv` / `keep_last` is expected.
+    PruneHistory {
+        /// If `Some`, only prune within this peer's conversation.
+        contact: Option<crate::identity::PublicKey>,
+        /// Delete messages with `ts_daemon_recv < this`. Unix seconds.
+        before_ts_recv: Option<i64>,
+        /// Keep at most this many most-recent rows per conversation.
+        keep_last: Option<u64>,
+    },
+    /// Export a paged window of persisted messages for the given peer.
+    ExportHistory {
+        /// Peer whose history to export.
+        contact: crate::identity::PublicKey,
+        /// Page cursor: return rows with `id > after_id`. `None` starts
+        /// from the beginning.
+        after_id: Option<i64>,
+        /// Max rows per page.
+        limit: u32,
+    },
 }
 
 /// Outcome of a `SendMessage` command after the inline-delivery wait.
@@ -116,6 +160,17 @@ pub struct MessageRecord {
     pub ts_envelope: i64,
 }
 
+/// One full-text search hit returned by `Command::SearchMessages`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchHitRecord {
+    /// Underlying message row projection.
+    pub record: MessageRecord,
+    /// FTS5 BM25 rank score (lower = better; negative is normal for BM25).
+    pub bm25: f64,
+    /// FTS5-rendered snippet around the matched terms.
+    pub snippet: String,
+}
+
 /// Response returned for a completed [`Command`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "result", content = "data", rename_all = "snake_case")]
@@ -148,6 +203,25 @@ pub enum CommandResult {
     Subscribed,
     /// No-payload acknowledgement (rotate, shutdown, etc.).
     Ok,
+    /// [`Command::SearchMessages`] completed.
+    SearchResults(Vec<SearchHitRecord>),
+    /// [`Command::MarkRead`] completed.
+    MarkedRead {
+        /// Message-table `id` (primary key) of the highest message marked read.
+        up_to: i64,
+    },
+    /// [`Command::PruneHistory`] completed.
+    Pruned {
+        /// Number of message rows actually deleted.
+        rows_deleted: u64,
+    },
+    /// One page of [`Command::ExportHistory`] results.
+    ExportPage {
+        /// Records in this page.
+        records: Vec<MessageRecord>,
+        /// Cursor for the next page; `None` if this was the last page.
+        next_after_id: Option<i64>,
+    },
 }
 
 impl From<InviteLink> for CommandResult {
@@ -235,5 +309,84 @@ mod tests {
         for r in &results {
             let _back: CommandResult = roundtrip(r);
         }
+    }
+}
+
+#[cfg(test)]
+mod phase_1g_wire_tests {
+    use super::*;
+
+    #[test]
+    fn search_messages_command_round_trips_cbor() {
+        let cmd = Command::SearchMessages {
+            query: "alpha bravo".into(),
+            contact: None,
+            limit: 20,
+            offset: 0,
+            newest_first: false,
+        };
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&cmd, &mut buf).unwrap();
+        let back: Command = ciborium::de::from_reader(&buf[..]).unwrap();
+        assert!(matches!(back, Command::SearchMessages { .. }));
+    }
+
+    #[test]
+    fn mark_read_command_round_trips_cbor() {
+        let cmd = Command::MarkRead {
+            contact: crate::identity::PublicKey([0x11; 32]),
+            up_to_message_id: 42,
+        };
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&cmd, &mut buf).unwrap();
+        let back: Command = ciborium::de::from_reader(&buf[..]).unwrap();
+        assert!(matches!(
+            back,
+            Command::MarkRead {
+                up_to_message_id: 42,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn prune_history_command_round_trips_cbor() {
+        let cmd = Command::PruneHistory {
+            contact: None,
+            before_ts_recv: Some(1_700_000_000),
+            keep_last: None,
+        };
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&cmd, &mut buf).unwrap();
+        let back: Command = ciborium::de::from_reader(&buf[..]).unwrap();
+        assert!(matches!(back, Command::PruneHistory { .. }));
+    }
+
+    #[test]
+    fn export_history_command_round_trips_cbor() {
+        let cmd = Command::ExportHistory {
+            contact: crate::identity::PublicKey([0x22; 32]),
+            after_id: Some(100),
+            limit: 1000,
+        };
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&cmd, &mut buf).unwrap();
+        let back: Command = ciborium::de::from_reader(&buf[..]).unwrap();
+        assert!(matches!(
+            back,
+            Command::ExportHistory {
+                after_id: Some(100),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn search_results_round_trips() {
+        let res = CommandResult::SearchResults(vec![]);
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&res, &mut buf).unwrap();
+        let back: CommandResult = ciborium::de::from_reader(&buf[..]).unwrap();
+        assert!(matches!(back, CommandResult::SearchResults(_)));
     }
 }

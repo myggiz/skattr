@@ -206,6 +206,10 @@ fn exit_on_ipc_error(err: skattr_core::daemon::IpcClientError) -> ! {
                 eprintln!("storage error (see daemon logs)");
                 std::process::exit(1);
             }
+            DaemonErrorKind::SearchSyntax => {
+                eprintln!("search query rejected by FTS5 engine");
+                std::process::exit(6);
+            }
         },
         IpcClientError::Server(other) => {
             eprintln!("ipc: server error: {other:?}");

@@ -37,6 +37,8 @@ pub enum DaemonErrorKind {
     TorNotReady,
     /// Storage-layer failure that the CLI can't disambiguate further.
     StorageError,
+    /// Search query was empty after FTS5 escaping or the engine rejected it.
+    SearchSyntax,
 }
 
 #[cfg(test)]
