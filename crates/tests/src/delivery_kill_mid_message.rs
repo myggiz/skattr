@@ -71,6 +71,7 @@ impl InboundDispatch for MlsInboundDispatch {
         let repo = MlsGroupRepo::new(&self.pool);
         let mut g = Group::load(&self.group_id, &repo).ok().flatten()?;
         let envelope = g.decrypt(ciphertext).ok()?;
+        let mls_generation = g.epoch();
         let _ = g.save(&repo);
         let mid = envelope.id;
 
@@ -80,10 +81,28 @@ impl InboundDispatch for MlsInboundDispatch {
         }
 
         let now_ms = ts_now_ms();
+        let ts_daemon_recv = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+        )
+        .unwrap_or(0);
         let seen = SeenMessagesRepo::new(&self.pool);
         let msgs = MessageRepo::new(&self.pool);
-        match receive(&peer, &self.group_id.0, envelope, now_ms, &seen, &msgs).ok()? {
-            ReceiveOutcome::New(_) | ReceiveOutcome::Duplicate => Some(mid),
+        match receive(
+            &peer,
+            &self.group_id.0,
+            envelope,
+            now_ms,
+            mls_generation,
+            ts_daemon_recv,
+            &seen,
+            &msgs,
+        )
+        .ok()?
+        {
+            ReceiveOutcome::New { .. } | ReceiveOutcome::Duplicate => Some(mid),
             ReceiveOutcome::Rejected(_) => None,
         }
     }
