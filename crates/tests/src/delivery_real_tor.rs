@@ -22,9 +22,9 @@ use std::time::Duration;
 use skattr_core::envelope::{Envelope, Kind, MessageId};
 use skattr_core::identity::{IdentityKey, Seed};
 use skattr_core::test_exports::{
-    handshake_initiator, handshake_responder, DeliveryHub, Group, GroupId, InboundDispatch,
-    KeyPackage, KeyPackageRepo, MessageRepo, MlsGroupRepo, MlsProvider, OnionListener, Outbox,
-    Pool, ReceiveOutcome, SeenMessagesRepo, TorConfig, TorRuntime,
+    handshake_initiator, handshake_responder, now_unix_seconds, DeliveryHub, Group, GroupId,
+    InboundDispatch, KeyPackage, KeyPackageRepo, MessageRepo, MlsGroupRepo, MlsProvider,
+    OnionListener, Outbox, Pool, ReceiveOutcome, SeenMessagesRepo, TorConfig, TorRuntime,
 };
 
 /// Create a tempdir with 0700 permissions — Arti 0.41 refuses to open
@@ -108,13 +108,7 @@ impl InboundDispatch for MlsInboundDispatch {
         }
 
         let now_ms = ts_now_ms();
-        let ts_daemon_recv = i64::try_from(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0),
-        )
-        .unwrap_or(0);
+        let ts_daemon_recv = now_unix_seconds();
         let seen = SeenMessagesRepo::new(&self.pool);
         let msgs = MessageRepo::new(&self.pool);
         let receive = skattr_core::test_exports::receive;

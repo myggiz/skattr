@@ -52,9 +52,9 @@ use skattr_core::daemon::{Command, CommandResult, IpcClient, IpcClientError};
 use skattr_core::envelope::{Kind, MessageId};
 use skattr_core::identity::IdentityKey;
 use skattr_core::test_exports::{
-    handle_connection, handshake_initiator, handshake_responder, noise_public_of, receive,
-    CommandExecutor, ContactRepo, DaemonHandle, DeliveryHub, Group, GroupId, InboundDispatch,
-    MessageRepo, MlsGroupRepo, Pool, ReceiveOutcome, SeenMessagesRepo,
+    handle_connection, handshake_initiator, handshake_responder, noise_public_of, now_unix_seconds,
+    receive, CommandExecutor, ContactRepo, DaemonHandle, DeliveryHub, Group, GroupId,
+    InboundDispatch, MessageRepo, MlsGroupRepo, Pool, ReceiveOutcome, SeenMessagesRepo,
 };
 use tokio::sync::broadcast;
 
@@ -94,13 +94,7 @@ impl InboundDispatch for MlsInboundDispatch {
             set.insert(hash, mid);
         }
         let now_ms = now_ms();
-        let ts_daemon_recv = i64::try_from(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0),
-        )
-        .unwrap_or(0);
+        let ts_daemon_recv = now_unix_seconds();
         let seen_repo = SeenMessagesRepo::new(&self.pool);
         let msg_repo = MessageRepo::new(&self.pool);
         match receive(

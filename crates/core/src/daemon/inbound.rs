@@ -21,6 +21,7 @@ use std::sync::Arc;
 
 use tokio::sync::broadcast;
 
+use crate::daemon::clock::now_unix_seconds;
 use crate::daemon::commands::{Direction, MessageRecord};
 use crate::daemon::events::Event;
 use crate::delivery::peer::InboundDispatch;
@@ -185,22 +186,6 @@ impl DaemonInbound {
 
         Ok(msg_id)
     }
-}
-
-/// Unix seconds from the system clock, saturating to 0 on error.
-///
-/// Duplicates the pattern used by the three Task 13 integration test
-/// copies; kept local here to avoid leaking a clock helper into the
-/// public API. A future cleanup pass may hoist this into a shared
-/// internal utility.
-fn now_unix_seconds() -> i64 {
-    i64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0),
-    )
-    .unwrap_or(0)
 }
 
 impl InboundDispatch for DaemonInbound {

@@ -23,17 +23,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use skattr_core::envelope::{Envelope, Kind, MessageId};
-use skattr_core::test_exports::{spawn_sweep, InsertParams, MessageRepo, Pool};
-
-fn now_secs() -> i64 {
-    i64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0),
-    )
-    .unwrap_or(0)
-}
+use skattr_core::test_exports::{now_unix_seconds, spawn_sweep, InsertParams, MessageRepo, Pool};
 
 fn to_env(body: &str) -> Envelope {
     Envelope {
@@ -48,7 +38,7 @@ fn to_env(body: &str) -> Envelope {
 #[tokio::test]
 async fn sweep_deletes_only_rows_older_than_cutoff_and_cascades_fts() {
     let pool = Arc::new(Pool::in_memory());
-    let now = now_secs();
+    let now = now_unix_seconds();
     let gid: [u8; 32] = [0x33; 32];
 
     // Five rows at offsets [-3d, -2d, -1d, 0, 0].
