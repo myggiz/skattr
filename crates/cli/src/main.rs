@@ -124,6 +124,17 @@ enum Command {
         #[arg(long)]
         follow: bool,
     },
+    /// Export a contact's full message history.
+    Export {
+        /// Contact name or hex pubkey prefix.
+        contact: String,
+        /// Output format: `json` (default) or `text`.
+        #[arg(long, default_value = "json")]
+        format: String,
+        /// Output file path. Refuses to overwrite an existing file.
+        #[arg(long)]
+        output: std::path::PathBuf,
+    },
     /// Full-text search over message history.
     Search {
         /// Query — free-form, tokenize-and-AND on the daemon side.
@@ -299,6 +310,11 @@ async fn main() -> Result<()> {
             )
             .await
         }
+        Command::Export {
+            contact,
+            format,
+            output,
+        } => export(&contact, format, output, socket.as_deref()).await,
     }
 }
 
@@ -1138,6 +1154,120 @@ async fn search(
     }
 }
 
+fn chrono_or_naive_iso(ts: u64) -> String {
+    use time::format_description::well_known::Rfc3339;
+    use time::OffsetDateTime;
+    let secs = i64::try_from(ts).unwrap_or(0);
+    OffsetDateTime::from_unix_timestamp(secs)
+        .ok()
+        .and_then(|odt| odt.format(&Rfc3339).ok())
+        .unwrap_or_else(|| format!("{ts}"))
+}
+
+fn render_export_text_line(rec: &skattr_core::daemon::commands::MessageRecord) -> String {
+    use skattr_core::daemon::commands::Direction;
+    let body = match &rec.kind {
+        skattr_core::envelope::Kind::Text { body } => body.clone(),
+        other => format!("<{other:?}>"),
+    };
+    let from = match rec.direction {
+        Direction::Incoming => "peer",
+        Direction::Outgoing => "self",
+    };
+    let ts = chrono_or_naive_iso(rec.ts_daemon_recv);
+    format!("[{ts}] {from}: {body}\n")
+}
+
+async fn export(
+    contact_prefix: &str,
+    format: String,
+    output: std::path::PathBuf,
+    sock_flag: Option<&std::path::Path>,
+) -> Result<()> {
+    use skattr_core::daemon::commands::CommandResult;
+    use skattr_core::daemon::Command as CoreCommand;
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    // Validate format.
+    if format != "json" && format != "text" {
+        anyhow::bail!("unsupported --format {format:?}; use `json` or `text`");
+    }
+
+    let mut client = connect_or_exit(sock_flag).await?;
+
+    // Resolve contact via ListContacts + resolve_contact.
+    let rows_result = match client.execute(CoreCommand::ListContacts).await {
+        Ok(r) => r,
+        Err(e) => exit_on_ipc_error(e),
+    };
+    let rows = match rows_result {
+        CommandResult::Contacts(rows) => rows,
+        other => anyhow::bail!("unexpected daemon response: {other:?}"),
+    };
+    let pk = match resolve_contact(&rows, contact_prefix) {
+        Ok(pk) => pk,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(6);
+        }
+    };
+
+    // Open output with O_CREAT|O_EXCL to refuse clobbering.
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&output)
+        .map_err(|e| anyhow::anyhow!("open {}: {e}", output.display()))?;
+
+    if format == "json" {
+        file.write_all(b"[\n")?;
+    }
+    let mut first_record = true;
+    let mut after_id: Option<i64> = None;
+    loop {
+        let resp = match client
+            .execute(CoreCommand::ExportHistory {
+                contact: pk,
+                after_id,
+                limit: 1000,
+            })
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => exit_on_ipc_error(e),
+        };
+        let (records, next) = match resp {
+            CommandResult::ExportPage {
+                records,
+                next_after_id,
+            } => (records, next_after_id),
+            other => anyhow::bail!("unexpected response: {other:?}"),
+        };
+        for r in &records {
+            if format == "json" {
+                if !first_record {
+                    file.write_all(b",\n")?;
+                }
+                first_record = false;
+                serde_json::to_writer(&mut file, r)?;
+            } else {
+                file.write_all(render_export_text_line(r).as_bytes())?;
+            }
+        }
+        if next.is_none() {
+            break;
+        }
+        after_id = next;
+    }
+    if format == "json" {
+        file.write_all(b"\n]\n")?;
+    }
+    file.sync_all()?;
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -1338,6 +1468,30 @@ mod tests {
         assert!(!qr.is_empty(), "QR rendering must produce output");
         // Dense1x2 unicode rendering uses U+2580/U+2584 + space.
         assert!(qr.contains('\u{2580}') || qr.contains('\u{2584}') || qr.contains(' '));
+    }
+
+    #[test]
+    fn render_export_text_line_contains_body_and_direction_label() {
+        use skattr_core::daemon::commands::{Direction, MessageRecord};
+        use skattr_core::daemon::hex::Hex16;
+        use skattr_core::envelope::Kind;
+        use skattr_core::identity::PublicKey;
+
+        let rec = MessageRecord {
+            message_id: Hex16::from([0xCC; 16]),
+            contact: PublicKey([0x42; 32]),
+            direction: Direction::Incoming,
+            kind: Kind::Text { body: "hi".into() },
+            mls_generation: 1,
+            ts_daemon_recv: 1_700_000_000,
+            ts_envelope: 1_700_000_000,
+        };
+        let line = render_export_text_line(&rec);
+        assert!(line.starts_with('['));
+        assert!(line.contains("peer"));
+        assert!(line.contains("hi"));
+        // Must include the RFC3339 date part for ts_daemon_recv = 1_700_000_000 (2023-11-14T22:13:20Z).
+        assert!(line.contains("2023-11-14"));
     }
 
     #[test]
