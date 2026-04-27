@@ -9,6 +9,10 @@ authors.workspace = true
 repository.workspace = true
 publish = false
 
+[lib]
+name = "skattr_mailbox"
+path = "src/lib.rs"
+
 [[bin]]
 name = "skattr-mailbox"
 path = "src/main.rs"
@@ -20,8 +24,10 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 bytes = { workspace = true }
 futures = { workspace = true }
+async-trait = { workspace = true }
 
 serde = { workspace = true }
+serde-big-array = { workspace = true }
 toml = { workspace = true }
 ciborium = { workspace = true }
 
@@ -37,6 +43,25 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 clap = { workspace = true }
 directories = { workspace = true }
+
+# Binary-only (Arti). Library targets feed it via injected stream so
+# tests don't drag the Tor dependency in.
+arti-client = { workspace = true, optional = true }
+tor-hsservice = { workspace = true, optional = true }
+tor-rtcompat = { workspace = true, optional = true }
+
+# sd-notify for the binary's systemd integration.
+sd-notify = { workspace = true, optional = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+tokio = { workspace = true, features = ["test-util", "macros"] }
+
+[features]
+default = ["bin"]
+# Enabled by the binary; pulls Arti + sd-notify. Lib-only consumers
+# (tests, fuzz, soak) skip these and stay fast to compile.
+bin = ["dep:arti-client", "dep:tor-hsservice", "dep:tor-rtcompat", "dep:sd-notify"]
 
 [lints]
 workspace = true

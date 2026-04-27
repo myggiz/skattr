@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Myggiz AB
 
-//! Challenge nonce table. Filled in by Task 8.
+//! UDS healthcheck server. Filled in by Task 13.
 
 #![allow(missing_docs)]
-
-#[derive(Debug, Default)]
-pub struct Challenges;
