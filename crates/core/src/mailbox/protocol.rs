@@ -7,7 +7,7 @@
 //! All messages are CBOR (canonical: sorted keys, definite lengths).
 //! Frames sit inside the shared `length_u32 || type_u8 || payload`
 //! framing layout (see `core::transport::frame` for the peer-to-peer
-//! peer; the mailbox ships its own `MailboxFrameCodec` because the
+//! codec; the mailbox ships its own `MailboxFrameCodec` because the
 //! type bytes are disjoint).
 //!
 //! # Freezing rule
@@ -16,6 +16,26 @@
 //! ship as a parallel `MAILBOX_PROTOCOL_VERSION = 2` set; v1 stays
 //! supported until v2 is universally deployed. See ADR
 //! `docs/adr/0006-mailbox-protocol-v1.md`.
+//!
+//! # Authentication
+//!
+//! `Fetch` and `Delete` carry an Ed25519 signature over the
+//! domain-separated string:
+//!
+//! ```text
+//! "skattr-mailbox-auth-v1" || nonce || op_byte || sha256(canonical_cbor(payload_minus_signature))
+//! ```
+//!
+//! - `nonce` is the 32-byte server-issued challenge.
+//! - `op_byte` is the wire frame-type byte: `0x86` for [`Fetch`],
+//!   `0x88` for [`Delete`].
+//! - `payload_minus_signature` is the request body with the
+//!   `signature` field omitted, encoded as canonical CBOR (sorted
+//!   keys, definite lengths). The mailbox server computes the same
+//!   digest before verifying.
+//!
+//! See ADR `docs/adr/0006-mailbox-protocol-v1.md` for the freeze
+//! record.
 
 use serde::{Deserialize, Serialize};
 
