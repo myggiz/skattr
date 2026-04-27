@@ -102,6 +102,11 @@ pub enum StorageErrorKind {
     /// `deposit_id` not present.
     #[error("not found")]
     NotFound,
+    /// The internal mutex over the SQLite connection was poisoned by
+    /// a panicking thread. The connection is unsafe to reuse; treat
+    /// as a fatal storage error.
+    #[error("connection mutex poisoned")]
+    Poisoned,
 }
 
 impl From<rusqlite::Error> for StorageErrorKind {

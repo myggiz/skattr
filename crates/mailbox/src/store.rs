@@ -7,11 +7,6 @@
 //! transactional; cap enforcement and insertion happen atomically so
 //! a `RecipientFull` rejection never leaves the DB in a partial state.
 
-// `Mutex::lock()` only fails on a poisoned mutex, which indicates a
-// previous panic while holding the lock — there is no recovery path,
-// so propagating the panic via `expect()` is the correct response.
-#![allow(clippy::expect_used)]
-
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -79,7 +74,10 @@ impl Store {
         now: i64,
     ) -> Result<[u8; 16], MailboxError> {
         let new_len = u64::try_from(ciphertext.len()).unwrap_or(u64::MAX);
-        let mut conn = self.conn.lock().expect("store mutex poisoned");
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| MailboxError::Storage(StorageErrorKind::Poisoned))?;
         let tx = conn.transaction()?;
 
         let existing: i64 = tx
@@ -135,7 +133,10 @@ impl Store {
         recipient_hash: [u8; 32],
         now: i64,
     ) -> Result<Vec<StoredDeposit>, MailboxError> {
-        let conn = self.conn.lock().expect("store mutex poisoned");
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| MailboxError::Storage(StorageErrorKind::Poisoned))?;
         let mut stmt = conn.prepare(
             "SELECT deposit_id, ciphertext, deposited_at FROM deposits \
              WHERE recipient_hash = ?1 AND expires_at > ?2 \
@@ -166,7 +167,10 @@ impl Store {
         recipient_hash: [u8; 32],
         deposit_ids: &[[u8; 16]],
     ) -> Result<(u32, u32), MailboxError> {
-        let mut conn = self.conn.lock().expect("store mutex poisoned");
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| MailboxError::Storage(StorageErrorKind::Poisoned))?;
         let tx = conn.transaction()?;
         let mut deleted: u32 = 0;
         for id in deposit_ids {
@@ -186,7 +190,10 @@ impl Store {
     /// Expire all rows whose `expires_at < now`. Returns the number
     /// removed.
     pub fn expire_sweep(&self, now: i64) -> Result<u64, MailboxError> {
-        let conn = self.conn.lock().expect("store mutex poisoned");
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| MailboxError::Storage(StorageErrorKind::Poisoned))?;
         let n = conn.execute("DELETE FROM deposits WHERE expires_at < ?1", params![now])?;
         Ok(u64::try_from(n).unwrap_or(0))
     }
@@ -194,7 +201,10 @@ impl Store {
     /// Total bytes stored across all recipients. Used by the metrics
     /// tick.
     pub fn storage_bytes(&self) -> Result<u64, MailboxError> {
-        let conn = self.conn.lock().expect("store mutex poisoned");
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| MailboxError::Storage(StorageErrorKind::Poisoned))?;
         let total: i64 = conn
             .query_row(
                 "SELECT COALESCE(SUM(LENGTH(ciphertext)), 0) FROM deposits",
@@ -238,7 +248,7 @@ fn evict_expired_for(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
