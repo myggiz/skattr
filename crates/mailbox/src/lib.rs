@@ -22,6 +22,7 @@ pub mod config;
 pub mod dispatch;
 pub mod error;
 pub mod health;
+pub(crate) mod migrations;
 pub mod policy;
 pub mod server;
 pub mod store;
