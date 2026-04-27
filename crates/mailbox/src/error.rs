@@ -11,6 +11,10 @@ use thiserror::Error;
 pub enum MailboxError {
     #[error("placeholder")]
     Placeholder,
+    #[error("transport: {0:?}")]
+    Transport(TransportErrorKind),
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,7 +38,8 @@ pub enum PolicyErrorKind {
 pub enum StorageErrorKind {
     Placeholder,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransportErrorKind {
-    Placeholder,
+    EncodeFailed(String),
+    DecodeFailed(String),
 }
