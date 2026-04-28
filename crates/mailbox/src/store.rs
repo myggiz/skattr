@@ -51,8 +51,9 @@ impl Store {
         })
     }
 
-    /// In-memory store for tests.
-    #[cfg(test)]
+    /// In-memory store for tests (unit + integration). Not gated on
+    /// `#[cfg(test)]` so integration tests under `tests/` and the
+    /// soak driver can construct fresh instances.
     pub fn in_memory() -> Result<Self, MailboxError> {
         let mut conn = Connection::open_in_memory()?;
         migrations::apply(&mut conn)?;
