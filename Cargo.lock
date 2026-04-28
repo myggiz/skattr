@@ -4530,12 +4530,17 @@ name = "skattr-tests"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "arti-client",
  "async-trait",
+ "futures",
  "proptest",
  "sha2",
  "skattr-core",
+ "skattr-mailbox",
  "tempfile",
  "tokio",
+ "tokio-util",
+ "tor-rtcompat",
  "tracing",
  "tracing-subscriber",
  "zeroize",
