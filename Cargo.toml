@@ -6,7 +6,7 @@ members = [
     "crates/cli",
     "crates/tests",
 ]
-exclude = ["crates/core/fuzz"]
+exclude = ["crates/core/fuzz", "crates/mailbox/fuzz"]
 
 [workspace.package]
 version = "0.0.1"
