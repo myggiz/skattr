@@ -17,6 +17,7 @@
 #![warn(missing_docs)]
 
 pub mod auth;
+pub mod background;
 pub mod codec;
 pub mod config;
 pub mod dispatch;
