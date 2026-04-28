@@ -153,18 +153,11 @@ pub fn handle_fetch(
         rl.fetches.try_acquire(now_secs_f)?;
     }
 
-    // Build the canonical payload-minus-signature for the digest.
-    #[derive(serde::Serialize)]
-    struct Signed<'a> {
-        version: u16,
-        identity_pubkey: &'a [u8; 32],
-        nonce: &'a [u8; 32],
-    }
-    let digest = payload_digest(&Signed {
-        version: body.version,
-        identity_pubkey: &body.identity_pubkey,
-        nonce: &body.nonce,
-    })?;
+    // Auth digest input is a positional tuple (CBOR definite-length
+    // array) so the encoding has no field-order ambiguity. Order is
+    // frozen here as part of the v1 wire surface; reordering breaks
+    // signature compatibility and requires MAILBOX_PROTOCOL_VERSION = 2.
+    let digest = payload_digest(&(body.version, body.identity_pubkey, body.nonce))?;
 
     {
         let mut c = ctx
@@ -202,19 +195,12 @@ pub fn handle_delete(
 ) -> Result<MailboxFrame, MailboxError> {
     check_version(body.version)?;
 
-    #[derive(serde::Serialize)]
-    struct Signed<'a> {
-        version: u16,
-        identity_pubkey: &'a [u8; 32],
-        nonce: &'a [u8; 32],
-        deposit_ids: &'a [[u8; 16]],
-    }
-    let digest = payload_digest(&Signed {
-        version: body.version,
-        identity_pubkey: &body.identity_pubkey,
-        nonce: &body.nonce,
-        deposit_ids: &body.deposit_ids,
-    })?;
+    let digest = payload_digest(&(
+        body.version,
+        body.identity_pubkey,
+        body.nonce,
+        body.deposit_ids.as_slice(),
+    ))?;
 
     {
         let mut c = ctx
@@ -364,19 +350,9 @@ mod tests {
 
     fn build_signed_fetch(sk: &SigningKey, nonce: [u8; 32]) -> Fetch {
         let pk: [u8; 32] = sk.verifying_key().to_bytes();
-        // Compute digest the same way handle_fetch does.
-        #[derive(serde::Serialize)]
-        struct Signed<'a> {
-            version: u16,
-            identity_pubkey: &'a [u8; 32],
-            nonce: &'a [u8; 32],
-        }
-        let digest = payload_digest(&Signed {
-            version: PROTOCOL_VERSION,
-            identity_pubkey: &pk,
-            nonce: &nonce,
-        })
-        .unwrap();
+        // Compute digest the same way handle_fetch does — positional
+        // tuple (CBOR definite-length array).
+        let digest = payload_digest(&(PROTOCOL_VERSION, pk, nonce)).unwrap();
         let mut input = Vec::new();
         input.extend_from_slice(crate::auth::AUTH_DOMAIN);
         input.extend_from_slice(&nonce);

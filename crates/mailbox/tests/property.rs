@@ -141,32 +141,30 @@ proptest! {
     }
 
     #[test]
-    fn payload_digest_is_stable_under_field_reorder(
+    fn payload_digest_is_deterministic_for_tuples(
         v in any::<u16>(),
         nonce in proptest::array::uniform32(any::<u8>()),
         pubkey in proptest::array::uniform32(any::<u8>()),
     ) {
-        // Canonical CBOR sorts keys; encoding the same logical record
-        // twice must yield the same digest regardless of the source
-        // struct's field declaration order.
-        #[derive(serde::Serialize)]
-        struct A<'a> {
-            version: u16,
-            identity_pubkey: &'a [u8; 32],
-            nonce: &'a [u8; 32],
-        }
-        #[derive(serde::Serialize)]
-        struct B<'a> {
-            nonce: &'a [u8; 32],
-            identity_pubkey: &'a [u8; 32],
-            version: u16,
-        }
-        let d1 = payload_digest(&A { version: v, identity_pubkey: &pubkey, nonce: &nonce }).unwrap();
-        let d2 = payload_digest(&B { nonce: &nonce, identity_pubkey: &pubkey, version: v }).unwrap();
-        // Note: ciborium does NOT canonicalise keys for serde-derived
-        // structs. If this assert fails, we need to switch to manual
-        // canonical-encoding for the auth digest. The test serves as
-        // a tripwire so the freeze ADR can record the chosen behaviour.
+        // Two encodings of the same positional tuple must hash to the
+        // same digest. (CBOR definite-length array is positional, so
+        // there's no field-name canonicalisation gap.)
+        let d1 = payload_digest(&(v, pubkey, nonce)).unwrap();
+        let d2 = payload_digest(&(v, pubkey, nonce)).unwrap();
         prop_assert_eq!(d1, d2);
+    }
+
+    #[test]
+    fn payload_digest_changes_when_position_changes(
+        a in proptest::array::uniform32(any::<u8>()),
+        b in proptest::array::uniform32(any::<u8>()),
+    ) {
+        // Anti-collision: swapping two distinct fixed-length byte arrays
+        // in the tuple produces different digests. (Otherwise the auth
+        // string couldn't bind position.)
+        if a == b { return Ok(()); }
+        let d1 = payload_digest(&(a, b)).unwrap();
+        let d2 = payload_digest(&(b, a)).unwrap();
+        prop_assert_ne!(d1, d2);
     }
 }
