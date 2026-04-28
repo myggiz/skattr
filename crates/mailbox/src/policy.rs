@@ -156,7 +156,7 @@ impl GlobalRateLimiter {
         let mut g = self
             .inner
             .lock()
-            .map_err(|_| MailboxError::Storage(crate::error::StorageErrorKind::Poisoned))?;
+            .map_err(|_| MailboxError::Policy(PolicyErrorKind::Poisoned))?;
         g.try_acquire(now_secs)
     }
 }

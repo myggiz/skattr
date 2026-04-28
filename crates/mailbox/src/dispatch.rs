@@ -9,12 +9,11 @@
 //! don't decide whether to close the connection (the FSM in
 //! `server.rs` always keeps the stream open after a typed error).
 //!
-//! `expect_used` is allowed here because a poisoned mutex on the
-//! shared `Challenges` / `ConnRateLimiter` indicates an in-process
-//! invariant violation (panicking thread): bailing the server is the
-//! correct response, not silently degrading.
-
-#![allow(clippy::expect_used)]
+//! Mutex poisoning on the shared `Challenges` / `ConnRateLimiter` is
+//! propagated as a typed error ([`AuthErrorKind::Poisoned`] /
+//! [`PolicyErrorKind::Poisoned`]) which the wire boundary folds to
+//! [`ErrorCode::Internal`]. This mirrors the pattern from
+//! `crates/core/src/storage/pool.rs`.
 
 use std::sync::Mutex;
 
@@ -26,7 +25,7 @@ use skattr_core::mailbox::protocol::{
 
 use crate::auth::{payload_digest, Challenges, OP_BYTE_DELETE, OP_BYTE_FETCH};
 use crate::codec::MailboxFrame;
-use crate::error::{MailboxError, PolicyErrorKind, TransportErrorKind};
+use crate::error::{AuthErrorKind, MailboxError, PolicyErrorKind, TransportErrorKind};
 use crate::policy::{ConnRateLimiter, GlobalRateLimiter, Policy};
 use crate::store::Store;
 
@@ -93,7 +92,10 @@ pub fn handle_deposit(
     }
 
     {
-        let mut rl = ctx.conn_rl.lock().expect("conn rl poisoned");
+        let mut rl = ctx
+            .conn_rl
+            .lock()
+            .map_err(|_| MailboxError::Policy(PolicyErrorKind::Poisoned))?;
         rl.deposits.try_acquire(now_secs_f)?;
     }
     ctx.global_rl.try_acquire(now_secs_f)?;
@@ -123,7 +125,10 @@ pub fn handle_challenge(
     now: i64,
 ) -> Result<MailboxFrame, MailboxError> {
     check_version(body.version)?;
-    let mut c = ctx.challenges.lock().expect("challenges poisoned");
+    let mut c = ctx
+        .challenges
+        .lock()
+        .map_err(|_| MailboxError::Auth(AuthErrorKind::Poisoned))?;
     let nonce = c.issue(body.identity_hash, now);
     Ok(MailboxFrame::ChallengeNonce(ChallengeNonce {
         nonce,
@@ -141,7 +146,10 @@ pub fn handle_fetch(
     check_version(body.version)?;
 
     {
-        let mut rl = ctx.conn_rl.lock().expect("conn rl poisoned");
+        let mut rl = ctx
+            .conn_rl
+            .lock()
+            .map_err(|_| MailboxError::Policy(PolicyErrorKind::Poisoned))?;
         rl.fetches.try_acquire(now_secs_f)?;
     }
 
@@ -159,7 +167,10 @@ pub fn handle_fetch(
     })?;
 
     {
-        let mut c = ctx.challenges.lock().expect("challenges poisoned");
+        let mut c = ctx
+            .challenges
+            .lock()
+            .map_err(|_| MailboxError::Auth(AuthErrorKind::Poisoned))?;
         c.verify(
             body.nonce,
             body.identity_pubkey,
@@ -206,7 +217,10 @@ pub fn handle_delete(
     })?;
 
     {
-        let mut c = ctx.challenges.lock().expect("challenges poisoned");
+        let mut c = ctx
+            .challenges
+            .lock()
+            .map_err(|_| MailboxError::Auth(AuthErrorKind::Poisoned))?;
         c.verify(
             body.nonce,
             body.identity_pubkey,

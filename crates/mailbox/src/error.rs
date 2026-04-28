@@ -133,6 +133,10 @@ pub enum AuthErrorKind {
     /// Nonce unknown or older than 30 s.
     #[error("nonce expired")]
     NonceExpired,
+    /// In-memory `Challenges` table mutex was poisoned by a panicking
+    /// thread. Treat as fatal.
+    #[error("challenges mutex poisoned")]
+    Poisoned,
 }
 
 /// Operator-policy rejections.
@@ -153,6 +157,9 @@ pub enum PolicyErrorKind {
     /// Recipient cap reached, no expired rows available to evict.
     #[error("recipient full")]
     RecipientFull,
+    /// Rate-limiter mutex was poisoned by a panicking thread.
+    #[error("rate limiter mutex poisoned")]
+    Poisoned,
 }
 
 /// Wire-level failures (codec, framing).
@@ -269,5 +276,21 @@ mod tests {
     fn unknown_failures_fold_to_internal() {
         let e = MailboxError::Storage(StorageErrorKind::MigrationFailed("oops".into()));
         assert_eq!(e.to_wire_code(), ErrorCode::Internal);
+    }
+
+    #[test]
+    fn to_wire_code_for_poisoned_folds_to_internal() {
+        assert_eq!(
+            MailboxError::Auth(AuthErrorKind::Poisoned).to_wire_code(),
+            ErrorCode::Internal
+        );
+        assert_eq!(
+            MailboxError::Policy(PolicyErrorKind::Poisoned).to_wire_code(),
+            ErrorCode::Internal
+        );
+        assert_eq!(
+            MailboxError::Storage(StorageErrorKind::Poisoned).to_wire_code(),
+            ErrorCode::Internal
+        );
     }
 }
