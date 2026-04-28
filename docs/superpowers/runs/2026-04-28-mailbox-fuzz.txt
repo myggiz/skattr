@@ -1,0 +1,42 @@
+Phase 2.A — Mailbox fuzz freeze-bar evidence
+============================================
+
+Date:        2026-04-28
+Branch:      phase-2a-mailbox-server
+Toolchain:   nightly-x86_64-unknown-linux-gnu
+cargo-fuzz:  installed via `cargo install cargo-fuzz`
+Command:     cd crates/mailbox/fuzz \
+                && cargo +nightly fuzz run <target> -- -max_total_time=3600
+
+Target: frame_decode
+--------------------
+- Wall time:           3601 seconds (1 hour)
+- Total executions:    259,825,035
+- Crashes / sanitizer: 0
+- Artifacts produced:  0 (no findings)
+- Corpus growth:       (combined with dispatch below)
+
+Drives `MailboxFrameCodec::decode` over arbitrary bytes; asserts no
+panic and no UB. Decoder errors are expected and not failures.
+
+Target: dispatch
+----------------
+- Wall time:           3601 seconds (1 hour)
+- Total executions:    6,959,820
+- Crashes / sanitizer: 0
+- Artifacts produced:  0 (no findings)
+
+Drives an in-process `MailboxServer::accept_loop` over
+`tokio::io::duplex`, writing arbitrary bytes from the client side.
+Run rate is ~38× lower than frame_decode (each iteration spins a
+fresh tokio current-thread runtime plus the server task).
+
+Combined corpus
+---------------
+- Unique-coverage inputs retained: 9,626 (across both targets)
+- Stored under crates/mailbox/fuzz/corpus/{frame_decode,dispatch}/
+
+Verdict
+-------
+Freeze-bar gate satisfied: ≥1h per target, no findings on either.
+No regressions to file under crates/mailbox/tests/adversarial_*.rs.
