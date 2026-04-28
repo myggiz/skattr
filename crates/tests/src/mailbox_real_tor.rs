@@ -155,8 +155,28 @@ async fn deposit_and_challenge_over_real_tor() -> Result<()> {
 
     // `TorClient::connect` accepts `&str` directly via `IntoTorAddr`;
     // `core::transport::tor` uses the same shape (`format!("{onion}:{port}")`).
+    //
+    // The mailbox's `mailbox onion published` log line fires when Arti
+    // *launches* the service, but the HSDir upload happens
+    // asynchronously (typically 10–60s after launch). Connecting
+    // immediately fails with "Unable to download hidden service
+    // descriptor"; retry with backoff until the descriptor lands.
     let target = format!("{onion}:1");
-    let stream = tor.connect(target.as_str()).await?;
+    let mut attempts = 0;
+    let stream = loop {
+        attempts += 1;
+        match tor.connect(target.as_str()).await {
+            Ok(s) => break s,
+            Err(e) if attempts < 18 => {
+                eprintln!(
+                    "client connect attempt {attempts} failed (descriptor likely not yet \
+                     uploaded): {e}; retrying in 10s"
+                );
+                tokio::time::sleep(Duration::from_secs(10)).await;
+            }
+            Err(e) => bail!("client connect failed after {attempts} attempts: {e}"),
+        }
+    };
 
     // Drive the codec: one Deposit (must reply `DepositOk`) and one
     // Challenge (must reply `ChallengeNonce`).

@@ -43,6 +43,15 @@ async fn main() -> Result<()> {
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| "skattr_mailbox=info,warn".into()),
         )
+        // Daemons log to stderr, not stdout — keeps stdout free for
+        // structured output that consumers can pipe, and matches how
+        // systemd's `StandardError=journal` expects diagnostic events.
+        .with_writer(std::io::stderr)
+        // Disable ANSI colour codes — this is a server, not a TTY
+        // application; journald and the real-Tor smoke test parse
+        // plain text. Operators tailing logs locally can pipe through
+        // `bat -l log` if they want highlighting.
+        .with_ansi(false)
         .init();
 
     let args = Args::parse();

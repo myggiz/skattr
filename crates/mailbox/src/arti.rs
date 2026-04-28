@@ -76,6 +76,24 @@ pub async fn run_onion(
     let cache_dir = arti_state_dir.join("cache");
     std::fs::create_dir_all(&cache_dir).context("create arti cache dir")?;
 
+    // Arti 0.41 refuses to open a state_dir or cache_dir that is
+    // group- or world-readable; default umask leaves them at 0755 so
+    // we must chmod to 0700 ourselves. systemd's `StateDirectory`
+    // also defaults to 0755 so this is a production fix, not just a
+    // test workaround.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for path in [arti_state_dir, cache_dir.as_path()] {
+            let mut perms = std::fs::metadata(path)
+                .with_context(|| format!("stat {}", path.display()))?
+                .permissions();
+            perms.set_mode(0o700);
+            std::fs::set_permissions(path, perms)
+                .with_context(|| format!("chmod 0700 {}", path.display()))?;
+        }
+    }
+
     // `from_directories` is the idiomatic 0.41 builder; mirrors
     // `core::transport::tor::TorRuntime::bootstrap`.
     let tor_config: TorClientConfig =
