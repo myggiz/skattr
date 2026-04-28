@@ -49,6 +49,8 @@ directories = { workspace = true }
 arti-client = { workspace = true, optional = true }
 tor-hsservice = { workspace = true, optional = true }
 tor-rtcompat = { workspace = true, optional = true }
+tor-cell = { workspace = true, optional = true }
+safelog = { workspace = true, optional = true }
 
 # sd-notify for the binary's systemd integration.
 sd-notify = { workspace = true, optional = true }
@@ -62,7 +64,7 @@ tempfile = { workspace = true }
 default = ["bin"]
 # Enabled by the binary; pulls Arti + sd-notify. Lib-only consumers
 # (tests, fuzz, soak) skip these and stay fast to compile.
-bin = ["dep:arti-client", "dep:tor-hsservice", "dep:tor-rtcompat", "dep:sd-notify"]
+bin = ["dep:arti-client", "dep:tor-hsservice", "dep:tor-rtcompat", "dep:tor-cell", "dep:safelog", "dep:sd-notify"]
 
 [lints]
 workspace = true

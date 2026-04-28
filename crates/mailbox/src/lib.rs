@@ -16,6 +16,8 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+#[cfg(feature = "bin")]
+pub mod arti;
 pub mod auth;
 pub mod background;
 pub mod codec;
