@@ -33,9 +33,14 @@ use crate::mailbox::protocol::{
 pub(crate) const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
 
 /// Type byte for every wire frame.
+///
+/// Exposed as `pub` so that [`crate::test_exports`] (gated on
+/// `feature = "test-harness"`) can re-export it to the integration-test
+/// crate. Effective external visibility is still bounded by the
+/// `pub(crate)` module path unless explicitly re-exported.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum MailboxFrameKind {
+pub enum MailboxFrameKind {
     /// 0x82 — `Deposit` (C→S).
     Deposit = 0x82,
     /// 0x83 — `DepositOk` (S→C).
@@ -57,8 +62,10 @@ pub(crate) enum MailboxFrameKind {
 }
 
 /// One fully-parsed mailbox frame.
+///
+/// Exposed as `pub` for [`crate::test_exports`] — see [`MailboxFrameKind`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum MailboxFrame {
+pub enum MailboxFrame {
     /// Client → server.
     Deposit(Deposit),
     /// Server → client.
@@ -82,7 +89,7 @@ pub(crate) enum MailboxFrame {
 impl MailboxFrame {
     /// Wire-format type byte for this frame.
     #[must_use]
-    pub(crate) fn kind(&self) -> MailboxFrameKind {
+    pub fn kind(&self) -> MailboxFrameKind {
         match self {
             MailboxFrame::Deposit(_) => MailboxFrameKind::Deposit,
             MailboxFrame::DepositOk(_) => MailboxFrameKind::DepositOk,
@@ -98,15 +105,17 @@ impl MailboxFrame {
 }
 
 /// `tokio_util::codec::{Decoder, Encoder}` for [`MailboxFrame`].
+///
+/// Exposed as `pub` for [`crate::test_exports`] — see [`MailboxFrameKind`].
 #[derive(Debug, Default)]
-pub(crate) struct MailboxFrameCodec {
+pub struct MailboxFrameCodec {
     _private: (),
 }
 
 impl MailboxFrameCodec {
     /// Construct a codec.
     #[must_use]
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self::default()
     }
 }

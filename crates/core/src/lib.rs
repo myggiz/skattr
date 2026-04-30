@@ -92,6 +92,9 @@ pub mod test_exports {
     // Phase 1.H additions:
     pub use crate::daemon::clock::now_unix_seconds;
 
+    // Phase 2.B additions:
+    pub use crate::mailbox::codec::{MailboxFrame, MailboxFrameCodec, MailboxFrameKind};
+
     /// Test-only helper: convert an `IdentityKey` to its X25519 static
     /// public key for use as `peer_static_x25519` in
     /// `handshake_initiator`. Integration tests cannot reach
