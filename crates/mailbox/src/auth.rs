@@ -21,17 +21,14 @@ use sha2::{Digest, Sha256};
 
 use crate::error::{AuthErrorKind, MailboxError};
 
+// Re-export wire-frozen helpers from core so the mailbox crate's
+// call sites keep working without modification.
+pub use skattr_core::mailbox::auth::{
+    signing_input, AUTH_DOMAIN, OP_BYTE_DELETE, OP_BYTE_FETCH,
+};
+
 /// Nonce TTL in seconds.
 pub const CHALLENGE_TTL_SECS: i64 = 30;
-
-/// Domain-separation prefix for all auth signatures. Bumped if the
-/// signing input format ever changes.
-pub const AUTH_DOMAIN: &[u8] = b"skattr-mailbox-auth-v1";
-
-/// Operation byte for FETCH (matches `MailboxFrameKind::Fetch`).
-pub const OP_BYTE_FETCH: u8 = 0x86;
-/// Operation byte for DELETE (matches `MailboxFrameKind::Delete`).
-pub const OP_BYTE_DELETE: u8 = 0x88;
 
 #[derive(Debug, Clone, Copy)]
 struct Issued {
@@ -89,16 +86,12 @@ impl Challenges {
             return Err(MailboxError::Auth(AuthErrorKind::HashMismatch));
         }
 
-        let mut signing_input = Vec::with_capacity(AUTH_DOMAIN.len() + 32 + 1 + 32);
-        signing_input.extend_from_slice(AUTH_DOMAIN);
-        signing_input.extend_from_slice(&nonce);
-        signing_input.push(op_byte);
-        signing_input.extend_from_slice(&payload_hash);
+        let input = signing_input(&nonce, op_byte, &payload_hash);
 
         let vk = VerifyingKey::from_bytes(&identity_pubkey)
             .map_err(|_| MailboxError::Auth(AuthErrorKind::InvalidSignature))?;
         let sig = Signature::from_bytes(signature);
-        vk.verify(&signing_input, &sig)
+        vk.verify(&input, &sig)
             .map_err(|_| MailboxError::Auth(AuthErrorKind::InvalidSignature))?;
 
         // Single-use: consume on successful verify.
@@ -138,14 +131,13 @@ impl Challenges {
 /// Compute `sha256(canonical_cbor(payload))` — the helper used by
 /// dispatch handlers to build the signing input over the
 /// payload-minus-signature.
+///
+/// This is a local wrapper around [`skattr_core::mailbox::auth::payload_digest`]
+/// that maps the `String` error into the mailbox crate's `MailboxError` taxonomy.
 pub fn payload_digest<T: serde::Serialize>(payload: &T) -> Result<[u8; 32], MailboxError> {
-    let mut buf = Vec::new();
-    ciborium::into_writer(payload, &mut buf).map_err(|e| {
-        MailboxError::Transport(crate::error::TransportErrorKind::EncodeFailed(format!(
-            "auth digest: {e}"
-        )))
-    })?;
-    Ok(Sha256::digest(&buf).into())
+    skattr_core::mailbox::auth::payload_digest(payload).map_err(|e| {
+        MailboxError::Transport(crate::error::TransportErrorKind::EncodeFailed(e))
+    })
 }
 
 #[cfg(test)]

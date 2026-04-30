@@ -7,6 +7,7 @@
 //! lives in the `skattr-mailbox` crate and shares the wire-type
 //! definitions in [`protocol`].
 
+pub mod auth;
 pub(crate) mod client;
 pub mod protocol;
 pub(crate) mod scheduler;
