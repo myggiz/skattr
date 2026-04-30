@@ -9,7 +9,8 @@
 
 use super::StorageErrorKind;
 use crate::error::{CoreError, Result};
-use crate::storage::Pool;
+use crate::identity::PublicKey;
+use crate::storage::{ContactRepo, Pool};
 
 /// Role of a stored mailbox record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -247,7 +248,7 @@ impl<'p> MailboxRepo<'p> {
     }
 
     /// Update the `status` column for the given row id.
-    pub fn mark_status(&self, id: i64, status: MailboxStatus, _now: i64) -> Result<()> {
+    pub fn mark_status(&self, id: i64, status: MailboxStatus) -> Result<()> {
         self.pool.with_mut(|c| {
             c.execute(
                 "UPDATE mailboxes SET status = ?1 WHERE id = ?2",
@@ -262,13 +263,24 @@ impl<'p> MailboxRepo<'p> {
 
     /// Transition to `pending_removal` (first step of two-phase removal).
     pub fn mark_pending_removal(&self, id: i64) -> Result<()> {
-        self.mark_status(id, MailboxStatus::PendingRemoval, 0)
+        self.mark_status(id, MailboxStatus::PendingRemoval)
     }
 
     /// Transition to `removed` (second step — after the server ACKs the
     /// de-registration).
     pub fn finalize_removal(&self, id: i64) -> Result<()> {
-        self.mark_status(id, MailboxStatus::Removed, 0)
+        self.mark_status(id, MailboxStatus::Removed)
+    }
+
+    /// Return the list of mailbox onions advertised on `identity`'s latest
+    /// `ContactCard`. Returns an empty `Vec` when the contact is unknown or
+    /// has no card yet. Does **not** touch the `mailboxes` SQL table.
+    pub fn list_for_contact(&self, identity: &PublicKey) -> Result<Vec<String>> {
+        let contacts = ContactRepo::new(self.pool);
+        match contacts.latest_card(identity)? {
+            Some(card) => Ok(card.body.mailboxes.clone()),
+            None => Ok(Vec::new()),
+        }
     }
 
     /// Update `last_poll_at` to `now`.
@@ -375,7 +387,7 @@ mod tests {
         let pool = Pool::in_memory();
         let repo = MailboxRepo::new(&pool);
         let id = repo.add_mine("cccc.onion", 100).unwrap();
-        repo.mark_status(id, MailboxStatus::Reachable, 200).unwrap();
+        repo.mark_status(id, MailboxStatus::Reachable).unwrap();
         let row = repo.get(id).unwrap().unwrap();
         assert_eq!(row.status, MailboxStatus::Reachable);
     }
@@ -436,5 +448,76 @@ mod tests {
         let mine = repo.list_mine().unwrap();
         assert_eq!(mine.len(), 1);
         assert_eq!(mine[0].onion, "aaaa.onion");
+    }
+
+    // ── list_for_contact tests ────────────────────────────────────────────
+
+    #[test]
+    fn list_for_contact_returns_card_mailboxes() {
+        use crate::contact::card::{ContactCard, ContactCardBody};
+        use crate::contact::Contact;
+        use crate::identity::{PublicKey, Signature};
+        use crate::storage::ContactRepo;
+
+        let pool = Pool::in_memory();
+        let contacts = ContactRepo::new(&pool);
+        let id = PublicKey([0x42; 32]);
+        contacts
+            .upsert(&Contact {
+                identity: id,
+                display_name: None,
+                added_at: 0,
+                card: None,
+            })
+            .unwrap();
+        contacts
+            .put_card(&ContactCard {
+                body: ContactCardBody {
+                    identity: id,
+                    onion: "self.onion".into(),
+                    mailboxes: vec!["aaaa.onion".into(), "bbbb.onion".into()],
+                    version: 1,
+                    expires_at: 9_999_999_999,
+                },
+                // Storage tests skip signature verification — see contacts.rs sample_card.
+                signature: Signature([0u8; 64]),
+            })
+            .unwrap();
+
+        let mailboxes = MailboxRepo::new(&pool).list_for_contact(&id).unwrap();
+        assert_eq!(
+            mailboxes,
+            vec!["aaaa.onion".to_string(), "bbbb.onion".to_string()]
+        );
+    }
+
+    #[test]
+    fn list_for_contact_empty_when_no_card() {
+        use crate::contact::Contact;
+        use crate::identity::PublicKey;
+        use crate::storage::ContactRepo;
+
+        let pool = Pool::in_memory();
+        let id = PublicKey([0x55; 32]);
+        ContactRepo::new(&pool)
+            .upsert(&Contact {
+                identity: id,
+                display_name: None,
+                added_at: 0,
+                card: None,
+            })
+            .unwrap();
+        let mailboxes = MailboxRepo::new(&pool).list_for_contact(&id).unwrap();
+        assert!(mailboxes.is_empty());
+    }
+
+    #[test]
+    fn list_for_contact_empty_when_contact_unknown() {
+        use crate::identity::PublicKey;
+        let pool = Pool::in_memory();
+        let mailboxes = MailboxRepo::new(&pool)
+            .list_for_contact(&PublicKey([0x99; 32]))
+            .unwrap();
+        assert!(mailboxes.is_empty());
     }
 }
