@@ -12,17 +12,16 @@
 //! ```
 //!
 //! Type bytes are disjoint from peer-to-peer frames (0x82–0x8F). The
-//! decoder rejects unknown types with [`crate::error::CoreError::Frame`].
+//! decoder rejects unknown types with
+//! [`crate::error::CoreError::MailboxClient`] (`Malformed`).
 //!
 //! This is `pub(crate)` — the daemon/IPC layer is the stable boundary.
-//!
-// TODO(Task 8): retarget error mappings to MailboxClientErrorKind once Task 7 lands it.
 
 use bytes::{BufMut as _, BytesMut};
 use serde::{Deserialize, Serialize};
 use tokio_util::codec::{Decoder, Encoder};
 
-use crate::error::CoreError;
+use crate::error::{CoreError, MailboxClientErrorKind};
 use crate::mailbox::protocol::{
     Challenge, ChallengeNonce, Delete, DeleteOk, Deposit, DepositOk, ErrorBody, Fetch,
     FetchResponse,
@@ -122,15 +121,14 @@ impl MailboxFrameCodec {
 
 fn encode_cbor<T: Serialize>(value: &T) -> Result<Vec<u8>, CoreError> {
     let mut out = Vec::new();
-    // TODO(Task 8): retarget to MailboxClientErrorKind once Task 7 lands it.
     ciborium::into_writer(value, &mut out)
-        .map_err(|e| CoreError::CborEncode(format!("mailbox codec: {e}")))?;
+        .map_err(|e| CoreError::MailboxClient(MailboxClientErrorKind::Other(format!("encode: {e}"))))?;
     Ok(out)
 }
 
 fn decode_cbor<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<T, CoreError> {
-    // TODO(Task 8): retarget to MailboxClientErrorKind once Task 7 lands it.
-    ciborium::from_reader(bytes).map_err(|e| CoreError::CborDecode(format!("mailbox codec: {e}")))
+    ciborium::from_reader(bytes)
+        .map_err(|_| CoreError::MailboxClient(MailboxClientErrorKind::Malformed))
 }
 
 impl Encoder<MailboxFrame> for MailboxFrameCodec {
@@ -155,14 +153,16 @@ impl Encoder<MailboxFrame> for MailboxFrameCodec {
 
         let length = 1 + payload.len();
         if length > MAX_FRAME_SIZE {
-            return Err(CoreError::Frame(format!(
-                "mailbox codec: frame too large: {length} bytes"
+            return Err(CoreError::MailboxClient(MailboxClientErrorKind::Other(
+                format!("frame too large: {length} bytes"),
             )));
         }
 
         dst.reserve(4 + length);
         let length_u32 = u32::try_from(length).map_err(|_| {
-            CoreError::Frame(format!("mailbox codec: length overflow: {length}"))
+            CoreError::MailboxClient(MailboxClientErrorKind::Other(format!(
+                "length overflow: {length}"
+            )))
         })?;
         dst.extend_from_slice(&length_u32.to_be_bytes());
         dst.put_u8(type_byte);
@@ -184,14 +184,10 @@ impl Decoder for MailboxFrameCodec {
         let length = u32::from_be_bytes(len_bytes) as usize;
 
         if length == 0 {
-            return Err(CoreError::Frame(
-                "mailbox codec: zero-length frame".into(),
-            ));
+            return Err(CoreError::MailboxClient(MailboxClientErrorKind::Malformed));
         }
         if length > MAX_FRAME_SIZE {
-            return Err(CoreError::Frame(format!(
-                "mailbox codec: frame too large: {length} bytes"
-            )));
+            return Err(CoreError::MailboxClient(MailboxClientErrorKind::Malformed));
         }
         if src.len() < 4 + length {
             return Ok(None);
@@ -213,10 +209,8 @@ impl Decoder for MailboxFrameCodec {
             0x88 => MailboxFrame::Delete(decode_cbor(&payload)?),
             0x89 => MailboxFrame::DeleteOk(decode_cbor(&payload)?),
             0x8F => MailboxFrame::Error(decode_cbor(&payload)?),
-            other => {
-                return Err(CoreError::Frame(format!(
-                    "mailbox codec: unknown mailbox frame type 0x{other:02X}"
-                )));
+            _other => {
+                return Err(CoreError::MailboxClient(MailboxClientErrorKind::Malformed));
             }
         };
         Ok(Some(frame))
@@ -284,12 +278,16 @@ mod tests {
 
     #[test]
     fn unknown_type_rejected() {
+        use crate::error::MailboxClientErrorKind;
         let mut buf = BytesMut::new();
         buf.extend_from_slice(&1u32.to_be_bytes());
         buf.extend_from_slice(&[0x20]);
         let mut codec = MailboxFrameCodec::new();
         let err = codec.decode(&mut buf).expect_err("must reject");
-        assert!(matches!(err, CoreError::Frame(_)));
+        assert!(matches!(
+            err,
+            CoreError::MailboxClient(MailboxClientErrorKind::Malformed)
+        ));
     }
 
     #[test]
@@ -311,13 +309,17 @@ mod tests {
 
     #[test]
     fn malformed_cbor_rejected() {
+        use crate::error::MailboxClientErrorKind;
         let mut buf = BytesMut::new();
         buf.extend_from_slice(&3u32.to_be_bytes());
         buf.extend_from_slice(&[0x82]); // Deposit frame
         buf.extend_from_slice(&[0xFF, 0xFF]); // garbage CBOR
         let mut codec = MailboxFrameCodec::new();
         let err = codec.decode(&mut buf).expect_err("must reject");
-        assert!(matches!(err, CoreError::CborDecode(_)));
+        assert!(matches!(
+            err,
+            CoreError::MailboxClient(MailboxClientErrorKind::Malformed)
+        ));
     }
 
     #[test]

@@ -15,6 +15,42 @@ use thiserror::Error;
 /// Library-wide result alias with [`CoreError`] as the error type.
 pub type Result<T> = std::result::Result<T, CoreError>;
 
+/// Mailbox client (2.B) typed failure reasons.
+///
+/// Used as the payload of [`CoreError::MailboxClient`]. Callers that produce
+/// a `MailboxClientErrorKind` can propagate it with `?` thanks to the
+/// `#[from]` impl on the parent enum.
+#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+pub enum MailboxClientErrorKind {
+    /// The mailbox onion service could not be reached.
+    #[error("mailbox unreachable")]
+    Unreachable,
+    /// The server rejected our protocol version.
+    #[error("mailbox unsupported protocol version")]
+    UnsupportedVersion,
+    /// The server applied rate limiting.
+    #[error("mailbox rate limited")]
+    RateLimited,
+    /// The recipient's inbox is full.
+    #[error("mailbox recipient full")]
+    RecipientFull,
+    /// The server rejected our auth signature.
+    #[error("mailbox invalid signature")]
+    InvalidSignature,
+    /// The challenge nonce was expired before we responded.
+    #[error("mailbox nonce expired")]
+    NonceExpired,
+    /// The server sent a frame we could not parse.
+    #[error("mailbox malformed response")]
+    Malformed,
+    /// The received ciphertext hash does not match the deposit receipt.
+    #[error("mailbox hash mismatch")]
+    HashMismatch,
+    /// Catch-all for errors that don't fit the above variants.
+    #[error("mailbox: {0}")]
+    Other(String),
+}
+
 /// Top-level error for the `skattr-core` library.
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -42,6 +78,10 @@ pub enum CoreError {
     /// Mailbox wire protocol problem.
     #[error("mailbox: {0}")]
     Mailbox(String),
+
+    /// Mailbox client (2.B) wire-protocol problem.
+    #[error("{0}")]
+    MailboxClient(#[from] MailboxClientErrorKind),
 
     /// Delivery (outbox, retry, dedup) problem.
     #[error("{0}")]
@@ -249,6 +289,30 @@ mod tests {
             "connect refused".into(),
         ));
         assert_eq!(e.kind(), None);
+    }
+
+    #[test]
+    fn mailbox_client_kind_round_trips_to_none() {
+        use crate::error::MailboxClientErrorKind;
+        let e = CoreError::MailboxClient(MailboxClientErrorKind::RateLimited);
+        // No DaemonErrorKind mapping — IPC layer uses InvalidArgument or events.
+        assert_eq!(e.kind(), None);
+    }
+
+    #[test]
+    fn mailbox_client_other_carries_message() {
+        use crate::error::MailboxClientErrorKind;
+        let e = CoreError::MailboxClient(MailboxClientErrorKind::Other("disk full".into()));
+        let s = format!("{e}");
+        assert!(s.contains("disk full"), "got: {s}");
+    }
+
+    #[test]
+    fn mailbox_client_variants_are_distinct() {
+        use crate::error::MailboxClientErrorKind as K;
+        assert_ne!(K::Unreachable, K::UnsupportedVersion);
+        assert_ne!(K::RateLimited, K::RecipientFull);
+        assert_ne!(K::Malformed, K::HashMismatch);
     }
 
     #[test]
