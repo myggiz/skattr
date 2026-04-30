@@ -40,6 +40,8 @@ pub(crate) use groups::MlsGroupRepo;
 #[cfg(not(feature = "test-harness"))]
 pub(crate) use key_packages::KeyPackageRepo;
 #[cfg(not(feature = "test-harness"))]
+pub(crate) use mailboxes::{MailboxRepo, MailboxRow, MailboxStatus};
+#[cfg(not(feature = "test-harness"))]
 pub(crate) use messages::{InsertParams, MessageRepo};
 #[cfg(not(feature = "test-harness"))]
 pub(crate) use pool::Pool;
@@ -54,6 +56,8 @@ pub use contacts::ContactRepo;
 pub use groups::MlsGroupRepo;
 #[cfg(feature = "test-harness")]
 pub use key_packages::KeyPackageRepo;
+#[cfg(feature = "test-harness")]
+pub use mailboxes::{MailboxRepo, MailboxRow, MailboxStatus};
 #[cfg(feature = "test-harness")]
 pub use messages::{InsertParams, MessageRepo};
 #[cfg(feature = "test-harness")]
