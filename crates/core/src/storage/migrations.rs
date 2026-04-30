@@ -51,6 +51,10 @@ const ALL_MIGRATIONS: &[Migration] = &[
         version: 7,
         sql: include_str!("migrations/0007_messages_envelope_id.sql"),
     },
+    Migration {
+        version: 8,
+        sql: include_str!("migrations/0008_mailbox_status_and_outbox_target_kind.sql"),
+    },
 ];
 
 /// Apply all pending migrations in order. Idempotent — re-running does
@@ -94,6 +98,7 @@ pub(crate) fn apply(conn: &mut rusqlite::Connection) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::pool::Pool;
 
     #[test]
     fn fresh_db_runs_migrations_to_latest() {
@@ -139,18 +144,19 @@ mod tests {
             "migration 0004 must add message_id column; got {cols:?}"
         );
 
-        // Unique index present
+        // Unique index present (migration 0008 replaced the original 0004 index
+        // with a wider composite index; check that some unique outbox index exists)
         let idx_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master \
-                 WHERE type = 'index' AND name = 'idx_outbox_target_message_id'",
+                 WHERE type = 'index' AND tbl_name = 'outbox' AND name LIKE 'idx_outbox_%'",
                 [],
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(
-            idx_count, 1,
-            "unique index idx_outbox_target_message_id must exist"
+        assert!(
+            idx_count >= 1,
+            "at least one outbox index must exist after migrations"
         );
 
         // schema_version is at latest (all migrations applied)
@@ -319,6 +325,70 @@ mod tests {
              VALUES (?1, ?2, ?3, 1, 'text', NULL)",
             rusqlite::params![[0u8; 32], [0u8; 32], [0u8; 16]],
         )
+        .unwrap();
+    }
+
+    #[test]
+    fn migration_0008_adds_mailbox_status_columns() {
+        let pool = Pool::in_memory();
+        pool.with(|c| {
+            let cols: Vec<String> = c
+                .prepare("PRAGMA table_info(mailboxes)")
+                .unwrap()
+                .query_map([], |r| r.get::<_, String>(1))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect();
+            for want in ["status", "last_poll_at", "last_error_at", "last_error_kind"] {
+                assert!(cols.iter().any(|c| c == want), "missing column: {want}");
+            }
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn migration_0008_adds_outbox_target_kind_columns() {
+        let pool = Pool::in_memory();
+        pool.with(|c| {
+            let cols: Vec<String> = c
+                .prepare("PRAGMA table_info(outbox)")
+                .unwrap()
+                .query_map([], |r| r.get::<_, String>(1))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect();
+            for want in ["target_kind", "mailbox_id"] {
+                assert!(cols.iter().any(|c| c == want), "missing column: {want}");
+            }
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn migration_0008_replaces_outbox_unique_index() {
+        let pool = Pool::in_memory();
+        pool.with(|c| {
+            let names: Vec<String> = c
+                .prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='outbox'")
+                .unwrap()
+                .query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect();
+            assert!(
+                names
+                    .iter()
+                    .any(|n| n == "idx_outbox_target_message_kind_mailbox"),
+                "expected new composite unique index, got: {names:?}"
+            );
+            assert!(
+                !names.iter().any(|n| n == "idx_outbox_target_message_id"),
+                "old unique index must be dropped"
+            );
+            Ok(())
+        })
         .unwrap();
     }
 
