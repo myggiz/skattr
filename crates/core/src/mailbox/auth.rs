@@ -51,7 +51,7 @@ mod tests {
     }
 
     #[test]
-    fn payload_digest_round_trips() {
+    fn payload_digest_produces_32_bytes() {
         let v = (1u16, [9u8; 32], [0xAAu8; 32]);
         let d = payload_digest(&v).unwrap();
         assert_eq!(d.len(), 32);

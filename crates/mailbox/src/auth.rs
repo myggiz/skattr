@@ -148,11 +148,7 @@ mod tests {
     use rand::rngs::OsRng;
 
     fn signed_input(nonce: [u8; 32], op: u8, payload_hash: [u8; 32], sk: &SigningKey) -> [u8; 64] {
-        let mut input = Vec::new();
-        input.extend_from_slice(AUTH_DOMAIN);
-        input.extend_from_slice(&nonce);
-        input.push(op);
-        input.extend_from_slice(&payload_hash);
+        let input = signing_input(&nonce, op, &payload_hash);
         sk.sign(&input).to_bytes()
     }
 
