@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Myggiz AB
 
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 //! SQL repository for the outbox table.
 //!
@@ -304,15 +304,27 @@ impl<'p> OutboxRepo<'p> {
 
     /// Flip an existing direct row to mailbox delivery. Called by the delivery
     /// hub when it determines the peer should be reached via a mailbox server.
+    ///
+    /// Returns an error if no row with `row_id` exists — a stale or already-
+    /// acked id must be a hard error so the orchestrator doesn't proceed with
+    /// a phantom row.
     pub(crate) fn set_mailbox_target(&self, row_id: i64, mailbox_id: i64) -> Result<()> {
         self.pool.with_mut(|c| {
-            c.execute(
-                "UPDATE outbox SET target_kind='mailbox', mailbox_id=?1 WHERE id=?2",
-                rusqlite::params![mailbox_id, row_id],
-            )
-            .map_err(|e| {
-                CoreError::Storage(StorageErrorKind::Other(format!("set_mailbox_target: {e}")))
-            })?;
+            let n = c
+                .execute(
+                    "UPDATE outbox SET target_kind='mailbox', mailbox_id=?1 WHERE id=?2",
+                    rusqlite::params![mailbox_id, row_id],
+                )
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!(
+                        "set_mailbox_target: {e}"
+                    )))
+                })?;
+            if n == 0 {
+                return Err(CoreError::Storage(StorageErrorKind::Other(format!(
+                    "set_mailbox_target: no row with id={row_id}"
+                ))));
+            }
             Ok(())
         })
     }
@@ -491,6 +503,21 @@ mod tests {
             2,
             "direct + mailbox rows for same (target,msg) coexist"
         );
+    }
+
+    #[test]
+    fn set_mailbox_target_errors_on_missing_row() {
+        let pool = Pool::in_memory();
+        let repo = OutboxRepo::new(&pool);
+        let err = repo
+            .set_mailbox_target(999, 42)
+            .expect_err("must reject missing id");
+        match err {
+            CoreError::Storage(StorageErrorKind::Other(s)) => {
+                assert!(s.contains("no row with id=999"), "got: {s}");
+            }
+            other => panic!("expected Storage(Other), got {other:?}"),
+        }
     }
 
     #[test]
