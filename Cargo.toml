@@ -6,7 +6,7 @@ members = [
     "crates/cli",
     "crates/tests",
 ]
-exclude = ["crates/core/fuzz"]
+exclude = ["crates/core/fuzz", "crates/mailbox/fuzz"]
 
 [workspace.package]
 version = "0.0.1"
@@ -112,6 +112,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 qrcode = { version = "0.14" }
 arbitrary = { version = "1", features = ["derive"] }
 directories = "5"
+sd-notify = "0.4"
 
 # Test helpers
 proptest = "1"

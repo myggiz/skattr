@@ -1,0 +1,41 @@
+[Unit]
+Description=Skattr mailbox server
+Documentation=https://github.com/myggiz/skattr/blob/main/docs/operations/mailbox-setup.md
+After=network.target
+
+[Service]
+Type=notify
+ExecStart=/usr/local/bin/skattr-mailbox --config /etc/skattr-mailbox/mailbox.toml
+DynamicUser=yes
+StateDirectory=skattr-mailbox
+WorkingDirectory=/var/lib/skattr-mailbox
+ConfigurationDirectory=skattr-mailbox
+
+# Hardening
+ProtectSystem=strict
+ProtectHome=yes
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+
+# Lifecycle
+WatchdogSec=120
+Restart=on-failure
+RestartSec=10s
+TimeoutStopSec=30s
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

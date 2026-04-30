@@ -39,7 +39,7 @@ pub mod invite;
 pub mod prelude;
 
 pub(crate) mod delivery;
-pub(crate) mod mailbox;
+pub mod mailbox;
 pub(crate) mod mls;
 pub(crate) mod storage;
 pub(crate) mod transport;

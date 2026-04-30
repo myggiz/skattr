@@ -4,10 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository state
 
-**Phase 0 is complete; Phase 1.A (frame codec), 1.B (Noise_XK handshake),
-1.C (MLS 2-member groups), 1.D (invite & contact flow), 1.E (delivery
-semantics), 1.F (CLI integration), 1.G (message storage & search), and
-1.H (hardening) are done.** Phase 0 shipped all five workstreams (0.A scaffold,
+**Phase 0 is complete; Phase 1 is complete (1.H merged 2026-04-24);
+Phase 2.A (mailbox server) is complete.** Phase 0 shipped all five workstreams (0.A scaffold,
 0.B identity & crypto, 0.C Arti integration, 0.D storage layer, 0.E
 documentation baseline). Phase 1.A added `transport::frame::FrameCodec`.
 Phase 1.B added `transport::noise::handshake_{initiator,responder}`
@@ -63,6 +61,20 @@ duplicates; `ReceiveOutcome::New.group_id: [u8; 32]` (group IDs are
 now generated as 32 random bytes at `create_solo`);
 `backfill_body_text` runs in one transaction; the socket-path Mutex is
 replaced by `serial_test`.
+Phase 2.A added `crates/mailbox/` as a `[lib] + [bin]` AGPLv3 crate:
+`MailboxServer::accept_loop` per-stream FSM over the shared wire
+layout (length+type+CBOR; type bytes 0x82–0x8F), `Store` with
+transactional cap-eviction insert, `Challenges` (single-use 30 s
+nonces), `Policy` + per-conn / global token buckets, three
+background tasks (expiry / challenge sweep / metrics), a UDS
+healthcheck at `${data_dir}/health.sock`, and Arti glue feature-
+gated as `bin`. `core::mailbox::protocol` is frozen (ADR 0006); the
+auth digest input is a positional CBOR tuple after a Task 16
+property tripwire revealed `ciborium`'s serde-derive non-canonical
+field ordering. `core::mailbox::client` and `scheduler` stay stubs
+for 2.B. Operational artefacts: `packaging/systemd/skattr-mailbox.service`,
+`packaging/Dockerfile` (distroless cc + nonroot),
+`docs/operations/mailbox-setup.md` (≤ 30 min target).
 
 `crates/core/src/identity/` is fully implemented (Ed25519, BIP39,
 Argon2id + XChaCha20-Poly1305 vault, HKDF). `crates/core/src/transport/{tor,
@@ -83,10 +95,14 @@ passing. Phase 0 exit criterion (two daemons echo bytes over Tor)
 is exercised by `crates/tests/src/arti_echo.rs`, `#[ignore]`-gated
 (run with `cargo test -p skattr-tests --release -- --ignored`).
 
-Phase 1 is complete (1.H merged 2026-04-24); the next workstream is
-Phase 2 (Tauri 2 + SvelteKit UI) — see
-`docs/superpowers/specs/2026-04-21-phase-1-decomposition.md`
-for the original decomposition. The bootstrap prompt remains
+Phase 1 is complete (1.H merged 2026-04-24); Phase 2.A (mailbox
+server) merged at the head of `phase-2a-mailbox-server`. The next
+workstream is Phase 2.B (mailbox client + ContactCard rotation),
+then the UI lane 2.C → 2.D → 2.E → 2.F → 2.G — see
+`docs/superpowers/specs/2026-04-26-phase-2-ui-decomposition.md`
+for the Phase 2 decomposition and
+`docs/adr/0006-mailbox-protocol-v1.md` for the wire freeze 2.B
+develops against. The bootstrap prompt remains
 authoritative for file layout, module boundaries, type signatures,
 and visibility rules — match it exactly.
 

@@ -1,0 +1,14 @@
+services:
+  mailbox:
+    image: skattr-mailbox:latest
+    restart: unless-stopped
+    user: nonroot
+    volumes:
+      - ./mailbox-data:/var/lib/skattr-mailbox
+      - ./mailbox.toml:/etc/skattr-mailbox/mailbox.toml:ro
+    healthcheck:
+      test: ["CMD", "socat", "-", "UNIX-CONNECT:/var/lib/skattr-mailbox/health.sock"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s

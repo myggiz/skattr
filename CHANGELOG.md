@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Phase 2.A — Mailbox server
+
+`crates/mailbox/` promoted to `[lib] + [bin]` (AGPLv3). Frozen wire
+surface in `core::mailbox::protocol` (ADR 0006). Server ships
+transactional cap-eviction, per-connection + global token-bucket
+rate limits, challenge-response auth with single-use 30 s nonces,
+three background tasks (expiry, challenge sweep, metrics), local-only
+UDS healthcheck, hardened systemd unit, distroless Dockerfile, and
+an operator guide that targets ≤ 30 min from-fresh-VM. Test pyramid:
+unit + property + fuzz + adversarial (every `ErrorCode` covered) +
+24 h soak (`#[ignore]`-gated) + real-Tor smoke. The auth digest
+input was switched from a CBOR map to a positional CBOR tuple after
+a property-test tripwire showed `ciborium`'s serde derive emits
+struct fields in declaration order rather than canonical-sorted;
+the tuple form removes the ambiguity entirely.
+`core::mailbox::client` and `core::mailbox::scheduler` remain stubs;
+2.B picks them up.
+
 ## Phase 1.H — Hardening
 
 Closes all 11 items surfaced in Phase 1.G review threads. No new
