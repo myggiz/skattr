@@ -31,7 +31,8 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     match cmd {
-        Command::Shutdown | Command::RotateOnion => Ok(CommandResult::Ok),
+        Command::Shutdown => Ok(CommandResult::Ok),
+        Command::RotateOnion => handle_rotate_onion(handle).await,
         Command::ListContacts => list_contacts(&handle).await,
         Command::CreateInvite { nickname, ttl_secs } => {
             create_invite(&handle, nickname, ttl_secs).await
@@ -656,6 +657,52 @@ where
         records,
         next_after_id,
     })
+}
+
+/// `RotateOnion` handler: bump the self-card version and republish the
+/// current onion to all contacts.
+///
+/// # Deferred: real HS key rotation (Task 23.5)
+///
+/// This implementation is intentionally degenerate — it does **not** rotate
+/// the underlying hidden-service key, so the onion address stays the same.
+/// Contacts receive a `ContactCardUpdate` with an incremented version, but
+/// the onion they route to is unchanged. This is a no-op semantically, but
+/// it exercises the `publish_self_card_update` path end-to-end for
+/// integration tests (Task 27 `rotate_onion_during_offline` will surface
+/// what is still missing).
+///
+/// ## What full rotation (Task 23.5) needs
+///
+/// Full design (deferred — see `docs/superpowers/specs/
+/// 2026-04-30-phase-2b-mailbox-client-design.md` decision 8):
+///
+/// 1. Generate a new HS key file alongside the current one.
+/// 2. Launch a second `OnionService` bound to the new key; await its
+///    published-status.
+/// 3. Replace the daemon's onion-listener accept loop to feed both
+///    old + new services into the same `DeliveryHub::ingest`.
+/// 4. Schedule a `tokio::time::sleep(rotate_grace_secs)` task that shuts
+///    down the old service when fired. Default: 24 h
+///    (`[delivery] rotate_grace_secs`).
+/// 5. After successful publish to N/N contacts (best-effort), call
+///    `handle.set_onion(new_address)` so subsequent IPC sees the new onion.
+///
+/// The `TorRuntime::publish_onion` API today owns the lifecycle of a single
+/// `OnionService` and aborts it on `TorRuntime::shutdown`. Supporting
+/// concurrent services requires either: (a) a parallel
+/// `TorRuntime::publish_secondary_onion(...) -> SecondaryHandle` method; or
+/// (b) a `RotatingOnion` wrapper struct that owns two services and a swap
+/// mechanism. Either path is non-trivial and is deferred to Task 23.5.
+async fn handle_rotate_onion<S>(
+    handle: Arc<DaemonHandle<S>>,
+) -> std::result::Result<CommandResult, IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    // TODO Task 23.5: real HS key rotation — see doc-comment above.
+    publish_self_card_update(handle).await?;
+    Ok(CommandResult::Ok)
 }
 
 /// `AddMailbox` handler: probe the mailbox, persist `Reachable`, kick
@@ -2352,5 +2399,69 @@ mod tests {
         assert_eq!(summaries[1].onion, "beta.onion");
         assert_eq!(summaries[1].status, MailboxStatus::Unreachable);
         assert_eq!(summaries[1].registered_at, 2_000);
+    }
+
+    // ── Task 23: Command::RotateOnion ─────────────────────────────────────
+
+    /// Read the current `self_card_state.version` directly from the pool.
+    fn read_self_card_version(pool: &crate::storage::Pool) -> u64 {
+        pool.with(|c| {
+            c.query_row(
+                "SELECT version FROM self_card_state WHERE id = 1",
+                rusqlite::params![],
+                |r| r.get::<_, i64>(0),
+            )
+            .map_err(|e| {
+                crate::error::CoreError::Storage(StorageErrorKind::Other(e.to_string()))
+            })
+        })
+        .map(|v| u64::try_from(v).unwrap_or(0))
+        .unwrap_or(0)
+    }
+
+    #[tokio::test]
+    async fn rotate_onion_publishes_card_update_to_contacts() {
+        // `test_handle_with_mailbox` builds a handle whose pool has all
+        // migrations (including 0009 self_card_state) and wires up a
+        // `poller_ctrl` channel required by `publish_self_card_update`.
+        let (handle, _ctrl_rx) = test_handle_with_mailbox(Arc::new(UnreachableFactory));
+        // Tor must appear "ready" so `publish_self_card_update` can read the onion.
+        handle.set_onion("rotate-test.onion".to_string());
+
+        let version_before = read_self_card_version(&handle.pool);
+
+        let res = execute_command(handle.clone(), Command::RotateOnion)
+            .await
+            .unwrap();
+        assert!(
+            matches!(res, CommandResult::Ok),
+            "expected Ok, got {res:?}"
+        );
+
+        // The self-card version counter must have advanced by exactly 1.
+        let version_after = read_self_card_version(&handle.pool);
+        assert_eq!(
+            version_after,
+            version_before + 1,
+            "self_card_state.version must be bumped by RotateOnion"
+        );
+    }
+
+    #[tokio::test]
+    async fn rotate_onion_without_published_onion_fails() {
+        // Base handle with no `set_onion` call → onion() returns None.
+        let (handle, _ctrl_rx) = test_handle_with_mailbox(Arc::new(UnreachableFactory));
+        // Deliberately do NOT call handle.set_onion(…).
+
+        let res = execute_command(handle, Command::RotateOnion).await;
+        assert!(
+            matches!(
+                res,
+                Err(IpcError::Daemon(
+                    crate::daemon::error_kind::DaemonErrorKind::TorNotReady
+                ))
+            ),
+            "expected TorNotReady when onion is not set, got {res:?}"
+        );
     }
 }
