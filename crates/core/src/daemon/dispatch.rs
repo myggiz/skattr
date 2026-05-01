@@ -2486,4 +2486,37 @@ mod tests {
             "expected TorNotReady when onion is not set, got {res:?}"
         );
     }
+
+    #[tokio::test]
+    async fn daemon_info_returns_pubkey_onion_version_schema() {
+        let h = test_handle();
+        h.set_onion("example.onion".to_string());
+        let result = execute_command(h.clone(), Command::DaemonInfo).await;
+        match result.unwrap() {
+            CommandResult::DaemonInfo {
+                local_pubkey,
+                current_onion,
+                daemon_version,
+                schema_version,
+            } => {
+                assert_eq!(local_pubkey, h.identity.public());
+                assert_eq!(current_onion.as_deref(), Some("example.onion"));
+                assert_eq!(daemon_version, env!("CARGO_PKG_VERSION"));
+                assert!(schema_version >= 9);
+            }
+            other => panic!("expected DaemonInfo, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn daemon_info_returns_none_onion_when_not_yet_published() {
+        let h = test_handle();
+        let result = execute_command(h, Command::DaemonInfo).await;
+        match result.unwrap() {
+            CommandResult::DaemonInfo { current_onion, .. } => {
+                assert!(current_onion.is_none());
+            }
+            other => panic!("expected DaemonInfo, got {other:?}"),
+        }
+    }
 }
