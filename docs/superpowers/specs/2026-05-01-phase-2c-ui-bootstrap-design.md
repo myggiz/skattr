@@ -102,7 +102,7 @@ revisited.
     ~3 KiB). Pinned in 2.C; 2.D inherits.
 11. **Wizard step granularity: 4 steps,** welcome → passphrase →
     seed-phrase reveal+confirm → Tor bootstrap. Confirmation is
-    **type-back** (user types the 12 words in order; case-insensitive,
+    **type-back** (user types the 24 words in order; case-insensitive,
     whitespace-tolerant). A "Skip confirmation (I've written it down)"
     escape is required for accessibility but only revealed behind a
     red-modal warning.
