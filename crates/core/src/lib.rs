@@ -207,6 +207,41 @@ pub mod test_exports {
                 inner: crate::mailbox::client::MailboxClient::from_stream(onion, boxed),
             }
         }
+
+        /// Delegate to `MailboxClient::probe`.
+        pub async fn probe(
+            &mut self,
+            identity_hash: [u8; 32],
+        ) -> crate::error::Result<()> {
+            self.inner.probe(identity_hash).await
+        }
+
+        /// Delegate to `MailboxClient::fetch`.
+        pub async fn fetch(
+            &mut self,
+            identity: &crate::identity::IdentityKey,
+        ) -> crate::error::Result<crate::mailbox::protocol::FetchResponse> {
+            self.inner.fetch(identity).await
+        }
+
+        /// Delegate to `MailboxClient::deposit`.
+        pub async fn deposit(
+            &mut self,
+            recipient_hash: [u8; 32],
+            ciphertext: Vec<u8>,
+            ttl_request: u32,
+        ) -> crate::error::Result<crate::mailbox::protocol::DepositOk> {
+            self.inner.deposit(recipient_hash, ciphertext, ttl_request).await
+        }
+
+        /// Delegate to `MailboxClient::delete`.
+        pub async fn delete(
+            &mut self,
+            identity: &crate::identity::IdentityKey,
+            deposit_ids: Vec<[u8; 16]>,
+        ) -> crate::error::Result<crate::mailbox::protocol::DeleteOk> {
+            self.inner.delete(identity, deposit_ids).await
+        }
     }
 
     /// Adapter: wraps a [`TestMailboxFactory`] impl from the integration

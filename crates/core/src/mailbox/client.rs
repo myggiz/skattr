@@ -68,9 +68,9 @@ where
                 Err(CoreError::MailboxClient(map_error(code)))
             }
             Some(Ok(_)) => Err(CoreError::MailboxClient(MailboxClientErrorKind::Malformed)),
-            Some(Err(_)) | None => Err(CoreError::MailboxClient(
-                MailboxClientErrorKind::Unreachable,
-            )),
+            // Propagate codec errors (e.g. Malformed) directly; EOF → Unreachable.
+            Some(Err(e)) => Err(e),
+            None => Err(CoreError::MailboxClient(MailboxClientErrorKind::Unreachable)),
         }
     }
 
@@ -89,9 +89,9 @@ where
                 Err(CoreError::MailboxClient(map_error(code)))
             }
             Some(Ok(_)) => Err(CoreError::MailboxClient(MailboxClientErrorKind::Malformed)),
-            Some(Err(_)) | None => Err(CoreError::MailboxClient(
-                MailboxClientErrorKind::Unreachable,
-            )),
+            // Propagate codec errors (e.g. Malformed) directly; EOF → Unreachable.
+            Some(Err(e)) => Err(e),
+            None => Err(CoreError::MailboxClient(MailboxClientErrorKind::Unreachable)),
         }
     }
 
@@ -127,9 +127,8 @@ where
                 Err(CoreError::MailboxClient(map_error(code)))
             }
             Some(Ok(_)) => Err(CoreError::MailboxClient(MailboxClientErrorKind::Malformed)),
-            Some(Err(_)) | None => Err(CoreError::MailboxClient(
-                MailboxClientErrorKind::Unreachable,
-            )),
+            Some(Err(e)) => Err(e),
+            None => Err(CoreError::MailboxClient(MailboxClientErrorKind::Unreachable)),
         }
     }
 
@@ -168,9 +167,8 @@ where
                 Err(CoreError::MailboxClient(map_error(code)))
             }
             Some(Ok(_)) => Err(CoreError::MailboxClient(MailboxClientErrorKind::Malformed)),
-            Some(Err(_)) | None => Err(CoreError::MailboxClient(
-                MailboxClientErrorKind::Unreachable,
-            )),
+            Some(Err(e)) => Err(e),
+            None => Err(CoreError::MailboxClient(MailboxClientErrorKind::Unreachable)),
         }
     }
 
@@ -189,9 +187,8 @@ where
                 Err(CoreError::MailboxClient(map_error(code)))
             }
             Some(Ok(_)) => Err(CoreError::MailboxClient(MailboxClientErrorKind::Malformed)),
-            Some(Err(_)) | None => Err(CoreError::MailboxClient(
-                MailboxClientErrorKind::Unreachable,
-            )),
+            Some(Err(e)) => Err(e),
+            None => Err(CoreError::MailboxClient(MailboxClientErrorKind::Unreachable)),
         }
     }
 }
