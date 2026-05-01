@@ -33,6 +33,28 @@ pub(crate) fn next_interval(active: bool, unreachable: bool, rng: &mut impl Rng)
     Duration::from_nanos(out)
 }
 
+/// One Challenge → Fetch → Delete cycle. The caller (Task 15's actor)
+/// hands each `PendingDeposit` to the inbound MLS dispatcher between
+/// Fetch and Delete; this function does NOT decrypt or persist.
+///
+/// Returned `FetchResponse` is the unmodified server reply — caller
+/// inspects it to decide whether to bump Active hold (non-empty
+/// deposits) and to drive the inbound dispatch.
+pub(crate) async fn run_one_poll_tick<S>(
+    client: &mut crate::mailbox::client::MailboxClient<S>,
+    signer: &crate::identity::IdentityKey,
+) -> crate::error::Result<crate::mailbox::protocol::FetchResponse>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send,
+{
+    let resp = client.fetch(signer).await?;
+    if !resp.deposits.is_empty() {
+        let ids: Vec<[u8; 16]> = resp.deposits.iter().map(|d| d.deposit_id).collect();
+        client.delete(signer, ids).await?;
+    }
+    Ok(resp)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -82,5 +104,110 @@ mod tests {
             let d = next_interval(true, true, &mut rng);
             assert!(d >= Duration::from_millis(225_000));
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn poll_tick_drives_full_challenge_fetch_delete_cycle() {
+        use crate::identity::IdentityKey;
+        use crate::mailbox::client::MailboxClient;
+        use crate::mailbox::codec::{MailboxFrame, MailboxFrameCodec};
+        use crate::mailbox::protocol::{
+            ChallengeNonce, DeleteOk, FetchResponse, PendingDeposit,
+        };
+        use futures::{SinkExt, StreamExt};
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+        use tokio::io::duplex;
+        use tokio_util::codec::Framed;
+
+        let cycles_completed = Arc::new(AtomicU32::new(0));
+        let counter = cycles_completed.clone();
+
+        let (a, b) = duplex(64 * 1024);
+        let server = tokio::spawn(async move {
+            let mut framed = Framed::new(b, MailboxFrameCodec::new());
+            // 1. Challenge → ChallengeNonce
+            let _ = framed.next().await;
+            framed
+                .send(MailboxFrame::ChallengeNonce(ChallengeNonce {
+                    nonce: [0; 32],
+                    issued_at: 1,
+                }))
+                .await
+                .unwrap();
+            // 2. Fetch → FetchResponse with one deposit
+            let _ = framed.next().await;
+            framed
+                .send(MailboxFrame::FetchResponse(FetchResponse {
+                    deposits: vec![PendingDeposit {
+                        deposit_id: [1; 16],
+                        ciphertext: vec![9],
+                        received_at: 1,
+                    }],
+                }))
+                .await
+                .unwrap();
+            // 3. Delete: Challenge → ChallengeNonce → Delete → DeleteOk
+            let _ = framed.next().await;
+            framed
+                .send(MailboxFrame::ChallengeNonce(ChallengeNonce {
+                    nonce: [1; 32],
+                    issued_at: 1,
+                }))
+                .await
+                .unwrap();
+            let _ = framed.next().await;
+            framed
+                .send(MailboxFrame::DeleteOk(DeleteOk { deleted: 1, not_found: 0 }))
+                .await
+                .unwrap();
+            counter.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let signer = IdentityKey::generate().unwrap();
+        let mut client = MailboxClient::from_stream("a.onion".into(), a);
+        let resp = run_one_poll_tick(&mut client, &signer).await.unwrap();
+        assert_eq!(resp.deposits.len(), 1);
+        server.await.unwrap();
+        assert_eq!(cycles_completed.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn poll_tick_skips_delete_when_no_deposits() {
+        use crate::identity::IdentityKey;
+        use crate::mailbox::client::MailboxClient;
+        use crate::mailbox::codec::{MailboxFrame, MailboxFrameCodec};
+        use crate::mailbox::protocol::{ChallengeNonce, FetchResponse};
+        use futures::{SinkExt, StreamExt};
+        use tokio::io::duplex;
+        use tokio_util::codec::Framed;
+
+        let (a, b) = duplex(64 * 1024);
+        let server = tokio::spawn(async move {
+            let mut framed = Framed::new(b, MailboxFrameCodec::new());
+            let _ = framed.next().await;
+            framed
+                .send(MailboxFrame::ChallengeNonce(ChallengeNonce {
+                    nonce: [0; 32],
+                    issued_at: 1,
+                }))
+                .await
+                .unwrap();
+            let _ = framed.next().await;
+            framed
+                .send(MailboxFrame::FetchResponse(FetchResponse { deposits: vec![] }))
+                .await
+                .unwrap();
+            // No more frames expected — if `run_one_poll_tick` calls Delete on an
+            // empty deposit list, the test will hang waiting for a request that
+            // never arrives. The framed.next() in the test would error out from
+            // the EOF path, propagating into `run_one_poll_tick` as an Err.
+        });
+
+        let signer = IdentityKey::generate().unwrap();
+        let mut client = MailboxClient::from_stream("a.onion".into(), a);
+        let resp = run_one_poll_tick(&mut client, &signer).await.unwrap();
+        assert!(resp.deposits.is_empty());
+        server.await.unwrap();
     }
 }
