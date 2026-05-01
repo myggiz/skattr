@@ -74,6 +74,65 @@ where
         }
     }
 
+    /// Private helper: one-shot Challenge round-trip returning the server nonce.
+    async fn challenge(&mut self, identity_hash: [u8; 32]) -> Result<[u8; 32]> {
+        self.framed
+            .send(MailboxFrame::Challenge(Challenge {
+                version: PROTOCOL_VERSION,
+                identity_hash,
+            }))
+            .await
+            .map_err(|_| CoreError::MailboxClient(MailboxClientErrorKind::Unreachable))?;
+        match self.framed.next().await {
+            Some(Ok(MailboxFrame::ChallengeNonce(c))) => Ok(c.nonce),
+            Some(Ok(MailboxFrame::Error(ErrorBody { code, .. }))) => {
+                Err(CoreError::MailboxClient(map_error(code)))
+            }
+            Some(Ok(_)) => Err(CoreError::MailboxClient(MailboxClientErrorKind::Malformed)),
+            Some(Err(_)) | None => {
+                Err(CoreError::MailboxClient(MailboxClientErrorKind::Unreachable))
+            }
+        }
+    }
+
+    /// Fetch all pending deposits for this identity from the mailbox.
+    pub async fn fetch(
+        &mut self,
+        identity: &crate::identity::IdentityKey,
+    ) -> Result<crate::mailbox::protocol::FetchResponse> {
+        use crate::mailbox::auth::{payload_digest, signing_input, OP_BYTE_FETCH};
+        use crate::mailbox::protocol::{Fetch, FetchResponse};
+
+        let pk: [u8; 32] = identity.public().0;
+        let id_hash = recipient_hash_from_pubkey(&pk);
+        let nonce = self.challenge(id_hash).await?;
+
+        let digest = payload_digest(&(PROTOCOL_VERSION, pk, nonce))
+            .map_err(|e| CoreError::MailboxClient(MailboxClientErrorKind::Other(e)))?;
+        let input = signing_input(&nonce, OP_BYTE_FETCH, &digest);
+        let sig = identity.sign(&input).0;
+
+        self.framed
+            .send(MailboxFrame::Fetch(Fetch {
+                version: PROTOCOL_VERSION,
+                identity_pubkey: pk,
+                nonce,
+                signature: sig,
+            }))
+            .await
+            .map_err(|_| CoreError::MailboxClient(MailboxClientErrorKind::Unreachable))?;
+        match self.framed.next().await {
+            Some(Ok(MailboxFrame::FetchResponse(r))) => Ok(r),
+            Some(Ok(MailboxFrame::Error(ErrorBody { code, .. }))) => {
+                Err(CoreError::MailboxClient(map_error(code)))
+            }
+            Some(Ok(_)) => Err(CoreError::MailboxClient(MailboxClientErrorKind::Malformed)),
+            Some(Err(_)) | None => {
+                Err(CoreError::MailboxClient(MailboxClientErrorKind::Unreachable))
+            }
+        }
+    }
+
     /// Single Challenge round-trip — used by AddMailbox liveness check.
     pub async fn probe(&mut self, identity_hash: [u8; 32]) -> Result<()> {
         self.framed
@@ -222,6 +281,66 @@ mod tests {
             err,
             CoreError::MailboxClient(MailboxClientErrorKind::RecipientFull)
         ));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn fetch_signs_with_identity_and_returns_deposits() {
+        use crate::identity::IdentityKey;
+        use crate::mailbox::protocol::{ChallengeNonce, FetchResponse, PendingDeposit};
+
+        let signer = IdentityKey::generate().unwrap();
+        let pk: [u8; 32] = signer.public().0;
+
+        let (a, b) = duplex(64 * 1024);
+        let server = tokio::spawn(async move {
+            let mut framed = Framed::new(b, MailboxFrameCodec::new());
+            // Challenge → ChallengeNonce
+            let MailboxFrame::Challenge(_) = framed.next().await.unwrap().unwrap() else {
+                panic!()
+            };
+            framed
+                .send(MailboxFrame::ChallengeNonce(ChallengeNonce {
+                    nonce: [0x77; 32],
+                    issued_at: 1,
+                }))
+                .await
+                .unwrap();
+            // Fetch — verify signature
+            let MailboxFrame::Fetch(f) = framed.next().await.unwrap().unwrap() else {
+                panic!()
+            };
+            assert_eq!(f.identity_pubkey, pk);
+            let digest = crate::mailbox::auth::payload_digest(&(
+                f.version,
+                f.identity_pubkey,
+                f.nonce,
+            ))
+            .unwrap();
+            let input = crate::mailbox::auth::signing_input(
+                &f.nonce,
+                crate::mailbox::auth::OP_BYTE_FETCH,
+                &digest,
+            );
+            use ed25519_dalek::{Signature as DSig, Verifier, VerifyingKey};
+            let vk = VerifyingKey::from_bytes(&f.identity_pubkey).unwrap();
+            vk.verify(&input, &DSig::from_bytes(&f.signature)).unwrap();
+            framed
+                .send(MailboxFrame::FetchResponse(FetchResponse {
+                    deposits: vec![PendingDeposit {
+                        deposit_id: [0xEE; 16],
+                        ciphertext: vec![9, 9, 9],
+                        received_at: 1,
+                    }],
+                }))
+                .await
+                .unwrap();
+        });
+
+        let mut client = MailboxClient::from_stream("a.onion".into(), a);
+        let resp = client.fetch(&signer).await.unwrap();
+        assert_eq!(resp.deposits.len(), 1);
+        assert_eq!(resp.deposits[0].deposit_id, [0xEE; 16]);
         server.await.unwrap();
     }
 
