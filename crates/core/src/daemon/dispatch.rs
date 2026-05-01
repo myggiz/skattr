@@ -64,6 +64,8 @@ where
             limit,
         } => export_history(&handle, contact, after_id, limit).await,
         Command::AddMailbox { onion } => handle_add_mailbox(handle, onion).await,
+        Command::RemoveMailbox { id } => handle_remove_mailbox(handle, id).await,
+        Command::ListMailboxes => handle_list_mailboxes(handle).await,
     }
 }
 
@@ -847,6 +849,108 @@ where
         let _ = handle.hub.send(contact.identity, msg_id, ciphertext).await;
     }
     Ok(())
+}
+
+/// `RemoveMailbox` handler: mark `pending_removal`, attempt a best-effort
+/// final drain (fetch + server-side delete via `run_one_poll_tick`), then
+/// mark `removed`, stop the poll actor, and republish the self-card.
+///
+/// If the mailbox is unreachable during the drain attempt, we proceed
+/// anyway — callers must not get stuck on a misbehaving mailbox.
+///
+/// # TODO Task 22.5
+/// The deposits returned by `run_one_poll_tick` are deleted server-side but
+/// their plaintext is not dispatched through `DaemonInbound` in this initial
+/// cut. A follow-up task should iterate the `FetchResponse` envelopes and
+/// pass each through `DaemonInbound::dispatch`.
+async fn handle_remove_mailbox<S>(
+    handle: Arc<DaemonHandle<S>>,
+    id: i64,
+) -> std::result::Result<CommandResult, IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    use crate::daemon::error_kind::DaemonErrorKind;
+
+    let repo = crate::storage::MailboxRepo::new(&handle.pool);
+
+    // 1. Find the row.
+    let row = match repo.get(id) {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return Err(IpcError::Daemon(DaemonErrorKind::InvalidArgument {
+                message: "not_found".into(),
+            }))
+        }
+        Err(e) => return Err(map_err(e)),
+    };
+
+    // 2. Mark pending_removal + emit status event.
+    repo.mark_pending_removal(id).map_err(map_err)?;
+    let _ = handle
+        .events_tx
+        .send(crate::daemon::events::Event::MailboxStatusChanged {
+            mailbox_id: id,
+            status: crate::storage::MailboxStatus::PendingRemoval,
+        });
+
+    // 3. Best-effort final drain. If anything fails (unreachable, auth,
+    //    timeout), proceed to finalize anyway — keeps users from getting
+    //    stuck on a misbehaving mailbox.
+    if let Some(factory) = &handle.mailbox_factory {
+        if let Ok(mut client) = factory.connect(&row.onion).await {
+            // run_one_poll_tick fetches + server-side deletes deposits.
+            // TODO Task 22.5: dispatch each deposit through DaemonInbound.
+            let _ =
+                crate::mailbox::poll::run_one_poll_tick(&mut client, &handle.identity).await;
+        }
+    }
+
+    // 4. Tell scheduler to stop the actor.
+    if let Some(ctrl) = &handle.poller_ctrl {
+        let _ = ctrl
+            .send(crate::mailbox::poll::PollerCtrl::RemoveMailbox(id))
+            .await;
+    }
+
+    // 5. Finalize.
+    repo.finalize_removal(id).map_err(map_err)?;
+    let _ = handle
+        .events_tx
+        .send(crate::daemon::events::Event::MailboxStatusChanged {
+            mailbox_id: id,
+            status: crate::storage::MailboxStatus::Removed,
+        });
+
+    // 6. Republish card (best-effort: if onion isn't set yet the helper
+    //    returns TorNotReady; propagate that to the caller).
+    publish_self_card_update(handle.clone()).await?;
+
+    Ok(CommandResult::Ok)
+}
+
+/// `ListMailboxes` handler: return every `role='mine'` row.
+async fn handle_list_mailboxes<S>(
+    handle: Arc<DaemonHandle<S>>,
+) -> std::result::Result<CommandResult, IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    use crate::daemon::commands::MailboxSummary;
+
+    let rows = crate::storage::MailboxRepo::new(&handle.pool)
+        .list_mine()
+        .map_err(map_err)?;
+    let summaries = rows
+        .into_iter()
+        .map(|r| MailboxSummary {
+            id: r.id,
+            onion: r.onion,
+            status: r.status,
+            registered_at: u64::try_from(r.registered_at).unwrap_or(0),
+        })
+        .collect();
+    Ok(CommandResult::Mailboxes(summaries))
 }
 
 /// Map any `CoreError` to an `IpcError`. Projects via `CoreError::kind`
@@ -2115,5 +2219,138 @@ mod tests {
 
         // The probe consumed the slot; the server task completes.
         let _ = server.await;
+    }
+
+    // ── Task 22: Command::RemoveMailbox ───────────────────────────────────
+
+    #[tokio::test]
+    async fn remove_mailbox_unknown_id_returns_invalid_argument() {
+        // Base handle (no mailbox factory); the row lookup must fail first.
+        let (handle, _ctrl_rx) = test_handle_with_mailbox(Arc::new(UnreachableFactory));
+        handle.set_onion("self.onion".to_string());
+        let res = execute_command(handle, Command::RemoveMailbox { id: 999 }).await;
+        assert!(
+            matches!(
+                res,
+                Err(IpcError::Daemon(
+                    crate::daemon::error_kind::DaemonErrorKind::InvalidArgument { ref message }
+                )) if message == "not_found"
+            ),
+            "expected InvalidArgument(not_found), got {res:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_mailbox_marks_pending_then_removed_and_notifies_scheduler() {
+        use crate::mailbox::codec::{MailboxFrame, MailboxFrameCodec};
+        use crate::mailbox::protocol::ChallengeNonce;
+        use crate::storage::{MailboxRepo, MailboxStatus};
+        use futures::{SinkExt, StreamExt};
+        use tokio_util::codec::Framed;
+
+        // Server peer for the drain: answers Challenge → ChallengeNonce,
+        // then FetchRequest → FetchResponse(empty), then DeleteRequest → Ok.
+        // For simplicity, use an unreachable factory for the drain so we
+        // exercise the "proceed despite drain failure" path and keep the
+        // test hermetic (no full mailbox server FSM needed here).
+        let factory = Arc::new(UnreachableFactory);
+        let (handle, mut ctrl_rx) = test_handle_with_mailbox(factory);
+        handle.set_onion("self.onion".to_string());
+
+        // Pre-insert a 'mine' mailbox row directly via MailboxRepo::add_mine.
+        let repo = MailboxRepo::new(&handle.pool);
+        let mb_id = repo.add_mine("target.onion", 1_000).unwrap();
+        repo.mark_status(mb_id, MailboxStatus::Reachable).unwrap();
+
+        // Subscribe to events before driving the command.
+        let mut events_rx = handle.events_tx.subscribe();
+
+        let res = execute_command(handle.clone(), Command::RemoveMailbox { id: mb_id })
+            .await
+            .unwrap();
+        assert!(matches!(res, CommandResult::Ok));
+
+        // Row must be Removed after the handler completes.
+        let row = MailboxRepo::new(&handle.pool).get(mb_id).unwrap().unwrap();
+        assert_eq!(row.status, MailboxStatus::Removed, "status must be Removed");
+
+        // Scheduler must have received RemoveMailbox(id).
+        let ctrl_msg = tokio::time::timeout(std::time::Duration::from_secs(1), ctrl_rx.recv())
+            .await
+            .expect("ctrl message arrives within 1 s")
+            .expect("ctrl channel still open");
+        match ctrl_msg {
+            crate::mailbox::poll::PollerCtrl::RemoveMailbox(id) => {
+                assert_eq!(id, mb_id)
+            }
+            other => panic!("expected RemoveMailbox, got {other:?}"),
+        }
+
+        // Two MailboxStatusChanged events must have been emitted:
+        // 1. PendingRemoval  2. Removed
+        let ev1 = tokio::time::timeout(std::time::Duration::from_secs(1), events_rx.recv())
+            .await
+            .expect("event 1 arrives")
+            .expect("event channel open");
+        assert!(
+            matches!(
+                ev1,
+                crate::daemon::events::Event::MailboxStatusChanged {
+                    mailbox_id,
+                    status: MailboxStatus::PendingRemoval
+                } if mailbox_id == mb_id
+            ),
+            "expected PendingRemoval event, got {ev1:?}"
+        );
+        let ev2 = tokio::time::timeout(std::time::Duration::from_secs(1), events_rx.recv())
+            .await
+            .expect("event 2 arrives")
+            .expect("event channel open");
+        assert!(
+            matches!(
+                ev2,
+                crate::daemon::events::Event::MailboxStatusChanged {
+                    mailbox_id,
+                    status: MailboxStatus::Removed
+                } if mailbox_id == mb_id
+            ),
+            "expected Removed event, got {ev2:?}"
+        );
+    }
+
+    // ── Task 24: Command::ListMailboxes ───────────────────────────────────
+
+    #[tokio::test]
+    async fn list_mailboxes_returns_real_rows_after_add() {
+        use crate::daemon::commands::MailboxSummary;
+        use crate::storage::{MailboxRepo, MailboxStatus};
+
+        let (handle, _ctrl_rx) = test_handle_with_mailbox(Arc::new(UnreachableFactory));
+        handle.set_onion("self.onion".to_string());
+
+        // Pre-insert two 'mine' mailbox rows.
+        let repo = MailboxRepo::new(&handle.pool);
+        let id1 = repo.add_mine("alpha.onion", 1_000).unwrap();
+        repo.mark_status(id1, MailboxStatus::Reachable).unwrap();
+        let id2 = repo.add_mine("beta.onion", 2_000).unwrap();
+        repo.mark_status(id2, MailboxStatus::Unreachable).unwrap();
+
+        let res = execute_command(handle, Command::ListMailboxes).await.unwrap();
+        let summaries: Vec<MailboxSummary> = match res {
+            CommandResult::Mailboxes(s) => s,
+            other => panic!("expected Mailboxes, got {other:?}"),
+        };
+
+        assert_eq!(summaries.len(), 2, "two rows expected");
+        // list_mine returns in registered_at, id order.
+        assert_eq!(summaries[0].id, id1);
+        assert_eq!(summaries[0].onion, "alpha.onion");
+        assert_eq!(summaries[0].status, MailboxStatus::Reachable);
+        assert_eq!(summaries[0].registered_at, 1_000);
+
+        assert_eq!(summaries[1].id, id2);
+        assert_eq!(summaries[1].onion, "beta.onion");
+        assert_eq!(summaries[1].status, MailboxStatus::Unreachable);
+        assert_eq!(summaries[1].registered_at, 2_000);
     }
 }
