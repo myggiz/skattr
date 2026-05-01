@@ -302,6 +302,48 @@ impl<'p> OutboxRepo<'p> {
 
     // ── mutations ─────────────────────────────────────────────────────────────
 
+    /// Look up the row id for an existing direct-delivery row keyed by
+    /// `(target, message_id, target_kind='direct')`. Returns `Ok(None)` when
+    /// no such row exists. Used by the delivery hub's fallback orchestrator
+    /// to find the row it should retarget to a mailbox.
+    pub(crate) fn find_direct_id(
+        &self,
+        target: &[u8],
+        message_id: &[u8; 16],
+    ) -> Result<Option<i64>> {
+        use rusqlite::OptionalExtension;
+        self.pool.with(|c| {
+            c.query_row(
+                "SELECT id FROM outbox \
+                 WHERE target = ?1 AND message_id = ?2 AND target_kind = 'direct' \
+                 LIMIT 1",
+                rusqlite::params![target, message_id.as_slice()],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!("find_direct_id: {e}")))
+            })
+        })
+    }
+
+    /// Delete a single outbox row by id. Returns `true` if a row was removed.
+    /// Used by the fallback orchestrator after a successful mailbox deposit
+    /// (the row's message has been "delivered" by the mailbox).
+    pub(crate) fn delete_by_id(&self, row_id: i64) -> Result<bool> {
+        self.pool.with_mut(|c| {
+            let n = c
+                .execute(
+                    "DELETE FROM outbox WHERE id = ?1",
+                    rusqlite::params![row_id],
+                )
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!("delete_by_id: {e}")))
+                })?;
+            Ok(n > 0)
+        })
+    }
+
     /// Flip an existing direct row to mailbox delivery. Called by the delivery
     /// hub when it determines the peer should be reached via a mailbox server.
     ///
@@ -316,9 +358,7 @@ impl<'p> OutboxRepo<'p> {
                     rusqlite::params![mailbox_id, row_id],
                 )
                 .map_err(|e| {
-                    CoreError::Storage(StorageErrorKind::Other(format!(
-                        "set_mailbox_target: {e}"
-                    )))
+                    CoreError::Storage(StorageErrorKind::Other(format!("set_mailbox_target: {e}")))
                 })?;
             if n == 0 {
                 return Err(CoreError::Storage(StorageErrorKind::Other(format!(

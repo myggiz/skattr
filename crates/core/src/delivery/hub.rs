@@ -5,27 +5,38 @@
 //!
 //! Maps `PublicKey → (mpsc::Sender<DeliveryJob>, mpsc::Sender<PeerCtrl>)`,
 //! spawning a per-peer actor on the first send or ingest. Also runs a
-//! periodic `seen_messages` sweep.
+//! periodic `seen_messages` sweep, and (Task 20) a direct → mailbox
+//! fallback orchestrator that retargets an outbox row to one of the
+//! recipient's advertised mailboxes when direct delivery fails.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 
+use crate::daemon::events::{DeliveryStatus, Event};
 use crate::delivery::peer::{DeliveryJob, InboundDispatch, PeerConnection, PeerCtrl};
 use crate::envelope::MessageId;
 use crate::error::Result;
-use crate::identity::PublicKey;
+use crate::identity::{IdentityKey, PublicKey};
+use crate::mailbox::client::recipient_hash_from_pubkey;
+use crate::mailbox::poll::MailboxConnectFactory;
+use crate::storage::outbox::OutboxRepo;
 use crate::storage::seen_messages::SeenMessagesRepo;
-use crate::storage::Pool;
+use crate::storage::{ContactRepo, MailboxRepo, Pool};
 use crate::transport::connection::AuthenticatedConnection;
 
 const JOB_CHAN_CAP: usize = 64;
 const CTRL_CHAN_CAP: usize = 4;
 const SWEEP_INTERVAL: Duration = Duration::from_secs(3600);
 const SEEN_WINDOW_MS: i64 = 24 * 3600 * 1000;
+
+/// Default TTL request for mailbox deposits made via fallback. 24 hours
+/// is long enough to cover most "peer is briefly offline" windows
+/// without unnecessarily encouraging the server to retain ciphertext.
+const FALLBACK_TTL_SECS: u32 = 24 * 3600;
 
 struct PeerChannels<S>
 where
@@ -47,8 +58,32 @@ where
     }
 }
 
+/// Mailbox-fallback dependencies kept together so the hub can carry
+/// `Option<MailboxFallback>` for callers that don't wire fallback yet
+/// (`DeliveryHub::new` / `new_with_inbound`) without inflating the
+/// per-field count.
+struct MailboxFallback {
+    factory: Arc<dyn MailboxConnectFactory>,
+    events: broadcast::Sender<Event>,
+    /// Held for symmetry with the rest of the mailbox client stack and
+    /// for forward compatibility with signed-deposit variants. The
+    /// current `Deposit` wire frame is depositor-anonymous (no signature)
+    /// so the identity isn't used at deposit time — but storing it here
+    /// keeps the constructor signature stable when 2.B introduces
+    /// signed deposit flows.
+    #[allow(dead_code)]
+    identity: Arc<IdentityKey>,
+}
+
 /// Daemon-scoped delivery router. Routes outbound sends and inbound
 /// post-handshake connections to per-peer `PeerConnection` actor tasks.
+///
+/// When constructed with [`DeliveryHub::new_with_mailbox_fallback`] the
+/// hub also owns a fallback orchestrator: callers may invoke
+/// [`DeliveryHub::ensure_mailbox_fallback`] when direct delivery to a
+/// peer has failed, and the hub will pick one of the recipient's
+/// advertised mailboxes (deterministically by message id) and walk the
+/// list, depositing into the first reachable one.
 pub struct DeliveryHub<S>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -57,29 +92,65 @@ where
     pool: Arc<Pool>,
     inbound: Option<Arc<dyn InboundDispatch>>,
     sweep: tokio::task::JoinHandle<()>,
+    /// `None` when the hub was constructed without fallback support — in
+    /// which case `ensure_mailbox_fallback` is a logged no-op.
+    fallback: Option<MailboxFallback>,
 }
 
 impl<S> DeliveryHub<S>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    /// Construct a hub with no inbound-MLS handling. Suitable for
-    /// outbound-only tests where the responder echoes `Frame::Ack`
-    /// directly; real-MLS deployments must use
-    /// [`DeliveryHub::new_with_inbound`] instead.
+    /// Construct a hub with no inbound-MLS handling and no mailbox
+    /// fallback. Suitable for outbound-only tests where the responder
+    /// echoes `Frame::Ack` directly; real-MLS deployments must use
+    /// [`DeliveryHub::new_with_inbound`] or
+    /// [`DeliveryHub::new_with_mailbox_fallback`] instead.
     pub fn new(pool: Arc<Pool>) -> Self {
-        Self::new_with_inbound_inner(pool, None)
+        Self::new_inner(pool, None, None)
     }
 
     /// Construct a hub that decrypts inbound `Frame::MlsApp` through
     /// `dispatch`. The integration test builds an `MlsInboundDispatch`
     /// that wraps `Group::decrypt` + `receiver::receive` for the one
     /// peer it cares about.
+    ///
+    /// No mailbox-fallback orchestrator: callers wanting fallback must
+    /// use [`DeliveryHub::new_with_mailbox_fallback`].
     pub fn new_with_inbound(pool: Arc<Pool>, dispatch: Arc<dyn InboundDispatch>) -> Self {
-        Self::new_with_inbound_inner(pool, Some(dispatch))
+        Self::new_inner(pool, Some(dispatch), None)
     }
 
-    fn new_with_inbound_inner(pool: Arc<Pool>, inbound: Option<Arc<dyn InboundDispatch>>) -> Self {
+    /// Construct a hub that owns the direct → mailbox fallback
+    /// orchestrator in addition to the pre-existing direct delivery
+    /// path. `inbound` is `Some` in production (real MLS decrypt) and
+    /// `None` in tests that don't exercise inbound decryption.
+    ///
+    /// `pub(crate)` because `MailboxConnectFactory` is itself
+    /// `pub(crate)` — production wiring lives in `daemon::run`.
+    pub(crate) fn new_with_mailbox_fallback(
+        pool: Arc<Pool>,
+        inbound: Option<Arc<dyn InboundDispatch>>,
+        events: broadcast::Sender<Event>,
+        mailbox_factory: Arc<dyn MailboxConnectFactory>,
+        identity: Arc<IdentityKey>,
+    ) -> Self {
+        Self::new_inner(
+            pool,
+            inbound,
+            Some(MailboxFallback {
+                factory: mailbox_factory,
+                events,
+                identity,
+            }),
+        )
+    }
+
+    fn new_inner(
+        pool: Arc<Pool>,
+        inbound: Option<Arc<dyn InboundDispatch>>,
+        fallback: Option<MailboxFallback>,
+    ) -> Self {
         let sweep_pool = pool.clone();
         let sweep = tokio::spawn(async move {
             let mut t = tokio::time::interval(SWEEP_INTERVAL);
@@ -97,6 +168,7 @@ where
             pool,
             inbound,
             sweep,
+            fallback,
         }
     }
 
@@ -172,6 +244,179 @@ where
         let channels = self.spawn_peer_actor(&mut peers, peer);
         channels.jobs
     }
+
+    /// Direct → mailbox fallback orchestrator (Task 20).
+    ///
+    /// When direct delivery to `peer` has failed (timeout or hard
+    /// connect error), the daemon invokes this method with the
+    /// outbound message's id and ciphertext. The orchestrator:
+    ///
+    /// 1. Looks up the peer's `ContactCard.body.mailboxes` via
+    ///    [`MailboxRepo::list_for_contact`].
+    /// 2. Picks a primary mailbox deterministically:
+    ///    `mailboxes[blake2s(message_id) % len]`.
+    /// 3. Walks `(0..len).cycle().skip(primary).take(len)`, attempting
+    ///    one [`MailboxClient::deposit`] per onion. The first success
+    ///    deletes the outbox row and emits
+    ///    `Event::DeliveryStatusChanged{Deposited}`.
+    /// 4. If every mailbox fails, leaves the outbox row in place and
+    ///    logs the cascade (no event). The pre-existing outbox retry
+    ///    path will surface a `Failed` event after the backoff cap.
+    ///
+    /// On a hub constructed without `mailbox_factory` (i.e. via
+    /// [`DeliveryHub::new`] or [`DeliveryHub::new_with_inbound`]) this
+    /// method logs and returns silently.
+    pub async fn ensure_mailbox_fallback(
+        &self,
+        peer: PublicKey,
+        message_id: MessageId,
+        ciphertext: Vec<u8>,
+    ) {
+        let Some(fallback) = self.fallback.as_ref() else {
+            tracing::debug!(
+                target: "skattr::delivery::hub",
+                "fallback skipped: hub has no mailbox factory"
+            );
+            return;
+        };
+
+        // 1. Look up peer's mailboxes.
+        let mailbox_repo = MailboxRepo::new(&self.pool);
+        let onions = match mailbox_repo.list_for_contact(&peer) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    target: "skattr::delivery::hub",
+                    error = %e,
+                    "fallback: list_for_contact failed"
+                );
+                return;
+            }
+        };
+        if onions.is_empty() {
+            tracing::debug!(
+                target: "skattr::delivery::hub",
+                "fallback: peer has no advertised mailboxes; leaving outbox row untouched"
+            );
+            return;
+        }
+
+        // 2. Find the existing direct outbox row (orchestrator MOVES, never duplicates).
+        let outbox = OutboxRepo::new(&self.pool);
+        let row_id = match outbox.find_direct_id(&peer.0, &message_id.0) {
+            Ok(Some(id)) => id,
+            Ok(None) => {
+                tracing::debug!(
+                    target: "skattr::delivery::hub",
+                    "fallback: no direct outbox row to retarget"
+                );
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "skattr::delivery::hub",
+                    error = %e,
+                    "fallback: find_direct_id failed"
+                );
+                return;
+            }
+        };
+
+        // 3. Pick a primary index, then walk sequentially.
+        let n = onions.len();
+        let primary = pick_first_mailbox_index(&message_id, n);
+        let recipient_hash = recipient_hash_from_pubkey(&peer.0);
+        let mut last_err: Option<crate::error::CoreError> = None;
+
+        for offset in 0..n {
+            let idx = (primary + offset) % n;
+            let onion = &onions[idx];
+
+            // 3a. Ensure a 'theirs' row exists for this onion → mailbox_id.
+            let now = crate::daemon::clock::now_unix_seconds();
+            let mailbox_id = match mailbox_repo.ensure_theirs(onion, now) {
+                Ok(id) => id,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "skattr::delivery::hub",
+                        error = %e,
+                        "fallback: ensure_theirs failed; trying next mailbox"
+                    );
+                    last_err = Some(e);
+                    continue;
+                }
+            };
+
+            // 3b. Retarget the existing outbox row to this mailbox.
+            if let Err(e) = outbox.set_mailbox_target(row_id, mailbox_id) {
+                tracing::warn!(
+                    target: "skattr::delivery::hub",
+                    error = %e,
+                    "fallback: set_mailbox_target failed; trying next mailbox"
+                );
+                last_err = Some(e);
+                continue;
+            }
+
+            // 3c. Connect + deposit.
+            let mut client = match fallback.factory.connect(onion).await {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::debug!(
+                        target: "skattr::delivery::hub",
+                        error = %e,
+                        "fallback: connect failed; trying next mailbox"
+                    );
+                    last_err = Some(e);
+                    continue;
+                }
+            };
+
+            match client
+                .deposit(recipient_hash, ciphertext.clone(), FALLBACK_TTL_SECS)
+                .await
+            {
+                Ok(_ok) => {
+                    // 4. Success: delete the outbox row + emit event.
+                    if let Err(e) = outbox.delete_by_id(row_id) {
+                        tracing::warn!(
+                            target: "skattr::delivery::hub",
+                            error = %e,
+                            "fallback: delete_by_id after deposit failed"
+                        );
+                    }
+                    let _ = fallback.events.send(Event::DeliveryStatusChanged {
+                        message: message_id,
+                        status: DeliveryStatus::Deposited,
+                    });
+                    tracing::debug!(
+                        target: "skattr::delivery::hub",
+                        "fallback: deposit succeeded"
+                    );
+                    return;
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        target: "skattr::delivery::hub",
+                        error = %e,
+                        "fallback: deposit failed; trying next mailbox"
+                    );
+                    last_err = Some(e);
+                    continue;
+                }
+            }
+        }
+
+        // 5. All mailboxes exhausted. Leave outbox row in place.
+        if let Some(e) = last_err {
+            tracing::info!(
+                target: "skattr::delivery::hub",
+                error = %e,
+                mailboxes = n,
+                "fallback: all mailboxes failed; outbox row retained"
+            );
+        }
+    }
 }
 
 impl<S> Drop for DeliveryHub<S>
@@ -183,12 +428,38 @@ where
     }
 }
 
+/// Pick a mailbox index deterministically from a message id.
+///
+/// `mailboxes[blake2s(message_id) % len]` — single hash per message, so
+/// retries of the same message stay pinned to the same primary while
+/// different messages fan out across the list. Caller asserts `n > 0`.
+fn pick_first_mailbox_index(message_id: &MessageId, n: usize) -> usize {
+    use blake2::{Blake2s256, Digest};
+    debug_assert!(n > 0, "pick_first_mailbox_index requires n > 0");
+    let h = Blake2s256::digest(message_id.0);
+    let mut bytes = [0u8; 8];
+    bytes.copy_from_slice(&h[0..8]);
+    let v = u64::from_le_bytes(bytes) as usize;
+    v % n.max(1)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::identity::IdentityKey;
+    use crate::contact::card::{ContactCard, ContactCardBody};
+    use crate::contact::Contact;
+    use crate::identity::{IdentityKey, Signature};
+    use crate::mailbox::client::MailboxClient;
+    use crate::mailbox::codec::{MailboxFrame, MailboxFrameCodec};
+    use crate::mailbox::poll::MailboxStream;
+    use crate::mailbox::protocol::{DepositOk, ErrorBody, ErrorCode};
+    use crate::storage::ContactRepo;
     use crate::transport::noise::{handshake_initiator, handshake_responder};
+    use futures::{SinkExt, StreamExt};
+    use std::collections::HashMap as StdHashMap;
+    use std::sync::Mutex as StdMutex;
+    use tokio_util::codec::Framed;
 
     #[tokio::test]
     async fn ingest_spawns_actor_and_replace_conn_on_second_ingest() {
@@ -219,5 +490,356 @@ mod tests {
         }
 
         let _ = bob_task.await;
+    }
+
+    // ─── Task 20: ensure_mailbox_fallback orchestrator tests ───────────
+
+    /// Per-onion deposit outcome the test wants the in-process server to
+    /// produce.
+    #[derive(Clone)]
+    enum DepositReply {
+        Ok,
+        Error(ErrorCode),
+    }
+
+    /// Stub `MailboxConnectFactory`: per-onion, hands out one in-process
+    /// duplex peer with a tiny inline server that replies to one Deposit
+    /// with the configured outcome. After the configured stream is
+    /// consumed, subsequent connects to that onion fail with `Unreachable`.
+    struct StubFactory {
+        // `onion -> queue of pre-spawned client streams` and the matching
+        // server-task handles. The server tasks are spawned eagerly when
+        // the test calls `seed`.
+        slots: StdMutex<StdHashMap<String, Vec<tokio::io::DuplexStream>>>,
+        // Track which onions were `connect`-ed for assertion in tests.
+        connects: StdMutex<Vec<String>>,
+    }
+
+    impl StubFactory {
+        fn new() -> Self {
+            Self {
+                slots: StdMutex::new(StdHashMap::new()),
+                connects: StdMutex::new(Vec::new()),
+            }
+        }
+
+        /// Seed one Deposit-handling server for `onion`. Returns the
+        /// `JoinHandle` so the test can `.await` it.
+        fn seed(&self, onion: &str, reply: DepositReply) -> tokio::task::JoinHandle<()> {
+            let (a, b) = tokio::io::duplex(64 * 1024);
+            self.slots
+                .lock()
+                .unwrap()
+                .entry(onion.to_string())
+                .or_default()
+                .push(a);
+            tokio::spawn(deposit_server(b, reply))
+        }
+
+        fn connects(&self) -> Vec<String> {
+            self.connects.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MailboxConnectFactory for StubFactory {
+        async fn connect(&self, onion: &str) -> Result<MailboxClient<Box<dyn MailboxStream>>> {
+            self.connects.lock().unwrap().push(onion.to_string());
+            let stream_opt = {
+                let mut slots = self.slots.lock().unwrap();
+                slots.get_mut(onion).and_then(|v| v.pop())
+            };
+            match stream_opt {
+                Some(s) => {
+                    let boxed: Box<dyn MailboxStream> = Box::new(s);
+                    Ok(MailboxClient::from_stream(onion.to_string(), boxed))
+                }
+                None => Err(crate::error::CoreError::MailboxClient(
+                    crate::error::MailboxClientErrorKind::Unreachable,
+                )),
+            }
+        }
+    }
+
+    /// Tiny inline mailbox server: read one Deposit, reply with the
+    /// configured outcome, then exit.
+    async fn deposit_server(server: tokio::io::DuplexStream, reply: DepositReply) {
+        let mut framed = Framed::new(server, MailboxFrameCodec::new());
+        let req = framed.next().await;
+        let Some(Ok(MailboxFrame::Deposit(_))) = req else {
+            return;
+        };
+        let outgoing = match reply {
+            DepositReply::Ok => MailboxFrame::DepositOk(DepositOk {
+                deposit_id: [0xAB; 16],
+                expires_at: 9_999,
+            }),
+            DepositReply::Error(code) => MailboxFrame::Error(ErrorBody {
+                code,
+                message: "stub".into(),
+            }),
+        };
+        let _ = framed.send(outgoing).await;
+    }
+
+    /// Insert a contact + a card listing `mailboxes`. The signature is
+    /// `[0u8; 64]` since the storage layer never re-verifies (matches
+    /// existing patterns in `storage::mailboxes` tests).
+    fn seed_contact_with_card(pool: &Pool, peer: PublicKey, mailboxes: Vec<String>) {
+        let contacts = ContactRepo::new(pool);
+        contacts
+            .upsert(&Contact {
+                identity: peer,
+                display_name: None,
+                added_at: 0,
+                card: None,
+            })
+            .unwrap();
+        contacts
+            .put_card(&ContactCard {
+                body: ContactCardBody {
+                    identity: peer,
+                    onion: "self.onion".into(),
+                    mailboxes,
+                    version: 1,
+                    expires_at: 9_999_999_999,
+                },
+                signature: Signature([0u8; 64]),
+            })
+            .unwrap();
+    }
+
+    /// Insert a direct outbox row for `(peer, mid)` with payload `ct`.
+    fn seed_direct_outbox_row(pool: &Pool, peer: &PublicKey, mid: &MessageId, ct: &[u8]) {
+        let repo = OutboxRepo::new(pool);
+        let outcome = repo.insert_direct(&peer.0, &mid.0, ct, 0).unwrap();
+        assert!(matches!(
+            outcome,
+            crate::storage::outbox::InsertOutcome::Inserted
+        ));
+    }
+
+    #[tokio::test]
+    async fn ensure_mailbox_fallback_picks_one_then_succeeds() {
+        let pool = Arc::new(Pool::in_memory());
+        let peer = PublicKey([0x42; 32]);
+        let mid = MessageId([0x77; 16]);
+        let ct = vec![0xDE, 0xAD, 0xBE, 0xEF];
+
+        // Two mailboxes; we don't know in advance which is primary, so
+        // we seed BOTH with DepositOk. This is robust to changes in the
+        // hash, while still asserting that fallback succeeds, deletes
+        // the row, and emits the event.
+        seed_contact_with_card(&pool, peer, vec!["mb1.onion".into(), "mb2.onion".into()]);
+        seed_direct_outbox_row(&pool, &peer, &mid, &ct);
+
+        let factory = Arc::new(StubFactory::new());
+        let s1 = factory.seed("mb1.onion", DepositReply::Ok);
+        let s2 = factory.seed("mb2.onion", DepositReply::Ok);
+
+        let (events_tx, mut events_rx) = broadcast::channel::<Event>(8);
+        let identity = Arc::new(IdentityKey::generate().unwrap());
+
+        let hub: DeliveryHub<tokio::io::DuplexStream> = DeliveryHub::new_with_mailbox_fallback(
+            pool.clone(),
+            None,
+            events_tx,
+            factory.clone(),
+            identity,
+        );
+
+        hub.ensure_mailbox_fallback(peer, mid, ct.clone()).await;
+
+        // Outbox row should be gone.
+        let after = OutboxRepo::new(&pool)
+            .find_direct_id(&peer.0, &mid.0)
+            .unwrap();
+        assert!(after.is_none(), "outbox row deleted on success");
+
+        // Mailbox row for the *primary* exists with role='theirs'.
+        let primary_idx = pick_first_mailbox_index(&mid, 2);
+        let onions = ["mb1.onion", "mb2.onion"];
+        let chosen = onions[primary_idx];
+        let row_id = pool
+            .with(|c| {
+                c.query_row(
+                    "SELECT id FROM mailboxes WHERE onion = ?1 AND role = 'theirs'",
+                    rusqlite::params![chosen],
+                    |r| r.get::<_, i64>(0),
+                )
+                .map_err(|e| {
+                    crate::error::CoreError::Storage(crate::storage::StorageErrorKind::Other(
+                        format!("test: {e}"),
+                    ))
+                })
+            })
+            .unwrap();
+        assert!(row_id > 0);
+
+        // Event was emitted.
+        let evt = tokio::time::timeout(std::time::Duration::from_secs(2), events_rx.recv())
+            .await
+            .expect("event in time")
+            .expect("channel open");
+        match evt {
+            Event::DeliveryStatusChanged {
+                message,
+                status: DeliveryStatus::Deposited,
+            } => assert_eq!(message, mid),
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        // The orchestrator only connects to the primary on success, so
+        // one of the two seeded server tasks completes; the other is
+        // still parked waiting for a Deposit. Drop the factory to close
+        // the unused stream and let the parked server task drain.
+        drop(factory);
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), s1).await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), s2).await;
+    }
+
+    #[tokio::test]
+    async fn ensure_mailbox_fallback_cascades_on_first_mailbox_error() {
+        let pool = Arc::new(Pool::in_memory());
+        let peer = PublicKey([0x42; 32]);
+        let mid = MessageId([0xC0; 16]);
+        let ct = vec![1u8, 2, 3, 4];
+
+        seed_contact_with_card(&pool, peer, vec!["mb1.onion".into(), "mb2.onion".into()]);
+        seed_direct_outbox_row(&pool, &peer, &mid, &ct);
+
+        // Determine which mailbox is primary, fail it, succeed the other.
+        let primary_idx = pick_first_mailbox_index(&mid, 2);
+        let onions = ["mb1.onion", "mb2.onion"];
+        let primary = onions[primary_idx];
+        let secondary = onions[(primary_idx + 1) % 2];
+
+        let factory = Arc::new(StubFactory::new());
+        let s_pri = factory.seed(primary, DepositReply::Error(ErrorCode::RateLimited));
+        let s_sec = factory.seed(secondary, DepositReply::Ok);
+
+        let (events_tx, mut events_rx) = broadcast::channel::<Event>(8);
+        let identity = Arc::new(IdentityKey::generate().unwrap());
+
+        let hub: DeliveryHub<tokio::io::DuplexStream> = DeliveryHub::new_with_mailbox_fallback(
+            pool.clone(),
+            None,
+            events_tx,
+            factory.clone(),
+            identity,
+        );
+
+        hub.ensure_mailbox_fallback(peer, mid, ct.clone()).await;
+
+        // Outbox row gone (deposit eventually succeeded).
+        assert!(OutboxRepo::new(&pool)
+            .find_direct_id(&peer.0, &mid.0)
+            .unwrap()
+            .is_none());
+
+        // Cascade visited primary first, then secondary.
+        let connects = factory.connects();
+        assert_eq!(connects.len(), 2, "both mailboxes visited");
+        assert_eq!(connects[0], primary);
+        assert_eq!(connects[1], secondary);
+
+        // Deposited event emitted.
+        let evt = tokio::time::timeout(std::time::Duration::from_secs(2), events_rx.recv())
+            .await
+            .expect("event in time")
+            .expect("channel open");
+        assert!(matches!(
+            evt,
+            Event::DeliveryStatusChanged {
+                status: DeliveryStatus::Deposited,
+                ..
+            }
+        ));
+
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), s_pri).await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), s_sec).await;
+    }
+
+    #[tokio::test]
+    async fn ensure_mailbox_fallback_with_no_mailboxes_leaves_outbox_row() {
+        let pool = Arc::new(Pool::in_memory());
+        let peer = PublicKey([0x42; 32]);
+        let mid = MessageId([0x99; 16]);
+        let ct = vec![9u8, 9, 9];
+
+        // Contact exists but has NO card.
+        let contacts = ContactRepo::new(&pool);
+        contacts
+            .upsert(&Contact {
+                identity: peer,
+                display_name: None,
+                added_at: 0,
+                card: None,
+            })
+            .unwrap();
+        seed_direct_outbox_row(&pool, &peer, &mid, &ct);
+
+        let factory = Arc::new(StubFactory::new());
+        let (events_tx, mut events_rx) = broadcast::channel::<Event>(4);
+        let identity = Arc::new(IdentityKey::generate().unwrap());
+
+        let hub: DeliveryHub<tokio::io::DuplexStream> = DeliveryHub::new_with_mailbox_fallback(
+            pool.clone(),
+            None,
+            events_tx,
+            factory.clone(),
+            identity,
+        );
+
+        hub.ensure_mailbox_fallback(peer, mid, ct.clone()).await;
+
+        // Outbox row still present.
+        let after = OutboxRepo::new(&pool)
+            .find_direct_id(&peer.0, &mid.0)
+            .unwrap();
+        assert!(after.is_some(), "outbox row preserved when no mailboxes");
+
+        // No 'theirs' mailbox row created (none to insert).
+        let theirs: i64 = pool
+            .with(|c| {
+                c.query_row(
+                    "SELECT COUNT(*) FROM mailboxes WHERE role = 'theirs'",
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(|e| {
+                    crate::error::CoreError::Storage(crate::storage::StorageErrorKind::Other(
+                        format!("test: {e}"),
+                    ))
+                })
+            })
+            .unwrap();
+        assert_eq!(theirs, 0);
+
+        // No event emitted.
+        let evt =
+            tokio::time::timeout(std::time::Duration::from_millis(200), events_rx.recv()).await;
+        assert!(evt.is_err(), "no event when no mailboxes");
+        assert!(factory.connects().is_empty());
+    }
+
+    #[test]
+    fn pick_first_mailbox_index_is_deterministic() {
+        let mid = MessageId([0x42; 16]);
+        let a = pick_first_mailbox_index(&mid, 5);
+        let b = pick_first_mailbox_index(&mid, 5);
+        assert_eq!(a, b);
+        assert!(a < 5);
+    }
+
+    #[test]
+    fn pick_first_mailbox_index_distributes_across_messages() {
+        // Sanity: not all message ids hash to the same index for n=4.
+        let mut seen = std::collections::HashSet::new();
+        for byte in 0u8..32 {
+            let mid = MessageId([byte; 16]);
+            seen.insert(pick_first_mailbox_index(&mid, 4));
+        }
+        assert!(seen.len() >= 2, "hash should distribute (got {seen:?})");
     }
 }

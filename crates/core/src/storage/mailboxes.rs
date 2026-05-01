@@ -184,6 +184,39 @@ impl<'p> MailboxRepo<'p> {
         })
     }
 
+    /// Insert a `role='theirs'` row for `onion`, or return the existing row id
+    /// if already present. Idempotent. Used by the delivery hub's
+    /// direct→mailbox fallback orchestrator: when we discover a peer's
+    /// mailbox onion (via their `ContactCard`) and need a concrete
+    /// `mailbox_id` for the outbox row, we lazy-insert the row here.
+    pub fn ensure_theirs(&self, onion: &str, now: i64) -> Result<i64> {
+        self.pool.with_mut(|c| {
+            c.execute(
+                "INSERT INTO mailboxes(onion, registered_at, role) \
+                 VALUES (?1, ?2, 'theirs') \
+                 ON CONFLICT(onion, role) DO NOTHING",
+                rusqlite::params![onion, now],
+            )
+            .map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!(
+                    "ensure_theirs insert: {e}"
+                )))
+            })?;
+            let id: i64 = c
+                .query_row(
+                    "SELECT id FROM mailboxes WHERE onion = ?1 AND role = 'theirs'",
+                    rusqlite::params![onion],
+                    |r| r.get(0),
+                )
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!(
+                        "ensure_theirs select: {e}"
+                    )))
+                })?;
+            Ok(id)
+        })
+    }
+
     /// List all `role='mine'` rows ordered by `registered_at, id`.
     pub fn list_mine(&self) -> Result<Vec<MailboxRow>> {
         self.pool.with(|c| {
@@ -454,6 +487,48 @@ mod tests {
         let mine = repo.list_mine().unwrap();
         assert_eq!(mine.len(), 1);
         assert_eq!(mine[0].onion, "aaaa.onion");
+    }
+
+    // ── ensure_theirs tests ──────────────────────────────────────────────
+
+    #[test]
+    fn ensure_theirs_inserts_new_row_with_role_theirs() {
+        let pool = Pool::in_memory();
+        let repo = MailboxRepo::new(&pool);
+        let id = repo.ensure_theirs("peer-mb.onion", 100).unwrap();
+        // Should appear in raw SQL with role='theirs' and not in list_mine.
+        assert!(repo.list_mine().unwrap().is_empty());
+        let onion: String = pool
+            .with(|c| {
+                c.query_row(
+                    "SELECT onion FROM mailboxes WHERE id = ?1 AND role = 'theirs'",
+                    rusqlite::params![id],
+                    |r| r.get(0),
+                )
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!("test query: {e}")))
+                })
+            })
+            .unwrap();
+        assert_eq!(onion, "peer-mb.onion");
+    }
+
+    #[test]
+    fn ensure_theirs_is_idempotent_on_same_onion() {
+        let pool = Pool::in_memory();
+        let repo = MailboxRepo::new(&pool);
+        let id1 = repo.ensure_theirs("peer-mb.onion", 100).unwrap();
+        let id2 = repo.ensure_theirs("peer-mb.onion", 200).unwrap();
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn ensure_theirs_does_not_collide_with_role_mine() {
+        let pool = Pool::in_memory();
+        let repo = MailboxRepo::new(&pool);
+        let mine = repo.add_mine("dual.onion", 100).unwrap();
+        let theirs = repo.ensure_theirs("dual.onion", 200).unwrap();
+        assert_ne!(mine, theirs, "different rows for different roles");
     }
 
     // ── list_for_contact tests ────────────────────────────────────────────
