@@ -1,0 +1,10 @@
+node_modules
+.svelte-kit
+build
+.vite
+playwright-report
+test-results
+
+# ts-rs generated outputs (regenerate via `cargo test -p skattr-core --features test-harness`)
+src/lib/ipc/types/*.ts
+!src/lib/ipc/types/index.ts
