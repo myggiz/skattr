@@ -11,7 +11,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::broadcast;
 
 use crate::daemon::commands::{Command as IpcCommand, CommandResult as IpcCommandResult};
-use crate::daemon::events::Event;
+use crate::daemon::events::{Event, TorStatus};
 use crate::daemon::ipc::server::CommandExecutor;
 use crate::daemon::ipc::wire::IpcError;
 use crate::delivery::hub::DeliveryHub;
@@ -50,6 +50,12 @@ where
     /// Sender side of the `PollScheduler` control channel. `None` in
     /// test helpers. `pub(crate)` — `PollerCtrl` is `pub(crate)`.
     pub(crate) poller_ctrl: Option<tokio::sync::mpsc::Sender<crate::mailbox::poll::PollerCtrl>>,
+    /// Snapshot of the latest `TorStatusChanged` event the daemon
+    /// emitted. Updated by a tap task spawned in `Daemon::run`. Read
+    /// by the IPC server when answering a `Subscribe` ack so the UI
+    /// can paint the bootstrap pill on first connect without waiting
+    /// for the next live event.
+    pub(crate) latest_tor_status: Arc<RwLock<Option<TorStatus>>>,
 }
 
 impl<S> DaemonHandle<S>
@@ -77,6 +83,7 @@ where
             onion: Arc::new(RwLock::new(None)),
             mailbox_factory: None,
             poller_ctrl: None,
+            latest_tor_status: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -106,6 +113,24 @@ where
             onion: Arc::new(RwLock::new(None)),
             mailbox_factory: Some(mailbox_factory),
             poller_ctrl: Some(poller_ctrl),
+            latest_tor_status: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    /// Snapshot the latest cached `TorStatus`. Non-blocking RwLock read.
+    #[must_use]
+    pub fn latest_tor_status(&self) -> Option<TorStatus> {
+        self.latest_tor_status
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone())
+    }
+
+    /// Replace the cached `TorStatus`. Called by the tap task spawned
+    /// in `Daemon::run`. Tests may call directly.
+    pub fn set_tor_status(&self, status: TorStatus) {
+        if let Ok(mut guard) = self.latest_tor_status.write() {
+            *guard = Some(status);
         }
     }
 
@@ -137,6 +162,10 @@ where
         let arc = Arc::new(self.clone_for_dispatch());
         crate::daemon::dispatch::execute_command(arc, cmd).await
     }
+
+    fn latest_tor_status(&self) -> Option<crate::daemon::events::TorStatus> {
+        DaemonHandle::latest_tor_status(self)
+    }
 }
 
 impl<S> DaemonHandle<S>
@@ -152,6 +181,7 @@ where
             onion: self.onion.clone(),
             mailbox_factory: self.mailbox_factory.clone(),
             poller_ctrl: self.poller_ctrl.clone(),
+            latest_tor_status: self.latest_tor_status.clone(),
         }
     }
 }
@@ -179,5 +209,37 @@ mod tests {
 
         assert!(Arc::ptr_eq(&handle.pool, &pool));
         assert!(Arc::ptr_eq(&handle.hub, &hub));
+    }
+}
+
+#[cfg(test)]
+mod tor_status_cache_tests {
+    use super::*;
+    use crate::daemon::events::TorStatus;
+
+    fn fake_handle() -> DaemonHandle<tokio::io::DuplexStream> {
+        let (events_tx, _) = tokio::sync::broadcast::channel(16);
+        let pool = Arc::new(Pool::in_memory());
+        let identity = {
+            let seed = crate::identity::Seed::generate().unwrap();
+            crate::identity::IdentityKey::from_seed(&seed).unwrap()
+        };
+        let hub = Arc::new(crate::delivery::hub::DeliveryHub::new(pool.clone()));
+        DaemonHandle::new(pool, hub, identity, events_tx)
+    }
+
+    #[tokio::test]
+    async fn latest_tor_status_starts_none() {
+        let h = fake_handle();
+        assert!(h.latest_tor_status().is_none());
+    }
+
+    #[tokio::test]
+    async fn set_tor_status_round_trips() {
+        let h = fake_handle();
+        h.set_tor_status(TorStatus::Bootstrapping(42));
+        assert_eq!(h.latest_tor_status(), Some(TorStatus::Bootstrapping(42)),);
+        h.set_tor_status(TorStatus::Ready);
+        assert_eq!(h.latest_tor_status(), Some(TorStatus::Ready));
     }
 }

@@ -138,6 +138,13 @@ use crate::daemon::ipc::wire::{EventFilter, IpcRequest, IpcResponse};
 pub trait CommandExecutor: Send + Sync {
     /// Dispatch `cmd` and return a result or typed wire error.
     async fn execute(&self, cmd: Command) -> std::result::Result<CommandResult, IpcError>;
+
+    /// Snapshot the latest cached `TorStatus`. Default `None` so test
+    /// stubs and pre-2.C executors compile unchanged. The production
+    /// `DaemonHandle` impl returns `latest_tor_status()`.
+    fn latest_tor_status(&self) -> Option<crate::daemon::events::TorStatus> {
+        None
+    }
 }
 
 /// Handle one accepted connection. The loop owns a per-connection
