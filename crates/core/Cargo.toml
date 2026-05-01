@@ -81,6 +81,7 @@ libc = "0.2.185"
 tempfile = { workspace = true }
 proptest = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+tracing-subscriber = { workspace = true }
 
 [features]
 default = ["qr"]

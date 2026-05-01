@@ -63,7 +63,14 @@ where
             .await
             .map_err(|_| CoreError::MailboxClient(MailboxClientErrorKind::Unreachable))?;
         match self.framed.next().await {
-            Some(Ok(MailboxFrame::DepositOk(ok))) => Ok(ok),
+            Some(Ok(MailboxFrame::DepositOk(ok))) => {
+                tracing::info!(
+                    target: "skattr::mailbox::client",
+                    op = "deposit",
+                    "mailbox deposit accepted"
+                );
+                Ok(ok)
+            }
             Some(Ok(MailboxFrame::Error(ErrorBody { code, .. }))) => {
                 Err(CoreError::MailboxClient(map_error(code)))
             }
@@ -122,7 +129,15 @@ where
             .await
             .map_err(|_| CoreError::MailboxClient(MailboxClientErrorKind::Unreachable))?;
         match self.framed.next().await {
-            Some(Ok(MailboxFrame::FetchResponse(r))) => Ok(r),
+            Some(Ok(MailboxFrame::FetchResponse(r))) => {
+                tracing::info!(
+                    target: "skattr::mailbox::client",
+                    op = "fetch",
+                    deposit_count = r.deposits.len(),
+                    "mailbox fetch completed"
+                );
+                Ok(r)
+            }
             Some(Ok(MailboxFrame::Error(ErrorBody { code, .. }))) => {
                 Err(CoreError::MailboxClient(map_error(code)))
             }
@@ -182,8 +197,21 @@ where
             .await
             .map_err(|_| CoreError::MailboxClient(MailboxClientErrorKind::Unreachable))?;
         match self.framed.next().await {
-            Some(Ok(MailboxFrame::ChallengeNonce(_))) => Ok(()),
+            Some(Ok(MailboxFrame::ChallengeNonce(_))) => {
+                tracing::info!(
+                    target: "skattr::mailbox::client",
+                    op = "probe",
+                    "mailbox probe completed"
+                );
+                Ok(())
+            }
             Some(Ok(MailboxFrame::Error(ErrorBody { code, .. }))) => {
+                tracing::info!(
+                    target: "skattr::mailbox::client",
+                    op = "probe",
+                    error_code = ?code,
+                    "mailbox probe rejected by server"
+                );
                 Err(CoreError::MailboxClient(map_error(code)))
             }
             Some(Ok(_)) => Err(CoreError::MailboxClient(MailboxClientErrorKind::Malformed)),
