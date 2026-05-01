@@ -41,8 +41,8 @@ use skattr_core::envelope::{Envelope, Kind, MessageId};
 use skattr_core::identity::IdentityKey;
 use skattr_core::test_exports::{
     delivery_hub_with_mailbox, mailbox_run_one_poll_tick, outbox_count_for_target,
-    outbox_seed_direct, ContactRepo, DeliveryHub, Group, KeyPackage, KeyPackageRepo,
-    MlsGroupRepo, MlsProvider, Pool, TestMailboxFactory,
+    outbox_seed_direct, ContactRepo, DeliveryHub, Group, KeyPackage, KeyPackageRepo, MlsGroupRepo,
+    MlsProvider, Pool, TestMailboxFactory,
 };
 use tokio::sync::broadcast;
 
@@ -159,13 +159,10 @@ async fn alice_deposits_to_mailbox_bob_fetches_then_decrypts() {
         },
     };
     let ciphertext = alice_group.encrypt(&envelope).unwrap();
-    alice_group
-        .save(&MlsGroupRepo::new(&alice_pool))
-        .unwrap();
+    alice_group.save(&MlsGroupRepo::new(&alice_pool)).unwrap();
 
     // ── Seed the direct outbox row that fallback retargets ───────────
-    outbox_seed_direct(&alice_pool, &bob_id.public().0, &msg_id.0, &ciphertext)
-        .unwrap();
+    outbox_seed_direct(&alice_pool, &bob_id.public().0, &msg_id.0, &ciphertext).unwrap();
     assert_eq!(
         outbox_count_for_target(&alice_pool, &bob_id.public().0).unwrap(),
         1,

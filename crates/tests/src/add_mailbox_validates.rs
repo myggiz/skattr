@@ -58,13 +58,8 @@ fn build_handle(
         Arc::new(IdentityKey::generate().unwrap()),
     );
 
-    let (handle, ctrl_rx) = daemon_handle_with_mailbox(
-        pool.clone(),
-        hub,
-        identity,
-        events_tx.clone(),
-        factory,
-    );
+    let (handle, ctrl_rx) =
+        daemon_handle_with_mailbox(pool.clone(), hub, identity, events_tx.clone(), factory);
     handle.set_onion("self.onion".to_string());
     (handle, ctrl_rx, pool, events_tx)
 }
@@ -109,8 +104,7 @@ async fn add_mailbox_reachable_persists_and_notifies_scheduler() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn add_mailbox_unreachable_returns_invalid_argument_and_does_not_persist() {
     // Empty factory — every connect returns Unreachable.
-    let factory: Arc<dyn TestMailboxFactory> =
-        Arc::new(InProcessMailboxFactory::new(Vec::new()));
+    let factory: Arc<dyn TestMailboxFactory> = Arc::new(InProcessMailboxFactory::new(Vec::new()));
     let (handle, _ctrl_rx, pool, _events_tx) = build_handle(factory);
 
     let err = handle

@@ -112,10 +112,7 @@ impl InProcessMailboxFactory {
 
 #[async_trait::async_trait]
 impl TestMailboxFactory for InProcessMailboxFactory {
-    async fn connect(
-        &self,
-        onion: &str,
-    ) -> skattr_core::Result<MailboxClientHandle> {
+    async fn connect(&self, onion: &str) -> skattr_core::Result<MailboxClientHandle> {
         let mb = self.mailboxes.get(onion).ok_or_else(|| {
             skattr_core::CoreError::MailboxClient(
                 skattr_core::error::MailboxClientErrorKind::Unreachable,
@@ -123,11 +120,7 @@ impl TestMailboxFactory for InProcessMailboxFactory {
         })?;
 
         // Knob for failover testing.
-        let should_fail = mb
-            .fail_connects
-            .lock()
-            .map(|g| *g)
-            .unwrap_or(false);
+        let should_fail = mb.fail_connects.lock().map(|g| *g).unwrap_or(false);
         if should_fail {
             return Err(skattr_core::CoreError::MailboxClient(
                 skattr_core::error::MailboxClientErrorKind::Unreachable,
@@ -137,8 +130,7 @@ impl TestMailboxFactory for InProcessMailboxFactory {
         // Open a fresh duplex pair and hand the server side off to a
         // background `accept_loop` task. The task exits when the client
         // half is dropped.
-        let (client_side, server_side): (DuplexStream, DuplexStream) =
-            tokio::io::duplex(64 * 1024);
+        let (client_side, server_side): (DuplexStream, DuplexStream) = tokio::io::duplex(64 * 1024);
         let server = mb.server.clone();
         tokio::spawn(async move {
             let _ = server.accept_loop(server_side).await;
@@ -153,11 +145,7 @@ impl TestMailboxFactory for InProcessMailboxFactory {
 /// Pre-populate a `'mine'` mailbox row pointing at the given onion and
 /// flip its status to `Reachable`. Used by tests that exercise the
 /// recipient-side polling path.
-pub fn seed_mine_mailbox(
-    pool: &skattr_core::test_exports::Pool,
-    onion: &str,
-    now: i64,
-) -> i64 {
+pub fn seed_mine_mailbox(pool: &skattr_core::test_exports::Pool, onion: &str, now: i64) -> i64 {
     let repo = MailboxRepo::new(pool);
     let id = repo.add_mine(onion, now).unwrap();
     repo.mark_status(id, MailboxStatus::Reachable).unwrap();

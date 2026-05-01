@@ -21,8 +21,8 @@ use skattr_core::envelope::{Envelope, Kind, MessageId};
 use skattr_core::identity::IdentityKey;
 use skattr_core::test_exports::{
     delivery_hub_with_mailbox, mailbox_run_one_poll_tick, outbox_count_for_target,
-    outbox_seed_direct, ContactRepo, DeliveryHub, Group, KeyPackage, KeyPackageRepo,
-    MlsGroupRepo, MlsProvider, Pool, TestMailboxFactory,
+    outbox_seed_direct, ContactRepo, DeliveryHub, Group, KeyPackage, KeyPackageRepo, MlsGroupRepo,
+    MlsProvider, Pool, TestMailboxFactory,
 };
 use tokio::sync::broadcast;
 
@@ -66,15 +66,7 @@ fn install_contact_with_card(
         .unwrap();
     contacts.set_group_id(&peer.public(), group_id).unwrap();
 
-    let card = ContactCard::sign(
-        peer,
-        onion.to_string(),
-        mailboxes,
-        1,
-        24 * 3600,
-        0,
-    )
-    .unwrap();
+    let card = ContactCard::sign(peer, onion.to_string(), mailboxes, 1, 24 * 3600, 0).unwrap();
     contacts.put_card(&card).unwrap();
 }
 
@@ -97,11 +89,10 @@ async fn primary_unreachable_secondary_accepts() {
     let secondary = Arc::new(InProcessMailbox::new(secondary_onion));
     primary.fail_next_connects();
 
-    let factory: Arc<dyn TestMailboxFactory> =
-        Arc::new(InProcessMailboxFactory::new(vec![
-            primary.clone(),
-            secondary.clone(),
-        ]));
+    let factory: Arc<dyn TestMailboxFactory> = Arc::new(InProcessMailboxFactory::new(vec![
+        primary.clone(),
+        secondary.clone(),
+    ]));
 
     // Bob's card lists primary FIRST, then secondary.
     install_contact_with_card(
@@ -135,8 +126,7 @@ async fn primary_unreachable_secondary_accepts() {
     };
     let ciphertext = alice_group.encrypt(&envelope).unwrap();
     alice_group.save(&MlsGroupRepo::new(&alice_pool)).unwrap();
-    outbox_seed_direct(&alice_pool, &bob_id.public().0, &msg_id.0, &ciphertext)
-        .unwrap();
+    outbox_seed_direct(&alice_pool, &bob_id.public().0, &msg_id.0, &ciphertext).unwrap();
 
     // ── Drive fallback. Hub must walk past the failing primary and
     //    deposit into the secondary. ─────────────────────────────────
@@ -179,19 +169,17 @@ async fn primary_unreachable_secondary_accepts() {
     // walk has completed.)
     primary.allow_connects();
 
-    let primary_deposits =
-        mailbox_run_one_poll_tick(factory.as_ref(), primary_onion, &bob_id)
-            .await
-            .unwrap();
+    let primary_deposits = mailbox_run_one_poll_tick(factory.as_ref(), primary_onion, &bob_id)
+        .await
+        .unwrap();
     assert!(
         primary_deposits.is_empty(),
         "primary mailbox must be empty (every connect failed)"
     );
 
-    let secondary_deposits =
-        mailbox_run_one_poll_tick(factory.as_ref(), secondary_onion, &bob_id)
-            .await
-            .unwrap();
+    let secondary_deposits = mailbox_run_one_poll_tick(factory.as_ref(), secondary_onion, &bob_id)
+        .await
+        .unwrap();
     assert_eq!(
         secondary_deposits.len(),
         1,

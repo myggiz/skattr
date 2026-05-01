@@ -948,8 +948,7 @@ where
         if let Ok(mut client) = factory.connect(&row.onion).await {
             // run_one_poll_tick fetches + server-side deletes deposits.
             // TODO Task 22.5: dispatch each deposit through DaemonInbound.
-            let _ =
-                crate::mailbox::poll::run_one_poll_tick(&mut client, &handle.identity).await;
+            let _ = crate::mailbox::poll::run_one_poll_tick(&mut client, &handle.identity).await;
         }
     }
 
@@ -2382,7 +2381,9 @@ mod tests {
         let id2 = repo.add_mine("beta.onion", 2_000).unwrap();
         repo.mark_status(id2, MailboxStatus::Unreachable).unwrap();
 
-        let res = execute_command(handle, Command::ListMailboxes).await.unwrap();
+        let res = execute_command(handle, Command::ListMailboxes)
+            .await
+            .unwrap();
         let summaries: Vec<MailboxSummary> = match res {
             CommandResult::Mailboxes(s) => s,
             other => panic!("expected Mailboxes, got {other:?}"),
@@ -2411,9 +2412,7 @@ mod tests {
                 rusqlite::params![],
                 |r| r.get::<_, i64>(0),
             )
-            .map_err(|e| {
-                crate::error::CoreError::Storage(StorageErrorKind::Other(e.to_string()))
-            })
+            .map_err(|e| crate::error::CoreError::Storage(StorageErrorKind::Other(e.to_string())))
         })
         .map(|v| u64::try_from(v).unwrap_or(0))
         .unwrap_or(0)
@@ -2433,10 +2432,7 @@ mod tests {
         let res = execute_command(handle.clone(), Command::RotateOnion)
             .await
             .unwrap();
-        assert!(
-            matches!(res, CommandResult::Ok),
-            "expected Ok, got {res:?}"
-        );
+        assert!(matches!(res, CommandResult::Ok), "expected Ok, got {res:?}");
 
         // The self-card version counter must have advanced by exactly 1.
         let version_after = read_self_card_version(&handle.pool);
