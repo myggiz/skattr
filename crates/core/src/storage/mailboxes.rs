@@ -44,11 +44,17 @@ impl MailboxRole {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MailboxStatus {
+    /// Status has not yet been determined.
     Unknown,
+    /// Mailbox is reachable and accepting connections.
     Reachable,
+    /// Mailbox could not be reached during the last poll.
     Unreachable,
+    /// Mailbox responded but is enforcing a rate limit.
     RateLimited,
+    /// De-registration has been requested but not yet confirmed by the server.
     PendingRemoval,
+    /// De-registration confirmed; mailbox is no longer in use.
     Removed,
 }
 

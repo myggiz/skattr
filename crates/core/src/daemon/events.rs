@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Myggiz AB
 
+#![cfg_attr(test, allow(clippy::unwrap_used))]
+
 //! Events emitted by the daemon to subscribers.
 
 use serde::{Deserialize, Serialize};
 
 use crate::envelope::MessageId;
 use crate::identity::PublicKey;
+
+pub use crate::storage::mailboxes::MailboxStatus;
 
 /// Tor-layer status, surfaced for UI bootstrap progress bars.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -66,4 +70,49 @@ pub enum Event {
         /// Current status.
         status: DeliveryStatus,
     },
+    /// One of our `'mine'` mailboxes changed reachability/auth status.
+    MailboxStatusChanged {
+        /// Row id from the `mailboxes` table.
+        mailbox_id: i64,
+        /// New status.
+        status: MailboxStatus,
+    },
+    /// A peer published a higher-version `ContactCard`. UI re-fetches the
+    /// contact summary on receipt.
+    ContactCardReceived {
+        /// Peer identity pubkey.
+        contact: PublicKey,
+        /// New monotonic version (always strictly greater than the
+        /// previously-stored card's version, per `ContactRepo::put_card`).
+        version: u64,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mailbox_status_changed_round_trips_cbor() {
+        let e = Event::MailboxStatusChanged {
+            mailbox_id: 42,
+            status: MailboxStatus::Reachable,
+        };
+        let mut buf = Vec::new();
+        ciborium::into_writer(&e, &mut buf).unwrap();
+        let back: Event = ciborium::from_reader(&buf[..]).unwrap();
+        assert!(matches!(back, Event::MailboxStatusChanged { mailbox_id: 42, .. }));
+    }
+
+    #[test]
+    fn contact_card_received_round_trips_cbor() {
+        let e = Event::ContactCardReceived {
+            contact: PublicKey([7; 32]),
+            version: 5,
+        };
+        let mut buf = Vec::new();
+        ciborium::into_writer(&e, &mut buf).unwrap();
+        let back: Event = ciborium::from_reader(&buf[..]).unwrap();
+        assert!(matches!(back, Event::ContactCardReceived { version: 5, .. }));
+    }
 }
