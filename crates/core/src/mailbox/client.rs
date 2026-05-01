@@ -133,6 +133,47 @@ where
         }
     }
 
+    /// Delete a set of deposits from the mailbox, authenticated by signature.
+    pub async fn delete(
+        &mut self,
+        identity: &crate::identity::IdentityKey,
+        deposit_ids: Vec<[u8; 16]>,
+    ) -> Result<crate::mailbox::protocol::DeleteOk> {
+        use crate::mailbox::auth::{payload_digest, signing_input, OP_BYTE_DELETE};
+        use crate::mailbox::protocol::{Delete, DeleteOk};
+
+        let pk: [u8; 32] = identity.public().0;
+        let id_hash = recipient_hash_from_pubkey(&pk);
+        let nonce = self.challenge(id_hash).await?;
+
+        // Frozen tuple shape for Delete: (version, pubkey, nonce, deposit_ids)
+        let digest = payload_digest(&(PROTOCOL_VERSION, pk, nonce, deposit_ids.as_slice()))
+            .map_err(|e| CoreError::MailboxClient(MailboxClientErrorKind::Other(e)))?;
+        let input = signing_input(&nonce, OP_BYTE_DELETE, &digest);
+        let sig = identity.sign(&input).0;
+
+        self.framed
+            .send(MailboxFrame::Delete(Delete {
+                version: PROTOCOL_VERSION,
+                identity_pubkey: pk,
+                nonce,
+                signature: sig,
+                deposit_ids,
+            }))
+            .await
+            .map_err(|_| CoreError::MailboxClient(MailboxClientErrorKind::Unreachable))?;
+        match self.framed.next().await {
+            Some(Ok(MailboxFrame::DeleteOk(ok))) => Ok(ok),
+            Some(Ok(MailboxFrame::Error(ErrorBody { code, .. }))) => {
+                Err(CoreError::MailboxClient(map_error(code)))
+            }
+            Some(Ok(_)) => Err(CoreError::MailboxClient(MailboxClientErrorKind::Malformed)),
+            Some(Err(_)) | None => {
+                Err(CoreError::MailboxClient(MailboxClientErrorKind::Unreachable))
+            }
+        }
+    }
+
     /// Single Challenge round-trip — used by AddMailbox liveness check.
     pub async fn probe(&mut self, identity_hash: [u8; 32]) -> Result<()> {
         self.framed
@@ -341,6 +382,60 @@ mod tests {
         let resp = client.fetch(&signer).await.unwrap();
         assert_eq!(resp.deposits.len(), 1);
         assert_eq!(resp.deposits[0].deposit_id, [0xEE; 16]);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn delete_signs_with_deposit_ids_in_tuple() {
+        use crate::identity::IdentityKey;
+        use crate::mailbox::protocol::{ChallengeNonce, DeleteOk};
+        let signer = IdentityKey::generate().unwrap();
+        let (a, b) = duplex(64 * 1024);
+        let server = tokio::spawn(async move {
+            let mut framed = Framed::new(b, MailboxFrameCodec::new());
+            let _ = framed.next().await;
+            framed
+                .send(MailboxFrame::ChallengeNonce(ChallengeNonce {
+                    nonce: [0x88; 32],
+                    issued_at: 1,
+                }))
+                .await
+                .unwrap();
+            let MailboxFrame::Delete(d) = framed.next().await.unwrap().unwrap() else {
+                panic!()
+            };
+            let digest = crate::mailbox::auth::payload_digest(&(
+                d.version,
+                d.identity_pubkey,
+                d.nonce,
+                d.deposit_ids.as_slice(),
+            ))
+            .unwrap();
+            let input = crate::mailbox::auth::signing_input(
+                &d.nonce,
+                crate::mailbox::auth::OP_BYTE_DELETE,
+                &digest,
+            );
+            use ed25519_dalek::{Signature as DSig, Verifier, VerifyingKey};
+            VerifyingKey::from_bytes(&d.identity_pubkey)
+                .unwrap()
+                .verify(&input, &DSig::from_bytes(&d.signature))
+                .unwrap();
+            framed
+                .send(MailboxFrame::DeleteOk(DeleteOk {
+                    deleted: 2,
+                    not_found: 0,
+                }))
+                .await
+                .unwrap();
+        });
+
+        let mut client = MailboxClient::from_stream("a.onion".into(), a);
+        let ok = client
+            .delete(&signer, vec![[1; 16], [2; 16]])
+            .await
+            .unwrap();
+        assert_eq!(ok.deleted, 2);
         server.await.unwrap();
     }
 
