@@ -84,7 +84,8 @@ mod schema_version_tests {
     #[test]
     fn schema_version_returns_latest_after_open() {
         let tmp = tempfile::tempdir().unwrap();
-        let seed = Zeroizing::new([0u8; 32]);
+        // `Pool::open` takes `&Seed`, not raw bytes — see crates/core/src/storage/pool.rs:48.
+        let seed = crate::identity::Seed::generate().unwrap();
         let pool = Pool::open(tmp.path(), &seed).unwrap();
         // The migration count must be > 0 for this test to be meaningful.
         let v = pool.schema_version().unwrap();
@@ -157,32 +158,51 @@ Append at end of `crates/core/src/storage/messages.rs` inside the existing `#[cf
 ```rust
 #[test]
 fn latest_for_group_returns_max_id_row() {
+    use crate::identity::Seed;
     use crate::storage::Pool;
-    use zeroize::Zeroizing;
 
     let tmp = tempfile::tempdir().unwrap();
-    let seed = Zeroizing::new([1u8; 32]);
+    let seed = Seed::generate().unwrap();
     let pool = Pool::open(tmp.path(), &seed).unwrap();
     let repo = MessageRepo::new(&pool);
 
     let group_id = vec![0xAA; 32];
     // Insert two rows; latest_for_group should return the higher-id one.
-    let env_a = sample_envelope(*b"A___________aaaa", "first");
-    let env_b = sample_envelope(*b"B___________bbbb", "second");
-    repo.insert(&env_a, &group_id, &[1; 32], 0, 100).unwrap();
-    repo.insert(&env_b, &group_id, &[1; 32], 0, 200).unwrap();
+    // `MessageRepo::insert` takes `InsertParams<'_>` (a struct), not positional args —
+    // see crates/core/src/storage/messages.rs:65.
+    let env_a = sample_envelope([0xA0; 16], "first");
+    let env_b = sample_envelope([0xB0; 16], "second");
+    let pk = [1u8; 32];
+    repo.insert(InsertParams {
+        group_id: &group_id,
+        sender: &pk,
+        envelope: &env_a,
+        mls_generation: 0,
+        ts_daemon_recv: 100,
+    })
+    .unwrap();
+    repo.insert(InsertParams {
+        group_id: &group_id,
+        sender: &pk,
+        envelope: &env_b,
+        mls_generation: 0,
+        ts_daemon_recv: 200,
+    })
+    .unwrap();
 
-    let out = repo.latest_for_group(&group_id).unwrap();
-    let row = out.expect("at least one row");
+    let row = repo
+        .latest_for_group(&group_id)
+        .unwrap()
+        .expect("at least one row");
     assert_eq!(row.ts_daemon_recv, 200);
 }
 
 #[test]
 fn latest_for_group_returns_none_when_empty() {
+    use crate::identity::Seed;
     use crate::storage::Pool;
-    use zeroize::Zeroizing;
     let tmp = tempfile::tempdir().unwrap();
-    let seed = Zeroizing::new([2u8; 32]);
+    let seed = Seed::generate().unwrap();
     let pool = Pool::open(tmp.path(), &seed).unwrap();
     let repo = MessageRepo::new(&pool);
     assert!(repo.latest_for_group(&[0xBB; 32]).unwrap().is_none());
@@ -1202,9 +1222,13 @@ where
 
     // Order: last_ts_recv DESC NULLS LAST, added_at DESC. Sort in
     // Rust because the underlying repo doesn't expose a JOIN.
+    // DESC NULLS LAST on last_ts_recv; tie-break by added_at DESC.
+    // `sort_by` semantics: closure returns the ordering of `a` relative
+    // to `b` — `Less` means `a` comes first. For DESC, when b's value
+    // is greater we return `Greater` so `a` sorts after.
     summaries.sort_by(|a, b| {
-        match (b.last_ts_recv, a.last_ts_recv) {
-            (Some(bv), Some(av)) => bv.cmp(&av).then(b.added_at.cmp(&a.added_at)),
+        match (a.last_ts_recv, b.last_ts_recv) {
+            (Some(av), Some(bv)) => bv.cmp(&av).then(b.added_at.cmp(&a.added_at)),
             (Some(_), None) => std::cmp::Ordering::Less,
             (None, Some(_)) => std::cmp::Ordering::Greater,
             (None, None) => b.added_at.cmp(&a.added_at),
