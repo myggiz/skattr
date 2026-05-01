@@ -118,6 +118,10 @@ sd-notify = "0.4"
 proptest = "1"
 tempfile = "3"
 
+# UI / codegen
+ts-rs = { version = "9", default-features = false, features = ["serde-compat", "no-serde-warnings"] }
+parking_lot = "0.12"
+
 [profile.release]
 lto = "fat"
 codegen-units = 1

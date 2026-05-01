@@ -71,6 +71,9 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 directories = { workspace = true }
 
+# TypeScript codegen
+ts-rs = { workspace = true }
+
 # Optional: QR rendering
 qrcode = { workspace = true, optional = true }
 # Optional: fuzzing harness support
