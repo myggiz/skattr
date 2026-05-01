@@ -111,6 +111,26 @@ pub mod test_exports {
         Ok(())
     }
 
+    /// Test-only helper: read `self_card_state.version` from the pool.
+    /// Used by `Command::RotateOnion` integration tests to assert the
+    /// version counter advances.
+    pub fn self_card_state_version(pool: &crate::storage::Pool) -> crate::error::Result<u64> {
+        pool.with(|c| {
+            let v: i64 = c
+                .query_row(
+                    "SELECT version FROM self_card_state WHERE id = 1",
+                    rusqlite::params![],
+                    |r| r.get(0),
+                )
+                .map_err(|e| {
+                    crate::error::CoreError::Storage(crate::storage::StorageErrorKind::Other(
+                        format!("self_card_state version: {e}"),
+                    ))
+                })?;
+            Ok(u64::try_from(v).unwrap_or(0))
+        })
+    }
+
     /// Test-only helper: count outbox rows for a given `target` pubkey.
     /// Used by drain assertions.
     pub fn outbox_count_for_target(
@@ -154,14 +174,8 @@ pub mod test_exports {
     /// Object-safe stream alias re-exported for the integration-test
     /// `MailboxConnectFactory` impl. Mirrors the `pub(crate)` trait in
     /// `mailbox::poll`.
-    pub trait MailboxStream:
-        tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin
-    {
-    }
-    impl<T> MailboxStream for T where
-        T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin
-    {
-    }
+    pub trait MailboxStream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin {}
+    impl<T> MailboxStream for T where T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin {}
 
     /// Cross-crate factory trait, mirrors `mailbox::poll::MailboxConnectFactory`
     /// but with a public name so integration tests can implement it.
@@ -170,10 +184,7 @@ pub mod test_exports {
     #[async_trait::async_trait]
     pub trait TestMailboxFactory: Send + Sync + 'static {
         /// Open a fresh connection to the mailbox at `onion`.
-        async fn connect(
-            &self,
-            onion: &str,
-        ) -> crate::error::Result<MailboxClientHandle>;
+        async fn connect(&self, onion: &str) -> crate::error::Result<MailboxClientHandle>;
     }
 
     /// Erased `MailboxClient<Box<dyn MailboxStream>>` returned by the
@@ -274,8 +285,7 @@ pub mod test_exports {
         // integration test can observe scheduler notifications.
         let (priv_tx, mut priv_rx) =
             tokio::sync::mpsc::channel::<crate::mailbox::poll::PollerCtrl>(16);
-        let (pub_observer_tx, pub_observer_rx) =
-            tokio::sync::mpsc::channel::<TestPollerCtrl>(16);
+        let (pub_observer_tx, pub_observer_rx) = tokio::sync::mpsc::channel::<TestPollerCtrl>(16);
 
         tokio::spawn(async move {
             while let Some(msg) = priv_rx.recv().await {
