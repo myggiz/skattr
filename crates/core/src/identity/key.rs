@@ -22,7 +22,12 @@ use crate::error::{CoreError, Result};
 /// `Ord` / `PartialOrd` derive lexicographic byte order; used for
 /// stable display sorts and for deterministic ordering in tests.
 /// Not a cryptographic ordering — do not use for security decisions.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, ts_rs::TS)]
+#[ts(
+    export,
+    export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/",
+    type = "string"
+)]
 pub struct PublicKey(pub [u8; 32]);
 
 impl PublicKey {

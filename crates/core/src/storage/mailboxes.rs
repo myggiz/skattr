@@ -41,8 +41,9 @@ impl MailboxRole {
 }
 
 /// Mirrors the `mailboxes.status` CHECK constraint.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/")]
 pub enum MailboxStatus {
     /// Status has not yet been determined.
     Unknown,

@@ -16,8 +16,9 @@ use crate::identity::PublicKey;
 use crate::invite::InviteLink;
 
 /// Request sent into the daemon.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
+#[ts(export, export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/")]
 pub enum Command {
     /// Generate a fresh invite link and surface it for display / QR.
     CreateInvite {
@@ -130,8 +131,9 @@ pub enum Command {
 }
 
 /// Outcome of a `SendMessage` command after the inline-delivery wait.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/")]
 pub enum SendStatus {
     /// Hub accepted the ciphertext; ACK not seen within the inline wait.
     Queued,
@@ -140,8 +142,9 @@ pub enum SendStatus {
 }
 
 /// Direction of a stored message relative to the local identity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/")]
 pub enum Direction {
     /// Received from peer.
     Incoming,
@@ -150,7 +153,8 @@ pub enum Direction {
 }
 
 /// Wire-safe projection of a contact row + latest card.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/")]
 pub struct ContactSummary {
     /// Ed25519 identity pubkey.
     pub pubkey: PublicKey,
@@ -179,7 +183,8 @@ pub struct ContactSummary {
 }
 
 /// Wire-safe projection of a persisted message row.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/")]
 pub struct MessageRecord {
     /// SQLite primary key — stable within one node; used by UI for scroll
     /// anchoring, mark_read cursor targeting, and trace correlation.
@@ -233,7 +238,8 @@ impl MessageRecord {
 }
 
 /// One full-text search hit returned by `Command::SearchMessages`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/")]
 pub struct SearchHitRecord {
     /// Underlying message row projection.
     pub record: MessageRecord,
@@ -244,8 +250,9 @@ pub struct SearchHitRecord {
 }
 
 /// Response returned for a completed [`Command`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[serde(tag = "result", content = "data", rename_all = "snake_case")]
+#[ts(export, export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/")]
 pub enum CommandResult {
     /// The invite link for [`Command::CreateInvite`].
     InviteCreated {
@@ -311,7 +318,8 @@ pub enum CommandResult {
 }
 
 /// Wire-safe projection of a `mailboxes` row for CLI / UI display.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
+#[ts(export, export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/")]
 pub struct MailboxSummary {
     /// SQLite primary key of the `mailboxes` row.
     pub id: i64,

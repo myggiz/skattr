@@ -11,8 +11,9 @@ use serde::{Deserialize, Serialize};
 use crate::envelope::message::MessageId;
 
 /// Payload discriminator.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[ts(export, export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/")]
 pub enum Kind {
     /// Plain UTF-8 text.
     Text {
@@ -21,7 +22,8 @@ pub enum Kind {
     },
     /// File attachment manifest (chunk hashes live in [`Self::File::manifest`]).
     File {
-        /// CBOR-encoded attachment manifest.
+        /// CBOR-encoded attachment manifest (raw bytes, base64 in JSON contexts).
+        #[ts(type = "string")]
         manifest: Vec<u8>,
     },
     /// Emoji reaction to an earlier message.
@@ -52,6 +54,10 @@ pub enum Kind {
         /// Signed card carrying the new onion + mailbox list. Verified
         /// against the sender's identity by the receiver's inbound
         /// dispatcher. Boxed to keep `Kind`'s size reasonable.
+        ///
+        /// Skipped in TS export: the UI receives this via `Event::ContactCardReceived`
+        /// and re-fetches the summary; it does not need the raw card bytes.
+        #[ts(skip)]
         card: Box<crate::contact::ContactCard>,
     },
 }

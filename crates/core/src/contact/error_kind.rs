@@ -7,8 +7,9 @@
 
 use thiserror::Error;
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, ts_rs::TS)]
 #[non_exhaustive]
+#[ts(export, export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/")]
 pub enum ContactErrorKind {
     /// No contact row found for the given identity key or prefix.
     #[error("contact not found")]

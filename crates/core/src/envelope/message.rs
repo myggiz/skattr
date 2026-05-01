@@ -12,7 +12,12 @@ use crate::error::Result;
 ///
 /// Used for ACK correlation and receiver-side deduplication over a
 /// 24-hour sliding window per sender.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
+#[ts(
+    export,
+    export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/",
+    type = "string"
+)]
 pub struct MessageId(pub [u8; 16]);
 
 impl MessageId {
@@ -26,7 +31,8 @@ impl MessageId {
 }
 
 /// Wire envelope carried inside MLS application messages.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/")]
 pub struct Envelope {
     /// Wire format version. Currently `1`.
     pub v: u8,
