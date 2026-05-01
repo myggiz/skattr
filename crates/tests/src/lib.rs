@@ -34,6 +34,8 @@ mod history_sweep;
 #[cfg(test)]
 mod invite_roundtrip;
 #[cfg(test)]
+mod add_mailbox_validates;
+#[cfg(test)]
 mod mailbox_codec_parity;
 #[cfg(test)]
 mod mailbox_failover;
@@ -43,6 +45,8 @@ mod mailbox_harness;
 mod mailbox_offline_delivery;
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod mailbox_real_tor;
+#[cfg(test)]
+mod remove_mailbox_drains;
 #[cfg(test)]
 mod mls_pair;
 
