@@ -55,6 +55,10 @@ const ALL_MIGRATIONS: &[Migration] = &[
         version: 8,
         sql: include_str!("migrations/0008_mailbox_status_and_outbox_target_kind.sql"),
     },
+    Migration {
+        version: 9,
+        sql: include_str!("migrations/0009_self_card_state.sql"),
+    },
 ];
 
 /// Apply all pending migrations in order. Idempotent — re-running does
@@ -387,6 +391,21 @@ mod tests {
                 !names.iter().any(|n| n == "idx_outbox_target_message_id"),
                 "old unique index must be dropped"
             );
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn migration_0009_creates_self_card_state_singleton() {
+        let pool = Pool::in_memory();
+        pool.with(|c| {
+            let v: i64 = c
+                .query_row("SELECT version FROM self_card_state WHERE id = 1", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(v, 0);
             Ok(())
         })
         .unwrap();
