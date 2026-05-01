@@ -35,6 +35,10 @@ mod history_sweep;
 mod invite_roundtrip;
 #[cfg(test)]
 mod mailbox_codec_parity;
+#[cfg(test)]
+mod mailbox_harness;
+#[cfg(test)]
+mod mailbox_offline_delivery;
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod mailbox_real_tor;
 #[cfg(test)]

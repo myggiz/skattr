@@ -86,21 +86,40 @@ impl MailboxStatus {
 /// One row from the `mailboxes` table.
 #[derive(Debug, Clone)]
 pub struct MailboxRow {
+    /// Primary key.
     pub id: i64,
+    /// Onion service identifier (v3 format).
     pub onion: String,
+    /// Unix-seconds timestamp at which this row was first inserted.
     pub registered_at: i64,
+    /// Role string (`"mine"` or `"theirs"`).
     pub role: String,
+    /// Current connectivity status.
     pub status: MailboxStatus,
+    /// Unix-seconds timestamp of the most recent poll attempt, if any.
     pub last_poll_at: Option<i64>,
+    /// Unix-seconds timestamp of the most recent error, if any.
     pub last_error_at: Option<i64>,
+    /// Short error-kind string for the most recent failure, if any.
     pub last_error_kind: Option<String>,
 }
 
+/// Repository for the `mailboxes` table — both `'mine'` and `'theirs'` rows.
 pub struct MailboxRepo<'p> {
     pool: &'p Pool,
 }
 
 impl<'p> MailboxRepo<'p> {
+    /// Construct a `MailboxRepo` borrowing from `pool`.
+    ///
+    /// `pub` under `feature = "test-harness"` so the integration test
+    /// crate can build mailbox-aware harnesses; `pub(crate)` otherwise.
+    #[cfg(feature = "test-harness")]
+    pub fn new(pool: &'p Pool) -> Self {
+        Self { pool }
+    }
+
+    #[cfg(not(feature = "test-harness"))]
     pub(crate) fn new(pool: &'p Pool) -> Self {
         Self { pool }
     }
