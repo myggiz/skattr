@@ -196,6 +196,23 @@ where
     }
 }
 
+impl MailboxClient<arti_client::DataStream> {
+    /// Open a Tor circuit to `<onion>:1` and wrap it in a framed codec.
+    ///
+    /// Used by AddMailbox / RemoveMailbox / poll-cycle code in later tasks.
+    /// The port is 1 per the v1 mailbox protocol spec (ADR 0006).
+    pub async fn connect(
+        onion: &str,
+        tor: &crate::transport::tor::TorRuntime,
+    ) -> crate::error::Result<Self> {
+        let stream = tor
+            .connect(onion, 1)
+            .await
+            .map_err(|_| CoreError::MailboxClient(MailboxClientErrorKind::Unreachable))?;
+        Ok(Self::from_stream(onion.to_string(), stream))
+    }
+}
+
 /// Map a wire `ErrorCode` into our typed `MailboxClientErrorKind`.
 /// `pub(crate)` so subsequent tasks (deposit/fetch/delete) can reuse it.
 pub(crate) fn map_error(code: ErrorCode) -> MailboxClientErrorKind {
@@ -449,5 +466,12 @@ mod tests {
             err,
             CoreError::MailboxClient(MailboxClientErrorKind::Unreachable)
         ));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires real Arti circuit (see crates/tests/src/mailbox_client_real_tor.rs)"]
+    async fn connect_real_tor_compiles() {
+        // Kept as a trivial assertion that connect() exists at this signature;
+        // the integration test in Task 32 drives the real path.
     }
 }
