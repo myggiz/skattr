@@ -24,7 +24,7 @@ use crate::transport::tor::{TorConfig, TorRuntime};
 const EVENT_CHANNEL_CAPACITY: usize = 1024;
 
 /// Published readiness of the daemon: onion address + bound IPC path.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Ready {
     /// Full v3 onion address, without port suffix.
     pub onion: String,

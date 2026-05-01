@@ -1,0 +1,35 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Skattr",
+  "version": "0.0.1",
+  "identifier": "net.myggiz.skattr",
+  "build": {
+    "frontendDist": "../src-svelte/build",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "pnpm --dir src-svelte dev",
+    "beforeBuildCommand": "pnpm --dir src-svelte build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Skattr",
+        "width": 1100,
+        "height": 720,
+        "minWidth": 720,
+        "minHeight": 480,
+        "decorations": true,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data:; font-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: tauri:; script-src 'self'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/icon.ico", "icons/icon.icns"],
+    "category": "SocialNetworking",
+    "shortDescription": "Metadata-resistant P2P encrypted messenger.",
+    "longDescription": "Skattr is a desktop-first, metadata-resistant P2P encrypted messenger. All traffic over Tor v3 onion services. MLS for message encryption."
+  }
+}
