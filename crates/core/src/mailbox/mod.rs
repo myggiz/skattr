@@ -11,6 +11,6 @@ pub mod auth;
 pub(crate) mod client;
 pub(crate) mod codec;
 pub mod protocol;
-pub(crate) mod scheduler;
+pub(crate) mod poll;
 
 pub(crate) use client::{map_error, recipient_hash_from_pubkey, MailboxClient};
