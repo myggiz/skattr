@@ -44,6 +44,36 @@ where
         &self.onion
     }
 
+    /// Deposit an MLS-encrypted blob for a recipient. No auth required by
+    /// the protocol — depositor anonymity is the whole point of v3 onions.
+    pub async fn deposit(
+        &mut self,
+        recipient_hash: [u8; 32],
+        ciphertext: Vec<u8>,
+        ttl_request: u32,
+    ) -> Result<crate::mailbox::protocol::DepositOk> {
+        use crate::mailbox::protocol::Deposit;
+        self.framed
+            .send(MailboxFrame::Deposit(Deposit {
+                version: PROTOCOL_VERSION,
+                recipient_hash,
+                ciphertext,
+                ttl_request,
+            }))
+            .await
+            .map_err(|_| CoreError::MailboxClient(MailboxClientErrorKind::Unreachable))?;
+        match self.framed.next().await {
+            Some(Ok(MailboxFrame::DepositOk(ok))) => Ok(ok),
+            Some(Ok(MailboxFrame::Error(ErrorBody { code, .. }))) => {
+                Err(CoreError::MailboxClient(map_error(code)))
+            }
+            Some(Ok(_)) => Err(CoreError::MailboxClient(MailboxClientErrorKind::Malformed)),
+            Some(Err(_)) | None => {
+                Err(CoreError::MailboxClient(MailboxClientErrorKind::Unreachable))
+            }
+        }
+    }
+
     /// Single Challenge round-trip — used by AddMailbox liveness check.
     pub async fn probe(&mut self, identity_hash: [u8; 32]) -> Result<()> {
         self.framed
@@ -143,6 +173,54 @@ mod tests {
         assert!(matches!(
             err,
             CoreError::MailboxClient(MailboxClientErrorKind::RateLimited)
+        ));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn deposit_returns_deposit_id_on_ok() {
+        use crate::mailbox::protocol::{Deposit, DepositOk};
+        let (a, b) = duplex(64 * 1024);
+        let server = tokio::spawn(async move {
+            let mut framed = Framed::new(b, MailboxFrameCodec::new());
+            let req = framed.next().await.unwrap().unwrap();
+            let MailboxFrame::Deposit(d) = req else {
+                panic!("expected Deposit")
+            };
+            assert_eq!(d.recipient_hash, [0xAA; 32]);
+            framed
+                .send(MailboxFrame::DepositOk(DepositOk {
+                    deposit_id: [0x42; 16],
+                    expires_at: 999,
+                }))
+                .await
+                .unwrap();
+        });
+        let mut client = MailboxClient::from_stream("a.onion".into(), a);
+        let ok = client.deposit([0xAA; 32], vec![1, 2, 3], 86_400).await.unwrap();
+        assert_eq!(ok.deposit_id, [0x42; 16]);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn deposit_recipient_full_maps_kind() {
+        let (a, b) = duplex(64 * 1024);
+        let server = tokio::spawn(async move {
+            let mut framed = Framed::new(b, MailboxFrameCodec::new());
+            let _ = framed.next().await;
+            framed
+                .send(MailboxFrame::Error(ErrorBody {
+                    code: ErrorCode::RecipientFull,
+                    message: "full".into(),
+                }))
+                .await
+                .unwrap();
+        });
+        let mut client = MailboxClient::from_stream("a.onion".into(), a);
+        let err = client.deposit([0; 32], vec![1], 1).await.unwrap_err();
+        assert!(matches!(
+            err,
+            CoreError::MailboxClient(MailboxClientErrorKind::RecipientFull)
         ));
         server.await.unwrap();
     }
