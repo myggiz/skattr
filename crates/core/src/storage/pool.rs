@@ -131,6 +131,23 @@ impl Pool {
         Ok(())
     }
 
+    /// Return the highest applied migration version. Reads from the
+    /// `schema_version` table that the migrations runner maintains.
+    pub fn schema_version(&self) -> Result<u32> {
+        self.with(|c| {
+            let v: u32 = c
+                .query_row(
+                    "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!("schema_version: {e}")))
+                })?;
+            Ok(v)
+        })
+    }
+
     /// Test-only: construct a Pool from an in-memory connection. Skips
     /// all encryption + file-path bookkeeping. Used by repo unit tests
     /// and integration tests under the `test-harness` feature.
@@ -349,5 +366,19 @@ mod tests {
             })
             .unwrap();
         assert_eq!(count, 0, "transaction closure Err must roll back");
+    }
+}
+
+#[cfg(test)]
+mod schema_version_tests {
+    use super::*;
+
+    #[test]
+    fn schema_version_returns_latest_after_open() {
+        let tmp = tempfile::tempdir().unwrap();
+        let seed = Seed::generate().unwrap();
+        let pool = Pool::open(tmp.path(), &seed).unwrap();
+        let v = pool.schema_version().unwrap();
+        assert!(v >= 9, "expected schema_version >= 9, got {v}");
     }
 }
