@@ -82,6 +82,38 @@ impl DaemonInbound {
 
         let envelope = group.decrypt(ciphertext)?;
 
+        // --- ContactCardUpdate fast path ---
+        // Intercept before the message-persist transaction so that card
+        // updates never land in the `messages` table.
+        if let crate::envelope::Kind::ContactCardUpdate { card } = &envelope.kind {
+            let now_secs = now_unix_seconds();
+            let claimed_identity = card.verify(now_secs)?;
+            // Cross-check: the card's identity MUST equal the MLS-authenticated
+            // sender. A peer cannot publish a card claiming someone else's identity.
+            if claimed_identity != from {
+                tracing::warn!(
+                    peer = ?from,
+                    "inbound: card-update sender mismatch — dropping"
+                );
+                return Err(crate::error::CoreError::Contact(
+                    crate::contact::ContactErrorKind::Other(
+                        "card-update: sender identity mismatch".into(),
+                    ),
+                ));
+            }
+            // Persist (transactional, version-monotonic per ContactRepo::put_card).
+            let contacts = crate::storage::ContactRepo::new(&self.pool);
+            contacts.put_card(card)?;
+            // Emit an event so UI can refresh.
+            let _ = self.events_tx.send(Event::ContactCardReceived {
+                contact: from,
+                version: card.body.version,
+            });
+            // No message row, no MessageReceived. Returning the envelope's
+            // message id keeps the caller's ACK contract clean.
+            return Ok(envelope.id);
+        }
+
         // MLS generation is captured *after* decrypt so the broadcast
         // event reflects the epoch under which this message was
         // authenticated. Likewise `ts_daemon_recv` is the local clock at
@@ -407,6 +439,239 @@ mod tests {
             }
             other => panic!("expected MessageReceived, got {other:?}"),
         }
+    }
+
+    /// ContactCardUpdate envelope: card is persisted, ContactCardReceived
+    /// event fires, NO MessageReceived event, NO messages row created.
+    #[tokio::test]
+    async fn contact_card_update_is_persisted_and_emits_event_without_message_row() {
+        use crate::contact::Contact;
+        use crate::mls::key_package::KeyPackage;
+        use crate::storage::key_packages::KeyPackageRepo;
+
+        let pool = Arc::new(Pool::in_memory());
+        let (events_tx, mut rx) = broadcast::channel::<Event>(16);
+
+        // Set up identities.
+        let alice_seed = crate::identity::Seed::generate().unwrap();
+        let alice_id = crate::identity::IdentityKey::from_seed(&alice_seed).unwrap();
+        let bob_seed = crate::identity::Seed::generate().unwrap();
+        let bob_id = crate::identity::IdentityKey::from_seed(&bob_seed).unwrap();
+        let peer = bob_id.public();
+
+        // Build 2-member MLS group (alice adds bob).
+        let bob_provider = crate::mls::provider::MlsProvider::new();
+        let kp_repo = KeyPackageRepo::new(&pool);
+        let bob_kp = KeyPackage::generate(&bob_id, &bob_provider, &kp_repo).unwrap();
+        let mut alice_group =
+            crate::mls::Group::create_solo(&alice_id, None, crate::mls::provider::MlsProvider::new())
+                .unwrap();
+        let (welcome, _commit) = alice_group.add_member(&bob_kp, None).unwrap();
+        let group_id_bytes = alice_group.id().0.clone();
+        let mut bob_group =
+            crate::mls::Group::join_from_welcome(&bob_id, &welcome, None, bob_provider).unwrap();
+
+        // Pre-upsert bob as a contact in alice's pool so put_card has a row to attach to.
+        let contact_repo = crate::storage::ContactRepo::new(&pool);
+        contact_repo
+            .upsert(&Contact {
+                identity: peer,
+                display_name: Some("Bob".into()),
+                added_at: 0,
+                card: None,
+            })
+            .unwrap();
+
+        // Bob signs a ContactCard claiming his own identity at version 2.
+        let now_secs = now_unix_seconds();
+        let card = crate::contact::ContactCard::sign(
+            &bob_id,
+            "aaaa.onion".into(),
+            vec!["bbbb.onion".into()],
+            2,
+            3600,
+            now_secs,
+        )
+        .unwrap();
+
+        // Bob encrypts a ContactCardUpdate envelope.
+        let now_ms = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0),
+        )
+        .unwrap_or(0);
+        let msg_id = MessageId::generate();
+        let env = crate::envelope::Envelope {
+            v: 1,
+            id: msg_id,
+            ts: now_ms,
+            reply_to: None,
+            kind: Kind::ContactCardUpdate {
+                card: Box::new(card),
+            },
+        };
+        let ciphertext = bob_group.encrypt(&env).unwrap();
+
+        // Persist alice's group state.
+        let group_repo = MlsGroupRepo::new(&pool);
+        alice_group.save(&group_repo).unwrap();
+
+        let inbound = DaemonInbound::new(pool.clone(), events_tx.clone());
+        let returned_mid = inbound
+            .dispatch_for_group(peer, &group_id_bytes, &ciphertext)
+            .unwrap();
+
+        // Message id must round-trip.
+        assert_eq!(returned_mid.0, msg_id.0);
+
+        // ContactCardReceived event must arrive.
+        match tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv()).await {
+            Ok(Ok(Event::ContactCardReceived { contact, version })) => {
+                assert_eq!(contact, peer);
+                assert_eq!(version, 2);
+            }
+            other => panic!("expected ContactCardReceived, got {other:?}"),
+        }
+
+        // No MessageReceived event must be queued.
+        // The channel should be empty (recv should time out immediately).
+        match tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await {
+            Err(_timeout) => {} // expected: no more events
+            Ok(Ok(Event::MessageReceived { .. })) => {
+                panic!("MessageReceived must NOT be emitted for ContactCardUpdate")
+            }
+            Ok(other) => panic!("unexpected: {other:?}"),
+        }
+
+        // alice's ContactRepo::latest_card(&bob) must return the new card.
+        let stored = contact_repo.latest_card(&peer).unwrap().unwrap();
+        assert_eq!(stored.body.version, 2);
+        assert_eq!(stored.body.onion, "aaaa.onion");
+
+        // No messages row for this group_id.
+        let msg_count: i64 = pool
+            .with(|c| {
+                c.query_row(
+                    "SELECT COUNT(*) FROM messages WHERE group_id = ?1",
+                    rusqlite::params![&group_id_bytes[..]],
+                    |r| r.get(0),
+                )
+                .map_err(|e| {
+                    crate::error::CoreError::Storage(crate::storage::StorageErrorKind::Other(
+                        e.to_string(),
+                    ))
+                })
+            })
+            .unwrap();
+        assert_eq!(msg_count, 0, "ContactCardUpdate must not create a messages row");
+    }
+
+    /// ContactCardUpdate where the card claims a different identity than the
+    /// MLS-authenticated sender: must be rejected with an error and must
+    /// not persist the card or emit any event.
+    #[tokio::test]
+    async fn contact_card_update_with_mismatched_identity_is_rejected() {
+        use crate::contact::Contact;
+        use crate::mls::key_package::KeyPackage;
+        use crate::storage::key_packages::KeyPackageRepo;
+
+        let pool = Arc::new(Pool::in_memory());
+        let (events_tx, mut rx) = broadcast::channel::<Event>(16);
+
+        // Set up identities: alice, bob (sender), charlie (identity claimed in card).
+        let alice_seed = crate::identity::Seed::generate().unwrap();
+        let alice_id = crate::identity::IdentityKey::from_seed(&alice_seed).unwrap();
+        let bob_seed = crate::identity::Seed::generate().unwrap();
+        let bob_id = crate::identity::IdentityKey::from_seed(&bob_seed).unwrap();
+        let charlie_seed = crate::identity::Seed::generate().unwrap();
+        let charlie_id = crate::identity::IdentityKey::from_seed(&charlie_seed).unwrap();
+        let peer = bob_id.public(); // MLS sender is bob
+
+        // Build 2-member MLS group.
+        let bob_provider = crate::mls::provider::MlsProvider::new();
+        let kp_repo = KeyPackageRepo::new(&pool);
+        let bob_kp = KeyPackage::generate(&bob_id, &bob_provider, &kp_repo).unwrap();
+        let mut alice_group =
+            crate::mls::Group::create_solo(&alice_id, None, crate::mls::provider::MlsProvider::new())
+                .unwrap();
+        let (welcome, _commit) = alice_group.add_member(&bob_kp, None).unwrap();
+        let group_id_bytes = alice_group.id().0.clone();
+        let mut bob_group =
+            crate::mls::Group::join_from_welcome(&bob_id, &welcome, None, bob_provider).unwrap();
+
+        // Pre-upsert both contacts.
+        let contact_repo = crate::storage::ContactRepo::new(&pool);
+        for (id, name) in [(&bob_id, "Bob"), (&charlie_id, "Charlie")] {
+            contact_repo
+                .upsert(&Contact {
+                    identity: id.public(),
+                    display_name: Some(name.into()),
+                    added_at: 0,
+                    card: None,
+                })
+                .unwrap();
+        }
+
+        // Bob signs a card claiming CHARLIE's identity (the mismatch).
+        let now_secs = now_unix_seconds();
+        // We build the card manually: sign with charlie's key but the
+        // MLS sender is bob — so the identity in the card won't match `peer`.
+        let card = crate::contact::ContactCard::sign(
+            &charlie_id, // signer != MLS sender (bob)
+            "cccc.onion".into(),
+            vec![],
+            1,
+            3600,
+            now_secs,
+        )
+        .unwrap();
+
+        // Bob encrypts the forged card inside his MLS session.
+        let now_ms = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0),
+        )
+        .unwrap_or(0);
+        let msg_id = MessageId::generate();
+        let env = crate::envelope::Envelope {
+            v: 1,
+            id: msg_id,
+            ts: now_ms,
+            reply_to: None,
+            kind: Kind::ContactCardUpdate {
+                card: Box::new(card),
+            },
+        };
+        let ciphertext = bob_group.encrypt(&env).unwrap();
+
+        // Persist alice's group state.
+        let group_repo = MlsGroupRepo::new(&pool);
+        alice_group.save(&group_repo).unwrap();
+
+        let inbound = DaemonInbound::new(pool.clone(), events_tx.clone());
+        let result = inbound.dispatch_for_group(peer, &group_id_bytes, &ciphertext);
+
+        // Must return Err.
+        assert!(
+            result.is_err(),
+            "mismatched identity card must be rejected; got Ok"
+        );
+
+        // No event must be emitted.
+        match tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await {
+            Err(_timeout) => {} // expected: no events
+            Ok(other) => panic!("unexpected event: {other:?}"),
+        }
+
+        // No card must have been persisted for bob.
+        assert!(
+            contact_repo.latest_card(&peer).unwrap().is_none(),
+            "no card must be stored for bob after mismatch rejection"
+        );
     }
 
     /// When no group exists for the given id, dispatch_for_group must

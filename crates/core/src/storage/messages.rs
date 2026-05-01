@@ -119,6 +119,9 @@ impl<'p> MessageRepo<'p> {
             crate::envelope::Kind::Edit { .. } => "edit",
             crate::envelope::Kind::Delete { .. } => "delete",
             crate::envelope::Kind::Typing => "typing",
+            crate::envelope::Kind::ContactCardUpdate { .. } => unreachable!(
+                "ContactCardUpdate is intercepted in DaemonInbound; never reaches MessageRepo"
+            ),
         };
         let body_text: Option<&str> = match &p.envelope.kind {
             crate::envelope::Kind::Text { body } => Some(body.as_str()),

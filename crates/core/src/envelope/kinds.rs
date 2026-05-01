@@ -45,4 +45,42 @@ pub enum Kind {
     },
     /// Typing indicator (ephemeral, not persisted).
     Typing,
+    /// Self-published `ContactCard` (rotation, mailbox-list change).
+    /// 2.B carries these inside MLS app messages so rotation reuses the
+    /// direct→mailbox fallback path with no new transport frame.
+    ContactCardUpdate {
+        /// Signed card carrying the new onion + mailbox list. Verified
+        /// against the sender's identity by the receiver's inbound
+        /// dispatcher. Boxed to keep `Kind`'s size reasonable.
+        card: Box<crate::contact::ContactCard>,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::contact::card::{ContactCard, ContactCardBody};
+    use crate::identity::{PublicKey, Signature};
+
+    #[allow(clippy::unwrap_used)]
+    #[test]
+    fn contact_card_update_round_trips_cbor() {
+        let card = ContactCard {
+            body: ContactCardBody {
+                identity: PublicKey([7; 32]),
+                onion: "aaaa.onion".into(),
+                mailboxes: vec!["bbbb.onion".into()],
+                version: 3,
+                expires_at: 1_700_000_000,
+            },
+            signature: Signature([0; 64]),
+        };
+        let kind = Kind::ContactCardUpdate {
+            card: Box::new(card),
+        };
+        let mut buf = Vec::new();
+        ciborium::into_writer(&kind, &mut buf).unwrap();
+        let back: Kind = ciborium::from_reader(&buf[..]).unwrap();
+        assert!(matches!(back, Kind::ContactCardUpdate { .. }));
+    }
 }
