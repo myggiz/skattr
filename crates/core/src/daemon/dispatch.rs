@@ -67,6 +67,7 @@ where
         Command::AddMailbox { onion } => handle_add_mailbox(handle, onion).await,
         Command::RemoveMailbox { id } => handle_remove_mailbox(handle, id).await,
         Command::ListMailboxes => handle_list_mailboxes(handle).await,
+        Command::DaemonInfo => handle_daemon_info(handle).await,
     }
 }
 
@@ -997,6 +998,25 @@ where
         })
         .collect();
     Ok(CommandResult::Mailboxes(summaries))
+}
+
+async fn handle_daemon_info<S>(
+    handle: Arc<DaemonHandle<S>>,
+) -> std::result::Result<CommandResult, IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let local_pubkey = handle.identity.public();
+    let current_onion = handle.onion();
+    let daemon_version = env!("CARGO_PKG_VERSION").to_string();
+    let schema_version = handle.pool.schema_version().map_err(map_err)?;
+
+    Ok(CommandResult::DaemonInfo {
+        local_pubkey,
+        current_onion,
+        daemon_version,
+        schema_version,
+    })
 }
 
 /// Map any `CoreError` to an `IpcError`. Projects via `CoreError::kind`

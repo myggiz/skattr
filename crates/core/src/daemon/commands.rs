@@ -113,6 +113,10 @@ pub enum Command {
     },
     /// List every `'mine'` mailbox row with its current status.
     ListMailboxes,
+    /// Return runtime metadata for the UI's About screen + first-paint
+    /// store hydration: identity pubkey, current onion (None until
+    /// Tor bootstraps), daemon version, schema version.
+    DaemonInfo,
     /// Export a paged window of persisted messages for the given peer.
     ExportHistory {
         /// Peer whose history to export.
@@ -278,6 +282,18 @@ pub enum CommandResult {
     },
     /// [`Command::ListMailboxes`] completed.
     Mailboxes(Vec<MailboxSummary>),
+    /// [`Command::DaemonInfo`] completed.
+    DaemonInfo {
+        /// Local Ed25519 identity pubkey.
+        local_pubkey: PublicKey,
+        /// Current v3 onion address (without `:port`). `None` while
+        /// Tor is still bootstrapping.
+        current_onion: Option<String>,
+        /// `env!("CARGO_PKG_VERSION")` of `skattr-core`.
+        daemon_version: String,
+        /// Latest applied storage migration version.
+        schema_version: u32,
+    },
 }
 
 /// Wire-safe projection of a `mailboxes` row for CLI / UI display.
@@ -409,6 +425,58 @@ mod tests {
         ];
         for r in &results {
             let _back: CommandResult = roundtrip(r);
+        }
+    }
+
+    #[test]
+    fn daemon_info_command_round_trips_cbor() {
+        let cmd = Command::DaemonInfo;
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&cmd, &mut buf).unwrap();
+        let back: Command = ciborium::de::from_reader(&buf[..]).unwrap();
+        assert!(matches!(back, Command::DaemonInfo));
+    }
+
+    #[test]
+    fn daemon_info_result_round_trips_cbor() {
+        let r = CommandResult::DaemonInfo {
+            local_pubkey: PublicKey([0xAB; 32]),
+            current_onion: Some("abcd.onion".into()),
+            daemon_version: "0.0.1".into(),
+            schema_version: 9,
+        };
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&r, &mut buf).unwrap();
+        let back: CommandResult = ciborium::de::from_reader(&buf[..]).unwrap();
+        match back {
+            CommandResult::DaemonInfo {
+                current_onion,
+                schema_version,
+                ..
+            } => {
+                assert_eq!(current_onion.as_deref(), Some("abcd.onion"));
+                assert_eq!(schema_version, 9);
+            }
+            other => panic!("expected DaemonInfo, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn daemon_info_result_with_none_onion_round_trips() {
+        let r = CommandResult::DaemonInfo {
+            local_pubkey: PublicKey([0xCD; 32]),
+            current_onion: None,
+            daemon_version: "0.0.1".into(),
+            schema_version: 9,
+        };
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&r, &mut buf).unwrap();
+        let back: CommandResult = ciborium::de::from_reader(&buf[..]).unwrap();
+        match back {
+            CommandResult::DaemonInfo { current_onion, .. } => {
+                assert!(current_onion.is_none());
+            }
+            other => panic!("expected DaemonInfo, got {other:?}"),
         }
     }
 }
