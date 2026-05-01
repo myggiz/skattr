@@ -304,11 +304,16 @@ fn event_matches(event: &Event, filter: Option<&EventFilter>) -> bool {
             true
         }
         (EventFilter::Contact(_), Event::ContactUpdated(_)) => true,
+        (EventFilter::Contact(peer), Event::ContactCardReceived { contact, .. }) => contact == peer,
         (EventFilter::Messages { contact: None }, Event::MessageReceived { .. }) => true,
         (EventFilter::Messages { contact: Some(c) }, Event::MessageReceived { contact, .. }) => {
             c == contact
         }
         (EventFilter::Messages { .. }, _) => false,
+        (EventFilter::Mailboxes, Event::MailboxStatusChanged { .. }) => true,
+        (EventFilter::Mailboxes, _) => false,
+        (EventFilter::Delivery, Event::DeliveryStatusChanged { .. }) => true,
+        (EventFilter::Delivery, _) => false,
         _ => false,
     }
 }
@@ -559,5 +564,77 @@ mod tests {
             },
             None,
         ));
+    }
+
+    #[test]
+    fn event_filter_mailboxes_matches_only_mailbox_status() {
+        use crate::daemon::events::{Event, MailboxStatus};
+        use crate::daemon::ipc::wire::EventFilter;
+
+        let mailbox_event = Event::MailboxStatusChanged {
+            mailbox_id: 1,
+            status: MailboxStatus::Reachable,
+        };
+        assert!(event_matches(&mailbox_event, Some(&EventFilter::Mailboxes)));
+
+        let tor_event = Event::TorStatusChanged(crate::daemon::events::TorStatus::Ready);
+        assert!(!event_matches(&tor_event, Some(&EventFilter::Mailboxes)));
+    }
+
+    #[test]
+    fn event_filter_delivery_matches_only_delivery_status() {
+        use crate::daemon::events::{DeliveryStatus, Event};
+        use crate::daemon::ipc::wire::EventFilter;
+        use crate::envelope::MessageId;
+
+        let delivery_event = Event::DeliveryStatusChanged {
+            message: MessageId([0; 16]),
+            status: DeliveryStatus::Deposited,
+        };
+        assert!(event_matches(&delivery_event, Some(&EventFilter::Delivery)));
+
+        let tor_event = Event::TorStatusChanged(crate::daemon::events::TorStatus::Ready);
+        assert!(!event_matches(&tor_event, Some(&EventFilter::Delivery)));
+    }
+
+    #[test]
+    fn event_filter_contact_matches_contact_card_received_for_same_peer() {
+        use crate::daemon::events::Event;
+        use crate::daemon::ipc::wire::EventFilter;
+        use crate::identity::PublicKey;
+
+        let alice = PublicKey([7; 32]);
+        let bob = PublicKey([8; 32]);
+        let card_event = Event::ContactCardReceived {
+            contact: alice,
+            version: 1,
+        };
+        assert!(event_matches(
+            &card_event,
+            Some(&EventFilter::Contact(alice))
+        ));
+        assert!(!event_matches(
+            &card_event,
+            Some(&EventFilter::Contact(bob))
+        ));
+    }
+
+    #[test]
+    fn event_filter_all_matches_new_events() {
+        use crate::daemon::events::{Event, MailboxStatus};
+        use crate::daemon::ipc::wire::EventFilter;
+        use crate::identity::PublicKey;
+
+        let mailbox_event = Event::MailboxStatusChanged {
+            mailbox_id: 1,
+            status: MailboxStatus::Reachable,
+        };
+        assert!(event_matches(&mailbox_event, Some(&EventFilter::All)));
+
+        let card_event = Event::ContactCardReceived {
+            contact: PublicKey([7; 32]),
+            version: 1,
+        };
+        assert!(event_matches(&card_event, Some(&EventFilter::All)));
     }
 }

@@ -353,11 +353,7 @@ mod tests {
         // Compute digest the same way handle_fetch does — positional
         // tuple (CBOR definite-length array).
         let digest = payload_digest(&(PROTOCOL_VERSION, pk, nonce)).unwrap();
-        let mut input = Vec::new();
-        input.extend_from_slice(crate::auth::AUTH_DOMAIN);
-        input.extend_from_slice(&nonce);
-        input.push(OP_BYTE_FETCH);
-        input.extend_from_slice(&digest);
+        let input = crate::auth::signing_input(&nonce, OP_BYTE_FETCH, &digest);
         let sig = sk.sign(&input).to_bytes();
         Fetch {
             version: PROTOCOL_VERSION,

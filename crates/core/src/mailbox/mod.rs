@@ -7,8 +7,10 @@
 //! lives in the `skattr-mailbox` crate and shares the wire-type
 //! definitions in [`protocol`].
 
+pub mod auth;
 pub(crate) mod client;
+pub(crate) mod codec;
+pub(crate) mod poll;
 pub mod protocol;
-pub(crate) mod scheduler;
 
-pub(crate) use client::MailboxClient;
+pub(crate) use client::{map_error, recipient_hash_from_pubkey, MailboxClient};

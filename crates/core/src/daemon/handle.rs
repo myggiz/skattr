@@ -41,6 +41,15 @@ where
     /// Cached onion address, set by `Daemon::run` after Tor publishes.
     /// None until the daemon has finished bootstrapping.
     pub onion: Arc<RwLock<Option<String>>>,
+    /// Connection factory for outbound mailbox operations (AddMailbox
+    /// probe, RemoveMailbox drain, RotateOnion deposits). `None` in test
+    /// helpers that don't exercise the mailbox path. `pub(crate)` —
+    /// the trait itself is `pub(crate)` (production wiring lives in
+    /// `daemon::run`).
+    pub(crate) mailbox_factory: Option<Arc<dyn crate::mailbox::poll::MailboxConnectFactory>>,
+    /// Sender side of the `PollScheduler` control channel. `None` in
+    /// test helpers. `pub(crate)` — `PollerCtrl` is `pub(crate)`.
+    pub(crate) poller_ctrl: Option<tokio::sync::mpsc::Sender<crate::mailbox::poll::PollerCtrl>>,
 }
 
 impl<S> DaemonHandle<S>
@@ -48,6 +57,11 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     /// Construct a handle from the four owned subsystems.
+    ///
+    /// Mailbox plumbing (`mailbox_factory`, `poller_ctrl`) is left
+    /// `None` — tests that don't exercise the mailbox path use this
+    /// constructor; production callers should prefer
+    /// [`DaemonHandle::new_with_mailbox`].
     #[must_use]
     pub fn new(
         pool: Arc<Pool>,
@@ -61,6 +75,37 @@ where
             identity: Arc::new(identity),
             events_tx,
             onion: Arc::new(RwLock::new(None)),
+            mailbox_factory: None,
+            poller_ctrl: None,
+        }
+    }
+
+    /// Construct a handle with the mailbox subsystem wired in. Used by
+    /// `Daemon::run` so command handlers (`AddMailbox`, `RemoveMailbox`,
+    /// `RotateOnion`) can drive outbound probes and notify the
+    /// `PollScheduler` of mailbox-table changes.
+    ///
+    /// `pub(crate)` because `MailboxConnectFactory` and `PollerCtrl`
+    /// are themselves `pub(crate)`. Production wiring lives in
+    /// `daemon::run`; tests can construct stub factories from inside
+    /// the crate.
+    #[must_use]
+    pub(crate) fn new_with_mailbox(
+        pool: Arc<Pool>,
+        hub: Arc<DeliveryHub<S>>,
+        identity: IdentityKey,
+        events_tx: broadcast::Sender<Event>,
+        mailbox_factory: Arc<dyn crate::mailbox::poll::MailboxConnectFactory>,
+        poller_ctrl: tokio::sync::mpsc::Sender<crate::mailbox::poll::PollerCtrl>,
+    ) -> Self {
+        Self {
+            pool,
+            hub,
+            identity: Arc::new(identity),
+            events_tx,
+            onion: Arc::new(RwLock::new(None)),
+            mailbox_factory: Some(mailbox_factory),
+            poller_ctrl: Some(poller_ctrl),
         }
     }
 
@@ -105,6 +150,8 @@ where
             identity: self.identity.clone(),
             events_tx: self.events_tx.clone(),
             onion: self.onion.clone(),
+            mailbox_factory: self.mailbox_factory.clone(),
+            poller_ctrl: self.poller_ctrl.clone(),
         }
     }
 }

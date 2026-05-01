@@ -184,6 +184,12 @@ const KEEPALIVE_PERIOD: std::time::Duration = std::time::Duration::from_secs(60)
 const PONG_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 const IDLE_CLOSE: std::time::Duration = std::time::Duration::from_secs(180);
 
+// TODO Task 20.5: wire `direct_timeout_secs` trigger from `PeerConnection`
+// into `DeliveryHub::ensure_mailbox_fallback`. The orchestrator itself ships
+// in Task 20 as a `pub(crate)` API; the timer-driven trigger that fires it
+// after sustained direct-delivery failure is deferred to a follow-up so the
+// orchestrator can be exercised in isolation by Tasks 25/26 first.
+
 /// Full actor (Tasks 8+). `conn` starts as `Some(...)` once the
 /// handshake is complete and may become `None` after an error; the
 /// retry tick is responsible for redialing via the hub in production.

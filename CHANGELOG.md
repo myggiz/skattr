@@ -4,6 +4,45 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added (Phase 2.B)
+- Mailbox client (`core::mailbox::client`) with long-lived per-mailbox
+  `Framed` connection.
+- `core::mailbox::auth` — single source of truth for the auth-digest
+  helpers (hoisted from `crates/mailbox` so client + server share one
+  implementation).
+- Adaptive `PollScheduler` with Idle ↔ Active ↔ Unreachable cadence
+  and ±25 % jitter; per-mailbox actors emit `MailboxStatusChanged`
+  events on transition.
+- `DeliveryHub::ensure_mailbox_fallback` — pick-one-then-retry
+  orchestrator using `BLAKE2s(message_id) % mailbox_count`.
+- `Command::AddMailbox`, `Command::RemoveMailbox`, `Command::RotateOnion`,
+  `Command::ListMailboxes` (real handler) wired through `daemon::dispatch`.
+- `Event::MailboxStatusChanged { mailbox_id, status }`,
+  `Event::ContactCardReceived { contact, version }`.
+- `EventFilter::Mailboxes`, `EventFilter::Delivery`.
+- `Envelope::Kind::ContactCardUpdate { card: Box<ContactCard> }` for
+  in-MLS card rotation.
+- Migration 0008 (mailbox status + outbox target_kind/mailbox_id +
+  composite unique index).
+- Migration 0009 (`self_card_state` singleton).
+- `core::contact::self_card::build_next_self_card` for monotonic
+  version-bumped self-card publishing.
+- 5 integration tests (`crates/tests/src/mailbox_*.rs`) covering
+  offline delivery, mailbox failover, AddMailbox validation,
+  RemoveMailbox drain, and RotateOnion republishing.
+- Adversarial regression suite (5 scenarios) and logging-redaction
+  guard.
+
+### Deferred (TODOs in code)
+- **Task 20.5**: `PeerConnection` direct-timeout trigger to
+  `DeliveryHub::ensure_mailbox_fallback`.
+- **Task 22.5**: `RemoveMailbox` final-drain ciphertexts through
+  `DaemonInbound::dispatch`.
+- **Task 23.5**: real HS key rotation in `Command::RotateOnion` (today
+  bumps the self-card version + republishes the current onion).
+
 ## Phase 2.A — Mailbox server
 
 `crates/mailbox/` promoted to `[lib] + [bin]` (AGPLv3). Frozen wire

@@ -17,6 +17,7 @@ pub mod card;
 #[allow(clippy::module_inception)]
 pub mod contact;
 pub mod rotation;
+pub(crate) mod self_card;
 
 pub use card::{ContactCard, ContactCardBody};
 pub use contact::Contact;

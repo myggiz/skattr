@@ -12,6 +12,8 @@
 #![warn(missing_docs)]
 
 #[cfg(test)]
+mod add_mailbox_validates;
+#[cfg(test)]
 mod arti_echo;
 #[cfg(test)]
 mod cli_export;
@@ -33,10 +35,24 @@ mod delivery_real_tor;
 mod history_sweep;
 #[cfg(test)]
 mod invite_roundtrip;
+#[cfg(test)]
+mod mailbox_client_real_tor;
+#[cfg(test)]
+mod mailbox_codec_parity;
+#[cfg(test)]
+mod mailbox_failover;
+#[cfg(test)]
+mod mailbox_harness;
+#[cfg(test)]
+mod mailbox_offline_delivery;
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod mailbox_real_tor;
 #[cfg(test)]
 mod mls_pair;
+#[cfg(test)]
+mod remove_mailbox_drains;
+#[cfg(test)]
+mod rotate_onion_during_offline;
 
 use std::time::Duration;
 

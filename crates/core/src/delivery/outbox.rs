@@ -86,17 +86,16 @@ impl<'p> Outbox<'p> {
 }
 
 fn row_to_entry(row: OutboxRow) -> OutboxEntry {
-    let (id, target, payload, message_id, attempts) = row;
     let mut pk = [0u8; 32];
-    if target.len() == 32 {
-        pk.copy_from_slice(&target);
+    if row.target.len() == 32 {
+        pk.copy_from_slice(&row.target);
     }
     OutboxEntry {
-        id,
+        id: row.id,
         target: PublicKey(pk),
-        payload,
-        message_id: MessageId(message_id),
-        attempts,
+        payload: row.payload,
+        message_id: MessageId(row.message_id),
+        attempts: row.attempts,
     }
 }
 

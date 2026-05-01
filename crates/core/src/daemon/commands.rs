@@ -96,6 +96,23 @@ pub enum Command {
         /// Keep at most this many most-recent rows per conversation.
         keep_last: Option<u64>,
     },
+    /// Register a `'mine'` mailbox: probe it for liveness, persist it
+    /// as `Reachable`, notify the `PollScheduler`, and republish the
+    /// self-card carrying the new mailbox onion to every contact.
+    AddMailbox {
+        /// Operator's onion address (without `:port` suffix).
+        onion: String,
+    },
+    /// Remove a previously registered `'mine'` mailbox. Marks the row
+    /// `pending_removal`, attempts a best-effort final drain (fetch +
+    /// server-side delete), then marks `removed`, stops the poll actor,
+    /// and republishes the self-card so contacts stop depositing there.
+    RemoveMailbox {
+        /// Primary-key `id` of the mailbox row to remove.
+        id: i64,
+    },
+    /// List every `'mine'` mailbox row with its current status.
+    ListMailboxes,
     /// Export a paged window of persisted messages for the given peer.
     ExportHistory {
         /// Peer whose history to export.
@@ -259,6 +276,21 @@ pub enum CommandResult {
         /// Cursor for the next page; `None` if this was the last page.
         next_after_id: Option<i64>,
     },
+    /// [`Command::ListMailboxes`] completed.
+    Mailboxes(Vec<MailboxSummary>),
+}
+
+/// Wire-safe projection of a `mailboxes` row for CLI / UI display.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MailboxSummary {
+    /// SQLite primary key of the `mailboxes` row.
+    pub id: i64,
+    /// Onion address (without `:port`).
+    pub onion: String,
+    /// Current lifecycle status.
+    pub status: crate::storage::MailboxStatus,
+    /// Unix seconds when the row was first created.
+    pub registered_at: u64,
 }
 
 impl From<InviteLink> for CommandResult {

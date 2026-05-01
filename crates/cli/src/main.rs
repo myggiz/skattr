@@ -987,6 +987,18 @@ async fn tail_follow(
             Event::TorStatusChanged(s) => {
                 eprintln!("tor: {s:?}");
             }
+            Event::MailboxStatusChanged { mailbox_id, status } => {
+                eprintln!("mailbox {mailbox_id}: {status:?}");
+            }
+            Event::ContactCardReceived { contact, version } => {
+                let short: String = contact
+                    .0
+                    .iter()
+                    .take(4)
+                    .map(|b| format!("{b:02x}"))
+                    .collect();
+                eprintln!("contact card updated: {short} v{version}");
+            }
         }
     }
     Ok(())

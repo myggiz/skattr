@@ -4446,6 +4446,7 @@ dependencies = [
  "base32",
  "base64 0.22.1",
  "bip39",
+ "blake2",
  "bytes",
  "chacha20poly1305",
  "ciborium",
@@ -4485,6 +4486,7 @@ dependencies = [
  "tor-llcrypto",
  "tor-rtcompat",
  "tracing",
+ "tracing-subscriber",
  "x25519-dalek",
  "zeroize",
 ]

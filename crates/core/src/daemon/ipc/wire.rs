@@ -35,6 +35,10 @@ pub enum EventFilter {
         /// Optional per-peer narrowing.
         contact: Option<PublicKey>,
     },
+    /// Only mailbox-related events: `MailboxStatusChanged`.
+    Mailboxes,
+    /// Only delivery-progress events: `DeliveryStatusChanged`.
+    Delivery,
 }
 
 /// Request frame sent from CLI to daemon.

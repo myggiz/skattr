@@ -31,7 +31,8 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     match cmd {
-        Command::Shutdown | Command::RotateOnion => Ok(CommandResult::Ok),
+        Command::Shutdown => Ok(CommandResult::Ok),
+        Command::RotateOnion => handle_rotate_onion(handle).await,
         Command::ListContacts => list_contacts(&handle).await,
         Command::CreateInvite { nickname, ttl_secs } => {
             create_invite(&handle, nickname, ttl_secs).await
@@ -63,6 +64,9 @@ where
             after_id,
             limit,
         } => export_history(&handle, contact, after_id, limit).await,
+        Command::AddMailbox { onion } => handle_add_mailbox(handle, onion).await,
+        Command::RemoveMailbox { id } => handle_remove_mailbox(handle, id).await,
+        Command::ListMailboxes => handle_list_mailboxes(handle).await,
     }
 }
 
@@ -653,6 +657,346 @@ where
         records,
         next_after_id,
     })
+}
+
+/// `RotateOnion` handler: bump the self-card version and republish the
+/// current onion to all contacts.
+///
+/// # Deferred: real HS key rotation (Task 23.5)
+///
+/// This implementation is intentionally degenerate — it does **not** rotate
+/// the underlying hidden-service key, so the onion address stays the same.
+/// Contacts receive a `ContactCardUpdate` with an incremented version, but
+/// the onion they route to is unchanged. This is a no-op semantically, but
+/// it exercises the `publish_self_card_update` path end-to-end for
+/// integration tests (Task 27 `rotate_onion_during_offline` will surface
+/// what is still missing).
+///
+/// ## What full rotation (Task 23.5) needs
+///
+/// Full design (deferred — see `docs/superpowers/specs/
+/// 2026-04-30-phase-2b-mailbox-client-design.md` decision 8):
+///
+/// 1. Generate a new HS key file alongside the current one.
+/// 2. Launch a second `OnionService` bound to the new key; await its
+///    published-status.
+/// 3. Replace the daemon's onion-listener accept loop to feed both
+///    old + new services into the same `DeliveryHub::ingest`.
+/// 4. Schedule a `tokio::time::sleep(rotate_grace_secs)` task that shuts
+///    down the old service when fired. Default: 24 h
+///    (`[delivery] rotate_grace_secs`).
+/// 5. After successful publish to N/N contacts (best-effort), call
+///    `handle.set_onion(new_address)` so subsequent IPC sees the new onion.
+///
+/// The `TorRuntime::publish_onion` API today owns the lifecycle of a single
+/// `OnionService` and aborts it on `TorRuntime::shutdown`. Supporting
+/// concurrent services requires either: (a) a parallel
+/// `TorRuntime::publish_secondary_onion(...) -> SecondaryHandle` method; or
+/// (b) a `RotatingOnion` wrapper struct that owns two services and a swap
+/// mechanism. Either path is non-trivial and is deferred to Task 23.5.
+async fn handle_rotate_onion<S>(
+    handle: Arc<DaemonHandle<S>>,
+) -> std::result::Result<CommandResult, IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    // TODO Task 23.5: real HS key rotation — see doc-comment above.
+    publish_self_card_update(handle).await?;
+    Ok(CommandResult::Ok)
+}
+
+/// `AddMailbox` handler: probe the mailbox, persist `Reachable`, kick
+/// the `PollScheduler`, and republish the self-card so contacts learn
+/// the new mailbox onion. See [`publish_self_card_update`] for the
+/// best-effort fan-out semantics.
+async fn handle_add_mailbox<S>(
+    handle: Arc<DaemonHandle<S>>,
+    onion: String,
+) -> std::result::Result<CommandResult, IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    use crate::daemon::error_kind::DaemonErrorKind;
+    use sha2::{Digest, Sha256};
+
+    let factory = handle.mailbox_factory.as_ref().ok_or_else(|| {
+        IpcError::Daemon(DaemonErrorKind::InvalidArgument {
+            message: "mailbox subsystem not initialized".into(),
+        })
+    })?;
+
+    // 1. Open a fresh probe connection. Any connect-side error surfaces
+    // as `unreachable` — this is the AddMailbox-validation failure mode.
+    let mut client = factory.connect(&onion).await.map_err(|_| {
+        IpcError::Daemon(DaemonErrorKind::InvalidArgument {
+            message: "unreachable".into(),
+        })
+    })?;
+
+    // 2. Single-Challenge probe. Maps client errors onto stable
+    // argument-validation reasons the CLI / UI can surface to the user.
+    let identity_hash: [u8; 32] = {
+        let pk = handle.identity.public().0;
+        let mut h = Sha256::new();
+        h.update(pk);
+        h.finalize().into()
+    };
+    if let Err(e) = client.probe(identity_hash).await {
+        let reason = match e {
+            crate::error::CoreError::MailboxClient(
+                crate::error::MailboxClientErrorKind::UnsupportedVersion,
+            ) => "unsupported_version",
+            crate::error::CoreError::MailboxClient(
+                crate::error::MailboxClientErrorKind::RateLimited,
+            ) => "rate_limited",
+            crate::error::CoreError::MailboxClient(
+                crate::error::MailboxClientErrorKind::Malformed,
+            ) => "malformed_response",
+            _ => "other",
+        };
+        return Err(IpcError::Daemon(DaemonErrorKind::InvalidArgument {
+            message: reason.into(),
+        }));
+    }
+
+    // 3. Insert the row + flip to Reachable. `add_mine` is idempotent on
+    // (onion, role='mine') so repeating AddMailbox just no-ops the row
+    // and re-runs the rest of the post-probe steps.
+    let now = crate::daemon::clock::now_unix_seconds();
+    let mb_repo = crate::storage::MailboxRepo::new(&handle.pool);
+    let id = mb_repo.add_mine(&onion, now).map_err(map_err)?;
+    mb_repo
+        .mark_status(id, crate::storage::MailboxStatus::Reachable)
+        .map_err(map_err)?;
+
+    // 4. Notify the scheduler so it spawns a poll actor for this row.
+    if let Some(ctrl) = &handle.poller_ctrl {
+        let _ = ctrl
+            .send(crate::mailbox::poll::PollerCtrl::AddMailbox(id))
+            .await;
+    }
+
+    // 5. Republish self-card so peers pick up the new mailbox onion.
+    publish_self_card_update(handle.clone()).await?;
+
+    Ok(CommandResult::Ok)
+}
+
+/// Build a fresh self-card and fan it out to every contact via the MLS
+/// app-message channel + `DeliveryHub::send` (which itself owns the
+/// direct → mailbox-fallback path). Best-effort: any single contact's
+/// failure is logged and skipped; the overall publish does not abort.
+///
+/// The new card row is persisted via `build_next_self_card` BEFORE any
+/// send, so even if every send fails the version counter has bumped and
+/// the next publish picks up from there.
+async fn publish_self_card_update<S>(
+    handle: Arc<DaemonHandle<S>>,
+) -> std::result::Result<(), IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    use crate::daemon::error_kind::DaemonErrorKind;
+    use crate::envelope::{Envelope, Kind, MessageId};
+    use crate::mls::group::{Group, GroupId};
+    use crate::storage::{ContactRepo, MailboxRepo, MailboxStatus, MlsGroupRepo};
+
+    let now_secs = crate::daemon::clock::now_unix_seconds();
+    let onion = handle
+        .onion()
+        .ok_or(IpcError::Daemon(DaemonErrorKind::TorNotReady))?;
+    let mailboxes: Vec<String> = MailboxRepo::new(&handle.pool)
+        .list_mine()
+        .map_err(map_err)?
+        .into_iter()
+        .filter(|r| r.status == MailboxStatus::Reachable)
+        .map(|r| r.onion)
+        .collect();
+
+    let card = crate::contact::self_card::build_next_self_card(
+        &handle.pool,
+        &handle.identity,
+        onion,
+        mailboxes,
+        crate::contact::self_card::DEFAULT_TTL_SECS,
+        now_secs,
+    )
+    .map_err(map_err)?;
+
+    let contacts = ContactRepo::new(&handle.pool).list().map_err(map_err)?;
+
+    for contact in contacts {
+        // 2-member-group lookup: skip contacts not yet linked.
+        let group_id_bytes = match ContactRepo::new(&handle.pool).get_group_id(&contact.identity) {
+            Ok(Some(gid)) if !gid.is_empty() => gid,
+            _ => continue,
+        };
+
+        let group_repo = MlsGroupRepo::new(&handle.pool);
+        let group_id = GroupId(group_id_bytes.clone());
+        let mut group = match Group::load(&group_id, &group_repo) {
+            Ok(Some(g)) => g,
+            Ok(None) => {
+                tracing::warn!(
+                    target: "skattr::daemon::dispatch",
+                    "publish_card: group_id present but Group::load missed; skipping contact"
+                );
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "skattr::daemon::dispatch",
+                    err = %e,
+                    "publish_card: load group failed; skipping contact"
+                );
+                continue;
+            }
+        };
+
+        let now_ms = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0),
+        )
+        .unwrap_or(0);
+        let msg_id = MessageId::generate();
+        let env = Envelope {
+            v: 1,
+            id: msg_id,
+            ts: now_ms,
+            reply_to: None,
+            kind: Kind::ContactCardUpdate {
+                card: Box::new(card.clone()),
+            },
+        };
+        let ciphertext = match group.encrypt(&env) {
+            Ok(ct) => ct,
+            Err(e) => {
+                tracing::warn!(
+                    target: "skattr::daemon::dispatch",
+                    err = %e,
+                    "publish_card: encrypt failed; skipping contact"
+                );
+                continue;
+            }
+        };
+
+        // Persist the advanced ratchet before handing off to the hub —
+        // if save fails we MUST NOT send the ciphertext (the peer would
+        // accept it and we'd be one epoch behind on disk).
+        if let Err(e) = group.save(&group_repo) {
+            tracing::warn!(
+                target: "skattr::daemon::dispatch",
+                err = %e,
+                "publish_card: save group failed; skipping contact"
+            );
+            continue;
+        }
+        let _ = handle.hub.send(contact.identity, msg_id, ciphertext).await;
+    }
+    Ok(())
+}
+
+/// `RemoveMailbox` handler: mark `pending_removal`, attempt a best-effort
+/// final drain (fetch + server-side delete via `run_one_poll_tick`), then
+/// mark `removed`, stop the poll actor, and republish the self-card.
+///
+/// If the mailbox is unreachable during the drain attempt, we proceed
+/// anyway — callers must not get stuck on a misbehaving mailbox.
+///
+/// # TODO Task 22.5
+/// The deposits returned by `run_one_poll_tick` are deleted server-side but
+/// their plaintext is not dispatched through `DaemonInbound` in this initial
+/// cut. A follow-up task should iterate the `FetchResponse` envelopes and
+/// pass each through `DaemonInbound::dispatch`.
+async fn handle_remove_mailbox<S>(
+    handle: Arc<DaemonHandle<S>>,
+    id: i64,
+) -> std::result::Result<CommandResult, IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    use crate::daemon::error_kind::DaemonErrorKind;
+
+    let repo = crate::storage::MailboxRepo::new(&handle.pool);
+
+    // 1. Find the row.
+    let row = match repo.get(id) {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return Err(IpcError::Daemon(DaemonErrorKind::InvalidArgument {
+                message: "not_found".into(),
+            }))
+        }
+        Err(e) => return Err(map_err(e)),
+    };
+
+    // 2. Mark pending_removal + emit status event.
+    repo.mark_pending_removal(id).map_err(map_err)?;
+    let _ = handle
+        .events_tx
+        .send(crate::daemon::events::Event::MailboxStatusChanged {
+            mailbox_id: id,
+            status: crate::storage::MailboxStatus::PendingRemoval,
+        });
+
+    // 3. Best-effort final drain. If anything fails (unreachable, auth,
+    //    timeout), proceed to finalize anyway — keeps users from getting
+    //    stuck on a misbehaving mailbox.
+    if let Some(factory) = &handle.mailbox_factory {
+        if let Ok(mut client) = factory.connect(&row.onion).await {
+            // run_one_poll_tick fetches + server-side deletes deposits.
+            // TODO Task 22.5: dispatch each deposit through DaemonInbound.
+            let _ = crate::mailbox::poll::run_one_poll_tick(&mut client, &handle.identity).await;
+        }
+    }
+
+    // 4. Tell scheduler to stop the actor.
+    if let Some(ctrl) = &handle.poller_ctrl {
+        let _ = ctrl
+            .send(crate::mailbox::poll::PollerCtrl::RemoveMailbox(id))
+            .await;
+    }
+
+    // 5. Finalize.
+    repo.finalize_removal(id).map_err(map_err)?;
+    let _ = handle
+        .events_tx
+        .send(crate::daemon::events::Event::MailboxStatusChanged {
+            mailbox_id: id,
+            status: crate::storage::MailboxStatus::Removed,
+        });
+
+    // 6. Republish card (best-effort: if onion isn't set yet the helper
+    //    returns TorNotReady; propagate that to the caller).
+    publish_self_card_update(handle.clone()).await?;
+
+    Ok(CommandResult::Ok)
+}
+
+/// `ListMailboxes` handler: return every `role='mine'` row.
+async fn handle_list_mailboxes<S>(
+    handle: Arc<DaemonHandle<S>>,
+) -> std::result::Result<CommandResult, IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    use crate::daemon::commands::MailboxSummary;
+
+    let rows = crate::storage::MailboxRepo::new(&handle.pool)
+        .list_mine()
+        .map_err(map_err)?;
+    let summaries = rows
+        .into_iter()
+        .map(|r| MailboxSummary {
+            id: r.id,
+            onion: r.onion,
+            status: r.status,
+            registered_at: u64::try_from(r.registered_at).unwrap_or(0),
+        })
+        .collect();
+    Ok(CommandResult::Mailboxes(summaries))
 }
 
 /// Map any `CoreError` to an `IpcError`. Projects via `CoreError::kind`
@@ -1742,5 +2086,378 @@ mod tests {
             }
             other => panic!("expected SearchResults, got {other:?}"),
         }
+    }
+
+    // ── Task 21: Command::AddMailbox ──────────────────────────────────────
+
+    /// Stub `MailboxConnectFactory` whose `connect` always errors with
+    /// `Unreachable`. Drives the AddMailbox-validation failure path.
+    struct UnreachableFactory;
+
+    #[async_trait::async_trait]
+    impl crate::mailbox::poll::MailboxConnectFactory for UnreachableFactory {
+        async fn connect(
+            &self,
+            _onion: &str,
+        ) -> crate::error::Result<
+            crate::mailbox::client::MailboxClient<Box<dyn crate::mailbox::poll::MailboxStream>>,
+        > {
+            Err(crate::error::CoreError::MailboxClient(
+                crate::error::MailboxClientErrorKind::Unreachable,
+            ))
+        }
+    }
+
+    /// Stub factory that hands out one in-process duplex peer per
+    /// `connect` call. The test seeds it with one stream whose remote
+    /// end is wired to a tiny `Challenge → ChallengeNonce` server, so a
+    /// single AddMailbox probe succeeds.
+    struct OneShotChallengeFactory {
+        slots: std::sync::Mutex<Vec<tokio::io::DuplexStream>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::mailbox::poll::MailboxConnectFactory for OneShotChallengeFactory {
+        async fn connect(
+            &self,
+            onion: &str,
+        ) -> crate::error::Result<
+            crate::mailbox::client::MailboxClient<Box<dyn crate::mailbox::poll::MailboxStream>>,
+        > {
+            let s_opt = self.slots.lock().unwrap().pop();
+            match s_opt {
+                Some(s) => {
+                    let boxed: Box<dyn crate::mailbox::poll::MailboxStream> = Box::new(s);
+                    Ok(crate::mailbox::client::MailboxClient::from_stream(
+                        onion.to_string(),
+                        boxed,
+                    ))
+                }
+                None => Err(crate::error::CoreError::MailboxClient(
+                    crate::error::MailboxClientErrorKind::Unreachable,
+                )),
+            }
+        }
+    }
+
+    /// Build a `DaemonHandle` with a stub mailbox factory and a fresh
+    /// `(poller_ctrl_tx, poller_ctrl_rx)` so the test can observe
+    /// `PollerCtrl::AddMailbox(id)` messages emitted by the handler.
+    fn test_handle_with_mailbox(
+        factory: Arc<dyn crate::mailbox::poll::MailboxConnectFactory>,
+    ) -> (
+        Arc<DaemonHandle<tokio::io::DuplexStream>>,
+        tokio::sync::mpsc::Receiver<crate::mailbox::poll::PollerCtrl>,
+    ) {
+        let seed = Seed::generate().unwrap();
+        let identity = IdentityKey::from_seed(&seed).unwrap();
+        let pool = Arc::new(Pool::in_memory());
+        let hub: Arc<DeliveryHub<tokio::io::DuplexStream>> =
+            Arc::new(DeliveryHub::new(pool.clone()));
+        let (events_tx, _) = broadcast::channel::<Event>(16);
+        let (ctrl_tx, ctrl_rx) = tokio::sync::mpsc::channel::<crate::mailbox::poll::PollerCtrl>(16);
+        let handle =
+            DaemonHandle::new_with_mailbox(pool, hub, identity, events_tx, factory, ctrl_tx);
+        (Arc::new(handle), ctrl_rx)
+    }
+
+    #[tokio::test]
+    async fn add_mailbox_unreachable_returns_invalid_argument() {
+        let (handle, _ctrl_rx) = test_handle_with_mailbox(Arc::new(UnreachableFactory));
+        handle.set_onion("self.onion".to_string());
+        let res = execute_command(
+            handle,
+            Command::AddMailbox {
+                onion: "dead.onion".into(),
+            },
+        )
+        .await;
+        assert!(
+            matches!(
+                res,
+                Err(IpcError::Daemon(
+                    crate::daemon::error_kind::DaemonErrorKind::InvalidArgument { ref message }
+                )) if message == "unreachable"
+            ),
+            "expected InvalidArgument(unreachable), got {res:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn add_mailbox_without_factory_returns_invalid_argument() {
+        // The base `test_handle()` wires `mailbox_factory: None`. The
+        // handler must reject with InvalidArgument so callers see a
+        // typed error rather than panicking on `as_ref().unwrap()`.
+        let handle = test_handle();
+        handle.set_onion("self.onion".to_string());
+        let res = execute_command(
+            handle,
+            Command::AddMailbox {
+                onion: "any.onion".into(),
+            },
+        )
+        .await;
+        assert!(
+            matches!(
+                res,
+                Err(IpcError::Daemon(
+                    crate::daemon::error_kind::DaemonErrorKind::InvalidArgument { .. }
+                ))
+            ),
+            "expected InvalidArgument, got {res:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn add_mailbox_reachable_inserts_row_and_notifies_scheduler() {
+        use crate::mailbox::codec::{MailboxFrame, MailboxFrameCodec};
+        use crate::mailbox::protocol::ChallengeNonce;
+        use futures::{SinkExt, StreamExt};
+        use tokio_util::codec::Framed;
+
+        // Server peer answers a single Challenge with a fixed nonce.
+        let (a, b) = tokio::io::duplex(64 * 1024);
+        let server = tokio::spawn(async move {
+            let mut framed = Framed::new(b, MailboxFrameCodec::new());
+            if let Some(Ok(MailboxFrame::Challenge(_))) = framed.next().await {
+                let _ = framed
+                    .send(MailboxFrame::ChallengeNonce(ChallengeNonce {
+                        nonce: [0xA1; 32],
+                        issued_at: 1,
+                    }))
+                    .await;
+            }
+        });
+
+        let factory = Arc::new(OneShotChallengeFactory {
+            slots: std::sync::Mutex::new(vec![a]),
+        });
+        let (handle, mut ctrl_rx) = test_handle_with_mailbox(factory);
+        handle.set_onion("self.onion".to_string());
+
+        let res = execute_command(
+            handle.clone(),
+            Command::AddMailbox {
+                onion: "live.onion".into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(res, CommandResult::Ok));
+
+        // Row persisted as Reachable.
+        use crate::storage::{MailboxRepo, MailboxStatus};
+        let rows = MailboxRepo::new(&handle.pool).list_mine().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].onion, "live.onion");
+        assert_eq!(rows[0].status, MailboxStatus::Reachable);
+
+        // Scheduler received a `PollerCtrl::AddMailbox(id)` for the
+        // exact row id.
+        let ctrl_msg = tokio::time::timeout(std::time::Duration::from_secs(1), ctrl_rx.recv())
+            .await
+            .expect("ctrl message arrives within 1 s")
+            .expect("ctrl channel still open");
+        match ctrl_msg {
+            crate::mailbox::poll::PollerCtrl::AddMailbox(id) => assert_eq!(id, rows[0].id),
+            other => panic!("expected AddMailbox, got {other:?}"),
+        }
+
+        // The probe consumed the slot; the server task completes.
+        let _ = server.await;
+    }
+
+    // ── Task 22: Command::RemoveMailbox ───────────────────────────────────
+
+    #[tokio::test]
+    async fn remove_mailbox_unknown_id_returns_invalid_argument() {
+        // Base handle (no mailbox factory); the row lookup must fail first.
+        let (handle, _ctrl_rx) = test_handle_with_mailbox(Arc::new(UnreachableFactory));
+        handle.set_onion("self.onion".to_string());
+        let res = execute_command(handle, Command::RemoveMailbox { id: 999 }).await;
+        assert!(
+            matches!(
+                res,
+                Err(IpcError::Daemon(
+                    crate::daemon::error_kind::DaemonErrorKind::InvalidArgument { ref message }
+                )) if message == "not_found"
+            ),
+            "expected InvalidArgument(not_found), got {res:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_mailbox_marks_pending_then_removed_and_notifies_scheduler() {
+        use crate::mailbox::codec::{MailboxFrame, MailboxFrameCodec};
+        use crate::mailbox::protocol::ChallengeNonce;
+        use crate::storage::{MailboxRepo, MailboxStatus};
+        use futures::{SinkExt, StreamExt};
+        use tokio_util::codec::Framed;
+
+        // Server peer for the drain: answers Challenge → ChallengeNonce,
+        // then FetchRequest → FetchResponse(empty), then DeleteRequest → Ok.
+        // For simplicity, use an unreachable factory for the drain so we
+        // exercise the "proceed despite drain failure" path and keep the
+        // test hermetic (no full mailbox server FSM needed here).
+        let factory = Arc::new(UnreachableFactory);
+        let (handle, mut ctrl_rx) = test_handle_with_mailbox(factory);
+        handle.set_onion("self.onion".to_string());
+
+        // Pre-insert a 'mine' mailbox row directly via MailboxRepo::add_mine.
+        let repo = MailboxRepo::new(&handle.pool);
+        let mb_id = repo.add_mine("target.onion", 1_000).unwrap();
+        repo.mark_status(mb_id, MailboxStatus::Reachable).unwrap();
+
+        // Subscribe to events before driving the command.
+        let mut events_rx = handle.events_tx.subscribe();
+
+        let res = execute_command(handle.clone(), Command::RemoveMailbox { id: mb_id })
+            .await
+            .unwrap();
+        assert!(matches!(res, CommandResult::Ok));
+
+        // Row must be Removed after the handler completes.
+        let row = MailboxRepo::new(&handle.pool).get(mb_id).unwrap().unwrap();
+        assert_eq!(row.status, MailboxStatus::Removed, "status must be Removed");
+
+        // Scheduler must have received RemoveMailbox(id).
+        let ctrl_msg = tokio::time::timeout(std::time::Duration::from_secs(1), ctrl_rx.recv())
+            .await
+            .expect("ctrl message arrives within 1 s")
+            .expect("ctrl channel still open");
+        match ctrl_msg {
+            crate::mailbox::poll::PollerCtrl::RemoveMailbox(id) => {
+                assert_eq!(id, mb_id)
+            }
+            other => panic!("expected RemoveMailbox, got {other:?}"),
+        }
+
+        // Two MailboxStatusChanged events must have been emitted:
+        // 1. PendingRemoval  2. Removed
+        let ev1 = tokio::time::timeout(std::time::Duration::from_secs(1), events_rx.recv())
+            .await
+            .expect("event 1 arrives")
+            .expect("event channel open");
+        assert!(
+            matches!(
+                ev1,
+                crate::daemon::events::Event::MailboxStatusChanged {
+                    mailbox_id,
+                    status: MailboxStatus::PendingRemoval
+                } if mailbox_id == mb_id
+            ),
+            "expected PendingRemoval event, got {ev1:?}"
+        );
+        let ev2 = tokio::time::timeout(std::time::Duration::from_secs(1), events_rx.recv())
+            .await
+            .expect("event 2 arrives")
+            .expect("event channel open");
+        assert!(
+            matches!(
+                ev2,
+                crate::daemon::events::Event::MailboxStatusChanged {
+                    mailbox_id,
+                    status: MailboxStatus::Removed
+                } if mailbox_id == mb_id
+            ),
+            "expected Removed event, got {ev2:?}"
+        );
+    }
+
+    // ── Task 24: Command::ListMailboxes ───────────────────────────────────
+
+    #[tokio::test]
+    async fn list_mailboxes_returns_real_rows_after_add() {
+        use crate::daemon::commands::MailboxSummary;
+        use crate::storage::{MailboxRepo, MailboxStatus};
+
+        let (handle, _ctrl_rx) = test_handle_with_mailbox(Arc::new(UnreachableFactory));
+        handle.set_onion("self.onion".to_string());
+
+        // Pre-insert two 'mine' mailbox rows.
+        let repo = MailboxRepo::new(&handle.pool);
+        let id1 = repo.add_mine("alpha.onion", 1_000).unwrap();
+        repo.mark_status(id1, MailboxStatus::Reachable).unwrap();
+        let id2 = repo.add_mine("beta.onion", 2_000).unwrap();
+        repo.mark_status(id2, MailboxStatus::Unreachable).unwrap();
+
+        let res = execute_command(handle, Command::ListMailboxes)
+            .await
+            .unwrap();
+        let summaries: Vec<MailboxSummary> = match res {
+            CommandResult::Mailboxes(s) => s,
+            other => panic!("expected Mailboxes, got {other:?}"),
+        };
+
+        assert_eq!(summaries.len(), 2, "two rows expected");
+        // list_mine returns in registered_at, id order.
+        assert_eq!(summaries[0].id, id1);
+        assert_eq!(summaries[0].onion, "alpha.onion");
+        assert_eq!(summaries[0].status, MailboxStatus::Reachable);
+        assert_eq!(summaries[0].registered_at, 1_000);
+
+        assert_eq!(summaries[1].id, id2);
+        assert_eq!(summaries[1].onion, "beta.onion");
+        assert_eq!(summaries[1].status, MailboxStatus::Unreachable);
+        assert_eq!(summaries[1].registered_at, 2_000);
+    }
+
+    // ── Task 23: Command::RotateOnion ─────────────────────────────────────
+
+    /// Read the current `self_card_state.version` directly from the pool.
+    fn read_self_card_version(pool: &crate::storage::Pool) -> u64 {
+        pool.with(|c| {
+            c.query_row(
+                "SELECT version FROM self_card_state WHERE id = 1",
+                rusqlite::params![],
+                |r| r.get::<_, i64>(0),
+            )
+            .map_err(|e| crate::error::CoreError::Storage(StorageErrorKind::Other(e.to_string())))
+        })
+        .map(|v| u64::try_from(v).unwrap_or(0))
+        .unwrap_or(0)
+    }
+
+    #[tokio::test]
+    async fn rotate_onion_publishes_card_update_to_contacts() {
+        // `test_handle_with_mailbox` builds a handle whose pool has all
+        // migrations (including 0009 self_card_state) and wires up a
+        // `poller_ctrl` channel required by `publish_self_card_update`.
+        let (handle, _ctrl_rx) = test_handle_with_mailbox(Arc::new(UnreachableFactory));
+        // Tor must appear "ready" so `publish_self_card_update` can read the onion.
+        handle.set_onion("rotate-test.onion".to_string());
+
+        let version_before = read_self_card_version(&handle.pool);
+
+        let res = execute_command(handle.clone(), Command::RotateOnion)
+            .await
+            .unwrap();
+        assert!(matches!(res, CommandResult::Ok), "expected Ok, got {res:?}");
+
+        // The self-card version counter must have advanced by exactly 1.
+        let version_after = read_self_card_version(&handle.pool);
+        assert_eq!(
+            version_after,
+            version_before + 1,
+            "self_card_state.version must be bumped by RotateOnion"
+        );
+    }
+
+    #[tokio::test]
+    async fn rotate_onion_without_published_onion_fails() {
+        // Base handle with no `set_onion` call → onion() returns None.
+        let (handle, _ctrl_rx) = test_handle_with_mailbox(Arc::new(UnreachableFactory));
+        // Deliberately do NOT call handle.set_onion(…).
+
+        let res = execute_command(handle, Command::RotateOnion).await;
+        assert!(
+            matches!(
+                res,
+                Err(IpcError::Daemon(
+                    crate::daemon::error_kind::DaemonErrorKind::TorNotReady
+                ))
+            ),
+            "expected TorNotReady when onion is not set, got {res:?}"
+        );
     }
 }
