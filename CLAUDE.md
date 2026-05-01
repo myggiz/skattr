@@ -5,7 +5,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Repository state
 
 **Phase 0 is complete; Phase 1 is complete (1.H merged 2026-04-24);
-Phase 2.A (mailbox server) is complete.** Phase 0 shipped all five workstreams (0.A scaffold,
+Phase 2.A (mailbox server) is complete; Phase 2.B (mailbox client +
+ContactCard rotation) is complete (merged 2026-05-01).** Phase 0 shipped all five workstreams (0.A scaffold,
 0.B identity & crypto, 0.C Arti integration, 0.D storage layer, 0.E
 documentation baseline). Phase 1.A added `transport::frame::FrameCodec`.
 Phase 1.B added `transport::noise::handshake_{initiator,responder}`
@@ -95,10 +96,37 @@ passing. Phase 0 exit criterion (two daemons echo bytes over Tor)
 is exercised by `crates/tests/src/arti_echo.rs`, `#[ignore]`-gated
 (run with `cargo test -p skattr-tests --release -- --ignored`).
 
+Phase 2.B (mailbox client + ContactCard rotation) merged at the head
+of `phase-2b-mailbox-client`. `core::mailbox::{client, codec, poll,
+auth}` ship the v1-protocol client (long-lived per-`'mine'` mailbox,
+on-demand for deposits), an Idle/Active/Unreachable per-mailbox
+`PollScheduler` with ±25 % jitter, the `DeliveryHub` direct→mailbox
+fallback (`ensure_mailbox_fallback`, pick-one + sequential failover
+via BLAKE2s), and the `RotateOnion` / `AddMailbox` / `RemoveMailbox` /
+`ListMailboxes` daemon commands. Migration 0008 adds status tracking
+to `mailboxes` and `target_kind`/`mailbox_id` to `outbox` (composite
+unique index `idx_outbox_target_message_kind_mailbox`); migration
+0009 adds the `self_card_state` singleton for monotonic version
+bumps. ContactCard updates ride MLS app messages as
+`Envelope::Kind::ContactCardUpdate { card: Box<ContactCard> }`, so
+rotation reuses the same direct→mailbox fallback path as ordinary
+messages. New events: `MailboxStatusChanged`, `ContactCardReceived`;
+new filters: `EventFilter::{Mailboxes, Delivery}`.
+
+Three TODOs in code track follow-up work that didn't fit the 2.B
+freeze: **Task 20.5** wires the per-peer direct-timeout trigger from
+`PeerConnection` to `DeliveryHub::ensure_mailbox_fallback`; **Task
+22.5** routes `RemoveMailbox`'s final-drain ciphertexts through
+`DaemonInbound::dispatch`; **Task 23.5** is real HS key rotation —
+`Command::RotateOnion` today bumps the self-card version and
+republishes the current onion (the address itself does not change),
+so contacts see `ContactCardReceived` with a new version but route
+to the same onion until 23.5 lands.
+
 Phase 1 is complete (1.H merged 2026-04-24); Phase 2.A (mailbox
-server) merged at the head of `phase-2a-mailbox-server`. The next
-workstream is Phase 2.B (mailbox client + ContactCard rotation),
-then the UI lane 2.C → 2.D → 2.E → 2.F → 2.G — see
+server) merged at the head of `phase-2a-mailbox-server`; Phase 2.B
+is complete (merged 2026-05-01). The next workstream is Phase 2.F
+(settings & history UI; depends on both 2.B and 2.E) — see
 `docs/superpowers/specs/2026-04-26-phase-2-ui-decomposition.md`
 for the Phase 2 decomposition and
 `docs/adr/0006-mailbox-protocol-v1.md` for the wire freeze 2.B

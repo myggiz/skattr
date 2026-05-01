@@ -64,7 +64,10 @@ async fn malicious_mailbox_replies_internal_on_every_fetch() {
 
         let err = client.fetch(&signer).await.unwrap_err();
         assert!(
-            matches!(err, CoreError::MailboxClient(MailboxClientErrorKind::Other(_))),
+            matches!(
+                err,
+                CoreError::MailboxClient(MailboxClientErrorKind::Other(_))
+            ),
             "expected Other(_) for Internal error code, got: {err:?}"
         );
         server.await.unwrap();
@@ -214,8 +217,7 @@ async fn mailbox_returns_malformed_cbor() {
 #[tokio::test]
 async fn mailbox_returns_unknown_frame_type_byte() {
     let (client_half, mut server_half) = duplex(256 * 1024);
-    let mut client =
-        MailboxClientHandle::from_stream("unknown-type.onion".into(), client_half);
+    let mut client = MailboxClientHandle::from_stream("unknown-type.onion".into(), client_half);
 
     let server = tokio::spawn(async move {
         // Write a frame with length=3 (1 type + 2 payload), type=0x20 (bogus).

@@ -77,7 +77,9 @@ where
             Some(Ok(_)) => Err(CoreError::MailboxClient(MailboxClientErrorKind::Malformed)),
             // Propagate codec errors (e.g. Malformed) directly; EOF → Unreachable.
             Some(Err(e)) => Err(e),
-            None => Err(CoreError::MailboxClient(MailboxClientErrorKind::Unreachable)),
+            None => Err(CoreError::MailboxClient(
+                MailboxClientErrorKind::Unreachable,
+            )),
         }
     }
 
@@ -98,7 +100,9 @@ where
             Some(Ok(_)) => Err(CoreError::MailboxClient(MailboxClientErrorKind::Malformed)),
             // Propagate codec errors (e.g. Malformed) directly; EOF → Unreachable.
             Some(Err(e)) => Err(e),
-            None => Err(CoreError::MailboxClient(MailboxClientErrorKind::Unreachable)),
+            None => Err(CoreError::MailboxClient(
+                MailboxClientErrorKind::Unreachable,
+            )),
         }
     }
 
@@ -143,7 +147,9 @@ where
             }
             Some(Ok(_)) => Err(CoreError::MailboxClient(MailboxClientErrorKind::Malformed)),
             Some(Err(e)) => Err(e),
-            None => Err(CoreError::MailboxClient(MailboxClientErrorKind::Unreachable)),
+            None => Err(CoreError::MailboxClient(
+                MailboxClientErrorKind::Unreachable,
+            )),
         }
     }
 
@@ -183,7 +189,9 @@ where
             }
             Some(Ok(_)) => Err(CoreError::MailboxClient(MailboxClientErrorKind::Malformed)),
             Some(Err(e)) => Err(e),
-            None => Err(CoreError::MailboxClient(MailboxClientErrorKind::Unreachable)),
+            None => Err(CoreError::MailboxClient(
+                MailboxClientErrorKind::Unreachable,
+            )),
         }
     }
 
@@ -216,7 +224,9 @@ where
             }
             Some(Ok(_)) => Err(CoreError::MailboxClient(MailboxClientErrorKind::Malformed)),
             Some(Err(e)) => Err(e),
-            None => Err(CoreError::MailboxClient(MailboxClientErrorKind::Unreachable)),
+            None => Err(CoreError::MailboxClient(
+                MailboxClientErrorKind::Unreachable,
+            )),
         }
     }
 }

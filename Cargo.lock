@@ -4486,6 +4486,7 @@ dependencies = [
  "tor-llcrypto",
  "tor-rtcompat",
  "tracing",
+ "tracing-subscriber",
  "x25519-dalek",
  "zeroize",
 ]

@@ -209,10 +209,7 @@ pub mod test_exports {
         }
 
         /// Delegate to `MailboxClient::probe`.
-        pub async fn probe(
-            &mut self,
-            identity_hash: [u8; 32],
-        ) -> crate::error::Result<()> {
+        pub async fn probe(&mut self, identity_hash: [u8; 32]) -> crate::error::Result<()> {
             self.inner.probe(identity_hash).await
         }
 
@@ -231,7 +228,9 @@ pub mod test_exports {
             ciphertext: Vec<u8>,
             ttl_request: u32,
         ) -> crate::error::Result<crate::mailbox::protocol::DepositOk> {
-            self.inner.deposit(recipient_hash, ciphertext, ttl_request).await
+            self.inner
+                .deposit(recipient_hash, ciphertext, ttl_request)
+                .await
         }
 
         /// Delegate to `MailboxClient::delete`.

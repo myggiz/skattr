@@ -38,11 +38,7 @@ where
         if *event.metadata().level() <= Level::INFO {
             struct V<'a>(&'a mut String);
             impl tracing::field::Visit for V<'_> {
-                fn record_debug(
-                    &mut self,
-                    _: &tracing::field::Field,
-                    value: &dyn std::fmt::Debug,
-                ) {
+                fn record_debug(&mut self, _: &tracing::field::Field, value: &dyn std::fmt::Debug) {
                     self.0.push_str(&format!("{value:?} "));
                 }
                 fn record_str(&mut self, _: &tracing::field::Field, value: &str) {
