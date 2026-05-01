@@ -630,6 +630,59 @@ impl<'p> MessageRepo<'p> {
             Ok(u64::try_from(n).unwrap_or(0))
         })
     }
+
+    /// Return the most recently inserted message in `group_id`, or
+    /// `None` if the group is empty. Used by `dispatch::list_contacts`
+    /// to populate `ContactSummary::last_message_preview` and
+    /// `last_ts_recv`.
+    ///
+    /// SQL plan: the existing `(group_id, id)` index from migration 0001
+    /// makes this an index-scan with `LIMIT 1` — constant cost regardless
+    /// of group size.
+    pub fn latest_for_group(&self, group_id: &[u8]) -> Result<Option<StoredMessage>> {
+        self.pool.with(|c| {
+            let mut stmt = c
+                .prepare(
+                    "SELECT id, group_id, sender, kind, body_blob, ts, delivered_at, \
+                            mls_generation, ts_daemon_recv \
+                     FROM messages \
+                     WHERE group_id = ?1 \
+                     ORDER BY id DESC \
+                     LIMIT 1",
+                )
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!(
+                        "prepare latest_for_group: {e}"
+                    )))
+                })?;
+            let mut rows = stmt
+                .query_map(rusqlite::params![group_id], |r| {
+                    Ok(StoredMessage {
+                        id: r.get(0)?,
+                        group_id: r.get(1)?,
+                        sender: r.get(2)?,
+                        kind: r.get(3)?,
+                        body_blob: r.get(4)?,
+                        ts: r.get(5)?,
+                        delivered_at: r.get(6)?,
+                        mls_generation: r.get(7)?,
+                        ts_daemon_recv: r.get(8)?,
+                    })
+                })
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!(
+                        "query latest_for_group: {e}"
+                    )))
+                })?;
+            match rows.next() {
+                None => Ok(None),
+                Some(Ok(r)) => Ok(Some(r)),
+                Some(Err(e)) => Err(CoreError::Storage(StorageErrorKind::Other(format!(
+                    "collect latest_for_group: {e}"
+                )))),
+            }
+        })
+    }
 }
 
 #[cfg(test)]
@@ -1637,5 +1690,45 @@ mod tests {
         // Backfill must do nothing.
         let n = repo.backfill_envelope_id().unwrap();
         assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn latest_for_group_returns_max_id_row() {
+        let pool = Pool::in_memory();
+        let repo = MessageRepo::new(&pool);
+
+        let group_id = [0xAA; 32];
+        let env_a = sample_envelope("first");
+        let env_b = sample_envelope("second");
+        let pk = [1u8; 32];
+        repo.insert(InsertParams {
+            group_id: &group_id,
+            sender: &pk,
+            envelope: &env_a,
+            mls_generation: 0,
+            ts_daemon_recv: 100,
+        })
+        .unwrap();
+        repo.insert(InsertParams {
+            group_id: &group_id,
+            sender: &pk,
+            envelope: &env_b,
+            mls_generation: 0,
+            ts_daemon_recv: 200,
+        })
+        .unwrap();
+
+        let row = repo
+            .latest_for_group(&group_id)
+            .unwrap()
+            .expect("at least one row");
+        assert_eq!(row.ts_daemon_recv, 200);
+    }
+
+    #[test]
+    fn latest_for_group_returns_none_when_empty() {
+        let pool = Pool::in_memory();
+        let repo = MessageRepo::new(&pool);
+        assert!(repo.latest_for_group(&[0xBB; 32]).unwrap().is_none());
     }
 }
