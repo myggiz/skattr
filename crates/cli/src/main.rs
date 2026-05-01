@@ -1450,6 +1450,9 @@ mod tests {
             onion: "aaaa.onion".into(),
             card_version: 3,
             added_at: 1_700_000_000,
+            unread_count: 0,
+            last_message_preview: None,
+            last_ts_recv: None,
         }];
         let out = render_contacts_human(&rows);
         assert!(out.contains("alice"));
@@ -1469,6 +1472,9 @@ mod tests {
                 onion: "".into(),
                 card_version: 0,
                 added_at: 0,
+                unread_count: 0,
+                last_message_preview: None,
+                last_ts_recv: None,
             },
             ContactSummary {
                 pubkey: PublicKey([0xCD; 32]),
@@ -1476,6 +1482,9 @@ mod tests {
                 onion: "".into(),
                 card_version: 0,
                 added_at: 0,
+                unread_count: 0,
+                last_message_preview: None,
+                last_ts_recv: None,
             },
         ];
         let pk = resolve_contact(&rows, "ab").unwrap();
@@ -1494,6 +1503,9 @@ mod tests {
                 onion: "".into(),
                 card_version: 0,
                 added_at: 0,
+                unread_count: 0,
+                last_message_preview: None,
+                last_ts_recv: None,
             },
             ContactSummary {
                 pubkey: PublicKey({
@@ -1505,6 +1517,9 @@ mod tests {
                 onion: "".into(),
                 card_version: 0,
                 added_at: 0,
+                unread_count: 0,
+                last_message_preview: None,
+                last_ts_recv: None,
             },
         ];
         let err = resolve_contact(&rows, "ab").unwrap_err();
