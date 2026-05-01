@@ -162,6 +162,20 @@ pub struct ContactSummary {
     pub card_version: u64,
     /// Unix seconds when the contact was first added locally.
     pub added_at: u64,
+    /// Number of unread messages in this contact's group, counted
+    /// against the per-group `read_state` cursor. `0` for fresh
+    /// contacts.
+    #[serde(default)]
+    pub unread_count: u64,
+    /// First ≤80 Unicode code points of the latest message body.
+    /// `None` when the latest message is not `Kind::Text`, or when
+    /// the contact has no messages.
+    #[serde(default)]
+    pub last_message_preview: Option<String>,
+    /// `MAX(ts_daemon_recv)` across both directions in this
+    /// contact's group; `None` if zero messages.
+    #[serde(default)]
+    pub last_ts_recv: Option<u64>,
 }
 
 /// Wire-safe projection of a persisted message row.
@@ -401,6 +415,9 @@ mod tests {
                 onion: "bbbb.onion".into(),
                 card_version: 1,
                 added_at: 1_700_000_000,
+                unread_count: 0,
+                last_message_preview: None,
+                last_ts_recv: None,
             }]),
             CommandResult::Messages(vec![MessageRecord {
                 row_id: 0, // row_id irrelevant in this test
@@ -478,6 +495,52 @@ mod tests {
             }
             other => panic!("expected DaemonInfo, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn contact_summary_with_new_fields_round_trips() {
+        let s = ContactSummary {
+            pubkey: PublicKey([0x99; 32]),
+            nickname: None,
+            onion: "x.onion".into(),
+            card_version: 1,
+            added_at: 1_700_000_000,
+            unread_count: 3,
+            last_message_preview: Some("hello".into()),
+            last_ts_recv: Some(1_700_000_500),
+        };
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&s, &mut buf).unwrap();
+        let back: ContactSummary = ciborium::de::from_reader(&buf[..]).unwrap();
+        assert_eq!(back.unread_count, 3);
+        assert_eq!(back.last_message_preview.as_deref(), Some("hello"));
+        assert_eq!(back.last_ts_recv, Some(1_700_000_500));
+    }
+
+    #[test]
+    fn contact_summary_decodes_old_payload_with_defaults() {
+        #[derive(serde::Serialize)]
+        struct OldShape {
+            pubkey: PublicKey,
+            nickname: Option<String>,
+            onion: String,
+            card_version: u64,
+            added_at: u64,
+        }
+        let old = OldShape {
+            pubkey: PublicKey([0x22; 32]),
+            nickname: Some("legacy".into()),
+            onion: "y.onion".into(),
+            card_version: 7,
+            added_at: 1_700_000_000,
+        };
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&old, &mut buf).unwrap();
+        let back: ContactSummary = ciborium::de::from_reader(&buf[..]).unwrap();
+        assert_eq!(back.unread_count, 0);
+        assert!(back.last_message_preview.is_none());
+        assert!(back.last_ts_recv.is_none());
+        assert_eq!(back.nickname.as_deref(), Some("legacy"));
     }
 }
 

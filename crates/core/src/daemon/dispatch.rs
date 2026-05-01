@@ -96,6 +96,9 @@ where
                 onion,
                 card_version,
                 added_at: u64::try_from(c.added_at).unwrap_or(0),
+                unread_count: 0,
+                last_message_preview: None,
+                last_ts_recv: None,
             }
         })
         .collect();
@@ -226,6 +229,9 @@ where
         onion: link.body.onion.clone(),
         card_version: 0,
         added_at: u64::try_from(now).unwrap_or(0),
+        unread_count: 0,
+        last_message_preview: None,
+        last_ts_recv: None,
     }))
 }
 
