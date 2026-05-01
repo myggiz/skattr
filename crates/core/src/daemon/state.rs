@@ -96,10 +96,15 @@ impl Daemon {
         // Step 1: unlock vault → identity → derive storage seed.
         // `derive_storage_seed` consumes the identity key, so we open
         // the vault a second time to get a fresh copy for DaemonHandle.
+        // The mailbox subsystem also needs an owned `IdentityKey` for
+        // the `PollScheduler`'s per-actor signing path; we open the
+        // vault a third time so the same passphrase produces three
+        // independent zeroize-on-drop handles.
         let vault_path = data_dir.join("identity.vault");
         let (_vault, identity_for_seed) = Vault::open(&vault_path, passphrase.as_str())?;
         let seed = derive_storage_seed(identity_for_seed)?;
         let (_vault2, identity) = Vault::open(&vault_path, passphrase.as_str())?;
+        let (_vault3, identity_for_poller) = Vault::open(&vault_path, passphrase.as_str())?;
 
         // Step 2: open Pool (migrations are applied inside Pool::open).
         let pool = Arc::new(Pool::open(data_dir, &seed)?);
@@ -157,11 +162,38 @@ impl Daemon {
         // (wired in a later phase). For Phase 1.F we only need the hub
         // constructed so IPC commands can be dispatched.
         let hub: Arc<DeliveryHub<arti_client::DataStream>> =
-            Arc::new(DeliveryHub::new_with_inbound(pool.clone(), inbound));
+            Arc::new(DeliveryHub::new_with_inbound(pool.clone(), inbound.clone()));
+
+        // Step 5.5: Mailbox connect factory + PollScheduler.
+        // The factory holds a cloned `arti_client::TorClient` so
+        // `AddMailbox` / `RemoveMailbox` / `RotateOnion` handlers (and
+        // per-mailbox poll actors) can dial mailboxes through Arti
+        // independently of the daemon's owning `TorRuntime`. The
+        // scheduler is held by `Daemon::run` for the lifetime of the
+        // daemon — its `Drop` aborts the supervisor on shutdown.
+        let mailbox_factory: Arc<dyn crate::mailbox::poll::MailboxConnectFactory> =
+            Arc::new(ArtiMailboxFactory {
+                tor_client: rt.client().clone(),
+            });
+        let identity_arc = Arc::new(identity_for_poller);
+        let scheduler = crate::mailbox::poll::PollScheduler::spawn(
+            pool.clone(),
+            identity_arc,
+            events_tx.clone(),
+            mailbox_factory.clone(),
+            Some(inbound.clone()),
+        );
+        let poller_ctrl = scheduler.ctrl();
 
         // Step 6: DaemonHandle.
-        let handle =
-            DaemonHandle::<arti_client::DataStream>::new(pool, hub, identity, events_tx.clone());
+        let handle = DaemonHandle::<arti_client::DataStream>::new_with_mailbox(
+            pool,
+            hub,
+            identity,
+            events_tx.clone(),
+            mailbox_factory,
+            poller_ctrl,
+        );
         handle.set_onion(onion.clone());
 
         // Step 7: IPC server.
@@ -196,6 +228,10 @@ impl Daemon {
         let _ = ipc_task.await;
         let _ = sweep_shutdown_tx.send(true);
         let _ = sweep_handle.await;
+        // Explicitly drop the PollScheduler so its supervisor task is
+        // aborted before Arti shuts down — a poll actor mid-Challenge
+        // would otherwise observe a torn-down circuit.
+        drop(scheduler);
         rt.shutdown().await?;
         // Server::drop removes the socket file automatically.
         Ok(())
@@ -222,6 +258,40 @@ impl Daemon {
             crate::delivery::DeliveryErrorKind::Other(
                 "Daemon::send requires 1.F CLI integration".into(),
             ),
+        ))
+    }
+}
+
+/// Production `MailboxConnectFactory`: dials each mailbox onion through
+/// the daemon's `arti_client::TorClient`. The factory is held by both
+/// the `PollScheduler` (per-tick poll connections) and the `DaemonHandle`
+/// (AddMailbox / RemoveMailbox / RotateOnion probes).
+struct ArtiMailboxFactory {
+    tor_client: arti_client::TorClient<tor_rtcompat::tokio::TokioRustlsRuntime>,
+}
+
+#[async_trait::async_trait]
+impl crate::mailbox::poll::MailboxConnectFactory for ArtiMailboxFactory {
+    async fn connect(
+        &self,
+        onion: &str,
+    ) -> crate::error::Result<
+        crate::mailbox::client::MailboxClient<Box<dyn crate::mailbox::poll::MailboxStream>>,
+    > {
+        let target = format!("{onion}:1");
+        let stream = self
+            .tor_client
+            .connect(target.as_str())
+            .await
+            .map_err(|_| {
+                crate::error::CoreError::MailboxClient(
+                    crate::error::MailboxClientErrorKind::Unreachable,
+                )
+            })?;
+        let boxed: Box<dyn crate::mailbox::poll::MailboxStream> = Box::new(stream);
+        Ok(crate::mailbox::client::MailboxClient::from_stream(
+            onion.to_string(),
+            boxed,
         ))
     }
 }

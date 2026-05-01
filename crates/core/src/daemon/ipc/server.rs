@@ -304,9 +304,7 @@ fn event_matches(event: &Event, filter: Option<&EventFilter>) -> bool {
             true
         }
         (EventFilter::Contact(_), Event::ContactUpdated(_)) => true,
-        (EventFilter::Contact(peer), Event::ContactCardReceived { contact, .. }) => {
-            contact == peer
-        }
+        (EventFilter::Contact(peer), Event::ContactCardReceived { contact, .. }) => contact == peer,
         (EventFilter::Messages { contact: None }, Event::MessageReceived { .. }) => true,
         (EventFilter::Messages { contact: Some(c) }, Event::MessageReceived { contact, .. }) => {
             c == contact
@@ -607,9 +605,18 @@ mod tests {
 
         let alice = PublicKey([7; 32]);
         let bob = PublicKey([8; 32]);
-        let card_event = Event::ContactCardReceived { contact: alice, version: 1 };
-        assert!(event_matches(&card_event, Some(&EventFilter::Contact(alice))));
-        assert!(!event_matches(&card_event, Some(&EventFilter::Contact(bob))));
+        let card_event = Event::ContactCardReceived {
+            contact: alice,
+            version: 1,
+        };
+        assert!(event_matches(
+            &card_event,
+            Some(&EventFilter::Contact(alice))
+        ));
+        assert!(!event_matches(
+            &card_event,
+            Some(&EventFilter::Contact(bob))
+        ));
     }
 
     #[test]

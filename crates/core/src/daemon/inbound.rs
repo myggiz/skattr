@@ -463,9 +463,12 @@ mod tests {
         let bob_provider = crate::mls::provider::MlsProvider::new();
         let kp_repo = KeyPackageRepo::new(&pool);
         let bob_kp = KeyPackage::generate(&bob_id, &bob_provider, &kp_repo).unwrap();
-        let mut alice_group =
-            crate::mls::Group::create_solo(&alice_id, None, crate::mls::provider::MlsProvider::new())
-                .unwrap();
+        let mut alice_group = crate::mls::Group::create_solo(
+            &alice_id,
+            None,
+            crate::mls::provider::MlsProvider::new(),
+        )
+        .unwrap();
         let (welcome, _commit) = alice_group.add_member(&bob_kp, None).unwrap();
         let group_id_bytes = alice_group.id().0.clone();
         let mut bob_group =
@@ -565,7 +568,10 @@ mod tests {
                 })
             })
             .unwrap();
-        assert_eq!(msg_count, 0, "ContactCardUpdate must not create a messages row");
+        assert_eq!(
+            msg_count, 0,
+            "ContactCardUpdate must not create a messages row"
+        );
     }
 
     /// ContactCardUpdate where the card claims a different identity than the
@@ -593,9 +599,12 @@ mod tests {
         let bob_provider = crate::mls::provider::MlsProvider::new();
         let kp_repo = KeyPackageRepo::new(&pool);
         let bob_kp = KeyPackage::generate(&bob_id, &bob_provider, &kp_repo).unwrap();
-        let mut alice_group =
-            crate::mls::Group::create_solo(&alice_id, None, crate::mls::provider::MlsProvider::new())
-                .unwrap();
+        let mut alice_group = crate::mls::Group::create_solo(
+            &alice_id,
+            None,
+            crate::mls::provider::MlsProvider::new(),
+        )
+        .unwrap();
         let (welcome, _commit) = alice_group.add_member(&bob_kp, None).unwrap();
         let group_id_bytes = alice_group.id().0.clone();
         let mut bob_group =

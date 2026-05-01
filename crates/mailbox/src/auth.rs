@@ -23,9 +23,7 @@ use crate::error::{AuthErrorKind, MailboxError};
 
 // Re-export wire-frozen helpers from core so the mailbox crate's
 // call sites keep working without modification.
-pub use skattr_core::mailbox::auth::{
-    signing_input, AUTH_DOMAIN, OP_BYTE_DELETE, OP_BYTE_FETCH,
-};
+pub use skattr_core::mailbox::auth::{signing_input, AUTH_DOMAIN, OP_BYTE_DELETE, OP_BYTE_FETCH};
 
 /// Nonce TTL in seconds.
 pub const CHALLENGE_TTL_SECS: i64 = 30;
@@ -135,9 +133,8 @@ impl Challenges {
 /// This is a local wrapper around [`skattr_core::mailbox::auth::payload_digest`]
 /// that maps the `String` error into the mailbox crate's `MailboxError` taxonomy.
 pub fn payload_digest<T: serde::Serialize>(payload: &T) -> Result<[u8; 32], MailboxError> {
-    skattr_core::mailbox::auth::payload_digest(payload).map_err(|e| {
-        MailboxError::Transport(crate::error::TransportErrorKind::EncodeFailed(e))
-    })
+    skattr_core::mailbox::auth::payload_digest(payload)
+        .map_err(|e| MailboxError::Transport(crate::error::TransportErrorKind::EncodeFailed(e)))
 }
 
 #[cfg(test)]

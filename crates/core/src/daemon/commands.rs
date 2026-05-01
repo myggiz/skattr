@@ -96,6 +96,13 @@ pub enum Command {
         /// Keep at most this many most-recent rows per conversation.
         keep_last: Option<u64>,
     },
+    /// Register a `'mine'` mailbox: probe it for liveness, persist it
+    /// as `Reachable`, notify the `PollScheduler`, and republish the
+    /// self-card carrying the new mailbox onion to every contact.
+    AddMailbox {
+        /// Operator's onion address (without `:port` suffix).
+        onion: String,
+    },
     /// Export a paged window of persisted messages for the given peer.
     ExportHistory {
         /// Peer whose history to export.

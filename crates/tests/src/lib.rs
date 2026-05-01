@@ -33,10 +33,10 @@ mod delivery_real_tor;
 mod history_sweep;
 #[cfg(test)]
 mod invite_roundtrip;
-#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
-mod mailbox_real_tor;
 #[cfg(test)]
 mod mailbox_codec_parity;
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod mailbox_real_tor;
 #[cfg(test)]
 mod mls_pair;
 

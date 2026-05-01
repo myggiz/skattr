@@ -68,9 +68,9 @@ where
                 Err(CoreError::MailboxClient(map_error(code)))
             }
             Some(Ok(_)) => Err(CoreError::MailboxClient(MailboxClientErrorKind::Malformed)),
-            Some(Err(_)) | None => {
-                Err(CoreError::MailboxClient(MailboxClientErrorKind::Unreachable))
-            }
+            Some(Err(_)) | None => Err(CoreError::MailboxClient(
+                MailboxClientErrorKind::Unreachable,
+            )),
         }
     }
 
@@ -89,9 +89,9 @@ where
                 Err(CoreError::MailboxClient(map_error(code)))
             }
             Some(Ok(_)) => Err(CoreError::MailboxClient(MailboxClientErrorKind::Malformed)),
-            Some(Err(_)) | None => {
-                Err(CoreError::MailboxClient(MailboxClientErrorKind::Unreachable))
-            }
+            Some(Err(_)) | None => Err(CoreError::MailboxClient(
+                MailboxClientErrorKind::Unreachable,
+            )),
         }
     }
 
@@ -127,9 +127,9 @@ where
                 Err(CoreError::MailboxClient(map_error(code)))
             }
             Some(Ok(_)) => Err(CoreError::MailboxClient(MailboxClientErrorKind::Malformed)),
-            Some(Err(_)) | None => {
-                Err(CoreError::MailboxClient(MailboxClientErrorKind::Unreachable))
-            }
+            Some(Err(_)) | None => Err(CoreError::MailboxClient(
+                MailboxClientErrorKind::Unreachable,
+            )),
         }
     }
 
@@ -168,9 +168,9 @@ where
                 Err(CoreError::MailboxClient(map_error(code)))
             }
             Some(Ok(_)) => Err(CoreError::MailboxClient(MailboxClientErrorKind::Malformed)),
-            Some(Err(_)) | None => {
-                Err(CoreError::MailboxClient(MailboxClientErrorKind::Unreachable))
-            }
+            Some(Err(_)) | None => Err(CoreError::MailboxClient(
+                MailboxClientErrorKind::Unreachable,
+            )),
         }
     }
 
@@ -189,9 +189,9 @@ where
                 Err(CoreError::MailboxClient(map_error(code)))
             }
             Some(Ok(_)) => Err(CoreError::MailboxClient(MailboxClientErrorKind::Malformed)),
-            Some(Err(_)) | None => {
-                Err(CoreError::MailboxClient(MailboxClientErrorKind::Unreachable))
-            }
+            Some(Err(_)) | None => Err(CoreError::MailboxClient(
+                MailboxClientErrorKind::Unreachable,
+            )),
         }
     }
 }
@@ -314,7 +314,10 @@ mod tests {
                 .unwrap();
         });
         let mut client = MailboxClient::from_stream("a.onion".into(), a);
-        let ok = client.deposit([0xAA; 32], vec![1, 2, 3], 86_400).await.unwrap();
+        let ok = client
+            .deposit([0xAA; 32], vec![1, 2, 3], 86_400)
+            .await
+            .unwrap();
         assert_eq!(ok.deposit_id, [0x42; 16]);
         server.await.unwrap();
     }
@@ -369,12 +372,9 @@ mod tests {
                 panic!()
             };
             assert_eq!(f.identity_pubkey, pk);
-            let digest = crate::mailbox::auth::payload_digest(&(
-                f.version,
-                f.identity_pubkey,
-                f.nonce,
-            ))
-            .unwrap();
+            let digest =
+                crate::mailbox::auth::payload_digest(&(f.version, f.identity_pubkey, f.nonce))
+                    .unwrap();
             let input = crate::mailbox::auth::signing_input(
                 &f.nonce,
                 crate::mailbox::auth::OP_BYTE_FETCH,

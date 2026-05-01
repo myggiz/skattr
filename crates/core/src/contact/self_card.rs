@@ -71,15 +71,8 @@ mod tests {
     fn first_self_card_starts_at_version_1() {
         let pool = Pool::in_memory();
         let signer = IdentityKey::generate().unwrap();
-        let card = build_next_self_card(
-            &pool,
-            &signer,
-            "aaaa.onion".into(),
-            vec![],
-            3600,
-            100,
-        )
-        .unwrap();
+        let card =
+            build_next_self_card(&pool, &signer, "aaaa.onion".into(), vec![], 3600, 100).unwrap();
         assert_eq!(card.body.version, 1);
         assert_eq!(card.body.onion, "aaaa.onion");
         assert_eq!(card.body.expires_at, 100 + 3600);

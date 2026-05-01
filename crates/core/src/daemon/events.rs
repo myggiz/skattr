@@ -101,7 +101,10 @@ mod tests {
         let mut buf = Vec::new();
         ciborium::into_writer(&e, &mut buf).unwrap();
         let back: Event = ciborium::from_reader(&buf[..]).unwrap();
-        assert!(matches!(back, Event::MailboxStatusChanged { mailbox_id: 42, .. }));
+        assert!(matches!(
+            back,
+            Event::MailboxStatusChanged { mailbox_id: 42, .. }
+        ));
     }
 
     #[test]
@@ -113,6 +116,9 @@ mod tests {
         let mut buf = Vec::new();
         ciborium::into_writer(&e, &mut buf).unwrap();
         let back: Event = ciborium::from_reader(&buf[..]).unwrap();
-        assert!(matches!(back, Event::ContactCardReceived { version: 5, .. }));
+        assert!(matches!(
+            back,
+            Event::ContactCardReceived { version: 5, .. }
+        ));
     }
 }

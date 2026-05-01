@@ -121,8 +121,9 @@ impl MailboxFrameCodec {
 
 fn encode_cbor<T: Serialize>(value: &T) -> Result<Vec<u8>, CoreError> {
     let mut out = Vec::new();
-    ciborium::into_writer(value, &mut out)
-        .map_err(|e| CoreError::MailboxClient(MailboxClientErrorKind::Other(format!("encode: {e}"))))?;
+    ciborium::into_writer(value, &mut out).map_err(|e| {
+        CoreError::MailboxClient(MailboxClientErrorKind::Other(format!("encode: {e}")))
+    })?;
     Ok(out)
 }
 

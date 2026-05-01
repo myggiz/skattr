@@ -401,9 +401,11 @@ mod tests {
         let pool = Pool::in_memory();
         pool.with(|c| {
             let v: i64 = c
-                .query_row("SELECT version FROM self_card_state WHERE id = 1", [], |r| {
-                    r.get(0)
-                })
+                .query_row(
+                    "SELECT version FROM self_card_state WHERE id = 1",
+                    [],
+                    |r| r.get(0),
+                )
                 .unwrap();
             assert_eq!(v, 0);
             Ok(())

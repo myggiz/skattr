@@ -9,16 +9,19 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use tokio_util::bytes::BytesMut;
-use skattr_core::test_exports::{
-    MailboxFrame as ClientFrame, MailboxFrameCodec as ClientCodec,
-    MailboxFrameKind as ClientFrameKind,
-};
 use skattr_core::mailbox::protocol::{
     Challenge, ChallengeNonce, Delete, DeleteOk, Deposit, DepositOk, ErrorBody, ErrorCode, Fetch,
     FetchResponse, PendingDeposit, PROTOCOL_VERSION,
 };
-use skattr_mailbox::codec::{MailboxFrame as ServerFrame, MailboxFrameCodec as ServerCodec, MailboxFrameKind as ServerFrameKind};
+use skattr_core::test_exports::{
+    MailboxFrame as ClientFrame, MailboxFrameCodec as ClientCodec,
+    MailboxFrameKind as ClientFrameKind,
+};
+use skattr_mailbox::codec::{
+    MailboxFrame as ServerFrame, MailboxFrameCodec as ServerCodec,
+    MailboxFrameKind as ServerFrameKind,
+};
+use tokio_util::bytes::BytesMut;
 use tokio_util::codec::{Decoder, Encoder};
 
 // === C → S frames (client encode → server decode) =====================
@@ -44,7 +47,10 @@ fn client_deposit_decodes_on_server() {
 
 #[test]
 fn client_challenge_decodes_on_server() {
-    let body = Challenge { version: PROTOCOL_VERSION, identity_hash: [0xCD; 32] };
+    let body = Challenge {
+        version: PROTOCOL_VERSION,
+        identity_hash: [0xCD; 32],
+    };
     let mut buf = BytesMut::new();
     ClientCodec::new()
         .encode(ClientFrame::Challenge(body.clone()), &mut buf)
@@ -96,7 +102,10 @@ fn client_delete_decodes_on_server() {
 
 #[test]
 fn server_deposit_ok_decodes_on_client() {
-    let body = DepositOk { deposit_id: [0x42; 16], expires_at: 1_700_000_000 };
+    let body = DepositOk {
+        deposit_id: [0x42; 16],
+        expires_at: 1_700_000_000,
+    };
     let mut buf = BytesMut::new();
     ServerCodec::new()
         .encode(ServerFrame::DepositOk(body.clone()), &mut buf)
@@ -109,7 +118,10 @@ fn server_deposit_ok_decodes_on_client() {
 
 #[test]
 fn server_challenge_nonce_decodes_on_client() {
-    let body = ChallengeNonce { nonce: [0x55; 32], issued_at: 1_700_000_000 };
+    let body = ChallengeNonce {
+        nonce: [0x55; 32],
+        issued_at: 1_700_000_000,
+    };
     let mut buf = BytesMut::new();
     ServerCodec::new()
         .encode(ServerFrame::ChallengeNonce(body.clone()), &mut buf)
@@ -143,7 +155,10 @@ fn server_fetch_response_decodes_on_client() {
 
 #[test]
 fn server_delete_ok_decodes_on_client() {
-    let body = DeleteOk { deleted: 3, not_found: 1 };
+    let body = DeleteOk {
+        deleted: 3,
+        not_found: 1,
+    };
     let mut buf = BytesMut::new();
     ServerCodec::new()
         .encode(ServerFrame::DeleteOk(body.clone()), &mut buf)
@@ -156,7 +171,10 @@ fn server_delete_ok_decodes_on_client() {
 
 #[test]
 fn server_error_decodes_on_client() {
-    let body = ErrorBody { code: ErrorCode::RateLimited, message: "slow down".into() };
+    let body = ErrorBody {
+        code: ErrorCode::RateLimited,
+        message: "slow down".into(),
+    };
     let mut buf = BytesMut::new();
     ServerCodec::new()
         .encode(ServerFrame::Error(body.clone()), &mut buf)
@@ -171,13 +189,31 @@ fn server_error_decodes_on_client() {
 
 #[test]
 fn every_frame_type_byte_matches_server() {
-    assert_eq!(ClientFrameKind::Deposit as u8, ServerFrameKind::Deposit as u8);
-    assert_eq!(ClientFrameKind::DepositOk as u8, ServerFrameKind::DepositOk as u8);
-    assert_eq!(ClientFrameKind::Challenge as u8, ServerFrameKind::Challenge as u8);
-    assert_eq!(ClientFrameKind::ChallengeNonce as u8, ServerFrameKind::ChallengeNonce as u8);
+    assert_eq!(
+        ClientFrameKind::Deposit as u8,
+        ServerFrameKind::Deposit as u8
+    );
+    assert_eq!(
+        ClientFrameKind::DepositOk as u8,
+        ServerFrameKind::DepositOk as u8
+    );
+    assert_eq!(
+        ClientFrameKind::Challenge as u8,
+        ServerFrameKind::Challenge as u8
+    );
+    assert_eq!(
+        ClientFrameKind::ChallengeNonce as u8,
+        ServerFrameKind::ChallengeNonce as u8
+    );
     assert_eq!(ClientFrameKind::Fetch as u8, ServerFrameKind::Fetch as u8);
-    assert_eq!(ClientFrameKind::FetchResponse as u8, ServerFrameKind::FetchResponse as u8);
+    assert_eq!(
+        ClientFrameKind::FetchResponse as u8,
+        ServerFrameKind::FetchResponse as u8
+    );
     assert_eq!(ClientFrameKind::Delete as u8, ServerFrameKind::Delete as u8);
-    assert_eq!(ClientFrameKind::DeleteOk as u8, ServerFrameKind::DeleteOk as u8);
+    assert_eq!(
+        ClientFrameKind::DeleteOk as u8,
+        ServerFrameKind::DeleteOk as u8
+    );
     assert_eq!(ClientFrameKind::Error as u8, ServerFrameKind::Error as u8);
 }
