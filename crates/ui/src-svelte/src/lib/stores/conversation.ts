@@ -176,3 +176,39 @@ export function appendMessage(record: MessageRecord): void {
     return state;
   });
 }
+
+const MARK_READ_DEBOUNCE_MS = 500;
+const BOTTOM_PROXIMITY_PX = 100;
+
+export function isWithinBottomThreshold(el: HTMLElement): boolean {
+  return el.scrollHeight - el.scrollTop - el.clientHeight < BOTTOM_PROXIMITY_PX;
+}
+
+let markReadTimer: ReturnType<typeof setTimeout> | null = null;
+let pendingHighestRowId: bigint = 0n;
+
+export function markReadIfAtBottom(rowId: bigint): void {
+  const state = get(conversation);
+  if (state.contact === null) return;
+  if (rowId <= state.readCursor) return;
+  if (rowId > pendingHighestRowId) pendingHighestRowId = rowId;
+  if (markReadTimer) clearTimeout(markReadTimer);
+  markReadTimer = setTimeout(async () => {
+    const target = pendingHighestRowId;
+    pendingHighestRowId = 0n;
+    markReadTimer = null;
+    const cur = get(conversation);
+    if (cur.contact === null || target <= cur.readCursor) return;
+    try {
+      await ipcClient.request({
+        cmd: "mark_read",
+        contact: cur.contact,
+        up_to_message_id: target,
+      });
+      conversation.update((s) => ({ ...s, readCursor: target }));
+    } catch (e) {
+      // Swallow per spec §4.4 — non-critical; next open retries.
+      console.warn("mark_read failed:", e);
+    }
+  }, MARK_READ_DEBOUNCE_MS);
+}

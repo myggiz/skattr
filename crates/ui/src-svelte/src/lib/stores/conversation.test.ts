@@ -85,7 +85,7 @@ describe("optimistic send + reconcile", () => {
 });
 
 import { vi } from "vitest";
-import { loadOlder, openConversationFromSummary } from "./conversation";
+import { loadOlder, openConversationFromSummary, markReadIfAtBottom, isWithinBottomThreshold } from "./conversation";
 import { ipcClient } from "$lib/ipc/tauri";
 import type { ContactSummary } from "$lib/ipc/types";
 
@@ -155,6 +155,61 @@ describe("pagination", () => {
     await Promise.all([p1, p2]);
     expect(spy).toHaveBeenCalledTimes(1);
     spy.mockRestore();
+  });
+});
+
+describe("mark-read", () => {
+  test("isWithinBottomThreshold true when scrolled near bottom", () => {
+    const el = { scrollTop: 900, scrollHeight: 1000, clientHeight: 100 } as any;
+    expect(isWithinBottomThreshold(el)).toBe(true);
+  });
+
+  test("isWithinBottomThreshold false when scrolled up", () => {
+    const el = { scrollTop: 100, scrollHeight: 1000, clientHeight: 100 } as any;
+    expect(isWithinBottomThreshold(el)).toBe(false);
+  });
+
+  test("markReadIfAtBottom debounces multiple bursts to a single IPC", async () => {
+    vi.useFakeTimers();
+    conversation.update((s) => ({ ...s, contact: peer, readCursor: 0n }));
+    const spy = vi.spyOn(ipcClient, "request").mockResolvedValue({
+      resp: "ok",
+      data: { result: "marked_read", data: { up_to: 7n } },
+    } as any);
+    markReadIfAtBottom(3n);
+    markReadIfAtBottom(5n);
+    markReadIfAtBottom(7n);
+    await vi.advanceTimersByTimeAsync(600);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy).toHaveBeenCalledWith({
+      cmd: "mark_read",
+      contact: peer,
+      up_to_message_id: 7n,
+    });
+    spy.mockRestore();
+    vi.useRealTimers();
+  });
+
+  test("markReadIfAtBottom skips when rowId <= readCursor", async () => {
+    vi.useFakeTimers();
+    conversation.update((s) => ({ ...s, contact: peer, readCursor: 10n }));
+    const spy = vi.spyOn(ipcClient, "request");
+    markReadIfAtBottom(5n);
+    await vi.advanceTimersByTimeAsync(600);
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+    vi.useRealTimers();
+  });
+
+  test("markReadIfAtBottom skips when contact is null", async () => {
+    vi.useFakeTimers();
+    conversation.update((s) => ({ ...s, contact: null, readCursor: 0n }));
+    const spy = vi.spyOn(ipcClient, "request");
+    markReadIfAtBottom(99n);
+    await vi.advanceTimersByTimeAsync(600);
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+    vi.useRealTimers();
   });
 });
 
