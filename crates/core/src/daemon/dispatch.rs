@@ -78,10 +78,12 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     use crate::daemon::commands::ContactSummary;
-    use crate::storage::{ContactRepo, MessageRepo};
+    use crate::storage::{ContactRepo, MessageRepo, MlsGroupRepo, ReadStateRepo};
 
     let repo = ContactRepo::new(&handle.pool);
     let msg_repo = MessageRepo::new(&handle.pool);
+    let group_repo = MlsGroupRepo::new(&handle.pool);
+    let read_repo = ReadStateRepo::new(&handle.pool);
     let contacts = repo.list().map_err(map_err)?;
 
     let mut summaries: Vec<ContactSummary> = Vec::with_capacity(contacts.len());
@@ -93,10 +95,10 @@ where
             .unwrap_or_else(|| (String::new(), 0));
 
         let group_id = repo.get_group_id(&c.identity).map_err(map_err)?;
-        let (unread_count, last_message_preview, last_ts_recv) = match group_id {
+        let (unread_count, last_message_preview, last_ts_recv) = match group_id.as_deref() {
             Some(gid) => {
-                let unread = msg_repo.unread_count(&gid).map_err(map_err)?;
-                let latest = msg_repo.latest_for_group(&gid).map_err(map_err)?;
+                let unread = msg_repo.unread_count(gid).map_err(map_err)?;
+                let latest = msg_repo.latest_for_group(gid).map_err(map_err)?;
                 let preview = latest.as_ref().and_then(|row| {
                     let env: crate::envelope::Envelope =
                         crate::envelope::Envelope::decode(row.body_blob.as_ref()?.as_slice())
@@ -112,6 +114,25 @@ where
             None => (0, None, None),
         };
 
+        let group_state: Option<crate::daemon::commands::MlsGroupStateLabel> =
+            match group_id.as_deref() {
+                Some(gid) => {
+                    use crate::daemon::commands::MlsGroupStateLabel;
+                    use crate::mls::group::{Group, GroupId};
+                    match Group::load(&GroupId(gid.to_vec()), &group_repo) {
+                        Ok(Some(_)) => Some(MlsGroupStateLabel::Active),
+                        Ok(None) => Some(MlsGroupStateLabel::PendingJoin),
+                        Err(_) => Some(MlsGroupStateLabel::Corrupt),
+                    }
+                }
+                None => None,
+            };
+
+        let last_read_row_id: Option<i64> = match group_id.as_deref() {
+            Some(gid) => read_repo.get(gid).map_err(map_err)?,
+            None => None,
+        };
+
         summaries.push(ContactSummary {
             pubkey: c.identity,
             nickname: c.display_name,
@@ -121,8 +142,8 @@ where
             unread_count,
             last_message_preview,
             last_ts_recv,
-            group_state: None,
-            last_read_row_id: None,
+            group_state,
+            last_read_row_id,
         });
     }
 
@@ -2975,5 +2996,75 @@ mod tests {
                 .unwrap();
         }
         (peer_pk, gid)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn list_contacts_carries_group_state_and_read_cursor() {
+        use crate::daemon::commands::MlsGroupStateLabel;
+
+        let handle = test_handle();
+        let (peer_pk, _gid) = seed_contact_with_real_group(&handle).await;
+
+        // Send a real message so a row exists, then mark up to its row_id as read.
+        let send_result = execute_command(
+            handle.clone(),
+            Command::SendMessage {
+                contact: peer_pk,
+                kind: crate::envelope::Kind::Text { body: "x".into() },
+            },
+        )
+        .await
+        .unwrap();
+        let row_id = match send_result {
+            CommandResult::MessageSent { record: Some(rec), .. } => rec.row_id,
+            other => panic!("expected MessageSent with record, got {other:?}"),
+        };
+        execute_command(
+            handle.clone(),
+            Command::MarkRead {
+                contact: peer_pk,
+                up_to_message_id: row_id,
+            },
+        )
+        .await
+        .unwrap();
+
+        let result = execute_command(handle.clone(), Command::ListContacts).await.unwrap();
+        let summary = match result {
+            CommandResult::Contacts(s) => s
+                .into_iter()
+                .find(|c| c.pubkey == peer_pk)
+                .expect("seeded peer not found"),
+            other => panic!("expected Contacts, got {other:?}"),
+        };
+
+        assert_eq!(summary.group_state, Some(MlsGroupStateLabel::Active));
+        assert_eq!(summary.last_read_row_id, Some(row_id));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn list_contacts_reports_corrupt_for_unloadable_group_blob() {
+        use crate::daemon::commands::MlsGroupStateLabel;
+        use crate::storage::MlsGroupRepo;
+
+        let handle = test_handle();
+        // seed_contact_with_group provides a placeholder group_id without real MLS state.
+        // We write a garbage blob to that group_id to trigger a load failure.
+        let (peer_pk, gid) = seed_contact_with_group(&handle, "broken", 0).await;
+
+        // Write a garbage blob to force load failure.
+        MlsGroupRepo::new(&handle.pool)
+            .put(&gid, b"\xFF\xFF\xFFnot a valid mls blob", 0)
+            .unwrap();
+
+        let result = execute_command(handle.clone(), Command::ListContacts).await.unwrap();
+        let summary = match result {
+            CommandResult::Contacts(s) => s
+                .into_iter()
+                .find(|c| c.pubkey == peer_pk)
+                .unwrap(),
+            other => panic!("expected Contacts, got {other:?}"),
+        };
+        assert_eq!(summary.group_state, Some(MlsGroupStateLabel::Corrupt));
     }
 }
