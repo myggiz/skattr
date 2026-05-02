@@ -55,6 +55,8 @@ mod remove_mailbox_drains;
 mod rotate_onion_during_offline;
 #[cfg(test)]
 mod ui_first_run;
+#[cfg(test)]
+mod ui_send_roundtrip;
 
 use std::time::Duration;
 
