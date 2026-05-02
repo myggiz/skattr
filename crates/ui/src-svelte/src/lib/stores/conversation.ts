@@ -209,6 +209,12 @@ export async function send(contact: PublicKey, body: string): Promise<void> {
       contact,
       kind: { kind: "text", body },
     });
+    const cur = get(conversation);
+    if (cur.contact !== contact) {
+      // User switched away — the daemon persisted the row;
+      // it'll show up next time the original conversation is opened.
+      return;
+    }
     const result = unwrapOk(resp);
     if (result.result !== "message_sent") {
       markFailed(tempId, "unexpected reply variant");
@@ -238,6 +244,8 @@ export async function send(contact: PublicKey, body: string): Promise<void> {
       });
     }
   } catch (e) {
+    const cur = get(conversation);
+    if (cur.contact !== contact) return;
     markFailed(tempId, e instanceof Error ? e.message : String(e));
   }
 }
