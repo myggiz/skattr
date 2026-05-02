@@ -39,8 +39,8 @@ where
         }
         Command::AddContact { invite_url } => add_contact(&handle, invite_url).await,
         Command::SendMessage { contact, kind } => send_message(&handle, contact, kind).await,
-        Command::RecentMessages { contact, limit } => {
-            recent_messages(&handle, contact, limit).await
+        Command::RecentMessages { contact, limit, before_id, paged } => {
+            recent_messages(&handle, contact, limit, before_id, paged).await
         }
         Command::CreateGroup { .. } => Err(IpcError::UnknownCommand),
         Command::SearchMessages {
@@ -387,10 +387,13 @@ async fn recent_messages<S>(
     handle: &Arc<DaemonHandle<S>>,
     contact: Option<crate::identity::PublicKey>,
     limit: u32,
+    before_id: Option<i64>,
+    paged: bool,
 ) -> std::result::Result<CommandResult, IpcError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    let _ = (before_id, paged); // used in Task 6
     use crate::daemon::commands::{Direction, MessageRecord};
     use crate::daemon::error_kind::DaemonErrorKind;
     use crate::envelope::Envelope;
@@ -1380,6 +1383,8 @@ mod tests {
             Command::RecentMessages {
                 contact: Some(crate::identity::PublicKey([0x88; 32])),
                 limit: 50,
+                before_id: None,
+                paged: false,
             },
         )
         .await;
@@ -1438,6 +1443,8 @@ mod tests {
             Command::RecentMessages {
                 contact: Some(peer),
                 limit: 10,
+                before_id: None,
+                paged: false,
             },
         )
         .await
@@ -1483,6 +1490,8 @@ mod tests {
             Command::RecentMessages {
                 contact: Some(peer),
                 limit: 10,
+                before_id: None,
+                paged: false,
             },
         )
         .await

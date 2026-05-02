@@ -439,6 +439,8 @@ async fn bob_recent_messages_empty_before_send() {
         .exec(Command::RecentMessages {
             contact: Some(alice_summary.pubkey),
             limit: 10,
+            before_id: None,
+            paged: false,
         })
         .await
         .unwrap()

@@ -845,6 +845,8 @@ async fn tail(
         .execute(CoreCommand::RecentMessages {
             contact: target,
             limit,
+            before_id: None,
+            paged: false,
         })
         .await
     {
@@ -947,6 +949,8 @@ async fn tail_follow(
         .execute(CoreCommand::RecentMessages {
             contact: target,
             limit,
+            before_id: None,
+            paged: false,
         })
         .await
     {

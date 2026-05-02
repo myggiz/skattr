@@ -48,6 +48,14 @@ pub enum Command {
         contact: Option<PublicKey>,
         /// Max rows to return.
         limit: u32,
+        /// Pagination cursor — return rows with `row_id < before_id`.
+        /// `None` = first page (most-recent).
+        #[serde(default)]
+        before_id: Option<i64>,
+        /// Opt-in to the paged response variant `MessagesPage`. CLI
+        /// callers omit and receive `Messages(Vec)` unchanged.
+        #[serde(default)]
+        paged: bool,
     },
     /// Start a new MLS group with the given initial members. Reserved
     /// for Phase 2; 1.F server answers `IpcError::UnknownCommand`.
@@ -394,10 +402,14 @@ mod tests {
             Command::RecentMessages {
                 contact: None,
                 limit: 50,
+                before_id: None,
+                paged: false,
             },
             Command::RecentMessages {
                 contact: Some(crate::identity::PublicKey([1; 32])),
                 limit: 10,
+                before_id: None,
+                paged: false,
             },
             Command::CreateInvite {
                 nickname: Some("alice".into()),
@@ -705,5 +717,57 @@ mod phase_1g_wire_tests {
         ciborium::ser::into_writer(&res, &mut buf).unwrap();
         let back: CommandResult = ciborium::de::from_reader(&buf[..]).unwrap();
         assert!(matches!(back, CommandResult::SearchResults(_)));
+    }
+
+    #[test]
+    fn recent_messages_with_before_id_and_paged_round_trips() {
+        fn roundtrip<T>(value: &T) -> T
+        where
+            T: serde::Serialize + for<'de> serde::Deserialize<'de>,
+        {
+            let mut buf = Vec::new();
+            ciborium::ser::into_writer(value, &mut buf).unwrap();
+            ciborium::de::from_reader(&buf[..]).unwrap()
+        }
+        let cmd = Command::RecentMessages {
+            contact: Some(crate::identity::PublicKey([1; 32])),
+            limit: 50,
+            before_id: Some(123),
+            paged: true,
+        };
+        let back: Command = roundtrip(&cmd);
+        match back {
+            Command::RecentMessages {
+                before_id: Some(123),
+                paged: true,
+                limit: 50,
+                ..
+            } => {}
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn recent_messages_without_new_fields_decodes_legacy() {
+        let legacy_cbor = {
+            let mut buf = Vec::new();
+            let v = ciborium::value::Value::Map(vec![
+                ("cmd".into(), ciborium::value::Value::Text("recent_messages".into())),
+                ("contact".into(), ciborium::value::Value::Null),
+                ("limit".into(), ciborium::value::Value::Integer(50.into())),
+            ]);
+            ciborium::ser::into_writer(&v, &mut buf).unwrap();
+            buf
+        };
+        let back: Command = ciborium::de::from_reader(&legacy_cbor[..]).unwrap();
+        match back {
+            Command::RecentMessages {
+                before_id: None,
+                paged: false,
+                limit: 50,
+                ..
+            } => {}
+            other => panic!("unexpected: {other:?}"),
+        }
     }
 }
