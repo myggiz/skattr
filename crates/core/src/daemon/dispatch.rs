@@ -2745,7 +2745,8 @@ mod tests {
             CommandResult::MessagesPage { records, next_before_id } => {
                 assert_eq!(records.len(), 50);
                 assert!(next_before_id.is_some());
-                assert_eq!(next_before_id, records.last().map(|r| r.row_id));
+                let min_id = records.iter().map(|r| r.row_id).min().expect("non-empty page");
+                assert_eq!(next_before_id, Some(min_id), "next_before_id must be the smallest row_id in the DESC-ordered page");
             }
             other => panic!("expected MessagesPage, got {other:?}"),
         }
