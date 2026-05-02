@@ -9,10 +9,10 @@
   import ContactRow from "$lib/components/ContactRow.svelte";
   import VirtualMessageList from "$lib/components/VirtualMessageList.svelte";
   import { contacts, refreshContacts } from "$lib/stores/contacts";
-  import { conversation, openConversation, appendMessage } from "$lib/stores/conversation";
+  import { conversation, openConversationFromSummary, appendMessage } from "$lib/stores/conversation";
   import { torStatus } from "$lib/stores/tor_status";
   import { ipcClient } from "$lib/ipc/tauri";
-  import type { PublicKey } from "$lib/ipc/types";
+  import type { ContactSummary, PublicKey } from "$lib/ipc/types";
 
   onMount(async () => {
     // If no vault exists yet, go to first-run to initialise identity.
@@ -24,8 +24,8 @@
     // Stay on "/" and show the main shell.
   });
 
-  async function selectContact(pubkey: PublicKey) {
-    await openConversation(pubkey);
+  async function selectContact(summary: ContactSummary) {
+    await openConversationFromSummary(summary);
   }
 
   // Subscribe to events on mount; update stores.
@@ -53,7 +53,7 @@
       <ContactRow
         summary={c}
         active={$conversation.contact === c.pubkey}
-        onclick={() => selectContact(c.pubkey)}
+        onclick={() => selectContact(c)}
       />
     {/each}
   </aside>

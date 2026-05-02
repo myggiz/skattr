@@ -83,3 +83,130 @@ describe("optimistic send + reconcile", () => {
     expect(after).toEqual(before);
   });
 });
+
+import { vi } from "vitest";
+import { loadOlder, openConversationFromSummary } from "./conversation";
+import { ipcClient } from "$lib/ipc/tauri";
+import type { ContactSummary } from "$lib/ipc/types";
+
+describe("pagination", () => {
+  test("loadOlder is a no-op when nextBeforeId is null", async () => {
+    conversation.set({
+      contact: peer,
+      messages: [],
+      nextBeforeId: null,
+      loadingOlder: false,
+      unreadAnchorRowId: null,
+      readCursor: 0n,
+    });
+    const spy = vi.spyOn(ipcClient, "request");
+    await loadOlder();
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  test("loadOlder prepends records (chronological) and updates cursor", async () => {
+    conversation.set({
+      contact: peer,
+      messages: [fakeRecord(60, "newer")],
+      nextBeforeId: 60n,
+      loadingOlder: false,
+      unreadAnchorRowId: null,
+      readCursor: 0n,
+    });
+    vi.spyOn(ipcClient, "request").mockResolvedValueOnce({
+      resp: "ok",
+      data: {
+        result: "messages_page",
+        data: {
+          // daemon returns most-recent-first; record ids 59, 58.
+          records: [fakeRecord(59, "older1"), fakeRecord(58, "older2")],
+          next_before_id: 58n,
+        },
+      },
+    } as any);
+    await loadOlder();
+    const state = get(conversation);
+    // Final order should be chronological: 58, 59, 60.
+    expect(state.messages.map((m) => Number(m.row_id))).toEqual([58, 59, 60]);
+    expect(state.nextBeforeId).toBe(58n);
+    expect(state.loadingOlder).toBe(false);
+  });
+
+  test("loadOlder is idempotent under concurrent calls", async () => {
+    conversation.set({
+      contact: peer,
+      messages: [],
+      nextBeforeId: 100n,
+      loadingOlder: false,
+      unreadAnchorRowId: null,
+      readCursor: 0n,
+    });
+    let resolveFirst: (v: any) => void = () => {};
+    const spy = vi.spyOn(ipcClient, "request").mockImplementationOnce(
+      () => new Promise((r) => (resolveFirst = r)),
+    );
+    const p1 = loadOlder();
+    const p2 = loadOlder(); // must short-circuit on loadingOlder flag
+    resolveFirst({
+      resp: "ok",
+      data: { result: "messages_page", data: { records: [], next_before_id: null } },
+    });
+    await Promise.all([p1, p2]);
+    expect(spy).toHaveBeenCalledTimes(1);
+    spy.mockRestore();
+  });
+});
+
+describe("openConversationFromSummary", () => {
+  test("populates unreadAnchorRowId from summary.last_read_row_id", async () => {
+    vi.spyOn(ipcClient, "request").mockResolvedValueOnce({
+      resp: "ok",
+      data: {
+        result: "messages_page",
+        data: { records: [], next_before_id: null },
+      },
+    } as any);
+    const summary: ContactSummary = {
+      pubkey: peer,
+      nickname: null,
+      onion: "",
+      card_version: 0n,
+      added_at: 0n,
+      unread_count: 0n,
+      last_message_preview: null,
+      last_ts_recv: null,
+      group_state: "active",
+      last_read_row_id: 12n,
+    };
+    await openConversationFromSummary(summary);
+    expect(get(conversation).unreadAnchorRowId).toBe(12n);
+    expect(get(conversation).readCursor).toBe(12n);
+    expect(get(conversation).contact).toBe(peer);
+  });
+
+  test("unreadAnchorRowId stays null when summary.last_read_row_id is null", async () => {
+    vi.spyOn(ipcClient, "request").mockResolvedValueOnce({
+      resp: "ok",
+      data: {
+        result: "messages_page",
+        data: { records: [], next_before_id: null },
+      },
+    } as any);
+    const summary: ContactSummary = {
+      pubkey: peer,
+      nickname: null,
+      onion: "",
+      card_version: 0n,
+      added_at: 0n,
+      unread_count: 0n,
+      last_message_preview: null,
+      last_ts_recv: null,
+      group_state: null,
+      last_read_row_id: null,
+    };
+    await openConversationFromSummary(summary);
+    expect(get(conversation).unreadAnchorRowId).toBeNull();
+    expect(get(conversation).readCursor).toBe(0n);
+  });
+});

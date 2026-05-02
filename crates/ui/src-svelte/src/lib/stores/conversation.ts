@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Myggiz AB
-import { writable } from "svelte/store";
+import { writable, get } from "svelte/store";
 
 import { ipcClient } from "$lib/ipc/tauri";
 import { unwrapOk } from "$lib/ipc/client";
-import type { MessageRecord, PublicKey } from "$lib/ipc/types";
+import type { ContactSummary, MessageRecord, PublicKey } from "$lib/ipc/types";
 
 export type OptimisticMessage = MessageRecord & {
   __tempId: string;
@@ -89,14 +89,12 @@ export function markFailed(tempId: string, reason: string): void {
   });
 }
 
-export async function openConversation(contact: PublicKey): Promise<void> {
-  // First-page fetch using the new paged variant. Will be
-  // superseded by openConversationFromSummary in Task 17 — this
-  // legacy entry point stays for now to keep existing 2.C call
-  // sites compiling.
+export async function openConversationFromSummary(
+  summary: ContactSummary,
+): Promise<void> {
   const resp = await ipcClient.request({
     cmd: "recent_messages",
-    contact,
+    contact: summary.pubkey,
     limit: 50,
     before_id: null,
     paged: true,
@@ -108,14 +106,63 @@ export async function openConversation(contact: PublicKey): Promise<void> {
     records.push(...[...result.data.records].reverse());
     nextBeforeId = result.data.next_before_id ?? null;
   }
+  const anchor = summary.last_read_row_id ?? null;
   conversation.set({
-    contact,
+    contact: summary.pubkey,
     messages: records,
     nextBeforeId,
     loadingOlder: false,
-    unreadAnchorRowId: null,
-    readCursor: 0n,
+    unreadAnchorRowId: anchor,
+    readCursor: anchor ?? 0n,
   });
+
+  // Mark-read for the largest row in the page so the contact-list
+  // badge clears on open. Daemon is idempotent if up_to <= current.
+  if (records.length > 0) {
+    const maxRowId = records.reduce<bigint>(
+      (acc, r) => (r.row_id > acc ? r.row_id : acc),
+      0n,
+    );
+    if (maxRowId > 0n) {
+      void ipcClient.request({
+        cmd: "mark_read",
+        contact: summary.pubkey,
+        up_to_message_id: maxRowId,
+      });
+    }
+  }
+}
+
+export async function loadOlder(): Promise<void> {
+  const state = get(conversation);
+  if (state.loadingOlder || state.nextBeforeId === null || state.contact === null) {
+    return;
+  }
+  conversation.update((s) => ({ ...s, loadingOlder: true }));
+  try {
+    const resp = await ipcClient.request({
+      cmd: "recent_messages",
+      contact: state.contact,
+      limit: 50,
+      before_id: state.nextBeforeId,
+      paged: true,
+    });
+    const result = unwrapOk(resp);
+    if (result.result === "messages_page") {
+      const olderChrono = [...result.data.records].reverse();
+      conversation.update((s) => ({
+        ...s,
+        messages: [...olderChrono, ...s.messages],
+        nextBeforeId: result.data.next_before_id ?? null,
+        loadingOlder: false,
+      }));
+    } else {
+      conversation.update((s) => ({ ...s, loadingOlder: false }));
+    }
+  } catch (e) {
+    conversation.update((s) => ({ ...s, loadingOlder: false }));
+    throw e;
+  }
 }
 
 export function appendMessage(record: MessageRecord): void {
