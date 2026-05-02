@@ -312,6 +312,16 @@ pub enum CommandResult {
     },
     /// [`Command::RecentMessages`] completed. Most-recent first.
     Messages(Vec<MessageRecord>),
+    /// [`Command::RecentMessages`] completed with `paged: true`.
+    /// Most-recent first within the page; `next_before_id` is the
+    /// cursor for the next older page (`None` if this was the
+    /// last page).
+    MessagesPage {
+        /// Message records for this page, most-recent first.
+        records: Vec<MessageRecord>,
+        /// Cursor for the next older page; `None` if this was the last page.
+        next_before_id: Option<i64>,
+    },
     /// Acknowledges a `Subscribe` request. No payload.
     Subscribed,
     /// No-payload acknowledgement (rotate, shutdown, etc.).
@@ -638,6 +648,44 @@ mod tests {
         assert!(back.last_message_preview.is_none());
         assert!(back.last_ts_recv.is_none());
         assert_eq!(back.nickname.as_deref(), Some("legacy"));
+    }
+
+    #[test]
+    fn messages_page_round_trips_cbor() {
+        let p = CommandResult::MessagesPage {
+            records: vec![MessageRecord {
+                row_id: 7,
+                message_id: Hex16::from([2; 16]),
+                contact: crate::identity::PublicKey([7; 32]),
+                direction: Direction::Incoming,
+                kind: Kind::Text { body: "hi".into() },
+                mls_generation: 1,
+                ts_daemon_recv: 100,
+                ts_envelope: 99,
+            }],
+            next_before_id: Some(6),
+        };
+        let back: CommandResult = roundtrip(&p);
+        match back {
+            CommandResult::MessagesPage { next_before_id: Some(6), records } => {
+                assert_eq!(records.len(), 1);
+                assert_eq!(records[0].row_id, 7);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn messages_page_with_null_cursor_round_trips() {
+        let p = CommandResult::MessagesPage {
+            records: vec![],
+            next_before_id: None,
+        };
+        let back: CommandResult = roundtrip(&p);
+        assert!(matches!(
+            back,
+            CommandResult::MessagesPage { next_before_id: None, .. }
+        ));
     }
 }
 
