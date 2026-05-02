@@ -11,6 +11,7 @@ repository.workspace = true
 homepage.workspace = true
 license = "GPL-3.0-or-later"
 description = "Tauri 2 + SvelteKit desktop UI for Skattr"
+publish = false
 
 [lints]
 workspace = true
