@@ -6,6 +6,66 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## Unreleased
 
+### Added (Phase 2.C — UI bootstrap, read-only conversation MVP)
+- New crate `crates/ui/` (GPLv3): Tauri 2 + SvelteKit shell with
+  in-process `Daemon::run`. Two-phase Tauri command surface:
+  pre-daemon (`vault_exists`, `identity_init`, `vault_unlock`),
+  post-daemon (`ipc_request`, `ipc_subscribe`, `start_in_process_cmd`).
+  CLI continues to attach to the daemon's existing IPC socket.
+- New wire surface, additive only:
+  - `Command::DaemonInfo` + `CommandResult::DaemonInfo {`
+    `local_pubkey, current_onion: Option<String>, daemon_version,`
+    `schema_version }`.
+  - `ContactSummary` projection extensions: `unread_count: u64`,
+    `last_message_preview: Option<String>` (≤80 code points,
+    `Kind::Text` only), `last_ts_recv: Option<u64>` —
+    all `#[serde(default)]` for forward compat.
+  - `Subscribe` ack now replays the latest cached
+    `Event::TorStatusChanged` immediately after `Ok(Subscribed)` for
+    `EventFilter::All` and `EventFilter::TorStatus`. Cache lives on
+    `DaemonHandle::latest_tor_status`, populated by a tap task
+    spawned in `Daemon::run`.
+- Storage helpers: `Pool::schema_version()` + `MessageRepo::latest_for_group()`.
+- `dispatch::list_contacts` rewrite: populates the new fields
+  (N+1 per-contact reads on `unread_count` + `latest_for_group`);
+  applies `last_ts_recv DESC NULLS LAST, added_at DESC` ordering.
+- `ts-rs` codegen: every wire type (29 types across 15 files)
+  derives `TS` and emits to
+  `crates/ui/src-svelte/src/lib/ipc/types/`. Files are gitignored
+  per spec decision 13; regeneration runs on `cargo test -p skattr-core`.
+- Locked design tokens (`crates/ui/src-svelte/src/lib/tokens.css`):
+  6 colours, 4-step spacing, 3-step type scale, dark-mode-first
+  with `prefers-color-scheme: light` override. Bundled Inter font
+  (OFL 1.1, regular + medium woff2).
+- Four-step first-run wizard: welcome → passphrase (zxcvbn ≥3) →
+  24-word BIP39 seed type-back (case-insensitive, whitespace-tolerant,
+  with red-modal "skip confirmation" escape) → Tor bootstrap.
+- Read-only main shell: contact list + open conversation pane,
+  live-append on `Event::MessageReceived`, virtualised message list
+  via `@tanstack/svelte-virtual` (substituted for the
+  unmaintained `svelte-virtual-list`).
+- Tests: 16 Vitest specs + 4 Playwright e2e specs (first-run +
+  unlock paths, headless Tauri mock); new
+  `crates/tests/src/ui_first_run.rs` `#[ignore]`-gated real-Tor
+  integration test.
+- 2.C-only behaviour: closing the window quits the daemon. 2.F
+  upgrades this to hide-to-tray; CLI users running the UI alongside
+  should be aware.
+- Mailbox wire surface inherited unchanged from 2.B; UI does not
+  render mailbox state in 2.C (2.F).
+
+### Workarounds documented (Phase 2.C)
+- `esrap@1.4.9` patched via `pnpm patch` to handle TypeScript
+  `EmptyStatement` nodes — known Svelte 5 + vite-plugin-svelte
+  compatibility gap; track upstream.
+- `app.html` CSP relaxed to allow SvelteKit's inline bootstrap
+  scripts in dev/preview; production Tauri WebView enforces its
+  own stricter CSP.
+- `cargo deny` ignore list extended for ~16 Tauri 2 transitive
+  unmaintained advisories (gtk-rs GTK3 bindings, unic-*,
+  proc-macro-error). Revisit when Tauri ships a non-GTK Linux
+  backend.
+
 ### Added (Phase 2.B)
 - Mailbox client (`core::mailbox::client`) with long-lived per-mailbox
   `Framed` connection.

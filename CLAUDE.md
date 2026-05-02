@@ -6,7 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Phase 0 is complete; Phase 1 is complete (1.H merged 2026-04-24);
 Phase 2.A (mailbox server) is complete; Phase 2.B (mailbox client +
-ContactCard rotation) is complete (merged 2026-05-01).** Phase 0 shipped all five workstreams (0.A scaffold,
+ContactCard rotation) is complete (merged 2026-05-01); Phase 2.C
+(UI bootstrap, read-only conversation MVP) is complete (merged
+2026-05-02).** Phase 0 shipped all five workstreams (0.A scaffold,
 0.B identity & crypto, 0.C Arti integration, 0.D storage layer, 0.E
 documentation baseline). Phase 1.A added `transport::frame::FrameCodec`.
 Phase 1.B added `transport::noise::handshake_{initiator,responder}`
@@ -123,12 +125,46 @@ republishes the current onion (the address itself does not change),
 so contacts see `ContactCardReceived` with a new version but route
 to the same onion until 23.5 lands.
 
+Phase 2.C added a new `crates/ui/` crate (GPLv3): Tauri 2 +
+SvelteKit shell that boots an in-process `Daemon::run`, walks
+first-run users through a four-step wizard (welcome → passphrase
+with zxcvbn ≥3 → 24-word BIP39 seed type-back → Tor bootstrap),
+and renders a read-only contact list + open conversation with
+live-append on `Event::MessageReceived`. Two-phase Tauri command
+surface: pre-daemon `vault_exists` / `identity_init` / `vault_unlock`
+(restricted to three by lint test), post-daemon `ipc_request` /
+`ipc_subscribe` / `start_in_process_cmd` over the daemon's existing
+Unix IPC socket so the CLI keeps working unchanged. New wire
+surface (additive only): `Command::DaemonInfo`, `ContactSummary`
+projection fields (`unread_count`, `last_message_preview`,
+`last_ts_recv`, all `#[serde(default)]`), and a filter-gated
+`TorStatusChanged` replay on the `Subscribe` ack backed by
+`DaemonHandle::latest_tor_status` plus a tap task spawned in
+`Daemon::run`. `ts-rs` emits TS bindings for every wire type into
+`crates/ui/src-svelte/src/lib/ipc/types/` (gitignored per spec
+decision 13; regenerated on `cargo test -p skattr-core`). Locked
+design tokens (6 colours / 4-step spacing / 3-step type, dark-first
+with `prefers-color-scheme: light`) and bundled Inter (OFL 1.1)
+ship in `crates/ui/src-svelte/src/lib/`. Virtualised message list
+uses `@tanstack/svelte-virtual` (substituted for the unmaintained
+`svelte-virtual-list`). 2.C closes the window by quitting the
+daemon — 2.F replaces this with hide-to-tray. Mailbox CRUD wire
+surface from 2.B is consumed unchanged; UI rendering of mailbox
+state lands in 2.F. Tests: 16 Vitest specs + 4 Playwright e2e
+specs (first-run + unlock paths, headless Tauri mock); new
+`crates/tests/src/ui_first_run.rs` `#[ignore]`-gated real-Tor
+integration test.
+
 Phase 1 is complete (1.H merged 2026-04-24); Phase 2.A (mailbox
 server) merged at the head of `phase-2a-mailbox-server`; Phase 2.B
-is complete (merged 2026-05-01). The next workstream is Phase 2.F
-(settings & history UI; depends on both 2.B and 2.E) — see
+is complete (merged 2026-05-01); Phase 2.C is complete (merged
+2026-05-02). The next workstream is Phase 2.D (conversation view:
+composer, delivery state icons, scroll-back pagination; depends on
+2.C) — see
 `docs/superpowers/specs/2026-04-26-phase-2-ui-decomposition.md`
-for the Phase 2 decomposition and
+for the Phase 2 decomposition,
+`docs/superpowers/specs/2026-05-01-phase-2c-ui-bootstrap-design.md`
+for the 2.C internals, and
 `docs/adr/0006-mailbox-protocol-v1.md` for the wire freeze 2.B
 develops against. The bootstrap prompt remains
 authoritative for file layout, module boundaries, type signatures,
