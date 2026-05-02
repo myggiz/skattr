@@ -534,7 +534,7 @@ mod tests {
     }
 
     #[test]
-    fn contact_summary_with_new_fields_round_trips() {
+    fn contact_summary_2c_preview_and_unread_round_trips() {
         let s = ContactSummary {
             pubkey: PublicKey([0x99; 32]),
             nickname: None,
@@ -556,7 +556,7 @@ mod tests {
     }
 
     #[test]
-    fn contact_summary_with_new_fields_round_trips_cbor() {
+    fn contact_summary_2d_group_state_and_read_cursor_round_trips_cbor() {
         let s = ContactSummary {
             pubkey: crate::identity::PublicKey([7; 32]),
             nickname: Some("bob".into()),
@@ -570,6 +570,14 @@ mod tests {
             last_read_row_id: Some(42),
         };
         let back: ContactSummary = roundtrip(&s);
+        assert_eq!(back.pubkey.0, [7; 32]);
+        assert_eq!(back.nickname.as_deref(), Some("bob"));
+        assert_eq!(back.onion, "bbbb.onion");
+        assert_eq!(back.card_version, 1);
+        assert_eq!(back.added_at, 1_700_000_000);
+        assert_eq!(back.unread_count, 3);
+        assert_eq!(back.last_message_preview.as_deref(), Some("hi"));
+        assert_eq!(back.last_ts_recv, Some(1_700_000_500));
         assert_eq!(back.group_state, Some(MlsGroupStateLabel::Active));
         assert_eq!(back.last_read_row_id, Some(42));
     }
