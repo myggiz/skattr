@@ -12,6 +12,7 @@
   import { contacts, refreshContacts } from "$lib/stores/contacts";
   import { conversation, openConversationFromSummary, appendMessage } from "$lib/stores/conversation";
   import { torStatus } from "$lib/stores/tor_status";
+  import { recordDeliveryStatus, hex16ToString } from "$lib/stores/delivery";
   import { ipcClient } from "$lib/ipc/tauri";
   import type { ContactSummary, PublicKey } from "$lib/ipc/types";
 
@@ -20,9 +21,11 @@
     const exists = await invoke<boolean>("vault_exists");
     if (!exists) {
       goto("/first-run");
+      return;
     }
     // If vault exists we are already unlocked (Bootstrap.svelte called goto("/")).
-    // Stay on "/" and show the main shell.
+    // Stay on "/" and show the main shell; refresh the contact list.
+    await refreshContacts();
   });
 
   async function selectContact(summary: ContactSummary) {
@@ -62,6 +65,8 @@
           torStatus.set(e.data);
         } else if (e.event === "message_received") {
           appendMessage(e.data.record);
+        } else if (e.event === "delivery_status_changed") {
+          recordDeliveryStatus(hex16ToString(e.data.message), e.data.status);
         }
       });
     })();

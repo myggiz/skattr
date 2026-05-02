@@ -13,7 +13,15 @@ const _preseeded =
   typeof window !== "undefined" &&
   new URLSearchParams(window.location.search).get("vault") === "yes";
 
-let _vault = _preseeded;
+// Pre-seed a contact + handle send_message when ?fixture=seeded-contact.
+const _fixtureSeeded =
+  typeof window !== "undefined" &&
+  new URLSearchParams(window.location.search).get("fixture") === "seeded-contact";
+
+let _vault = _preseeded || _fixtureSeeded;
+
+// Active subscribe channel — used by fixture to emit delivery_status_changed.
+let _subscribeChannel: Channel<unknown> | null = null;
 
 const MOCK_MNEMONIC =
   "abandon abandon abandon abandon abandon abandon abandon abandon abandon " +
@@ -22,6 +30,12 @@ const MOCK_MNEMONIC =
 
 const MOCK_ONION = "abcd1234efgh5678abcd1234efgh5678abcd1234efgh5678.onion";
 const MOCK_PUBKEY = "00".repeat(32);
+
+// ---------------------------------------------------------------------------
+// Fixture: seeded contact
+// ---------------------------------------------------------------------------
+const FIXTURE_PEER_PUBKEY = "ab".repeat(32);  // deterministic fake peer pubkey
+const FIXTURE_MESSAGE_ID = "cd".repeat(16);    // deterministic fake message_id
 
 // ---------------------------------------------------------------------------
 // Channel stub (mirrors Tauri 2 Channel<T> interface)
@@ -82,9 +96,74 @@ export async function invoke<T = unknown>(
         } as unknown as T;
       }
       if (cmdObj.cmd === "list_contacts") {
+        const contactList = _fixtureSeeded
+          ? [
+              {
+                pubkey: FIXTURE_PEER_PUBKEY,
+                nickname: "test peer",
+                onion: "fakeonion.onion",
+                card_version: 1,
+                added_at: 0,
+                unread_count: 0,
+                last_message_preview: null,
+                last_ts_recv: null,
+                group_state: "active",
+                last_read_row_id: null,
+              },
+            ]
+          : [];
         return {
           resp: "ok",
-          data: { result: "contacts", data: [] },
+          data: { result: "contacts", data: contactList },
+        } as unknown as T;
+      }
+      if (cmdObj.cmd === "recent_messages") {
+        return {
+          resp: "ok",
+          data: {
+            result: "messages_page",
+            data: { records: [], next_before_id: null },
+          },
+        } as unknown as T;
+      }
+      if (cmdObj.cmd === "mark_read") {
+        return {
+          resp: "ok",
+          data: { result: "marked_read", data: { up_to: 0 } },
+        } as unknown as T;
+      }
+      if (cmdObj.cmd === "send_message") {
+        const msgCmd = cmdObj as { cmd: string; contact: string; kind: unknown };
+        const record = {
+          row_id: 1,
+          message_id: FIXTURE_MESSAGE_ID,
+          contact: msgCmd.contact,
+          direction: "outgoing",
+          kind: msgCmd.kind,
+          mls_generation: 1,
+          ts_daemon_recv: Math.floor(Date.now() / 1000),
+          ts_envelope: Date.now(),
+        };
+        // Schedule a delivery_status_changed event 200 ms after the send,
+        // simulating the daemon advancing from Queued → Delivered.
+        setTimeout(() => {
+          if (_subscribeChannel) {
+            _subscribeChannel._emit({
+              event: "delivery_status_changed",
+              data: { message: FIXTURE_MESSAGE_ID, status: "Delivered" },
+            });
+          }
+        }, 200);
+        return {
+          resp: "ok",
+          data: {
+            result: "message_sent",
+            data: {
+              message_id: FIXTURE_MESSAGE_ID,
+              status: "Queued",
+              record,
+            },
+          },
         } as unknown as T;
       }
       throw new Error(`ipc_request: no mock for cmd=${cmdObj.cmd}`);
@@ -93,6 +172,8 @@ export async function invoke<T = unknown>(
     case "ipc_subscribe": {
       const channel = args?.channel as Channel<unknown> | undefined;
       if (!channel) throw new Error("ipc_subscribe: missing channel arg");
+      // Save channel ref so fixture send_message can emit delivery events.
+      _subscribeChannel = channel;
       // Fire a synthetic TorStatus Ready event after a tick so Bootstrap.svelte
       // can paint the progress bar at least once before the transition.
       setTimeout(() => {
