@@ -187,6 +187,50 @@ export function isWithinBottomThreshold(el: HTMLElement): boolean {
 let markReadTimer: ReturnType<typeof setTimeout> | null = null;
 let pendingHighestRowId: bigint = 0n;
 
+import { recordDeliveryStatus, hex16ToString } from "./delivery";
+
+export async function send(contact: PublicKey, body: string): Promise<void> {
+  const tempId = crypto.randomUUID();
+  appendOptimistic(contact, body, tempId);
+  try {
+    const resp = await ipcClient.request({
+      cmd: "send_message",
+      contact,
+      kind: { kind: "text", body },
+    });
+    const result = unwrapOk(resp);
+    if (result.result !== "message_sent") {
+      markFailed(tempId, "unexpected reply variant");
+      return;
+    }
+    const { message_id, status, record } = result.data;
+    if (record) {
+      reconcile(tempId, record);
+      recordDeliveryStatus(
+        hex16ToString(message_id),
+        status === "Delivered"
+          ? "Delivered"
+          : "Queued",
+      );
+    } else {
+      // Idempotent retry — promote optimistic to canonical without
+      // resorting to the failure flag.
+      conversation.update((s) => {
+        const idx = s.messages.findIndex(
+          (m) => (m as OptimisticMessage).__tempId === tempId,
+        );
+        if (idx < 0) return s;
+        const next = [...s.messages];
+        const original = next[idx] as OptimisticMessage;
+        next[idx] = { ...original, __optimistic: false } as MessageRecord;
+        return { ...s, messages: next };
+      });
+    }
+  } catch (e) {
+    markFailed(tempId, e instanceof Error ? e.message : String(e));
+  }
+}
+
 export function markReadIfAtBottom(rowId: bigint): void {
   const state = get(conversation);
   if (state.contact === null) return;

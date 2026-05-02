@@ -1,0 +1,101 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright (C) 2026 Myggiz AB -->
+<script lang="ts">
+  import { send } from "$lib/stores/conversation";
+  import type { PublicKey } from "$lib/ipc/types";
+
+  let {
+    contact,
+    disabled,
+    disabledReason,
+  }: {
+    contact: PublicKey;
+    disabled: boolean;
+    disabledReason?: string;
+  } = $props();
+
+  let text = $state("");
+  let composing = $state(false);
+  let textarea = $state<HTMLTextAreaElement | undefined>(undefined);
+
+  async function trySend(): Promise<void> {
+    const trimmed = text.trim();
+    if (!trimmed || disabled) return;
+    text = "";
+    await send(contact, trimmed);
+  }
+
+  function onKeyDown(e: KeyboardEvent): void {
+    if (e.key !== "Enter") return;
+    if (e.shiftKey) return;
+    if (e.isComposing || composing) return;
+    e.preventDefault();
+    void trySend();
+  }
+
+  function onPaste(e: ClipboardEvent): void {
+    if (!e.clipboardData) return;
+    e.preventDefault();
+    const plain = e.clipboardData.getData("text/plain");
+    if (!plain) return;
+    const start = textarea?.selectionStart ?? text.length;
+    const end = textarea?.selectionEnd ?? text.length;
+    text = text.slice(0, start) + plain + text.slice(end);
+    queueMicrotask(() => {
+      if (textarea) {
+        textarea.selectionStart = start + plain.length;
+        textarea.selectionEnd = start + plain.length;
+      }
+    });
+  }
+</script>
+
+<form class="composer" onsubmit={(e) => { e.preventDefault(); void trySend(); }}>
+  <textarea
+    bind:this={textarea}
+    bind:value={text}
+    {disabled}
+    placeholder={disabled ? (disabledReason ?? "Disabled") : "Type a message"}
+    rows={1}
+    onkeydown={onKeyDown}
+    onpaste={onPaste}
+    oncompositionstart={() => (composing = true)}
+    oncompositionend={() => (composing = false)}
+    aria-label="Message input"
+  ></textarea>
+  <button type="submit" {disabled} aria-label="Send">Send</button>
+</form>
+
+<style>
+  .composer {
+    display: flex;
+    align-items: flex-end;
+    gap: var(--s-2);
+    padding: var(--s-2) var(--s-3);
+    border-top: 1px solid var(--bg-elevated);
+  }
+  textarea {
+    flex: 1;
+    resize: none;
+    min-height: 2.5rem;
+    max-height: 8rem;
+    padding: var(--s-2);
+    background: var(--bg-elevated);
+    color: var(--text);
+    border: 1px solid transparent;
+    border-radius: 8px;
+    font: inherit;
+  }
+  textarea:focus { outline: none; border-color: var(--accent); }
+  textarea:disabled { opacity: 0.5; cursor: not-allowed; }
+  button {
+    padding: var(--s-2) var(--s-3);
+    background: var(--accent);
+    color: var(--bg);
+    border: 0;
+    border-radius: 8px;
+    font: inherit;
+    cursor: pointer;
+  }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+</style>
