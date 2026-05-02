@@ -107,7 +107,7 @@
   });
 </script>
 
-<div class="list" bind:this={scrollEl}>
+<div class="list" bind:this={scrollEl} data-message-count={items.length}>
   <div bind:this={topSentinel} class="sentinel"></div>
   <div style="height: {totalHeight}px; position: relative;">
     {#each virtualItems as row (rows[row.index]?.key ?? row.index)}

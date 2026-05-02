@@ -104,7 +104,7 @@
 </div>
 
 <style>
-  .shell { display: grid; grid-template-columns: 280px 1fr; height: 100vh; }
+  .shell { display: grid; grid-template-columns: 280px 1fr; grid-template-rows: 100vh; height: 100vh; overflow: hidden; }
   .rail { background: var(--bg); border-right: 1px solid var(--bg-elevated); overflow-y: auto; }
   .pane { display: flex; flex-direction: column; background: var(--bg); height: 100%; }
   .pane :global(.list) { flex: 1; min-height: 0; }

@@ -18,7 +18,12 @@ const _fixtureSeeded =
   typeof window !== "undefined" &&
   new URLSearchParams(window.location.search).get("fixture") === "seeded-contact";
 
-let _vault = _preseeded || _fixtureSeeded;
+// Pre-seed a 200-message conversation when ?fixture=seeded-200-msgs.
+const _fixture200Msgs =
+  typeof window !== "undefined" &&
+  new URLSearchParams(window.location.search).get("fixture") === "seeded-200-msgs";
+
+let _vault = _preseeded || _fixtureSeeded || _fixture200Msgs;
 
 // Active subscribe channel — used by fixture to emit delivery_status_changed.
 let _subscribeChannel: Channel<unknown> | null = null;
@@ -36,6 +41,33 @@ const MOCK_PUBKEY = "00".repeat(32);
 // ---------------------------------------------------------------------------
 const FIXTURE_PEER_PUBKEY = "ab".repeat(32);  // deterministic fake peer pubkey
 const FIXTURE_MESSAGE_ID = "cd".repeat(16);    // deterministic fake message_id
+
+// ---------------------------------------------------------------------------
+// Fixture: seeded-200-msgs — 200-message conversation for pagination tests
+// ---------------------------------------------------------------------------
+const SEED_PEER_PUBKEY = "ef".repeat(32);  // deterministic fake peer pubkey for pagination fixture
+
+function seededMessages(): Array<{
+  row_id: bigint;
+  message_id: string;
+  contact: string;
+  direction: string;
+  kind: { kind: string; body: string };
+  mls_generation: bigint;
+  ts_daemon_recv: bigint;
+  ts_envelope: bigint;
+}> {
+  return Array.from({ length: 200 }, (_, i) => ({
+    row_id: BigInt(i + 1),
+    message_id: (i + 1).toString(16).padStart(32, "0"),
+    contact: SEED_PEER_PUBKEY,
+    direction: "incoming",
+    kind: { kind: "text", body: `msg ${i + 1}` },
+    mls_generation: 0n,
+    ts_daemon_recv: BigInt(1_700_000_000 + i),
+    ts_envelope: BigInt(1_700_000_000 + i),
+  }));
+}
 
 // ---------------------------------------------------------------------------
 // Channel stub (mirrors Tauri 2 Channel<T> interface)
@@ -96,28 +128,66 @@ export async function invoke<T = unknown>(
         } as unknown as T;
       }
       if (cmdObj.cmd === "list_contacts") {
-        const contactList = _fixtureSeeded
-          ? [
-              {
-                pubkey: FIXTURE_PEER_PUBKEY,
-                nickname: "test peer",
-                onion: "fakeonion.onion",
-                card_version: 1,
-                added_at: 0,
-                unread_count: 0,
-                last_message_preview: null,
-                last_ts_recv: null,
-                group_state: "active",
-                last_read_row_id: null,
-              },
-            ]
-          : [];
+        let contactList: unknown[] = [];
+        if (_fixtureSeeded) {
+          contactList = [
+            {
+              pubkey: FIXTURE_PEER_PUBKEY,
+              nickname: "test peer",
+              onion: "fakeonion.onion",
+              card_version: 1,
+              added_at: 0,
+              unread_count: 0,
+              last_message_preview: null,
+              last_ts_recv: null,
+              group_state: "active",
+              last_read_row_id: null,
+            },
+          ];
+        } else if (_fixture200Msgs) {
+          contactList = [
+            {
+              pubkey: SEED_PEER_PUBKEY,
+              nickname: "pagination peer",
+              onion: "paginationonion.onion",
+              card_version: 1,
+              added_at: 0,
+              unread_count: 0,
+              last_message_preview: null,
+              last_ts_recv: null,
+              group_state: "active",
+              last_read_row_id: null,
+            },
+          ];
+        }
         return {
           resp: "ok",
           data: { result: "contacts", data: contactList },
         } as unknown as T;
       }
       if (cmdObj.cmd === "recent_messages") {
+        if (_fixture200Msgs) {
+          const msgCmd = cmdObj as { cmd: string; before_id: bigint | null; limit: number };
+          const all = seededMessages();
+          const cursorNum = msgCmd.before_id !== null && msgCmd.before_id !== undefined
+            ? Number(msgCmd.before_id)
+            : Number.MAX_SAFE_INTEGER;
+          const filtered = all.filter((m) => Number(m.row_id) < cursorNum);
+          // Sort DESC (most-recent-first) to match daemon behaviour.
+          const sorted = filtered.sort((a, b) => Number(b.row_id) - Number(a.row_id));
+          const page = sorted.slice(0, 50);
+          const nextBeforeId = page.length === 50 ? page[page.length - 1].row_id : null;
+          // Artificial 80 ms delay so Playwright can see intermediate page counts
+          // without cascading all 4 pages in a single tick.
+          await new Promise<void>((resolve) => setTimeout(resolve, 80));
+          return {
+            resp: "ok",
+            data: {
+              result: "messages_page",
+              data: { records: page, next_before_id: nextBeforeId },
+            },
+          } as unknown as T;
+        }
         return {
           resp: "ok",
           data: {
