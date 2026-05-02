@@ -15,14 +15,13 @@
   import type { PublicKey } from "$lib/ipc/types";
 
   onMount(async () => {
-    // All flows (new vault or existing) route through /first-run.
-    // The wizard detects vault_exists and enters unlock mode if needed.
+    // If no vault exists yet, go to first-run to initialise identity.
     const exists = await invoke<boolean>("vault_exists");
     if (!exists) {
       goto("/first-run");
-      return;
     }
-    goto("/first-run");
+    // If vault exists we are already unlocked (Bootstrap.svelte called goto("/")).
+    // Stay on "/" and show the main shell.
   });
 
   async function selectContact(pubkey: PublicKey) {

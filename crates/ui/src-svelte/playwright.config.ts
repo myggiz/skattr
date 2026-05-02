@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Myggiz AB
 import { defineConfig, devices } from "@playwright/test";
 
 export default defineConfig({
@@ -14,6 +16,9 @@ export default defineConfig({
     port: 4173,
     timeout: 120_000,
     reuseExistingServer: false,
+    env: {
+      TAURI_MOCK: "1",
+    },
   },
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
 });
