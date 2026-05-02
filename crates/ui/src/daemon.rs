@@ -84,10 +84,12 @@ pub async fn start_in_process_cmd(state: tauri::State<'_, AppState>) -> Result<R
 /// joins the task with a timeout. Called from the close-window hook.
 pub async fn shutdown(app: &tauri::AppHandle) {
     let state = tauri::Manager::state::<AppState>(app);
-    if let Some(tx) = state.shutdown_tx.lock().await.take() {
+    let tx = state.shutdown_tx.lock().await.take();
+    if let Some(tx) = tx {
         let _ = tx.send(());
     }
-    if let Some(handle) = state.task.lock().await.take() {
+    let handle = state.task.lock().await.take();
+    if let Some(handle) = handle {
         let _ = tokio::time::timeout(std::time::Duration::from_secs(30), handle).await;
     }
 }

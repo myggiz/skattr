@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Myggiz AB
 
+#![cfg_attr(test, allow(clippy::unwrap_used))]
+
 //! Pre-daemon Tauri commands. These are the only Tauri commands that
 //! run before `Daemon::run` is spawned. Three commands total:
 //! `vault_exists`, `identity_init`, `vault_unlock`. The lint test in
@@ -97,15 +99,24 @@ pub async fn vault_unlock(
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
     /// Lint guard: the pre-daemon Tauri command surface is restricted
     /// to three annotations. Adding a fourth requires re-evaluating
     /// the wizard-first contract from the 2.C spec.
     #[test]
     fn bootstrap_tauri_commands_are_capped_at_three() {
-        let src = std::fs::read_to_string(Path::new(file!())).unwrap();
-        let count = src.matches("#[tauri::command]").count();
+        // CARGO_MANIFEST_DIR is the absolute path to crates/ui/; file!() is
+        // a path relative to the workspace root that doesn't resolve from
+        // an arbitrary cwd (e.g., when `cargo test` is invoked from outside
+        // the worktree). Anchor against the manifest dir for portability.
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bootstrap.rs");
+        let src = std::fs::read_to_string(&path).unwrap();
+        // Count only lines whose trimmed leading content is the
+        // attribute itself (so the literal needle inside this test
+        // body — embedded as a string — doesn't get counted).
+        let count = src
+            .lines()
+            .filter(|l| l.trim_start().starts_with("#[tauri::command]"))
+            .count();
         assert_eq!(
             count, 3,
             "bootstrap.rs must expose exactly 3 Tauri commands; got {count}"

@@ -21,7 +21,7 @@ fn main() {
         )
         .init();
 
-    tauri::Builder::default()
+    let result = tauri::Builder::default()
         .manage(daemon::AppState::default())
         .invoke_handler(tauri::generate_handler![
             bootstrap::vault_exists,
@@ -32,11 +32,13 @@ fn main() {
             daemon::start_in_process_cmd,
         ])
         .setup(|app| {
-            // Resolve data_dir once and stash it.
+            // Resolve data_dir once and stash it. `app_data_dir` only fails
+            // on platforms where Tauri can't determine a config root —
+            // surface that as a Tauri setup error so the caller sees it.
             let data_dir = app
                 .path()
                 .app_data_dir()
-                .expect("Tauri app data dir")
+                .map_err(|e| format!("resolve app_data_dir: {e}"))?
                 .join("skattr");
             std::fs::create_dir_all(&data_dir).ok();
             let state: tauri::State<daemon::AppState> = app.state();
@@ -53,6 +55,10 @@ fn main() {
                 });
             }
         })
-        .run(tauri::generate_context!())
-        .expect("Tauri run");
+        .run(tauri::generate_context!());
+
+    if let Err(e) = result {
+        tracing::error!(error = %e, "Tauri runtime exited with error");
+        std::process::exit(1);
+    }
 }

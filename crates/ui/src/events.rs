@@ -36,15 +36,10 @@ pub async fn ipc_subscribe(
         .map_err(|e| format!("subscribe: {e}"))?;
 
     tokio::spawn(async move {
-        loop {
-            match client.next_event().await {
-                Ok(ev) => {
-                    if channel.send(ev).is_err() {
-                        // Receiver gone — Svelte unmounted the consumer.
-                        break;
-                    }
-                }
-                Err(_) => break,
+        while let Ok(ev) = client.next_event().await {
+            if channel.send(ev).is_err() {
+                // Receiver gone — Svelte unmounted the consumer.
+                break;
             }
         }
     });
