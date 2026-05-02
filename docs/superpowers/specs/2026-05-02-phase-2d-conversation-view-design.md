@@ -101,23 +101,23 @@ pub struct ContactSummary {
 }
 
 /// Wire-safe stringly projection of `mls::state::GroupState`.
-/// The internal enum carries non-serializable handles; this
-/// label is the wire-safe view.
+/// Mirrors the three concrete variants in `state_machine.rs` as
+/// of Phase 1.C — `Active { epoch }`, `PendingJoin`, `Corrupt
+/// { reason }`. Future state-machine extensions add new variants
+/// here at the same time as `GroupState`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 pub enum MlsGroupStateLabel {
     Active,
     PendingJoin,
-    PendingCommit,
-    CatchingUp,
-    Removed,
     Corrupt,
 }
 ```
 
 `group_state` defaults to `None`; old encoded summaries decode
-cleanly. UI uses `Some(Removed) | Some(Corrupt)` to disable the
-composer; `None` is treated as `Active` for backward decode.
+cleanly. UI uses `Some(Corrupt) | Some(PendingJoin)` to disable
+the composer (PendingJoin = group not yet usable for messaging);
+`None` is treated as `Active` for backward decode.
 
 ### Cursor semantics
 
@@ -390,13 +390,29 @@ filter.
 
 ### §3.6 `ContactSummary.group_state` source
 
-`ContactRepo::list_summaries` is extended to load each group blob
-via `MlsGroupRepo::load` and project its `mls::state::GroupState`
-to `MlsGroupStateLabel`. Cost: one extra SQL fetch per contact in
-the listing path. For 2-member groups this is ≤32 KiB per blob;
-for the contact list sizes 2.D needs (single-digit contacts) the
-overhead is irrelevant. If list_summaries becomes hot in later
-phases, the label can be denormalised onto the `contacts` row.
+The summary-building loop lives inline in `dispatch::list_contacts`
+(no dedicated `ContactRepo::list_summaries` method exists today).
+The loop is extended to load each group's MLS blob via
+`MlsGroupRepo::get` and pass it to `mls::Group::load`. Three
+projections:
+
+- `Group::load` returns `Ok(Some(group))` → `Some(Active)` (the
+  loaded group's epoch is internal; the wire label is just `Active`).
+- `Group::load` returns `Ok(None)` (no row) → `None` (no MLS group
+  for this contact yet — fresh KeyPackage exchange in flight).
+- `Group::load` returns `Err(_)` → `Some(Corrupt)` (deserialization
+  or state-machine validation failed).
+
+`PendingJoin` is set when the contact has a pending KeyPackage but
+the Welcome hasn't been processed — surfaced explicitly via a
+distinct branch when `MlsGroupRepo::get` returns `Some` blob whose
+deserialization yields `GroupState::PendingJoin`.
+
+Cost: one extra SQL fetch + one CBOR/MLS deserialization per
+contact in the listing path. For 2-member groups blobs are ≤32 KiB;
+for 2.D's contact-count target (single digits) the overhead is
+irrelevant. If `list_contacts` becomes hot in later phases, the
+label can be denormalised onto the `contacts` row.
 
 ## §4 — Error handling, edge cases, disabled states
 
@@ -405,7 +421,8 @@ phases, the label can be denormalised onto the `contacts` row.
 | Trigger | Composer behavior | Detection source |
 |---|---|---|
 | Daemon down (IPC connection lost) | Disabled; placeholder "Daemon not running" | 2.C IPC adapter connection state |
-| MLS `group_state == Removed \| Corrupt` | Disabled; placeholder "Conversation unavailable" | `ContactSummary.group_state` |
+| MLS `group_state == Some(Corrupt)` | Disabled; placeholder "Conversation unavailable" | `ContactSummary.group_state` |
+| MLS `group_state == Some(PendingJoin)` | Disabled; placeholder "Joining group…" | `ContactSummary.group_state` |
 | Contact removed (Phase 2.E soft-delete) | Out of scope for 2.D | — |
 
 ### §4.2 Optimistic send failure paths
