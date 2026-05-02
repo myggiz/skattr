@@ -134,6 +134,44 @@ describe("pagination", () => {
     expect(state.loadingOlder).toBe(false);
   });
 
+  test("loadOlder ignores response if contact switched mid-flight", async () => {
+    conversation.set({
+      contact: peer,
+      messages: [],
+      nextBeforeId: 100n,
+      loadingOlder: false,
+      unreadAnchorRowId: null,
+      readCursor: 0n,
+    });
+    let resolveResp: (v: any) => void = () => {};
+    vi.spyOn(ipcClient, "request").mockImplementationOnce(
+      () => new Promise((r) => (resolveResp = r)),
+    );
+    const p = loadOlder();
+    // Switch contacts during the in-flight request.
+    const otherPeer = "0909090909090909090909090909090909090909090909090909090909090909";
+    conversation.set({
+      contact: otherPeer,
+      messages: [],
+      nextBeforeId: null,
+      loadingOlder: false,
+      unreadAnchorRowId: null,
+      readCursor: 0n,
+    });
+    resolveResp({
+      resp: "ok",
+      data: {
+        result: "messages_page",
+        data: { records: [fakeRecord(1, "stale")], next_before_id: 1n },
+      },
+    });
+    await p;
+    const state = get(conversation);
+    expect(state.contact).toBe(otherPeer);
+    expect(state.messages.length).toBe(0);  // stale records ignored
+    expect(state.nextBeforeId).toBeNull();
+  });
+
   test("loadOlder is idempotent under concurrent calls", async () => {
     conversation.set({
       contact: peer,

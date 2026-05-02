@@ -138,11 +138,12 @@ export async function loadOlder(): Promise<void> {
   if (state.loadingOlder || state.nextBeforeId === null || state.contact === null) {
     return;
   }
+  const reqContact = state.contact;
   conversation.update((s) => ({ ...s, loadingOlder: true }));
   try {
     const resp = await ipcClient.request({
       cmd: "recent_messages",
-      contact: state.contact,
+      contact: reqContact,
       limit: 50,
       before_id: state.nextBeforeId,
       paged: true,
@@ -150,17 +151,26 @@ export async function loadOlder(): Promise<void> {
     const result = unwrapOk(resp);
     if (result.result === "messages_page") {
       const olderChrono = [...result.data.records].reverse();
-      conversation.update((s) => ({
-        ...s,
-        messages: [...olderChrono, ...s.messages],
-        nextBeforeId: result.data.next_before_id ?? null,
-        loadingOlder: false,
-      }));
+      conversation.update((s) => {
+        if (s.contact !== reqContact) return s;
+        return {
+          ...s,
+          messages: [...olderChrono, ...s.messages],
+          nextBeforeId: result.data.next_before_id ?? null,
+          loadingOlder: false,
+        };
+      });
     } else {
-      conversation.update((s) => ({ ...s, loadingOlder: false }));
+      conversation.update((s) => {
+        if (s.contact !== reqContact) return s;
+        return { ...s, loadingOlder: false };
+      });
     }
   } catch (e) {
-    conversation.update((s) => ({ ...s, loadingOlder: false }));
+    conversation.update((s) => {
+      if (s.contact !== reqContact) return s;
+      return { ...s, loadingOlder: false };
+    });
     throw e;
   }
 }
