@@ -1453,6 +1453,8 @@ mod tests {
             unread_count: 0,
             last_message_preview: None,
             last_ts_recv: None,
+            group_state: None,
+            last_read_row_id: None,
         }];
         let out = render_contacts_human(&rows);
         assert!(out.contains("alice"));
@@ -1475,6 +1477,8 @@ mod tests {
                 unread_count: 0,
                 last_message_preview: None,
                 last_ts_recv: None,
+                group_state: None,
+                last_read_row_id: None,
             },
             ContactSummary {
                 pubkey: PublicKey([0xCD; 32]),
@@ -1485,6 +1489,8 @@ mod tests {
                 unread_count: 0,
                 last_message_preview: None,
                 last_ts_recv: None,
+                group_state: None,
+                last_read_row_id: None,
             },
         ];
         let pk = resolve_contact(&rows, "ab").unwrap();
@@ -1506,6 +1512,8 @@ mod tests {
                 unread_count: 0,
                 last_message_preview: None,
                 last_ts_recv: None,
+                group_state: None,
+                last_read_row_id: None,
             },
             ContactSummary {
                 pubkey: PublicKey({
@@ -1520,6 +1528,8 @@ mod tests {
                 unread_count: 0,
                 last_message_preview: None,
                 last_ts_recv: None,
+                group_state: None,
+                last_read_row_id: None,
             },
         ];
         let err = resolve_contact(&rows, "ab").unwrap_err();

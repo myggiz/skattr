@@ -152,6 +152,22 @@ pub enum Direction {
     Outgoing,
 }
 
+/// Wire-safe stringly projection of `mls::state::GroupState`.
+/// Mirrors the three concrete variants in `state_machine.rs` as
+/// of Phase 1.C — `Active`, `PendingJoin`, `Corrupt`. Future
+/// state-machine variants extend this enum at the same time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/")]
+pub enum MlsGroupStateLabel {
+    /// Group is fully established and can send/receive messages.
+    Active,
+    /// Awaiting the Welcome/Commit that completes group formation.
+    PendingJoin,
+    /// Group state is unrecoverable; user must re-add the contact.
+    Corrupt,
+}
+
 /// Wire-safe projection of a contact row + latest card.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/")]
@@ -180,6 +196,16 @@ pub struct ContactSummary {
     /// contact's group; `None` if zero messages.
     #[serde(default)]
     pub last_ts_recv: Option<u64>,
+    /// MLS group state at summary-build time. `None` for fresh
+    /// contacts whose KeyPackage exchange is in flight.
+    #[serde(default)]
+    pub group_state: Option<MlsGroupStateLabel>,
+    /// Highest message-table `id` marked read for this contact's
+    /// group (from the `read_state` cursor). UI uses this to
+    /// anchor the frozen "Unread" separator at conversation-open.
+    /// `None` for fresh contacts with no cursor yet.
+    #[serde(default)]
+    pub last_read_row_id: Option<i64>,
 }
 
 /// Wire-safe projection of a persisted message row.
@@ -426,6 +452,8 @@ mod tests {
                 unread_count: 0,
                 last_message_preview: None,
                 last_ts_recv: None,
+                group_state: None,
+                last_read_row_id: None,
             }]),
             CommandResult::Messages(vec![MessageRecord {
                 row_id: 0, // row_id irrelevant in this test
@@ -516,6 +544,8 @@ mod tests {
             unread_count: 3,
             last_message_preview: Some("hello".into()),
             last_ts_recv: Some(1_700_000_500),
+            group_state: None,
+            last_read_row_id: None,
         };
         let mut buf = Vec::new();
         ciborium::ser::into_writer(&s, &mut buf).unwrap();
@@ -523,6 +553,45 @@ mod tests {
         assert_eq!(back.unread_count, 3);
         assert_eq!(back.last_message_preview.as_deref(), Some("hello"));
         assert_eq!(back.last_ts_recv, Some(1_700_000_500));
+    }
+
+    #[test]
+    fn contact_summary_with_new_fields_round_trips_cbor() {
+        let s = ContactSummary {
+            pubkey: crate::identity::PublicKey([7; 32]),
+            nickname: Some("bob".into()),
+            onion: "bbbb.onion".into(),
+            card_version: 1,
+            added_at: 1_700_000_000,
+            unread_count: 3,
+            last_message_preview: Some("hi".into()),
+            last_ts_recv: Some(1_700_000_500),
+            group_state: Some(MlsGroupStateLabel::Active),
+            last_read_row_id: Some(42),
+        };
+        let back: ContactSummary = roundtrip(&s);
+        assert_eq!(back.group_state, Some(MlsGroupStateLabel::Active));
+        assert_eq!(back.last_read_row_id, Some(42));
+    }
+
+    #[test]
+    fn contact_summary_decodes_legacy_payload_without_new_fields() {
+        // Build a CBOR map missing `group_state` / `last_read_row_id`.
+        let legacy_cbor = {
+            let mut buf = Vec::new();
+            let v = ciborium::value::Value::Map(vec![
+                ("pubkey".into(), ciborium::value::Value::Bytes([0u8; 32].to_vec())),
+                ("nickname".into(), ciborium::value::Value::Null),
+                ("onion".into(), ciborium::value::Value::Text("o.onion".into())),
+                ("card_version".into(), ciborium::value::Value::Integer(0.into())),
+                ("added_at".into(), ciborium::value::Value::Integer(0.into())),
+            ]);
+            ciborium::ser::into_writer(&v, &mut buf).unwrap();
+            buf
+        };
+        let back: ContactSummary = ciborium::de::from_reader(&legacy_cbor[..]).unwrap();
+        assert_eq!(back.group_state, None);
+        assert_eq!(back.last_read_row_id, None);
     }
 
     #[test]

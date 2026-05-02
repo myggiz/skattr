@@ -121,6 +121,8 @@ where
             unread_count,
             last_message_preview,
             last_ts_recv,
+            group_state: None,
+            last_read_row_id: None,
         });
     }
 
@@ -270,6 +272,8 @@ where
         unread_count: 0,
         last_message_preview: None,
         last_ts_recv: None,
+        group_state: None,
+        last_read_row_id: None,
     }))
 }
 
