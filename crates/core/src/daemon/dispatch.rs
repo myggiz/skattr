@@ -335,9 +335,9 @@ where
     let msg_repo = MessageRepo::new(&handle.pool);
     let outbox_repo = OutboxRepo::new(&handle.pool);
 
-    let insert_result: crate::error::Result<()> = handle.pool.transaction(|tx| {
+    let insert_result: crate::error::Result<i64> = handle.pool.transaction(|tx| {
         group.save_in_tx(&group_repo, tx)?;
-        let _ = msg_repo.insert_in_tx(
+        let row_id = msg_repo.insert_in_tx(
             tx,
             crate::storage::messages::InsertParams {
                 group_id: &group_id_bytes,
@@ -348,11 +348,11 @@ where
             },
         )?;
         let _ = outbox_repo.insert_in_tx(tx, &contact.0, &message_id.0, &ciphertext, 0)?;
-        Ok(())
+        Ok(row_id)
     });
 
-    match insert_result {
-        Ok(()) => { /* continue to hub.send below */ }
+    let row_id = match insert_result {
+        Ok(id) => id,
         Err(CoreError::Storage(StorageErrorKind::DuplicateMessage)) => {
             // Idempotent retry: this envelope_id was already persisted by a
             // prior attempt. Treat as Delivered — the outbox row from the
@@ -364,7 +364,7 @@ where
             });
         }
         Err(e) => return Err(map_err(e)),
-    }
+    };
 
     // 6. Kick the delivery hub, wait up to 2 s for an ACK.
     let ack_rx = handle
@@ -378,10 +378,19 @@ where
         _ => SendStatus::Queued,
     };
 
+    let record = crate::daemon::commands::MessageRecord::project(
+        row_id,
+        &envelope,
+        contact,
+        mls_generation,
+        ts_daemon_recv,
+        crate::daemon::commands::Direction::Outgoing,
+    );
+
     Ok(CommandResult::MessageSent {
         message_id: Hex16::from(message_id.0),
         status,
-        record: None,
+        record: Some(record),
     })
 }
 
@@ -2814,6 +2823,94 @@ mod tests {
                 assert!(records.iter().all(|r| r.row_id < cursor));
             }
             other => panic!("expected MessagesPage, got {other:?}"),
+        }
+    }
+
+    /// Creates a real two-party MLS group via the Alice/Bob invite dance.
+    ///
+    /// `handle` plays Bob's role: it adds Alice's invite via `AddContact`
+    /// and returns Alice's pubkey + her group_id (as seen in Bob's pool).
+    /// After this call, `SendMessage { contact: peer_pk, .. }` will succeed
+    /// because the MLS state, contact row, and group linkage are all in place.
+    ///
+    /// The returned `group_id` is the raw 32-byte group_id used in Bob's
+    /// storage — useful for direct SQL assertions in tests.
+    async fn seed_contact_with_real_group(
+        handle: &Arc<DaemonHandle<tokio::io::DuplexStream>>,
+    ) -> (crate::identity::PublicKey, Vec<u8>) {
+        use crate::storage::ContactRepo;
+
+        // Alice: separate handle, must have an onion so CreateInvite succeeds.
+        let handle_a = test_handle();
+        handle_a.set_onion("alice-seed-real.onion".to_string());
+
+        let CommandResult::InviteCreated { url, .. } = execute_command(
+            handle_a.clone(),
+            Command::CreateInvite {
+                nickname: None,
+                ttl_secs: Some(3600),
+            },
+        )
+        .await
+        .unwrap()
+        else {
+            panic!("seed_contact_with_real_group: expected InviteCreated");
+        };
+
+        // Bob (handle) consumes Alice's invite; this creates a real MLS group.
+        let CommandResult::ContactAdded(summary) =
+            execute_command(handle.clone(), Command::AddContact { invite_url: url })
+                .await
+                .unwrap()
+        else {
+            panic!("seed_contact_with_real_group: expected ContactAdded");
+        };
+
+        let peer_pk = summary.pubkey;
+        let contact_repo = ContactRepo::new(&handle.pool);
+        let group_id = contact_repo
+            .get_group_id(&peer_pk)
+            .unwrap()
+            .expect("group_id present after AddContact");
+
+        (peer_pk, group_id)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn send_message_returns_record_with_row_id() {
+        use crate::daemon::commands::Direction;
+        use crate::envelope::Kind;
+
+        let handle = test_handle();
+        let (peer_pk, _gid) = seed_contact_with_real_group(&handle).await;
+
+        let result = execute_command(
+            handle.clone(),
+            Command::SendMessage {
+                contact: peer_pk,
+                kind: Kind::Text { body: "hello".into() },
+            },
+        )
+        .await
+        .unwrap();
+
+        match result {
+            CommandResult::MessageSent {
+                record: Some(rec),
+                status: _,
+                ..
+            } => {
+                assert!(rec.row_id > 0, "record.row_id must be set");
+                assert_eq!(rec.direction, Direction::Outgoing);
+                assert_eq!(rec.contact, peer_pk);
+                match &rec.kind {
+                    Kind::Text { body } => assert_eq!(body, "hello"),
+                    other => panic!("expected Kind::Text, got {other:?}"),
+                }
+                assert!(rec.mls_generation > 0, "post-encrypt mls_generation must advance");
+                assert!(rec.ts_daemon_recv > 0);
+            }
+            other => panic!("expected MessageSent with Some(record), got {other:?}"),
         }
     }
 
