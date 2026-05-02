@@ -155,16 +155,52 @@ specs (first-run + unlock paths, headless Tauri mock); new
 `crates/tests/src/ui_first_run.rs` `#[ignore]`-gated real-Tor
 integration test.
 
+Phase 2.D (conversation view) merged at the head of
+`phase-2d-conversation-view`. The composer (Enter-to-send,
+Shift+Enter newline, paste-as-plaintext, IME-safe), per-message
+delivery state icons (clock → check → check-check → !), and
+scroll-back pagination (50 rows/page, `before_id` cursor, 5
+skeleton bubbles during loads) round out the conversation pane.
+Wire-format additions are strictly additive: `Command::Recent
+Messages` gains `before_id: Option<i64>` + `paged: bool` (both
+`#[serde(default)]`); new `CommandResult::MessagesPage { records,
+next_before_id }` variant alongside the unchanged `Messages(Vec)`;
+`MessageSent` gains `record: Option<MessageRecord>`;
+`ContactSummary` gains `group_state: Option<MlsGroupStateLabel>`
++ `last_read_row_id: Option<i64>`. New storage method
+`MessageRepo::recent_before` powers pagination. The frozen "Unread"
+separator anchors to `ContactSummary.last_read_row_id` at
+conversation-open and never advances live. Mark-read fires on both
+conversation-open and bottom-of-list intersection (debounced
+500 ms, scroll-proximity ≤ 100 px). Optimistic send: UI appends a
+placeholder bubble with a `__tempId`, awaits `MessageSent.record`,
+reconciles in place. New wire-format snapshot test
+(`crates/core/tests/wire_format_append_only.rs`) makes adding or
+reshaping a `Command`/`CommandResult` variant a deliberate edit.
+
+E2e harness work surfaced three production bugs fixed in 2.D:
+`refreshContacts()` not called on direct `/` navigation;
+`delivery_status_changed` events silently dropped from the
+subscribe stream; `.shell` CSS missing `grid-template-rows:
+100vh; overflow: hidden` causing the virtualizer to collapse.
+
+Known 2.D limitation: the `AddContact` dispatcher creates the
+MLS group only on the consumer side and does not propagate the
+Welcome message to the inviter. The inviter cannot decrypt
+messages from the new contact until this is wired up. Tracked as
+a follow-up beyond 2.D's exit criterion; the
+`ui_send_roundtrip` `#[ignore]`-gated test documents it.
+
 Phase 1 is complete (1.H merged 2026-04-24); Phase 2.A (mailbox
 server) merged at the head of `phase-2a-mailbox-server`; Phase 2.B
 is complete (merged 2026-05-01); Phase 2.C is complete (merged
-2026-05-02). The next workstream is Phase 2.D (conversation view:
-composer, delivery state icons, scroll-back pagination; depends on
-2.C) — see
+2026-05-02); Phase 2.D is complete (merged 2026-05-02). The next
+workstream is Phase 2.E (invite UX + contact rename/remove;
+depends on 2.D) — see
 `docs/superpowers/specs/2026-04-26-phase-2-ui-decomposition.md`
 for the Phase 2 decomposition,
-`docs/superpowers/specs/2026-05-01-phase-2c-ui-bootstrap-design.md`
-for the 2.C internals, and
+`docs/superpowers/specs/2026-05-02-phase-2d-conversation-view-design.md`
+for the 2.D internals, and
 `docs/adr/0006-mailbox-protocol-v1.md` for the wire freeze 2.B
 develops against. The bootstrap prompt remains
 authoritative for file layout, module boundaries, type signatures,
