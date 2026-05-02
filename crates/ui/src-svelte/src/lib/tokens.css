@@ -23,7 +23,7 @@
   --text: #e8eaed;
   --text-muted: #9aa0a6;
   --accent: #7aa2f7;
-  --danger: #f7768e;
+  --danger: #ef4444;
 
   --s-1: 4px;
   --s-2: 8px;
@@ -41,6 +41,7 @@
     --bg-elevated: #ffffff;
     --text: #1a1d21;
     --text-muted: #5f6368;
+    --danger: #dc2626;
   }
 }
 

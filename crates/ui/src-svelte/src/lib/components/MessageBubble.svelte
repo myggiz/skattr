@@ -2,21 +2,47 @@
 <!-- Copyright (C) 2026 Myggiz AB -->
 <script lang="ts">
   import type { MessageRecord } from "$lib/ipc/types";
+  import type { OptimisticMessage } from "$lib/stores/conversation";
+  import DeliveryIcon from "./DeliveryIcon.svelte";
+  import { delivery, deliveryToIconStatus, hex16ToString } from "$lib/stores/delivery";
 
-  let { record }: { record: MessageRecord } = $props();
+  let { record }: { record: MessageRecord | OptimisticMessage } = $props();
 
-  // Kind shape: { kind: "text", body: string } | { kind: "file", ... } | ...
   let body = $derived(
     record.kind && record.kind.kind === "text" ? record.kind.body : "",
   );
   let isOutgoing = $derived(record.direction === "outgoing");
-  // ts_daemon_recv is bigint in the wire type; coerce to number for Date.
   let tsMs = $derived(Number(record.ts_daemon_recv) * 1000);
+
+  let optimistic = $derived((record as OptimisticMessage).__optimistic === true);
+  let failed = $derived((record as OptimisticMessage).__failed);
+
+  let iconStatus = $derived.by(() => {
+    if (!isOutgoing) return null;
+    if (failed) return "failed" as const;
+    if (optimistic) return "pending" as const;
+    const hex = hex16ToString(record.message_id);
+    return deliveryToIconStatus($delivery.get(hex));
+  });
+
+  let iconTitle = $derived.by(() => {
+    if (failed) return failed;
+    if (optimistic) return "Pending";
+    return iconStatus === "delivered" ? "Delivered"
+         : iconStatus === "sent"      ? "Delivered to mailbox"
+         : iconStatus === "failed"    ? "Failed"
+                                      : "Pending";
+  });
 </script>
 
 <div class="bubble" class:outgoing={isOutgoing}>
   <p class="body">{body}</p>
-  <time class="ts">{new Date(tsMs).toLocaleTimeString()}</time>
+  <div class="meta">
+    <time class="ts">{new Date(tsMs).toLocaleTimeString()}</time>
+    {#if isOutgoing && iconStatus}
+      <DeliveryIcon status={iconStatus} title={iconTitle} />
+    {/if}
+  </div>
 </div>
 
 <style>
@@ -30,5 +56,13 @@
   }
   .bubble.outgoing { background: var(--accent); color: var(--bg); margin-left: auto; }
   .body { margin: 0; white-space: pre-wrap; word-break: break-word; }
-  .ts { color: var(--text-muted); font: var(--t-ui); display: block; margin-top: var(--s-1); }
+  .meta {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: var(--s-1);
+    margin-top: var(--s-1);
+  }
+  .ts { color: var(--text-muted); font: var(--t-ui); }
+  .bubble.outgoing .ts { color: rgba(255, 255, 255, 0.7); }
 </style>

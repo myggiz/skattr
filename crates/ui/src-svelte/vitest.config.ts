@@ -2,9 +2,15 @@
 // Copyright (C) 2026 Myggiz AB
 import { sveltekit } from "@sveltejs/kit/vite";
 import { defineConfig } from "vitest/config";
+import { svelteTesting } from "@testing-library/svelte/vite";
 
 export default defineConfig({
-  plugins: [sveltekit()],
+  // svelteTesting() adds `browser` to resolve.conditions (for Svelte 5 client
+  // module selection) and injects the @testing-library/svelte auto-cleanup
+  // setup file. autoCleanup:false prevents the setup file from being added
+  // globally — the tokens.css.test.ts runs under @vitest-environment node and
+  // importing Svelte's client module there throws (no requestAnimationFrame).
+  plugins: [sveltekit(), svelteTesting({ autoCleanup: false })],
   // Allow `?raw` imports of CSS files in tests.
   assetsInclude: [],
   test: {

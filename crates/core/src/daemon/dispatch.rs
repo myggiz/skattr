@@ -39,9 +39,12 @@ where
         }
         Command::AddContact { invite_url } => add_contact(&handle, invite_url).await,
         Command::SendMessage { contact, kind } => send_message(&handle, contact, kind).await,
-        Command::RecentMessages { contact, limit } => {
-            recent_messages(&handle, contact, limit).await
-        }
+        Command::RecentMessages {
+            contact,
+            limit,
+            before_id,
+            paged,
+        } => recent_messages(&handle, contact, limit, before_id, paged).await,
         Command::CreateGroup { .. } => Err(IpcError::UnknownCommand),
         Command::SearchMessages {
             query,
@@ -78,10 +81,12 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     use crate::daemon::commands::ContactSummary;
-    use crate::storage::{ContactRepo, MessageRepo};
+    use crate::storage::{ContactRepo, MessageRepo, MlsGroupRepo, ReadStateRepo};
 
     let repo = ContactRepo::new(&handle.pool);
     let msg_repo = MessageRepo::new(&handle.pool);
+    let group_repo = MlsGroupRepo::new(&handle.pool);
+    let read_repo = ReadStateRepo::new(&handle.pool);
     let contacts = repo.list().map_err(map_err)?;
 
     let mut summaries: Vec<ContactSummary> = Vec::with_capacity(contacts.len());
@@ -93,10 +98,10 @@ where
             .unwrap_or_else(|| (String::new(), 0));
 
         let group_id = repo.get_group_id(&c.identity).map_err(map_err)?;
-        let (unread_count, last_message_preview, last_ts_recv) = match group_id {
+        let (unread_count, last_message_preview, last_ts_recv) = match group_id.as_deref() {
             Some(gid) => {
-                let unread = msg_repo.unread_count(&gid).map_err(map_err)?;
-                let latest = msg_repo.latest_for_group(&gid).map_err(map_err)?;
+                let unread = msg_repo.unread_count(gid).map_err(map_err)?;
+                let latest = msg_repo.latest_for_group(gid).map_err(map_err)?;
                 let preview = latest.as_ref().and_then(|row| {
                     let env: crate::envelope::Envelope =
                         crate::envelope::Envelope::decode(row.body_blob.as_ref()?.as_slice())
@@ -112,6 +117,25 @@ where
             None => (0, None, None),
         };
 
+        let group_state: Option<crate::daemon::commands::MlsGroupStateLabel> =
+            match group_id.as_deref() {
+                Some(gid) => {
+                    use crate::daemon::commands::MlsGroupStateLabel;
+                    use crate::mls::group::{Group, GroupId};
+                    match Group::load(&GroupId(gid.to_vec()), &group_repo) {
+                        Ok(Some(_)) => Some(MlsGroupStateLabel::Active),
+                        Ok(None) => Some(MlsGroupStateLabel::PendingJoin),
+                        Err(_) => Some(MlsGroupStateLabel::Corrupt),
+                    }
+                }
+                None => None,
+            };
+
+        let last_read_row_id: Option<i64> = match group_id.as_deref() {
+            Some(gid) => read_repo.get(gid).map_err(map_err)?,
+            None => None,
+        };
+
         summaries.push(ContactSummary {
             pubkey: c.identity,
             nickname: c.display_name,
@@ -121,6 +145,8 @@ where
             unread_count,
             last_message_preview,
             last_ts_recv,
+            group_state,
+            last_read_row_id,
         });
     }
 
@@ -270,6 +296,8 @@ where
         unread_count: 0,
         last_message_preview: None,
         last_ts_recv: None,
+        group_state: None,
+        last_read_row_id: None,
     }))
 }
 
@@ -331,9 +359,9 @@ where
     let msg_repo = MessageRepo::new(&handle.pool);
     let outbox_repo = OutboxRepo::new(&handle.pool);
 
-    let insert_result: crate::error::Result<()> = handle.pool.transaction(|tx| {
+    let insert_result: crate::error::Result<i64> = handle.pool.transaction(|tx| {
         group.save_in_tx(&group_repo, tx)?;
-        let _ = msg_repo.insert_in_tx(
+        let row_id = msg_repo.insert_in_tx(
             tx,
             crate::storage::messages::InsertParams {
                 group_id: &group_id_bytes,
@@ -344,11 +372,11 @@ where
             },
         )?;
         let _ = outbox_repo.insert_in_tx(tx, &contact.0, &message_id.0, &ciphertext, 0)?;
-        Ok(())
+        Ok(row_id)
     });
 
-    match insert_result {
-        Ok(()) => { /* continue to hub.send below */ }
+    let row_id = match insert_result {
+        Ok(id) => id,
         Err(CoreError::Storage(StorageErrorKind::DuplicateMessage)) => {
             // Idempotent retry: this envelope_id was already persisted by a
             // prior attempt. Treat as Delivered — the outbox row from the
@@ -356,10 +384,11 @@ where
             return Ok(CommandResult::MessageSent {
                 message_id: Hex16::from(message_id.0),
                 status: SendStatus::Delivered,
+                record: None,
             });
         }
         Err(e) => return Err(map_err(e)),
-    }
+    };
 
     // 6. Kick the delivery hub, wait up to 2 s for an ACK.
     let ack_rx = handle
@@ -373,9 +402,19 @@ where
         _ => SendStatus::Queued,
     };
 
+    let record = crate::daemon::commands::MessageRecord::project(
+        row_id,
+        &envelope,
+        contact,
+        mls_generation,
+        ts_daemon_recv,
+        crate::daemon::commands::Direction::Outgoing,
+    );
+
     Ok(CommandResult::MessageSent {
         message_id: Hex16::from(message_id.0),
         status,
+        record: Some(record),
     })
 }
 
@@ -383,6 +422,8 @@ async fn recent_messages<S>(
     handle: &Arc<DaemonHandle<S>>,
     contact: Option<crate::identity::PublicKey>,
     limit: u32,
+    before_id: Option<i64>,
+    paged: bool,
 ) -> std::result::Result<CommandResult, IpcError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -403,9 +444,13 @@ where
     };
 
     let msg_repo = MessageRepo::new(&handle.pool);
-    let rows = msg_repo
-        .recent(&group_id, usize::try_from(limit).unwrap_or(usize::MAX))
-        .map_err(map_err)?;
+    let limit_usize = usize::try_from(limit).unwrap_or(usize::MAX);
+    let rows = match before_id {
+        Some(b) => msg_repo
+            .recent_before(&group_id, b, limit_usize)
+            .map_err(map_err)?,
+        None => msg_repo.recent(&group_id, limit_usize).map_err(map_err)?,
+    };
 
     // Local identity pubkey — determines message direction.
     let my_pubkey: PublicKey = handle.identity.public();
@@ -441,7 +486,22 @@ where
         })
         .collect();
 
-    Ok(CommandResult::Messages(records))
+    if paged {
+        // A full page (records.len() == limit_usize) means there may be
+        // more older rows; surface the oldest row's id as the cursor.
+        // A short (or empty) page means end-of-stream.
+        let next_before_id = if records.len() == limit_usize {
+            records.last().map(|r| r.row_id)
+        } else {
+            None
+        };
+        Ok(CommandResult::MessagesPage {
+            records,
+            next_before_id,
+        })
+    } else {
+        Ok(CommandResult::Messages(records))
+    }
 }
 
 async fn search_messages<S>(
@@ -1376,6 +1436,8 @@ mod tests {
             Command::RecentMessages {
                 contact: Some(crate::identity::PublicKey([0x88; 32])),
                 limit: 50,
+                before_id: None,
+                paged: false,
             },
         )
         .await;
@@ -1434,6 +1496,8 @@ mod tests {
             Command::RecentMessages {
                 contact: Some(peer),
                 limit: 10,
+                before_id: None,
+                paged: false,
             },
         )
         .await
@@ -1479,6 +1543,8 @@ mod tests {
             Command::RecentMessages {
                 contact: Some(peer),
                 limit: 10,
+                before_id: None,
+                paged: false,
             },
         )
         .await
@@ -2667,5 +2733,370 @@ mod tests {
         let preview = summaries[0].last_message_preview.as_ref().unwrap();
         assert_eq!(preview.chars().count(), 80);
         assert!(preview.chars().all(|c| c == 'x'));
+    }
+
+    // ── Task 6: paged recent_messages branch ─────────────────────────────
+
+    #[tokio::test]
+    async fn recent_messages_unpaged_returns_messages_tuple_variant() {
+        let handle = test_handle();
+        let (peer_pk, _gid) = seed_contact_with_group(&handle, "peer1", 5).await;
+
+        let result = execute_command(
+            handle.clone(),
+            Command::RecentMessages {
+                contact: Some(peer_pk),
+                limit: 10,
+                before_id: None,
+                paged: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        match result {
+            CommandResult::Messages(rows) => assert_eq!(rows.len(), 5),
+            other => panic!("expected Messages(Vec), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn recent_messages_paged_first_page_carries_cursor() {
+        let handle = test_handle();
+        let (peer_pk, _gid) = seed_contact_with_group(&handle, "peer2", 60).await;
+
+        let result = execute_command(
+            handle.clone(),
+            Command::RecentMessages {
+                contact: Some(peer_pk),
+                limit: 50,
+                before_id: None,
+                paged: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        match result {
+            CommandResult::MessagesPage {
+                records,
+                next_before_id,
+            } => {
+                assert_eq!(records.len(), 50);
+                assert!(next_before_id.is_some());
+                let min_id = records
+                    .iter()
+                    .map(|r| r.row_id)
+                    .min()
+                    .expect("non-empty page");
+                assert_eq!(
+                    next_before_id,
+                    Some(min_id),
+                    "next_before_id must be the smallest row_id in the DESC-ordered page"
+                );
+            }
+            other => panic!("expected MessagesPage, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn recent_messages_paged_last_page_has_null_cursor() {
+        let handle = test_handle();
+        let (peer_pk, _gid) = seed_contact_with_group(&handle, "peer3", 30).await;
+
+        let result = execute_command(
+            handle.clone(),
+            Command::RecentMessages {
+                contact: Some(peer_pk),
+                limit: 50,
+                before_id: None,
+                paged: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        match result {
+            CommandResult::MessagesPage {
+                records,
+                next_before_id: None,
+            } => {
+                assert_eq!(records.len(), 30);
+            }
+            other => panic!("expected MessagesPage with null cursor, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn recent_messages_paged_with_before_id_excludes_cursor_row() {
+        let handle = test_handle();
+        let (peer_pk, _gid) = seed_contact_with_group(&handle, "peer4", 30).await;
+
+        let first = execute_command(
+            handle.clone(),
+            Command::RecentMessages {
+                contact: Some(peer_pk),
+                limit: 10,
+                before_id: None,
+                paged: true,
+            },
+        )
+        .await
+        .unwrap();
+        let cursor = match first {
+            CommandResult::MessagesPage {
+                next_before_id: Some(c),
+                ..
+            } => c,
+            other => panic!("expected MessagesPage cursor, got {other:?}"),
+        };
+
+        let second = execute_command(
+            handle.clone(),
+            Command::RecentMessages {
+                contact: Some(peer_pk),
+                limit: 10,
+                before_id: Some(cursor),
+                paged: true,
+            },
+        )
+        .await
+        .unwrap();
+        match second {
+            CommandResult::MessagesPage { records, .. } => {
+                assert!(records.iter().all(|r| r.row_id < cursor));
+            }
+            other => panic!("expected MessagesPage, got {other:?}"),
+        }
+    }
+
+    /// Creates a real two-party MLS group via the Alice/Bob invite dance.
+    ///
+    /// `handle` plays Bob's role: it adds Alice's invite via `AddContact`
+    /// and returns Alice's pubkey + her group_id (as seen in Bob's pool).
+    /// After this call, `SendMessage { contact: peer_pk, .. }` will succeed
+    /// because the MLS state, contact row, and group linkage are all in place.
+    ///
+    /// The returned `group_id` is the raw 32-byte group_id used in Bob's
+    /// storage — useful for direct SQL assertions in tests.
+    async fn seed_contact_with_real_group(
+        handle: &Arc<DaemonHandle<tokio::io::DuplexStream>>,
+    ) -> (crate::identity::PublicKey, Vec<u8>) {
+        use crate::storage::ContactRepo;
+
+        // Alice: separate handle, must have an onion so CreateInvite succeeds.
+        let handle_a = test_handle();
+        handle_a.set_onion("alice-seed-real.onion".to_string());
+
+        let CommandResult::InviteCreated { url, .. } = execute_command(
+            handle_a.clone(),
+            Command::CreateInvite {
+                nickname: None,
+                ttl_secs: Some(3600),
+            },
+        )
+        .await
+        .unwrap() else {
+            panic!("seed_contact_with_real_group: expected InviteCreated");
+        };
+
+        // Bob (handle) consumes Alice's invite; this creates a real MLS group.
+        let CommandResult::ContactAdded(summary) =
+            execute_command(handle.clone(), Command::AddContact { invite_url: url })
+                .await
+                .unwrap()
+        else {
+            panic!("seed_contact_with_real_group: expected ContactAdded");
+        };
+
+        let peer_pk = summary.pubkey;
+        let contact_repo = ContactRepo::new(&handle.pool);
+        let group_id = contact_repo
+            .get_group_id(&peer_pk)
+            .unwrap()
+            .expect("group_id present after AddContact");
+
+        (peer_pk, group_id)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn send_message_returns_record_with_row_id() {
+        use crate::daemon::commands::Direction;
+        use crate::envelope::Kind;
+
+        let handle = test_handle();
+        let (peer_pk, _gid) = seed_contact_with_real_group(&handle).await;
+
+        let result = execute_command(
+            handle.clone(),
+            Command::SendMessage {
+                contact: peer_pk,
+                kind: Kind::Text {
+                    body: "hello".into(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+        match result {
+            CommandResult::MessageSent {
+                record: Some(rec),
+                status: _,
+                ..
+            } => {
+                assert!(rec.row_id > 0, "record.row_id must be set");
+                assert_eq!(rec.direction, Direction::Outgoing);
+                assert_eq!(rec.contact, peer_pk);
+                match &rec.kind {
+                    Kind::Text { body } => assert_eq!(body, "hello"),
+                    other => panic!("expected Kind::Text, got {other:?}"),
+                }
+                assert!(
+                    rec.mls_generation > 0,
+                    "post-encrypt mls_generation must advance"
+                );
+                assert!(rec.ts_daemon_recv > 0);
+            }
+            other => panic!("expected MessageSent with Some(record), got {other:?}"),
+        }
+    }
+
+    /// Seeds a contact + a placeholder group_id + N text messages.
+    /// Returns the peer pubkey + the group_id bytes.
+    ///
+    /// This is for tests that exercise the read path only — there is
+    /// no MLS Group state, no Welcome processing. Use one of the
+    /// existing real-group helpers (e.g. `seed_contact_with_real_group`)
+    /// when the test needs to encrypt.
+    async fn seed_contact_with_group(
+        handle: &Arc<DaemonHandle<tokio::io::DuplexStream>>,
+        nickname: &str,
+        n_messages: usize,
+    ) -> (crate::identity::PublicKey, Vec<u8>) {
+        use crate::envelope::{Envelope, Kind, MessageId};
+        use crate::storage::MessageRepo;
+
+        // Per-call distinct peer pubkey + group_id so calls within a
+        // single test handle don't collide. Fold nickname bytes into the
+        // first byte for stable-but-distinct values.
+        let nickname_byte = nickname
+            .as_bytes()
+            .iter()
+            .fold(0u8, |acc, &b| acc.wrapping_add(b));
+        let mut peer_bytes = [0xABu8; 32];
+        peer_bytes[0] = nickname_byte;
+        let peer_pk = crate::identity::PublicKey(peer_bytes);
+        let mut gid = vec![0xCDu8; 32];
+        gid[0] = nickname_byte;
+
+        // Seed the contact row then link it to the group_id.
+        let contact_repo = ContactRepo::new(&handle.pool);
+        contact_repo
+            .upsert(&crate::contact::Contact {
+                identity: peer_pk,
+                display_name: Some(nickname.into()),
+                added_at: 0,
+                card: None,
+            })
+            .unwrap();
+        contact_repo.set_group_id(&peer_pk, &gid).unwrap();
+
+        // Insert N text messages with distinct envelope ids + timestamps.
+        let msg_repo = MessageRepo::new(&handle.pool);
+        for i in 0..n_messages {
+            let env = Envelope {
+                v: 1,
+                id: MessageId([i as u8; 16]),
+                ts: 1_700_000_000 + i as i64,
+                reply_to: None,
+                kind: Kind::Text {
+                    body: format!("m{i}"),
+                },
+            };
+            msg_repo
+                .insert(crate::storage::messages::InsertParams {
+                    group_id: &gid,
+                    sender: &peer_pk.0,
+                    envelope: &env,
+                    mls_generation: 0,
+                    ts_daemon_recv: env.ts,
+                })
+                .unwrap();
+        }
+        (peer_pk, gid)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn list_contacts_carries_group_state_and_read_cursor() {
+        use crate::daemon::commands::MlsGroupStateLabel;
+
+        let handle = test_handle();
+        let (peer_pk, _gid) = seed_contact_with_real_group(&handle).await;
+
+        // Send a real message so a row exists, then mark up to its row_id as read.
+        let send_result = execute_command(
+            handle.clone(),
+            Command::SendMessage {
+                contact: peer_pk,
+                kind: crate::envelope::Kind::Text { body: "x".into() },
+            },
+        )
+        .await
+        .unwrap();
+        let row_id = match send_result {
+            CommandResult::MessageSent {
+                record: Some(rec), ..
+            } => rec.row_id,
+            other => panic!("expected MessageSent with record, got {other:?}"),
+        };
+        execute_command(
+            handle.clone(),
+            Command::MarkRead {
+                contact: peer_pk,
+                up_to_message_id: row_id,
+            },
+        )
+        .await
+        .unwrap();
+
+        let result = execute_command(handle.clone(), Command::ListContacts)
+            .await
+            .unwrap();
+        let summary = match result {
+            CommandResult::Contacts(s) => s
+                .into_iter()
+                .find(|c| c.pubkey == peer_pk)
+                .expect("seeded peer not found"),
+            other => panic!("expected Contacts, got {other:?}"),
+        };
+
+        assert_eq!(summary.group_state, Some(MlsGroupStateLabel::Active));
+        assert_eq!(summary.last_read_row_id, Some(row_id));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn list_contacts_reports_corrupt_for_unloadable_group_blob() {
+        use crate::daemon::commands::MlsGroupStateLabel;
+        use crate::storage::MlsGroupRepo;
+
+        let handle = test_handle();
+        // seed_contact_with_group provides a placeholder group_id without real MLS state.
+        // We write a garbage blob to that group_id to trigger a load failure.
+        let (peer_pk, gid) = seed_contact_with_group(&handle, "broken", 0).await;
+
+        // Write a garbage blob to force load failure.
+        MlsGroupRepo::new(&handle.pool)
+            .put(&gid, b"\xFF\xFF\xFFnot a valid mls blob", 0)
+            .unwrap();
+
+        let result = execute_command(handle.clone(), Command::ListContacts)
+            .await
+            .unwrap();
+        let summary = match result {
+            CommandResult::Contacts(s) => s.into_iter().find(|c| c.pubkey == peer_pk).unwrap(),
+            other => panic!("expected Contacts, got {other:?}"),
+        };
+        assert_eq!(summary.group_state, Some(MlsGroupStateLabel::Corrupt));
     }
 }

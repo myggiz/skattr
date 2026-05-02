@@ -8,25 +8,52 @@
   import TorPill from "$lib/components/TorPill.svelte";
   import ContactRow from "$lib/components/ContactRow.svelte";
   import VirtualMessageList from "$lib/components/VirtualMessageList.svelte";
+  import Composer from "$lib/components/Composer.svelte";
   import { contacts, refreshContacts } from "$lib/stores/contacts";
-  import { conversation, openConversation, appendMessage } from "$lib/stores/conversation";
+  import { conversation, openConversationFromSummary, appendMessage } from "$lib/stores/conversation";
   import { torStatus } from "$lib/stores/tor_status";
+  import { recordDeliveryStatus, hex16ToString } from "$lib/stores/delivery";
   import { ipcClient } from "$lib/ipc/tauri";
-  import type { PublicKey } from "$lib/ipc/types";
+  import type { ContactSummary, PublicKey } from "$lib/ipc/types";
 
   onMount(async () => {
     // If no vault exists yet, go to first-run to initialise identity.
     const exists = await invoke<boolean>("vault_exists");
     if (!exists) {
       goto("/first-run");
+      return;
     }
     // If vault exists we are already unlocked (Bootstrap.svelte called goto("/")).
-    // Stay on "/" and show the main shell.
+    // Stay on "/" and show the main shell; refresh the contact list.
+    await refreshContacts();
   });
 
-  async function selectContact(pubkey: PublicKey) {
-    await openConversation(pubkey);
+  async function selectContact(summary: ContactSummary) {
+    await openConversationFromSummary(summary);
   }
+
+  // Active ContactSummary lookup keyed by the conversation's current contact.
+  let activeSummary = $derived(
+    $conversation.contact === null
+      ? undefined
+      : $contacts.find((c) => c.pubkey === $conversation.contact),
+  );
+
+  let composerDisabled = $derived(
+    activeSummary === undefined || activeSummary.group_state !== "active",
+  );
+
+  let disabledReason = $derived(
+    activeSummary === undefined
+      ? "Select a contact"
+      : activeSummary.group_state === "corrupt"
+        ? "Conversation unavailable"
+        : activeSummary.group_state === "pending_join"
+          ? "Joining group…"
+          : activeSummary.group_state === null || activeSummary.group_state === undefined
+            ? "Setting up conversation…"
+            : undefined,
+  );
 
   // Subscribe to events on mount; update stores.
   onMount(() => {
@@ -38,6 +65,8 @@
           torStatus.set(e.data);
         } else if (e.event === "message_received") {
           appendMessage(e.data.record);
+        } else if (e.event === "delivery_status_changed") {
+          recordDeliveryStatus(hex16ToString(e.data.message), e.data.status);
         }
       });
     })();
@@ -53,7 +82,7 @@
       <ContactRow
         summary={c}
         active={$conversation.contact === c.pubkey}
-        onclick={() => selectContact(c.pubkey)}
+        onclick={() => selectContact(c)}
       />
     {/each}
   </aside>
@@ -65,14 +94,21 @@
       }</span>
       <TorPill />
     </header>
-    <VirtualMessageList items={$conversation.messages} />
+    {#if $conversation.contact !== null}
+      <VirtualMessageList items={$conversation.messages} />
+      <Composer contact={$conversation.contact} disabled={composerDisabled} {disabledReason} />
+    {:else}
+      <p class="empty">Select a contact</p>
+    {/if}
   </main>
 </div>
 
 <style>
-  .shell { display: grid; grid-template-columns: 280px 1fr; height: 100vh; }
+  .shell { display: grid; grid-template-columns: 280px 1fr; grid-template-rows: 100vh; height: 100vh; overflow: hidden; }
   .rail { background: var(--bg); border-right: 1px solid var(--bg-elevated); overflow-y: auto; }
-  .pane { display: flex; flex-direction: column; background: var(--bg); }
+  .pane { display: flex; flex-direction: column; background: var(--bg); height: 100%; }
+  .pane :global(.list) { flex: 1; min-height: 0; }
+  .empty { padding: var(--s-3); color: var(--fg-dim, #888); margin: auto; }
   header {
     display: flex;
     align-items: center;

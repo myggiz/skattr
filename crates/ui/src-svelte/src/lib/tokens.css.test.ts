@@ -48,5 +48,10 @@ test("tokens.css dark-mode palette values are locked", () => {
   expect(css).toContain("--text: #e8eaed");
   expect(css).toContain("--text-muted: #9aa0a6");
   expect(css).toContain("--accent: #7aa2f7");
-  expect(css).toContain("--danger: #f7768e");
+  expect(css).toContain("--danger: #ef4444");
+});
+
+test("tokens.css light-mode palette values are locked", () => {
+  // Light mode overrides; T10 added --danger: #dc2626 in light.
+  expect(css).toContain("--danger: #dc2626");
 });

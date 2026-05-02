@@ -48,6 +48,14 @@ pub enum Command {
         contact: Option<PublicKey>,
         /// Max rows to return.
         limit: u32,
+        /// Pagination cursor — return rows with `row_id < before_id`.
+        /// `None` = first page (most-recent).
+        #[serde(default)]
+        before_id: Option<i64>,
+        /// Opt-in to the paged response variant `MessagesPage`. CLI
+        /// callers omit and receive `Messages(Vec)` unchanged.
+        #[serde(default)]
+        paged: bool,
     },
     /// Start a new MLS group with the given initial members. Reserved
     /// for Phase 2; 1.F server answers `IpcError::UnknownCommand`.
@@ -152,6 +160,22 @@ pub enum Direction {
     Outgoing,
 }
 
+/// Wire-safe stringly projection of `mls::state::GroupState`.
+/// Mirrors the three concrete variants in `state_machine.rs` as
+/// of Phase 1.C — `Active`, `PendingJoin`, `Corrupt`. Future
+/// state-machine variants extend this enum at the same time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/")]
+pub enum MlsGroupStateLabel {
+    /// Group is fully established and can send/receive messages.
+    Active,
+    /// Awaiting the Welcome/Commit that completes group formation.
+    PendingJoin,
+    /// Group state is unrecoverable; user must re-add the contact.
+    Corrupt,
+}
+
 /// Wire-safe projection of a contact row + latest card.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/")]
@@ -180,6 +204,16 @@ pub struct ContactSummary {
     /// contact's group; `None` if zero messages.
     #[serde(default)]
     pub last_ts_recv: Option<u64>,
+    /// MLS group state at summary-build time. `None` for fresh
+    /// contacts whose KeyPackage exchange is in flight.
+    #[serde(default)]
+    pub group_state: Option<MlsGroupStateLabel>,
+    /// Highest message-table `id` marked read for this contact's
+    /// group (from the `read_state` cursor). UI uses this to
+    /// anchor the frozen "Unread" separator at conversation-open.
+    /// `None` for fresh contacts with no cursor yet.
+    #[serde(default)]
+    pub last_read_row_id: Option<i64>,
 }
 
 /// Wire-safe projection of a persisted message row.
@@ -275,9 +309,25 @@ pub enum CommandResult {
         message_id: Hex16,
         /// Outcome after the inline wait.
         status: SendStatus,
+        /// Canonical sender-side `MessageRecord` projection. `None`
+        /// only on the idempotent-retry branch where the original
+        /// row id is not easily recoverable. UI's optimistic
+        /// placeholder reconciles to `Some(record)` when present.
+        #[serde(default)]
+        record: Option<MessageRecord>,
     },
     /// [`Command::RecentMessages`] completed. Most-recent first.
     Messages(Vec<MessageRecord>),
+    /// [`Command::RecentMessages`] completed with `paged: true`.
+    /// Most-recent first within the page; `next_before_id` is the
+    /// cursor for the next older page (`None` if this was the
+    /// last page).
+    MessagesPage {
+        /// Message records for this page, most-recent first.
+        records: Vec<MessageRecord>,
+        /// Cursor for the next older page; `None` if this was the last page.
+        next_before_id: Option<i64>,
+    },
     /// Acknowledges a `Subscribe` request. No payload.
     Subscribed,
     /// No-payload acknowledgement (rotate, shutdown, etc.).
@@ -368,10 +418,14 @@ mod tests {
             Command::RecentMessages {
                 contact: None,
                 limit: 50,
+                before_id: None,
+                paged: false,
             },
             Command::RecentMessages {
                 contact: Some(crate::identity::PublicKey([1; 32])),
                 limit: 10,
+                before_id: None,
+                paged: false,
             },
             Command::CreateInvite {
                 nickname: Some("alice".into()),
@@ -426,6 +480,8 @@ mod tests {
                 unread_count: 0,
                 last_message_preview: None,
                 last_ts_recv: None,
+                group_state: None,
+                last_read_row_id: None,
             }]),
             CommandResult::Messages(vec![MessageRecord {
                 row_id: 0, // row_id irrelevant in this test
@@ -440,6 +496,7 @@ mod tests {
             CommandResult::MessageSent {
                 message_id: crate::daemon::hex::Hex16::from([3; 16]),
                 status: SendStatus::Queued,
+                record: None,
             },
             CommandResult::Subscribed,
             CommandResult::InviteCreated {
@@ -506,7 +563,7 @@ mod tests {
     }
 
     #[test]
-    fn contact_summary_with_new_fields_round_trips() {
+    fn contact_summary_2c_preview_and_unread_round_trips() {
         let s = ContactSummary {
             pubkey: PublicKey([0x99; 32]),
             nickname: None,
@@ -516,6 +573,8 @@ mod tests {
             unread_count: 3,
             last_message_preview: Some("hello".into()),
             last_ts_recv: Some(1_700_000_500),
+            group_state: None,
+            last_read_row_id: None,
         };
         let mut buf = Vec::new();
         ciborium::ser::into_writer(&s, &mut buf).unwrap();
@@ -523,6 +582,62 @@ mod tests {
         assert_eq!(back.unread_count, 3);
         assert_eq!(back.last_message_preview.as_deref(), Some("hello"));
         assert_eq!(back.last_ts_recv, Some(1_700_000_500));
+    }
+
+    #[test]
+    fn contact_summary_2d_group_state_and_read_cursor_round_trips_cbor() {
+        let s = ContactSummary {
+            pubkey: crate::identity::PublicKey([7; 32]),
+            nickname: Some("bob".into()),
+            onion: "bbbb.onion".into(),
+            card_version: 1,
+            added_at: 1_700_000_000,
+            unread_count: 3,
+            last_message_preview: Some("hi".into()),
+            last_ts_recv: Some(1_700_000_500),
+            group_state: Some(MlsGroupStateLabel::Active),
+            last_read_row_id: Some(42),
+        };
+        let back: ContactSummary = roundtrip(&s);
+        assert_eq!(back.pubkey.0, [7; 32]);
+        assert_eq!(back.nickname.as_deref(), Some("bob"));
+        assert_eq!(back.onion, "bbbb.onion");
+        assert_eq!(back.card_version, 1);
+        assert_eq!(back.added_at, 1_700_000_000);
+        assert_eq!(back.unread_count, 3);
+        assert_eq!(back.last_message_preview.as_deref(), Some("hi"));
+        assert_eq!(back.last_ts_recv, Some(1_700_000_500));
+        assert_eq!(back.group_state, Some(MlsGroupStateLabel::Active));
+        assert_eq!(back.last_read_row_id, Some(42));
+    }
+
+    #[test]
+    fn contact_summary_decodes_legacy_payload_without_new_fields() {
+        // Build a CBOR map missing `group_state` / `last_read_row_id`.
+        let legacy_cbor = {
+            let mut buf = Vec::new();
+            let v = ciborium::value::Value::Map(vec![
+                (
+                    "pubkey".into(),
+                    ciborium::value::Value::Bytes([0u8; 32].to_vec()),
+                ),
+                ("nickname".into(), ciborium::value::Value::Null),
+                (
+                    "onion".into(),
+                    ciborium::value::Value::Text("o.onion".into()),
+                ),
+                (
+                    "card_version".into(),
+                    ciborium::value::Value::Integer(0.into()),
+                ),
+                ("added_at".into(), ciborium::value::Value::Integer(0.into())),
+            ]);
+            ciborium::ser::into_writer(&v, &mut buf).unwrap();
+            buf
+        };
+        let back: ContactSummary = ciborium::de::from_reader(&legacy_cbor[..]).unwrap();
+        assert_eq!(back.group_state, None);
+        assert_eq!(back.last_read_row_id, None);
     }
 
     #[test]
@@ -549,6 +664,118 @@ mod tests {
         assert!(back.last_message_preview.is_none());
         assert!(back.last_ts_recv.is_none());
         assert_eq!(back.nickname.as_deref(), Some("legacy"));
+    }
+
+    #[test]
+    fn messages_page_round_trips_cbor() {
+        let p = CommandResult::MessagesPage {
+            records: vec![MessageRecord {
+                row_id: 7,
+                message_id: Hex16::from([2; 16]),
+                contact: crate::identity::PublicKey([7; 32]),
+                direction: Direction::Incoming,
+                kind: Kind::Text { body: "hi".into() },
+                mls_generation: 1,
+                ts_daemon_recv: 100,
+                ts_envelope: 99,
+            }],
+            next_before_id: Some(6),
+        };
+        let back: CommandResult = roundtrip(&p);
+        match back {
+            CommandResult::MessagesPage {
+                next_before_id: Some(6),
+                records,
+            } => {
+                assert_eq!(records.len(), 1);
+                assert_eq!(records[0].row_id, 7);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn messages_page_with_null_cursor_round_trips() {
+        let p = CommandResult::MessagesPage {
+            records: vec![],
+            next_before_id: None,
+        };
+        let back: CommandResult = roundtrip(&p);
+        assert!(matches!(
+            back,
+            CommandResult::MessagesPage {
+                next_before_id: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn message_sent_with_record_round_trips() {
+        let rec = MessageRecord {
+            row_id: 11,
+            message_id: Hex16::from([3; 16]),
+            contact: crate::identity::PublicKey([4; 32]),
+            direction: Direction::Outgoing,
+            kind: Kind::Text { body: "hi".into() },
+            mls_generation: 1,
+            ts_daemon_recv: 200,
+            ts_envelope: 199,
+        };
+        let r = CommandResult::MessageSent {
+            message_id: Hex16::from([3; 16]),
+            status: SendStatus::Delivered,
+            record: Some(rec),
+        };
+        let back: CommandResult = roundtrip(&r);
+        match back {
+            CommandResult::MessageSent {
+                status: SendStatus::Delivered,
+                record: Some(rec),
+                ..
+            } => assert_eq!(rec.row_id, 11),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn message_sent_legacy_payload_decodes_with_none_record() {
+        // Build a CBOR `MessageSent` payload that lacks the `record` field
+        // (simulating a daemon that predates this field). `message_id` is
+        // serialised as a hex string by `Hex16`'s custom serde impl.
+        let legacy_cbor = {
+            let mut buf = Vec::new();
+            let v = ciborium::value::Value::Map(vec![
+                (
+                    "result".into(),
+                    ciborium::value::Value::Text("message_sent".into()),
+                ),
+                (
+                    "data".into(),
+                    ciborium::value::Value::Map(vec![
+                        (
+                            "message_id".into(),
+                            ciborium::value::Value::Text("03030303030303030303030303030303".into()),
+                        ),
+                        (
+                            "status".into(),
+                            ciborium::value::Value::Text("queued".into()),
+                        ),
+                    ]),
+                ),
+            ]);
+            ciborium::ser::into_writer(&v, &mut buf).unwrap();
+            buf
+        };
+        let back: CommandResult = ciborium::de::from_reader(&legacy_cbor[..]).unwrap();
+        assert!(matches!(
+            back,
+            CommandResult::MessageSent {
+                record: None,
+                status: SendStatus::Queued,
+                ..
+            }
+        ));
     }
 }
 
@@ -628,5 +855,60 @@ mod phase_1g_wire_tests {
         ciborium::ser::into_writer(&res, &mut buf).unwrap();
         let back: CommandResult = ciborium::de::from_reader(&buf[..]).unwrap();
         assert!(matches!(back, CommandResult::SearchResults(_)));
+    }
+
+    #[test]
+    fn recent_messages_with_before_id_and_paged_round_trips() {
+        fn roundtrip<T>(value: &T) -> T
+        where
+            T: serde::Serialize + for<'de> serde::Deserialize<'de>,
+        {
+            let mut buf = Vec::new();
+            ciborium::ser::into_writer(value, &mut buf).unwrap();
+            ciborium::de::from_reader(&buf[..]).unwrap()
+        }
+        let cmd = Command::RecentMessages {
+            contact: Some(crate::identity::PublicKey([1; 32])),
+            limit: 50,
+            before_id: Some(123),
+            paged: true,
+        };
+        let back: Command = roundtrip(&cmd);
+        match back {
+            Command::RecentMessages {
+                before_id: Some(123),
+                paged: true,
+                limit: 50,
+                ..
+            } => {}
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn recent_messages_without_new_fields_decodes_legacy() {
+        let legacy_cbor = {
+            let mut buf = Vec::new();
+            let v = ciborium::value::Value::Map(vec![
+                (
+                    "cmd".into(),
+                    ciborium::value::Value::Text("recent_messages".into()),
+                ),
+                ("contact".into(), ciborium::value::Value::Null),
+                ("limit".into(), ciborium::value::Value::Integer(50.into())),
+            ]);
+            ciborium::ser::into_writer(&v, &mut buf).unwrap();
+            buf
+        };
+        let back: Command = ciborium::de::from_reader(&legacy_cbor[..]).unwrap();
+        match back {
+            Command::RecentMessages {
+                before_id: None,
+                paged: false,
+                limit: 50,
+                ..
+            } => {}
+            other => panic!("unexpected: {other:?}"),
+        }
     }
 }

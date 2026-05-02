@@ -44,7 +44,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use skattr_core::daemon::commands::SendStatus;
+use skattr_core::daemon::commands::{Direction, SendStatus};
 use skattr_core::daemon::error_kind::DaemonErrorKind;
 use skattr_core::daemon::events::Event;
 use skattr_core::daemon::ipc::wire::IpcError;
@@ -329,17 +329,33 @@ async fn full_flow_invite_add_send_queued() {
 
     match send_result {
         CommandResult::MessageSent {
+            message_id: _,
             status: SendStatus::Queued,
-            ..
+            record,
         } => {
             // Expected: enqueued but no ACK came (Alice has no group).
+            assert!(
+                record.is_some(),
+                "Phase 2.D: MessageSent must carry sender-side record"
+            );
+            let rec = record.expect("record present");
+            assert!(rec.row_id > 0);
+            assert_eq!(rec.direction, Direction::Outgoing);
         }
         CommandResult::MessageSent {
+            message_id: _,
             status: SendStatus::Delivered,
-            ..
+            record,
         } => {
             // Alice's side ACKed somehow — not wrong, just surprising.
             eprintln!("NOTE: MessageSent returned Delivered (unexpected but not wrong)");
+            assert!(
+                record.is_some(),
+                "Phase 2.D: MessageSent must carry sender-side record"
+            );
+            let rec = record.expect("record present");
+            assert!(rec.row_id > 0);
+            assert_eq!(rec.direction, Direction::Outgoing);
         }
         other => panic!("expected MessageSent, got {other:?}"),
     }
@@ -439,6 +455,8 @@ async fn bob_recent_messages_empty_before_send() {
         .exec(Command::RecentMessages {
             contact: Some(alice_summary.pubkey),
             limit: 10,
+            before_id: None,
+            paged: false,
         })
         .await
         .unwrap()

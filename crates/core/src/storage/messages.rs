@@ -216,6 +216,62 @@ impl<'p> MessageRepo<'p> {
         })
     }
 
+    /// Paginate older messages: rows with `id < before_id`.
+    /// Ordering matches `recent` — `(mls_generation DESC, id DESC) LIMIT n`.
+    /// Cursor row is excluded (strict-less semantics).
+    pub fn recent_before(
+        &self,
+        group_id: &[u8],
+        before_id: i64,
+        limit: usize,
+    ) -> Result<Vec<StoredMessage>> {
+        self.pool.with(|c| {
+            let mut stmt = c
+                .prepare(
+                    "SELECT id, group_id, sender, kind, body_blob, ts, delivered_at, \
+                            mls_generation, ts_daemon_recv \
+                     FROM messages \
+                     WHERE group_id = ?1 AND id < ?2 \
+                     ORDER BY mls_generation DESC, id DESC LIMIT ?3",
+                )
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!(
+                        "prepare recent_before: {e}"
+                    )))
+                })?;
+            let rows = stmt
+                .query_map(
+                    rusqlite::params![
+                        group_id,
+                        before_id,
+                        i64::try_from(limit).unwrap_or(i64::MAX)
+                    ],
+                    |r| {
+                        Ok(StoredMessage {
+                            id: r.get(0)?,
+                            group_id: r.get(1)?,
+                            sender: r.get(2)?,
+                            kind: r.get(3)?,
+                            body_blob: r.get(4)?,
+                            ts: r.get(5)?,
+                            delivered_at: r.get(6)?,
+                            mls_generation: r.get(7)?,
+                            ts_daemon_recv: r.get(8)?,
+                        })
+                    },
+                )
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!("query recent_before: {e}")))
+                })?;
+            let out: std::result::Result<Vec<_>, _> = rows.collect();
+            out.map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!(
+                    "collect recent_before: {e}"
+                )))
+            })
+        })
+    }
+
     /// Full-text search over text-kind message bodies.
     ///
     /// `query` is run through [`fts5_tokenize_and_and`]; whitespace-only
@@ -1730,5 +1786,54 @@ mod tests {
         let pool = Pool::in_memory();
         let repo = MessageRepo::new(&pool);
         assert!(repo.latest_for_group(&[0xBB; 32]).unwrap().is_none());
+    }
+
+    #[test]
+    fn recent_before_excludes_cursor_and_orders_descending() {
+        let pool = Pool::in_memory();
+        let repo = MessageRepo::new(&pool);
+        let gid = [0xCC; 32];
+        let mut row_ids = Vec::new();
+        for i in 0..10 {
+            let mut env = sample_envelope(&format!("m{i}"));
+            env.ts = 1000 + i as i64;
+            let id = repo
+                .insert(InsertParams {
+                    group_id: &gid,
+                    sender: &[0u8; 32],
+                    envelope: &env,
+                    mls_generation: 0,
+                    ts_daemon_recv: env.ts,
+                })
+                .unwrap();
+            row_ids.push(id);
+        }
+        let cursor = row_ids[6];
+        let page = repo.recent_before(&gid, cursor, 5).unwrap();
+        assert_eq!(page.len(), 5);
+        assert!(page.iter().all(|m| m.id != cursor));
+        assert!(page.iter().all(|m| m.id < cursor));
+        let ids: Vec<i64> = page.iter().map(|m| m.id).collect();
+        let mut sorted = ids.clone();
+        sorted.sort_by(|a, b| b.cmp(a));
+        assert_eq!(ids, sorted);
+    }
+
+    #[test]
+    fn recent_before_with_orphan_cursor_returns_older_rows() {
+        let pool = Pool::in_memory();
+        let repo = MessageRepo::new(&pool);
+        let gid = [0xDD; 32];
+        let env = sample_envelope("only-row");
+        repo.insert(InsertParams {
+            group_id: &gid,
+            sender: &[0u8; 32],
+            envelope: &env,
+            mls_generation: 0,
+            ts_daemon_recv: env.ts,
+        })
+        .unwrap();
+        let page = repo.recent_before(&gid, 999_999, 10).unwrap();
+        assert_eq!(page.len(), 1, "should return rows older than orphan cursor");
     }
 }

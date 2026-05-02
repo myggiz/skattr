@@ -6,6 +6,108 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## Unreleased
 
+### Added (Phase 2.D — conversation view)
+- Composer (`crates/ui/src-svelte/src/lib/components/Composer.svelte`):
+  Enter to send, Shift+Enter for newline, IME-safe (`event.isComposing`
+  + `compositionstart` / `compositionend` gating), paste-as-plaintext
+  via `event.clipboardData.getData("text/plain")` with `preventDefault()`.
+  Disabled prop drives both textarea + send button; placeholder text
+  reflects daemon-down / `pending_join` / `corrupt` states.
+- Per-message delivery state icons via new
+  `crates/ui/src-svelte/src/lib/components/DeliveryIcon.svelte` (4 states:
+  pending → clock, sent/Deposited → check, delivered → check-check,
+  failed → alert-triangle). Backed by 4 bundled Lucide ISC SVG glyphs
+  (`lib/icons/{clock,check,check-check,alert-triangle}.svg` + LICENSE),
+  loaded via Vite's `?raw` import. New `--danger` design token (7th
+  colour, dark `#ef4444` / light `#dc2626`).
+- Scroll-back pagination via new `Command::RecentMessages.before_id:
+  Option<i64>` cursor + `paged: bool` opt-in flag (both
+  `#[serde(default)]`). New `CommandResult::MessagesPage { records,
+  next_before_id }` variant alongside the unchanged `Messages(Vec)`
+  tuple — CLI consumers untouched. Storage method
+  `MessageRepo::recent_before(group_id, before_id, limit)` is the
+  sibling of `recent` with `WHERE id < ?before_id ORDER BY
+  mls_generation DESC, id DESC LIMIT ?limit` (strict-less cursor).
+- Frozen "Unread" separator anchored to `ContactSummary.last_read_row_id`
+  at conversation-open; does not advance live as new messages arrive.
+- New wire fields on `ContactSummary`: `group_state:
+  Option<MlsGroupStateLabel>` (Active / PendingJoin / Corrupt; mirrors
+  the three concrete `mls::state::GroupState` variants) and
+  `last_read_row_id: Option<i64>` (per-group read cursor surfaced from
+  `ReadStateRepo`). Composer disables on `Some(Corrupt)` /
+  `Some(PendingJoin)`.
+- New wire field `CommandResult::MessageSent.record:
+  Option<MessageRecord>` for UI optimistic reconciliation.
+  `dispatch::send_message` captures the post-encrypt `row_id` from
+  `insert_in_tx` (was discarded with `let _`) and projects a
+  canonical `MessageRecord` into the reply. Idempotent-retry branch
+  returns `record: None`.
+- Optimistic send path in the UI: `conversation.send(contact, body)`
+  generates a temp `__tempId`, appends an `OptimisticMessage`
+  placeholder, awaits the IPC reply, then `reconcile`s with the
+  canonical record (or `markFailed` on error). Bubble icon flows:
+  pending → (queued|delivered) → (deposited|delivered|failed) via
+  the new `delivery` store keyed by hex `message_id`.
+- Mark-read trigger: open-event AND bottom-of-list intersection.
+  500 ms debounce coalesces bursts into one `Command::MarkRead`.
+  Live-arrival auto-mark only fires when scrolled within 100 px of
+  bottom (`isWithinBottomThreshold`).
+- 5 skeleton bubbles render at the top of the list during in-flight
+  `loadOlder()` calls (CSS pulse animation, gated by
+  `prefers-reduced-motion`).
+- New wire-format snapshot lint test
+  (`crates/core/tests/wire_format_append_only.rs`): exhaustive match
+  arms make adding a `Command` or `CommandResult` variant a compile
+  error; sorted-list snapshot catches accidental removals or
+  reshapes. Phase 2.D exit constraint enforcement.
+
+### Fixed (Phase 2.D — caught by e2e harness)
+- `routes/+page.svelte` did not call `refreshContacts()` on direct
+  navigation to `/` — only the first-run completion path did, so
+  re-opening the app with an unlocked vault showed an empty contact
+  list until first manual refresh.
+- `delivery_status_changed` events from the subscribe stream were
+  silently dropped — the route's handler only routed
+  `tor_status_changed` and `message_received`. UI delivery icons
+  would never have advanced from live events.
+- `.shell` CSS lacked `grid-template-rows: 100vh; overflow: hidden`,
+  causing the conversation pane to expand to content height instead
+  of viewport height. The virtualizer collapsed (rendered all rows
+  at once, no scroll possible).
+
+### Tests (Phase 2.D)
+- 7 new dispatch tests (paged recent_messages + sender-side record
+  projection + group_state / last_read_row_id on `list_contacts`).
+- 2 new storage tests (`recent_before` cursor exclusion + orphan
+  cursor handling).
+- 7 new commands.rs serde tests for the new variants/fields, with
+  legacy-CBOR decode coverage on every additive change.
+- 53 Vitest specs total in `crates/ui/src-svelte/` (was 22 in 2.C):
+  +5 DeliveryIcon, +6 Composer, +15 conversation store, +10
+  delivery store, +4 tokens.css update.
+- 2 new Playwright e2e specs: `composer.spec.ts` (Enter happy path
+  with optimistic→delivered icon promotion + Shift+Enter newline)
+  and `pagination.spec.ts` (200-msg conversation, scroll-back
+  through 4 pages of 50 with cursor exhaustion).
+- 1 new `#[ignore]`-gated real-Tor integration test
+  (`crates/tests/src/ui_send_roundtrip.rs`) asserting
+  `MessageSent.record.is_some()`, `record.row_id > 0`, and
+  `last_read_row_id` cursor advance after `MarkRead`.
+- `cli_two_daemons` updated to assert `MessageSent.record.is_some()`
+  end-to-end.
+
+### Known limitations (Phase 2.D)
+- The `AddContact` dispatcher creates the MLS group on the consumer
+  side but does not propagate the resulting Welcome message to the
+  inviter. Consequence: the inviter cannot decrypt messages until
+  this is wired up. Tracked as a follow-up beyond Phase 2.D's exit
+  criterion. The `ui_send_roundtrip` test's module doc documents
+  the gap.
+- ts-rs emits `Hex16` and `PublicKey` as bare `string` (lowercase
+  hex), not the tuple-struct shape (`{ "0": number[] }`) the
+  original plan assumed. UI store + component code uses string
+  equality and hex strings throughout.
+
 ### Added (Phase 2.C — UI bootstrap, read-only conversation MVP)
 - New crate `crates/ui/` (GPLv3): Tauri 2 + SvelteKit shell with
   in-process `Daemon::run`. Two-phase Tauri command surface:

@@ -774,7 +774,9 @@ async fn send(
     };
 
     let (msg_id, status) = match result {
-        CommandResult::MessageSent { message_id, status } => (message_id, status),
+        CommandResult::MessageSent {
+            message_id, status, ..
+        } => (message_id, status),
         other => anyhow::bail!("unexpected result: {other:?}"),
     };
 
@@ -845,6 +847,8 @@ async fn tail(
         .execute(CoreCommand::RecentMessages {
             contact: target,
             limit,
+            before_id: None,
+            paged: false,
         })
         .await
     {
@@ -947,6 +951,8 @@ async fn tail_follow(
         .execute(CoreCommand::RecentMessages {
             contact: target,
             limit,
+            before_id: None,
+            paged: false,
         })
         .await
     {
@@ -1453,6 +1459,8 @@ mod tests {
             unread_count: 0,
             last_message_preview: None,
             last_ts_recv: None,
+            group_state: None,
+            last_read_row_id: None,
         }];
         let out = render_contacts_human(&rows);
         assert!(out.contains("alice"));
@@ -1475,6 +1483,8 @@ mod tests {
                 unread_count: 0,
                 last_message_preview: None,
                 last_ts_recv: None,
+                group_state: None,
+                last_read_row_id: None,
             },
             ContactSummary {
                 pubkey: PublicKey([0xCD; 32]),
@@ -1485,6 +1495,8 @@ mod tests {
                 unread_count: 0,
                 last_message_preview: None,
                 last_ts_recv: None,
+                group_state: None,
+                last_read_row_id: None,
             },
         ];
         let pk = resolve_contact(&rows, "ab").unwrap();
@@ -1506,6 +1518,8 @@ mod tests {
                 unread_count: 0,
                 last_message_preview: None,
                 last_ts_recv: None,
+                group_state: None,
+                last_read_row_id: None,
             },
             ContactSummary {
                 pubkey: PublicKey({
@@ -1520,6 +1534,8 @@ mod tests {
                 unread_count: 0,
                 last_message_preview: None,
                 last_ts_recv: None,
+                group_state: None,
+                last_read_row_id: None,
             },
         ];
         let err = resolve_contact(&rows, "ab").unwrap_err();
