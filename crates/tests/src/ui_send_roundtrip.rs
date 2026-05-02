@@ -254,7 +254,10 @@ async fn ui_send_roundtrip_over_real_tor() {
         Direction::Outgoing,
         "Phase 2.D: persisted row must have direction=Outgoing"
     );
-    eprintln!("Phase 2.D RecentMessages row validated: row_id={}", found.row_id);
+    eprintln!(
+        "Phase 2.D RecentMessages row validated: row_id={}",
+        found.row_id
+    );
 
     // --- Step 5: MarkRead → ListContacts → assert last_read_row_id cursor ---
     let mut client_b3 = IpcClient::connect(&ready_b.ipc_socket).await.unwrap();

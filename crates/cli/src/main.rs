@@ -774,7 +774,9 @@ async fn send(
     };
 
     let (msg_id, status) = match result {
-        CommandResult::MessageSent { message_id, status, .. } => (message_id, status),
+        CommandResult::MessageSent {
+            message_id, status, ..
+        } => (message_id, status),
         other => anyhow::bail!("unexpected result: {other:?}"),
     };
 

@@ -261,9 +261,7 @@ impl<'p> MessageRepo<'p> {
                     },
                 )
                 .map_err(|e| {
-                    CoreError::Storage(StorageErrorKind::Other(format!(
-                        "query recent_before: {e}"
-                    )))
+                    CoreError::Storage(StorageErrorKind::Other(format!("query recent_before: {e}")))
                 })?;
             let out: std::result::Result<Vec<_>, _> = rows.collect();
             out.map_err(|e| {

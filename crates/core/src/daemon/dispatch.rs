@@ -39,9 +39,12 @@ where
         }
         Command::AddContact { invite_url } => add_contact(&handle, invite_url).await,
         Command::SendMessage { contact, kind } => send_message(&handle, contact, kind).await,
-        Command::RecentMessages { contact, limit, before_id, paged } => {
-            recent_messages(&handle, contact, limit, before_id, paged).await
-        }
+        Command::RecentMessages {
+            contact,
+            limit,
+            before_id,
+            paged,
+        } => recent_messages(&handle, contact, limit, before_id, paged).await,
         Command::CreateGroup { .. } => Err(IpcError::UnknownCommand),
         Command::SearchMessages {
             query,
@@ -492,7 +495,10 @@ where
         } else {
             None
         };
-        Ok(CommandResult::MessagesPage { records, next_before_id })
+        Ok(CommandResult::MessagesPage {
+            records,
+            next_before_id,
+        })
     } else {
         Ok(CommandResult::Messages(records))
     }
@@ -2772,11 +2778,22 @@ mod tests {
         .unwrap();
 
         match result {
-            CommandResult::MessagesPage { records, next_before_id } => {
+            CommandResult::MessagesPage {
+                records,
+                next_before_id,
+            } => {
                 assert_eq!(records.len(), 50);
                 assert!(next_before_id.is_some());
-                let min_id = records.iter().map(|r| r.row_id).min().expect("non-empty page");
-                assert_eq!(next_before_id, Some(min_id), "next_before_id must be the smallest row_id in the DESC-ordered page");
+                let min_id = records
+                    .iter()
+                    .map(|r| r.row_id)
+                    .min()
+                    .expect("non-empty page");
+                assert_eq!(
+                    next_before_id,
+                    Some(min_id),
+                    "next_before_id must be the smallest row_id in the DESC-ordered page"
+                );
             }
             other => panic!("expected MessagesPage, got {other:?}"),
         }
@@ -2800,7 +2817,10 @@ mod tests {
         .unwrap();
 
         match result {
-            CommandResult::MessagesPage { records, next_before_id: None } => {
+            CommandResult::MessagesPage {
+                records,
+                next_before_id: None,
+            } => {
                 assert_eq!(records.len(), 30);
             }
             other => panic!("expected MessagesPage with null cursor, got {other:?}"),
@@ -2824,7 +2844,10 @@ mod tests {
         .await
         .unwrap();
         let cursor = match first {
-            CommandResult::MessagesPage { next_before_id: Some(c), .. } => c,
+            CommandResult::MessagesPage {
+                next_before_id: Some(c),
+                ..
+            } => c,
             other => panic!("expected MessagesPage cursor, got {other:?}"),
         };
 
@@ -2873,8 +2896,7 @@ mod tests {
             },
         )
         .await
-        .unwrap()
-        else {
+        .unwrap() else {
             panic!("seed_contact_with_real_group: expected InviteCreated");
         };
 
@@ -2909,7 +2931,9 @@ mod tests {
             handle.clone(),
             Command::SendMessage {
                 contact: peer_pk,
-                kind: Kind::Text { body: "hello".into() },
+                kind: Kind::Text {
+                    body: "hello".into(),
+                },
             },
         )
         .await
@@ -2928,7 +2952,10 @@ mod tests {
                     Kind::Text { body } => assert_eq!(body, "hello"),
                     other => panic!("expected Kind::Text, got {other:?}"),
                 }
-                assert!(rec.mls_generation > 0, "post-encrypt mls_generation must advance");
+                assert!(
+                    rec.mls_generation > 0,
+                    "post-encrypt mls_generation must advance"
+                );
                 assert!(rec.ts_daemon_recv > 0);
             }
             other => panic!("expected MessageSent with Some(record), got {other:?}"),
@@ -2983,7 +3010,9 @@ mod tests {
                 id: MessageId([i as u8; 16]),
                 ts: 1_700_000_000 + i as i64,
                 reply_to: None,
-                kind: Kind::Text { body: format!("m{i}") },
+                kind: Kind::Text {
+                    body: format!("m{i}"),
+                },
             };
             msg_repo
                 .insert(crate::storage::messages::InsertParams {
@@ -3016,7 +3045,9 @@ mod tests {
         .await
         .unwrap();
         let row_id = match send_result {
-            CommandResult::MessageSent { record: Some(rec), .. } => rec.row_id,
+            CommandResult::MessageSent {
+                record: Some(rec), ..
+            } => rec.row_id,
             other => panic!("expected MessageSent with record, got {other:?}"),
         };
         execute_command(
@@ -3029,7 +3060,9 @@ mod tests {
         .await
         .unwrap();
 
-        let result = execute_command(handle.clone(), Command::ListContacts).await.unwrap();
+        let result = execute_command(handle.clone(), Command::ListContacts)
+            .await
+            .unwrap();
         let summary = match result {
             CommandResult::Contacts(s) => s
                 .into_iter()
@@ -3057,12 +3090,11 @@ mod tests {
             .put(&gid, b"\xFF\xFF\xFFnot a valid mls blob", 0)
             .unwrap();
 
-        let result = execute_command(handle.clone(), Command::ListContacts).await.unwrap();
+        let result = execute_command(handle.clone(), Command::ListContacts)
+            .await
+            .unwrap();
         let summary = match result {
-            CommandResult::Contacts(s) => s
-                .into_iter()
-                .find(|c| c.pubkey == peer_pk)
-                .unwrap(),
+            CommandResult::Contacts(s) => s.into_iter().find(|c| c.pubkey == peer_pk).unwrap(),
             other => panic!("expected Contacts, got {other:?}"),
         };
         assert_eq!(summary.group_state, Some(MlsGroupStateLabel::Corrupt));

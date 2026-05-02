@@ -334,7 +334,10 @@ async fn full_flow_invite_add_send_queued() {
             record,
         } => {
             // Expected: enqueued but no ACK came (Alice has no group).
-            assert!(record.is_some(), "Phase 2.D: MessageSent must carry sender-side record");
+            assert!(
+                record.is_some(),
+                "Phase 2.D: MessageSent must carry sender-side record"
+            );
             let rec = record.expect("record present");
             assert!(rec.row_id > 0);
             assert_eq!(rec.direction, Direction::Outgoing);
@@ -346,7 +349,10 @@ async fn full_flow_invite_add_send_queued() {
         } => {
             // Alice's side ACKed somehow — not wrong, just surprising.
             eprintln!("NOTE: MessageSent returned Delivered (unexpected but not wrong)");
-            assert!(record.is_some(), "Phase 2.D: MessageSent must carry sender-side record");
+            assert!(
+                record.is_some(),
+                "Phase 2.D: MessageSent must carry sender-side record"
+            );
             let rec = record.expect("record present");
             assert!(rec.row_id > 0);
             assert_eq!(rec.direction, Direction::Outgoing);

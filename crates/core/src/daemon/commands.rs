@@ -617,10 +617,19 @@ mod tests {
         let legacy_cbor = {
             let mut buf = Vec::new();
             let v = ciborium::value::Value::Map(vec![
-                ("pubkey".into(), ciborium::value::Value::Bytes([0u8; 32].to_vec())),
+                (
+                    "pubkey".into(),
+                    ciborium::value::Value::Bytes([0u8; 32].to_vec()),
+                ),
                 ("nickname".into(), ciborium::value::Value::Null),
-                ("onion".into(), ciborium::value::Value::Text("o.onion".into())),
-                ("card_version".into(), ciborium::value::Value::Integer(0.into())),
+                (
+                    "onion".into(),
+                    ciborium::value::Value::Text("o.onion".into()),
+                ),
+                (
+                    "card_version".into(),
+                    ciborium::value::Value::Integer(0.into()),
+                ),
                 ("added_at".into(), ciborium::value::Value::Integer(0.into())),
             ]);
             ciborium::ser::into_writer(&v, &mut buf).unwrap();
@@ -674,7 +683,10 @@ mod tests {
         };
         let back: CommandResult = roundtrip(&p);
         match back {
-            CommandResult::MessagesPage { next_before_id: Some(6), records } => {
+            CommandResult::MessagesPage {
+                next_before_id: Some(6),
+                records,
+            } => {
                 assert_eq!(records.len(), 1);
                 assert_eq!(records[0].row_id, 7);
             }
@@ -691,7 +703,10 @@ mod tests {
         let back: CommandResult = roundtrip(&p);
         assert!(matches!(
             back,
-            CommandResult::MessagesPage { next_before_id: None, .. }
+            CommandResult::MessagesPage {
+                next_before_id: None,
+                ..
+            }
         ));
     }
 
@@ -731,17 +746,21 @@ mod tests {
         let legacy_cbor = {
             let mut buf = Vec::new();
             let v = ciborium::value::Value::Map(vec![
-                ("result".into(), ciborium::value::Value::Text("message_sent".into())),
+                (
+                    "result".into(),
+                    ciborium::value::Value::Text("message_sent".into()),
+                ),
                 (
                     "data".into(),
                     ciborium::value::Value::Map(vec![
                         (
                             "message_id".into(),
-                            ciborium::value::Value::Text(
-                                "03030303030303030303030303030303".into(),
-                            ),
+                            ciborium::value::Value::Text("03030303030303030303030303030303".into()),
                         ),
-                        ("status".into(), ciborium::value::Value::Text("queued".into())),
+                        (
+                            "status".into(),
+                            ciborium::value::Value::Text("queued".into()),
+                        ),
                     ]),
                 ),
             ]);
@@ -751,7 +770,11 @@ mod tests {
         let back: CommandResult = ciborium::de::from_reader(&legacy_cbor[..]).unwrap();
         assert!(matches!(
             back,
-            CommandResult::MessageSent { record: None, status: SendStatus::Queued, .. }
+            CommandResult::MessageSent {
+                record: None,
+                status: SendStatus::Queued,
+                ..
+            }
         ));
     }
 }
@@ -867,7 +890,10 @@ mod phase_1g_wire_tests {
         let legacy_cbor = {
             let mut buf = Vec::new();
             let v = ciborium::value::Value::Map(vec![
-                ("cmd".into(), ciborium::value::Value::Text("recent_messages".into())),
+                (
+                    "cmd".into(),
+                    ciborium::value::Value::Text("recent_messages".into()),
+                ),
                 ("contact".into(), ciborium::value::Value::Null),
                 ("limit".into(), ciborium::value::Value::Integer(50.into())),
             ]);

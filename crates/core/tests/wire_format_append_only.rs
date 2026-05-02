@@ -119,7 +119,10 @@ fn command_variant_set_is_frozen() {
     // Verify the static list is sorted (catches typos).
     let mut sorted = expected.clone();
     sorted.sort();
-    assert_eq!(expected, sorted, "expected list must be alphabetically sorted");
+    assert_eq!(
+        expected, sorted,
+        "expected list must be alphabetically sorted"
+    );
 
     // Compile-time exhaustive — if a Command variant is added without
     // updating command_variant_tag, this file won't compile.
@@ -132,7 +135,10 @@ fn command_result_variant_set_is_frozen() {
     assert!(!expected.is_empty(), "expected list cannot be empty");
     let mut sorted = expected.clone();
     sorted.sort();
-    assert_eq!(expected, sorted, "expected list must be alphabetically sorted");
+    assert_eq!(
+        expected, sorted,
+        "expected list must be alphabetically sorted"
+    );
 
     let _: fn(&CommandResult) -> &'static str = command_result_variant_tag;
 }
