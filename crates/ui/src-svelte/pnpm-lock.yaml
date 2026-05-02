@@ -4,6 +4,11 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  esrap@1.4.9:
+    hash: eabcd92379774f8d9933cf21294ef6232e78176853746821c28e1d7fecf18560
+    path: patches/esrap@1.4.9.patch
+
 importers:
 
   .:
@@ -1599,7 +1604,7 @@ snapshots:
 
   esm-env@1.2.2: {}
 
-  esrap@1.4.9:
+  esrap@1.4.9(patch_hash=eabcd92379774f8d9933cf21294ef6232e78176853746821c28e1d7fecf18560):
     dependencies:
       '@jridgewell/sourcemap-codec': 1.5.5
 
@@ -1906,7 +1911,7 @@ snapshots:
       aria-query: 5.3.2
       axobject-query: 4.1.0
       esm-env: 1.2.2
-      esrap: 1.4.9
+      esrap: 1.4.9(patch_hash=eabcd92379774f8d9933cf21294ef6232e78176853746821c28e1d7fecf18560)
       is-reference: 3.0.3
       locate-character: 3.0.0
       magic-string: 0.30.21
