@@ -26,6 +26,30 @@ ignore = [
     "RUSTSEC-2026-0097",
     "RUSTSEC-2023-0071",
     "RUSTSEC-2026-0104",
+    # The next block is Tauri 2.x transitive — gtk-rs GTK3 bindings on
+    # Linux + a handful of other crates that ship with the WebKit2GTK
+    # backend. All are "unmaintained" advisories rather than active
+    # vulnerabilities. Tauri's roadmap moves to a non-GTK backend on
+    # Linux; revisit when Tauri ships GTK4 / wry-only support.
+    #   - RUSTSEC-2024-0411..0420: gtk3, gdk, gdkx11, atk, gdk-sys, etc.
+    #   - RUSTSEC-2024-0370: proc-macro-error (used by glib-macros).
+    #   - RUSTSEC-2025-0075..0100: unic-* (used by Tauri's text-handling).
+    "RUSTSEC-2024-0370",
+    "RUSTSEC-2024-0411",
+    "RUSTSEC-2024-0412",
+    "RUSTSEC-2024-0413",
+    "RUSTSEC-2024-0414",
+    "RUSTSEC-2024-0415",
+    "RUSTSEC-2024-0416",
+    "RUSTSEC-2024-0417",
+    "RUSTSEC-2024-0418",
+    "RUSTSEC-2024-0419",
+    "RUSTSEC-2024-0420",
+    "RUSTSEC-2025-0075",
+    "RUSTSEC-2025-0080",
+    "RUSTSEC-2025-0081",
+    "RUSTSEC-2025-0098",
+    "RUSTSEC-2025-0100",
 ]
 
 [licenses]

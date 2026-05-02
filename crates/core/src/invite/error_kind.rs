@@ -7,8 +7,9 @@
 use thiserror::Error;
 
 /// Typed variants for invite-layer errors.
-#[derive(Debug, Error)]
+#[derive(Debug, Error, ts_rs::TS)]
 #[non_exhaustive]
+#[ts(export, export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/")]
 pub enum InviteErrorKind {
     /// The invite's `expires_at` timestamp is in the past.
     #[error("invite expired")]

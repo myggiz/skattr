@@ -138,6 +138,13 @@ use crate::daemon::ipc::wire::{EventFilter, IpcRequest, IpcResponse};
 pub trait CommandExecutor: Send + Sync {
     /// Dispatch `cmd` and return a result or typed wire error.
     async fn execute(&self, cmd: Command) -> std::result::Result<CommandResult, IpcError>;
+
+    /// Snapshot the latest cached `TorStatus`. Default `None` so test
+    /// stubs and pre-2.C executors compile unchanged. The production
+    /// `DaemonHandle` impl returns `latest_tor_status()`.
+    fn latest_tor_status(&self) -> Option<crate::daemon::events::TorStatus> {
+        None
+    }
 }
 
 /// Handle one accepted connection. The loop owns a per-connection
@@ -225,13 +232,26 @@ pub async fn handle_connection<S>(
                 }
             }
             IpcRequest::Subscribe(filter) => {
-                subscribed = Some(filter);
+                subscribed = Some(filter.clone());
                 events_rx = Some(events_tx.subscribe());
                 if write_frame(&mut stream, &IpcResponse::Ok(CommandResult::Subscribed))
                     .await
                     .is_err()
                 {
                     break;
+                }
+                // 2.C: replay cached TorStatus immediately if the filter
+                // matches. The cache is populated by the tap task in
+                // Daemon::run; lag-induced gaps fall through (None).
+                if let Some(status) = executor.latest_tor_status() {
+                    let replay = Event::TorStatusChanged(status);
+                    if event_matches(&replay, subscribed.as_ref())
+                        && write_frame(&mut stream, &IpcResponse::Event(replay))
+                            .await
+                            .is_err()
+                    {
+                        break;
+                    }
                 }
             }
             IpcRequest::Shutdown => {
@@ -636,5 +656,56 @@ mod tests {
             version: 1,
         };
         assert!(event_matches(&card_event, Some(&EventFilter::All)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn subscribe_ack_replays_cached_tor_status() {
+        use crate::daemon::events::TorStatus;
+
+        struct StubExec {
+            status: std::sync::Mutex<Option<TorStatus>>,
+        }
+        #[async_trait]
+        impl CommandExecutor for StubExec {
+            async fn execute(&self, _: Command) -> std::result::Result<CommandResult, IpcError> {
+                Ok(CommandResult::Ok)
+            }
+            fn latest_tor_status(&self) -> Option<TorStatus> {
+                self.status.lock().unwrap().clone()
+            }
+        }
+
+        let (mut client, server_stream) = tokio::io::duplex(1024 * 1024);
+        let (events_tx, _) = broadcast::channel::<Event>(16);
+        let executor: Arc<dyn CommandExecutor> = Arc::new(StubExec {
+            status: std::sync::Mutex::new(Some(TorStatus::Bootstrapping(7))),
+        });
+
+        let handle_task = tokio::spawn(handle_connection(server_stream, executor, events_tx));
+
+        // Subscribe with EventFilter::All.
+        write_frame(&mut client, &IpcRequest::Subscribe(EventFilter::All))
+            .await
+            .unwrap();
+
+        // First response: Subscribed ack.
+        let r1: IpcResponse = read_frame(&mut client).await.unwrap();
+        assert!(
+            matches!(r1, IpcResponse::Ok(CommandResult::Subscribed)),
+            "expected Ok(Subscribed), got {r1:?}"
+        );
+
+        // Second response: replayed TorStatus from the cache.
+        let r2: IpcResponse = read_frame(&mut client).await.unwrap();
+        assert!(
+            matches!(
+                r2,
+                IpcResponse::Event(Event::TorStatusChanged(TorStatus::Bootstrapping(7)))
+            ),
+            "expected replayed TorStatus::Bootstrapping(7), got {r2:?}"
+        );
+
+        drop(client);
+        let _ = handle_task.await;
     }
 }

@@ -6,8 +6,9 @@
 
 use thiserror::Error;
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, ts_rs::TS)]
 #[non_exhaustive]
+#[ts(export, export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/")]
 pub enum MlsErrorKind {
     #[error("group corrupt")]
     GroupCorrupt,

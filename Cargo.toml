@@ -5,6 +5,7 @@ members = [
     "crates/mailbox",
     "crates/cli",
     "crates/tests",
+    "crates/ui",
 ]
 exclude = ["crates/core/fuzz", "crates/mailbox/fuzz"]
 
@@ -117,6 +118,10 @@ sd-notify = "0.4"
 # Test helpers
 proptest = "1"
 tempfile = "3"
+
+# UI / codegen
+ts-rs = { version = "9", default-features = false, features = ["serde-compat", "no-serde-warnings"] }
+parking_lot = "0.12"
 
 [profile.release]
 lto = "fat"

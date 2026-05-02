@@ -1,0 +1,4 @@
+# tauri-build emits ACL + capabilities + platform schemas at build time.
+# Regenerated on every cargo build; not part of the source.
+gen/
+target/

@@ -7,8 +7,9 @@
 
 use thiserror::Error;
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, ts_rs::TS)]
 #[non_exhaustive]
+#[ts(export, export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/")]
 pub enum StorageErrorKind {
     /// FTS5 MATCH parse/syntax error. The inner string is the raw
     /// sqlite message for logs; the projected `DaemonErrorKind` is

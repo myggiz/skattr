@@ -1,0 +1,17 @@
+diff --git a/src/handlers.js b/src/handlers.js
+index ae7e37bc9327b580cf21d7883a8536a1881e69d2..5fa77e9de5fd411d0fcf0119bdab38bbcbe286da 100644
+--- a/src/handlers.js
++++ b/src/handlers.js
+@@ -620,6 +620,12 @@ function handle_type_annotation(node, state) {
+ 				handle(node.qualifier, state);
+ 			}
+ 			break;
++		case 'EmptyStatement':
++			// TypeScript type declarations stripped by the preprocessor leave an
++			// EmptyStatement placeholder; silently ignore it so that Svelte 5
++			// components with typed $props() and $state() compile correctly.
++			// See: https://github.com/sveltejs/esrap/issues/XXX
++			break;
+ 		default:
+ 			throw new Error(`Not implemented type annotation ${node.type}`);
+ 	}

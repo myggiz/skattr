@@ -67,6 +67,7 @@ where
         Command::AddMailbox { onion } => handle_add_mailbox(handle, onion).await,
         Command::RemoveMailbox { id } => handle_remove_mailbox(handle, id).await,
         Command::ListMailboxes => handle_list_mailboxes(handle).await,
+        Command::DaemonInfo => handle_daemon_info(handle).await,
     }
 }
 
@@ -77,28 +78,69 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     use crate::daemon::commands::ContactSummary;
-    use crate::storage::ContactRepo;
+    use crate::storage::{ContactRepo, MessageRepo};
 
     let repo = ContactRepo::new(&handle.pool);
+    let msg_repo = MessageRepo::new(&handle.pool);
     let contacts = repo.list().map_err(map_err)?;
-    let summaries: Vec<ContactSummary> = contacts
-        .into_iter()
-        .map(|c| {
-            let (onion, card_version) = c
-                .card
-                .as_ref()
-                .map(|card| (card.body.onion.clone(), card.body.version))
-                .unwrap_or_else(|| (String::new(), 0));
-            ContactSummary {
-                pubkey: c.identity,
-                nickname: c.display_name,
-                onion,
-                card_version,
-                added_at: u64::try_from(c.added_at).unwrap_or(0),
+
+    let mut summaries: Vec<ContactSummary> = Vec::with_capacity(contacts.len());
+    for c in contacts {
+        let (onion, card_version) = c
+            .card
+            .as_ref()
+            .map(|card| (card.body.onion.clone(), card.body.version))
+            .unwrap_or_else(|| (String::new(), 0));
+
+        let group_id = repo.get_group_id(&c.identity).map_err(map_err)?;
+        let (unread_count, last_message_preview, last_ts_recv) = match group_id {
+            Some(gid) => {
+                let unread = msg_repo.unread_count(&gid).map_err(map_err)?;
+                let latest = msg_repo.latest_for_group(&gid).map_err(map_err)?;
+                let preview = latest.as_ref().and_then(|row| {
+                    let env: crate::envelope::Envelope =
+                        crate::envelope::Envelope::decode(row.body_blob.as_ref()?.as_slice())
+                            .ok()?;
+                    match env.kind {
+                        crate::envelope::Kind::Text { body } => Some(truncate_preview(&body, 80)),
+                        _ => None,
+                    }
+                });
+                let ts = latest.map(|row| u64::try_from(row.ts_daemon_recv).unwrap_or(0));
+                (unread, preview, ts)
             }
-        })
-        .collect();
+            None => (0, None, None),
+        };
+
+        summaries.push(ContactSummary {
+            pubkey: c.identity,
+            nickname: c.display_name,
+            onion,
+            card_version,
+            added_at: u64::try_from(c.added_at).unwrap_or(0),
+            unread_count,
+            last_message_preview,
+            last_ts_recv,
+        });
+    }
+
+    // Sort descending: contacts with recent messages first; ties broken by
+    // `added_at` descending (newest-added first); contacts with no messages
+    // come last.
+    summaries.sort_by(|a, b| match (a.last_ts_recv, b.last_ts_recv) {
+        (Some(av), Some(bv)) => bv.cmp(&av).then(b.added_at.cmp(&a.added_at)),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => b.added_at.cmp(&a.added_at),
+    });
+
     Ok(CommandResult::Contacts(summaries))
+}
+
+/// Truncate `s` to at most `max_chars` Unicode code points. Cheap
+/// 2.C-grade preview; grapheme-aware truncation lands in 2.D.
+fn truncate_preview(s: &str, max_chars: usize) -> String {
+    s.chars().take(max_chars).collect()
 }
 
 async fn create_invite<S>(
@@ -225,6 +267,9 @@ where
         onion: link.body.onion.clone(),
         card_version: 0,
         added_at: u64::try_from(now).unwrap_or(0),
+        unread_count: 0,
+        last_message_preview: None,
+        last_ts_recv: None,
     }))
 }
 
@@ -997,6 +1042,25 @@ where
         })
         .collect();
     Ok(CommandResult::Mailboxes(summaries))
+}
+
+async fn handle_daemon_info<S>(
+    handle: Arc<DaemonHandle<S>>,
+) -> std::result::Result<CommandResult, IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let local_pubkey = handle.identity.public();
+    let current_onion = handle.onion();
+    let daemon_version = env!("CARGO_PKG_VERSION").to_string();
+    let schema_version = handle.pool.schema_version().map_err(map_err)?;
+
+    Ok(CommandResult::DaemonInfo {
+        local_pubkey,
+        current_onion,
+        daemon_version,
+        schema_version,
+    })
 }
 
 /// Map any `CoreError` to an `IpcError`. Projects via `CoreError::kind`
@@ -2459,5 +2523,149 @@ mod tests {
             ),
             "expected TorNotReady when onion is not set, got {res:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn daemon_info_returns_pubkey_onion_version_schema() {
+        let h = test_handle();
+        h.set_onion("example.onion".to_string());
+        let result = execute_command(h.clone(), Command::DaemonInfo).await;
+        match result.unwrap() {
+            CommandResult::DaemonInfo {
+                local_pubkey,
+                current_onion,
+                daemon_version,
+                schema_version,
+            } => {
+                assert_eq!(local_pubkey, h.identity.public());
+                assert_eq!(current_onion.as_deref(), Some("example.onion"));
+                assert_eq!(daemon_version, env!("CARGO_PKG_VERSION"));
+                assert!(schema_version >= 9);
+            }
+            other => panic!("expected DaemonInfo, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn daemon_info_returns_none_onion_when_not_yet_published() {
+        let h = test_handle();
+        let result = execute_command(h, Command::DaemonInfo).await;
+        match result.unwrap() {
+            CommandResult::DaemonInfo { current_onion, .. } => {
+                assert!(current_onion.is_none());
+            }
+            other => panic!("expected DaemonInfo, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn list_contacts_populates_new_projection_fields() {
+        use crate::envelope::{Envelope, Kind, MessageId};
+
+        let h = test_handle();
+        let repo = crate::storage::ContactRepo::new(&h.pool);
+        let pk_a = crate::identity::PublicKey([0xAA; 32]);
+        let pk_b = crate::identity::PublicKey([0xBB; 32]);
+        let group_a = vec![1u8; 32];
+        let group_b = vec![2u8; 32];
+        repo.upsert(&crate::contact::Contact {
+            identity: pk_a,
+            display_name: Some("alice".into()),
+            added_at: 100,
+            card: None,
+        })
+        .unwrap();
+        repo.upsert(&crate::contact::Contact {
+            identity: pk_b,
+            display_name: Some("bob".into()),
+            added_at: 200,
+            card: None,
+        })
+        .unwrap();
+        repo.set_group_id(&pk_a, &group_a).unwrap();
+        repo.set_group_id(&pk_b, &group_b).unwrap();
+
+        let env = Envelope {
+            v: 1,
+            id: MessageId([0x01; 16]),
+            ts: 1_700_000_000,
+            reply_to: None,
+            kind: Kind::Text {
+                body: "yo this is a preview".into(),
+            },
+        };
+        crate::storage::MessageRepo::new(&h.pool)
+            .insert(crate::storage::messages::InsertParams {
+                group_id: &group_a,
+                sender: &pk_a.0,
+                envelope: &env,
+                mls_generation: 0,
+                ts_daemon_recv: 1_700_000_500,
+            })
+            .unwrap();
+
+        let result = execute_command(h, Command::ListContacts).await.unwrap();
+        let summaries = match result {
+            CommandResult::Contacts(v) => v,
+            other => panic!("expected Contacts, got {other:?}"),
+        };
+        assert_eq!(summaries.len(), 2);
+        // alice has the recent message and should sort first.
+        assert_eq!(summaries[0].pubkey, pk_a);
+        assert_eq!(
+            summaries[0].last_message_preview.as_deref(),
+            Some("yo this is a preview"),
+        );
+        assert_eq!(summaries[0].last_ts_recv, Some(1_700_000_500));
+        assert_eq!(summaries[1].pubkey, pk_b);
+        assert!(summaries[1].last_message_preview.is_none());
+        assert!(summaries[1].last_ts_recv.is_none());
+    }
+
+    #[tokio::test]
+    async fn list_contacts_truncates_preview_to_80_codepoints() {
+        use crate::envelope::{Envelope, Kind, MessageId};
+
+        let h = test_handle();
+        let pk = crate::identity::PublicKey([0xCC; 32]);
+        let group = vec![3u8; 32];
+        crate::storage::ContactRepo::new(&h.pool)
+            .upsert(&crate::contact::Contact {
+                identity: pk,
+                display_name: None,
+                added_at: 0,
+                card: None,
+            })
+            .unwrap();
+        crate::storage::ContactRepo::new(&h.pool)
+            .set_group_id(&pk, &group)
+            .unwrap();
+
+        let body = "x".repeat(200);
+        let env = Envelope {
+            v: 1,
+            id: MessageId([0x02; 16]),
+            ts: 0,
+            reply_to: None,
+            kind: Kind::Text { body: body.clone() },
+        };
+        crate::storage::MessageRepo::new(&h.pool)
+            .insert(crate::storage::messages::InsertParams {
+                group_id: &group,
+                sender: &pk.0,
+                envelope: &env,
+                mls_generation: 0,
+                ts_daemon_recv: 100,
+            })
+            .unwrap();
+
+        let r = execute_command(h, Command::ListContacts).await.unwrap();
+        let summaries = match r {
+            CommandResult::Contacts(v) => v,
+            other => panic!("{other:?}"),
+        };
+        let preview = summaries[0].last_message_preview.as_ref().unwrap();
+        assert_eq!(preview.chars().count(), 80);
+        assert!(preview.chars().all(|c| c == 'x'));
     }
 }

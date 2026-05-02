@@ -19,8 +19,9 @@ use crate::identity::PublicKey;
 pub const MAX_IPC_BODY: u32 = 1024 * 1024;
 
 /// Subscription filter for `IpcRequest::Subscribe`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(tag = "filter", content = "data", rename_all = "snake_case")]
+#[ts(export, export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/")]
 pub enum EventFilter {
     /// Forward every event the daemon emits.
     All,
@@ -42,8 +43,9 @@ pub enum EventFilter {
 }
 
 /// Request frame sent from CLI to daemon.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[serde(tag = "req", content = "data", rename_all = "snake_case")]
+#[ts(export, export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/")]
 pub enum IpcRequest {
     /// One-shot command; expect a single `Ok` or `Err` response.
     Execute(Command),
@@ -55,8 +57,9 @@ pub enum IpcRequest {
 }
 
 /// Response frame sent from daemon to CLI.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[serde(tag = "resp", content = "data", rename_all = "snake_case")]
+#[ts(export, export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/")]
 pub enum IpcResponse {
     /// Successful command result.
     Ok(CommandResult),
@@ -71,8 +74,9 @@ pub enum IpcResponse {
 /// Stable wire error. `Daemon(DaemonErrorKind)` carries the library-error
 /// projection; `Internal(String)` is a 256-byte-truncated fallback whose
 /// full detail stays server-side in tracing logs.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(tag = "err", content = "data", rename_all = "snake_case")]
+#[ts(export, export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/")]
 pub enum IpcError {
     /// `SO_PEERCRED`/`getpeereid` reported a UID other than the daemon's.
     AuthDenied,

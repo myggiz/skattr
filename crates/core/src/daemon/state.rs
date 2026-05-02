@@ -24,7 +24,7 @@ use crate::transport::tor::{TorConfig, TorRuntime};
 const EVENT_CHANNEL_CAPACITY: usize = 1024;
 
 /// Published readiness of the daemon: onion address + bound IPC path.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Ready {
     /// Full v3 onion address, without port suffix.
     pub onion: String,
@@ -196,6 +196,29 @@ impl Daemon {
         );
         handle.set_onion(onion.clone());
 
+        // TorStatus tap: subscribe to the broadcast channel and copy
+        // every TorStatusChanged into the same Arc<RwLock<…>> the
+        // IpcServer reads via DaemonHandle::latest_tor_status(). Spawned
+        // after DaemonHandle is built so the tap and the readers share
+        // the same allocation. Held on a JoinHandle so the shutdown
+        // path can abort it.
+        let tor_status_cache_for_tap = handle.latest_tor_status.clone();
+        let mut tap_rx = events_tx.subscribe();
+        let tor_tap_task = tokio::spawn(async move {
+            loop {
+                match tap_rx.recv().await {
+                    Ok(crate::daemon::events::Event::TorStatusChanged(s)) => {
+                        if let Ok(mut g) = tor_status_cache_for_tap.write() {
+                            *g = Some(s);
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+
         // Step 7: IPC server.
         let sock_path = config.ipc_socket_or_default()?;
         let allowed_uid = current_uid();
@@ -226,6 +249,8 @@ impl Daemon {
         // Step 10: tear down.
         let _ = ipc_shutdown_tx.send(());
         let _ = ipc_task.await;
+        tor_tap_task.abort();
+        let _ = tor_tap_task.await;
         let _ = sweep_shutdown_tx.send(true);
         let _ = sweep_handle.await;
         // Explicitly drop the PollScheduler so its supervisor task is

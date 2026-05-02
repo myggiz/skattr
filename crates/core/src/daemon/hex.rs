@@ -16,11 +16,21 @@ use std::str::FromStr;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// 16-byte hex newtype (backing `MessageId`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ts_rs::TS)]
+#[ts(
+    export,
+    export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/",
+    type = "string"
+)]
 pub struct Hex16(pub [u8; 16]);
 
 /// 32-byte hex newtype (backing `PublicKey`, `GroupId`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ts_rs::TS)]
+#[ts(
+    export,
+    export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/",
+    type = "string"
+)]
 pub struct Hex32(pub [u8; 32]);
 
 impl From<[u8; 16]> for Hex16 {

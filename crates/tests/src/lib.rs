@@ -53,6 +53,8 @@ mod mls_pair;
 mod remove_mailbox_drains;
 #[cfg(test)]
 mod rotate_onion_during_offline;
+#[cfg(test)]
+mod ui_first_run;
 
 use std::time::Duration;
 

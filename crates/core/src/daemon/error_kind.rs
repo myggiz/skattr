@@ -12,8 +12,9 @@
 use serde::{Deserialize, Serialize};
 
 /// Typed categories a CLI can act on.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+#[ts(export, export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/")]
 pub enum DaemonErrorKind {
     /// No contact matches the given pubkey or prefix.
     ContactNotFound,

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Myggiz AB
 
-#![cfg_attr(test, allow(clippy::unwrap_used))]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::panic))]
 
 //! Commands submitted into the daemon from the UI / CLI.
 //!
@@ -16,8 +16,9 @@ use crate::identity::PublicKey;
 use crate::invite::InviteLink;
 
 /// Request sent into the daemon.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
+#[ts(export, export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/")]
 pub enum Command {
     /// Generate a fresh invite link and surface it for display / QR.
     CreateInvite {
@@ -113,6 +114,10 @@ pub enum Command {
     },
     /// List every `'mine'` mailbox row with its current status.
     ListMailboxes,
+    /// Return runtime metadata for the UI's About screen + first-paint
+    /// store hydration: identity pubkey, current onion (None until
+    /// Tor bootstraps), daemon version, schema version.
+    DaemonInfo,
     /// Export a paged window of persisted messages for the given peer.
     ExportHistory {
         /// Peer whose history to export.
@@ -126,8 +131,9 @@ pub enum Command {
 }
 
 /// Outcome of a `SendMessage` command after the inline-delivery wait.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/")]
 pub enum SendStatus {
     /// Hub accepted the ciphertext; ACK not seen within the inline wait.
     Queued,
@@ -136,8 +142,9 @@ pub enum SendStatus {
 }
 
 /// Direction of a stored message relative to the local identity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/")]
 pub enum Direction {
     /// Received from peer.
     Incoming,
@@ -146,7 +153,8 @@ pub enum Direction {
 }
 
 /// Wire-safe projection of a contact row + latest card.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/")]
 pub struct ContactSummary {
     /// Ed25519 identity pubkey.
     pub pubkey: PublicKey,
@@ -158,10 +166,25 @@ pub struct ContactSummary {
     pub card_version: u64,
     /// Unix seconds when the contact was first added locally.
     pub added_at: u64,
+    /// Number of unread messages in this contact's group, counted
+    /// against the per-group `read_state` cursor. `0` for fresh
+    /// contacts.
+    #[serde(default)]
+    pub unread_count: u64,
+    /// First ≤80 Unicode code points of the latest message body.
+    /// `None` when the latest message is not `Kind::Text`, or when
+    /// the contact has no messages.
+    #[serde(default)]
+    pub last_message_preview: Option<String>,
+    /// `MAX(ts_daemon_recv)` across both directions in this
+    /// contact's group; `None` if zero messages.
+    #[serde(default)]
+    pub last_ts_recv: Option<u64>,
 }
 
 /// Wire-safe projection of a persisted message row.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/")]
 pub struct MessageRecord {
     /// SQLite primary key — stable within one node; used by UI for scroll
     /// anchoring, mark_read cursor targeting, and trace correlation.
@@ -215,7 +238,8 @@ impl MessageRecord {
 }
 
 /// One full-text search hit returned by `Command::SearchMessages`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/")]
 pub struct SearchHitRecord {
     /// Underlying message row projection.
     pub record: MessageRecord,
@@ -226,8 +250,9 @@ pub struct SearchHitRecord {
 }
 
 /// Response returned for a completed [`Command`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[serde(tag = "result", content = "data", rename_all = "snake_case")]
+#[ts(export, export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/")]
 pub enum CommandResult {
     /// The invite link for [`Command::CreateInvite`].
     InviteCreated {
@@ -278,10 +303,23 @@ pub enum CommandResult {
     },
     /// [`Command::ListMailboxes`] completed.
     Mailboxes(Vec<MailboxSummary>),
+    /// [`Command::DaemonInfo`] completed.
+    DaemonInfo {
+        /// Local Ed25519 identity pubkey.
+        local_pubkey: PublicKey,
+        /// Current v3 onion address (without `:port`). `None` while
+        /// Tor is still bootstrapping.
+        current_onion: Option<String>,
+        /// `env!("CARGO_PKG_VERSION")` of `skattr-core`.
+        daemon_version: String,
+        /// Latest applied storage migration version.
+        schema_version: u32,
+    },
 }
 
 /// Wire-safe projection of a `mailboxes` row for CLI / UI display.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
+#[ts(export, export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/")]
 pub struct MailboxSummary {
     /// SQLite primary key of the `mailboxes` row.
     pub id: i64,
@@ -385,6 +423,9 @@ mod tests {
                 onion: "bbbb.onion".into(),
                 card_version: 1,
                 added_at: 1_700_000_000,
+                unread_count: 0,
+                last_message_preview: None,
+                last_ts_recv: None,
             }]),
             CommandResult::Messages(vec![MessageRecord {
                 row_id: 0, // row_id irrelevant in this test
@@ -410,6 +451,104 @@ mod tests {
         for r in &results {
             let _back: CommandResult = roundtrip(r);
         }
+    }
+
+    #[test]
+    fn daemon_info_command_round_trips_cbor() {
+        let cmd = Command::DaemonInfo;
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&cmd, &mut buf).unwrap();
+        let back: Command = ciborium::de::from_reader(&buf[..]).unwrap();
+        assert!(matches!(back, Command::DaemonInfo));
+    }
+
+    #[test]
+    fn daemon_info_result_round_trips_cbor() {
+        let r = CommandResult::DaemonInfo {
+            local_pubkey: PublicKey([0xAB; 32]),
+            current_onion: Some("abcd.onion".into()),
+            daemon_version: "0.0.1".into(),
+            schema_version: 9,
+        };
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&r, &mut buf).unwrap();
+        let back: CommandResult = ciborium::de::from_reader(&buf[..]).unwrap();
+        match back {
+            CommandResult::DaemonInfo {
+                current_onion,
+                schema_version,
+                ..
+            } => {
+                assert_eq!(current_onion.as_deref(), Some("abcd.onion"));
+                assert_eq!(schema_version, 9);
+            }
+            other => panic!("expected DaemonInfo, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn daemon_info_result_with_none_onion_round_trips() {
+        let r = CommandResult::DaemonInfo {
+            local_pubkey: PublicKey([0xCD; 32]),
+            current_onion: None,
+            daemon_version: "0.0.1".into(),
+            schema_version: 9,
+        };
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&r, &mut buf).unwrap();
+        let back: CommandResult = ciborium::de::from_reader(&buf[..]).unwrap();
+        match back {
+            CommandResult::DaemonInfo { current_onion, .. } => {
+                assert!(current_onion.is_none());
+            }
+            other => panic!("expected DaemonInfo, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn contact_summary_with_new_fields_round_trips() {
+        let s = ContactSummary {
+            pubkey: PublicKey([0x99; 32]),
+            nickname: None,
+            onion: "x.onion".into(),
+            card_version: 1,
+            added_at: 1_700_000_000,
+            unread_count: 3,
+            last_message_preview: Some("hello".into()),
+            last_ts_recv: Some(1_700_000_500),
+        };
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&s, &mut buf).unwrap();
+        let back: ContactSummary = ciborium::de::from_reader(&buf[..]).unwrap();
+        assert_eq!(back.unread_count, 3);
+        assert_eq!(back.last_message_preview.as_deref(), Some("hello"));
+        assert_eq!(back.last_ts_recv, Some(1_700_000_500));
+    }
+
+    #[test]
+    fn contact_summary_decodes_old_payload_with_defaults() {
+        #[derive(serde::Serialize)]
+        struct OldShape {
+            pubkey: PublicKey,
+            nickname: Option<String>,
+            onion: String,
+            card_version: u64,
+            added_at: u64,
+        }
+        let old = OldShape {
+            pubkey: PublicKey([0x22; 32]),
+            nickname: Some("legacy".into()),
+            onion: "y.onion".into(),
+            card_version: 7,
+            added_at: 1_700_000_000,
+        };
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&old, &mut buf).unwrap();
+        let back: ContactSummary = ciborium::de::from_reader(&buf[..]).unwrap();
+        assert_eq!(back.unread_count, 0);
+        assert!(back.last_message_preview.is_none());
+        assert!(back.last_ts_recv.is_none());
+        assert_eq!(back.nickname.as_deref(), Some("legacy"));
     }
 }
 

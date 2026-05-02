@@ -13,7 +13,8 @@ use crate::identity::PublicKey;
 pub use crate::storage::mailboxes::MailboxStatus;
 
 /// Tor-layer status, surfaced for UI bootstrap progress bars.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
+#[ts(export, export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/")]
 pub enum TorStatus {
     /// Bootstrap has not started.
     Idle,
@@ -26,7 +27,8 @@ pub enum TorStatus {
 }
 
 /// Per-message delivery outcome.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
+#[ts(export, export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/")]
 pub enum DeliveryStatus {
     /// Queued; first attempt has not fired yet.
     Queued,
@@ -43,8 +45,9 @@ pub enum DeliveryStatus {
 /// Adjacently tagged (`tag = "event", content = "data"`) so that
 /// ciborium can round-trip newtype variants (e.g. `TorStatusChanged`)
 /// without hitting the internally-tagged / non-map-value limitation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[serde(tag = "event", content = "data", rename_all = "snake_case")]
+#[ts(export, export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/")]
 pub enum Event {
     /// Bootstrap progress / final status.
     TorStatusChanged(TorStatus),

@@ -1,0 +1,58 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`tokens.css snapshot — no accidental token drift 1`] = `
+"/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (C) 2026 Myggiz AB */
+/* Phase 2.C design tokens — locked in 2026-05-01 spec; reused 2.D–2.F. */
+
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 400;
+  font-display: block;
+  src: url("./fonts/inter-regular.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 500;
+  font-display: block;
+  src: url("./fonts/inter-medium.woff2") format("woff2");
+}
+
+:root {
+  --bg: #0e0f12;
+  --bg-elevated: #16181d;
+  --text: #e8eaed;
+  --text-muted: #9aa0a6;
+  --accent: #7aa2f7;
+  --danger: #f7768e;
+
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 16px;
+  --s-4: 32px;
+
+  --t-body: 14px / 1.5 "Inter", system-ui, sans-serif;
+  --t-ui: 13px / 1.4 "Inter", system-ui, sans-serif;
+  --t-display: 20px / 1.3 "Inter", system-ui, sans-serif;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #fafafa;
+    --bg-elevated: #ffffff;
+    --text: #1a1d21;
+    --text-muted: #5f6368;
+  }
+}
+
+html, body {
+  background: var(--bg);
+  color: var(--text);
+  font: var(--t-body);
+  margin: 0;
+  padding: 0;
+}
+"
+`;
