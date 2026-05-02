@@ -85,7 +85,8 @@ describe("optimistic send + reconcile", () => {
 });
 
 import { vi } from "vitest";
-import { loadOlder, openConversationFromSummary, markReadIfAtBottom, isWithinBottomThreshold } from "./conversation";
+import { loadOlder, openConversationFromSummary, markReadIfAtBottom, isWithinBottomThreshold, send } from "./conversation";
+import { statusForMessageHex } from "./delivery";
 import { ipcClient } from "$lib/ipc/tauri";
 import type { ContactSummary } from "$lib/ipc/types";
 
@@ -263,5 +264,78 @@ describe("openConversationFromSummary", () => {
     await openConversationFromSummary(summary);
     expect(get(conversation).unreadAnchorRowId).toBeNull();
     expect(get(conversation).readCursor).toBe(0n);
+  });
+});
+
+import { ipcClient } from "$lib/ipc/tauri";
+
+describe("send status mapping", () => {
+  test("inline delivered SendStatus → Delivered DeliveryStatus", async () => {
+    conversation.set({
+      contact: peer,
+      messages: [],
+      nextBeforeId: null,
+      loadingOlder: false,
+      unreadAnchorRowId: null,
+      readCursor: 0n,
+    });
+    const messageHex = "ab".repeat(16);
+    const canonicalRecord = {
+      row_id: 1n,
+      message_id: messageHex,
+      contact: peer,
+      direction: "outgoing" as const,
+      kind: { kind: "text" as const, body: "x" },
+      mls_generation: 1n,
+      ts_daemon_recv: 100n,
+      ts_envelope: 99n,
+    };
+    vi.spyOn(ipcClient, "request").mockResolvedValueOnce({
+      resp: "ok",
+      data: {
+        result: "message_sent",
+        data: {
+          message_id: messageHex,
+          status: "delivered",          // lowercase per actual wire format
+          record: canonicalRecord,
+        },
+      },
+    } as any);
+    await send(peer, "x");
+    expect(statusForMessageHex(messageHex)).toBe("Delivered");
+  });
+
+  test("inline queued SendStatus → Queued DeliveryStatus", async () => {
+    conversation.set({
+      contact: peer,
+      messages: [],
+      nextBeforeId: null,
+      loadingOlder: false,
+      unreadAnchorRowId: null,
+      readCursor: 0n,
+    });
+    const messageHex = "cd".repeat(16);
+    vi.spyOn(ipcClient, "request").mockResolvedValueOnce({
+      resp: "ok",
+      data: {
+        result: "message_sent",
+        data: {
+          message_id: messageHex,
+          status: "queued",
+          record: {
+            row_id: 2n,
+            message_id: messageHex,
+            contact: peer,
+            direction: "outgoing" as const,
+            kind: { kind: "text" as const, body: "y" },
+            mls_generation: 1n,
+            ts_daemon_recv: 100n,
+            ts_envelope: 99n,
+          },
+        },
+      },
+    } as any);
+    await send(peer, "y");
+    expect(statusForMessageHex(messageHex)).toBe("Queued");
   });
 });

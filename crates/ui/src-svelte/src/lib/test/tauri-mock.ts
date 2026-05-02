@@ -230,7 +230,7 @@ export async function invoke<T = unknown>(
             result: "message_sent",
             data: {
               message_id: FIXTURE_MESSAGE_ID,
-              status: "Queued",
+              status: "queued",
               record,
             },
           },

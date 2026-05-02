@@ -208,7 +208,7 @@ export async function send(contact: PublicKey, body: string): Promise<void> {
       reconcile(tempId, record);
       recordDeliveryStatus(
         hex16ToString(message_id),
-        status === "Delivered"
+        status === "delivered"
           ? "Delivered"
           : "Queued",
       );
