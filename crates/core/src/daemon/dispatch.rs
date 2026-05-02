@@ -360,6 +360,7 @@ where
             return Ok(CommandResult::MessageSent {
                 message_id: Hex16::from(message_id.0),
                 status: SendStatus::Delivered,
+                record: None,
             });
         }
         Err(e) => return Err(map_err(e)),
@@ -380,6 +381,7 @@ where
     Ok(CommandResult::MessageSent {
         message_id: Hex16::from(message_id.0),
         status,
+        record: None,
     })
 }
 

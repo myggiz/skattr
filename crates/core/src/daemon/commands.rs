@@ -309,6 +309,12 @@ pub enum CommandResult {
         message_id: Hex16,
         /// Outcome after the inline wait.
         status: SendStatus,
+        /// Canonical sender-side `MessageRecord` projection. `None`
+        /// only on the idempotent-retry branch where the original
+        /// row id is not easily recoverable. UI's optimistic
+        /// placeholder reconciles to `Some(record)` when present.
+        #[serde(default)]
+        record: Option<MessageRecord>,
     },
     /// [`Command::RecentMessages`] completed. Most-recent first.
     Messages(Vec<MessageRecord>),
@@ -490,6 +496,7 @@ mod tests {
             CommandResult::MessageSent {
                 message_id: crate::daemon::hex::Hex16::from([3; 16]),
                 status: SendStatus::Queued,
+                record: None,
             },
             CommandResult::Subscribed,
             CommandResult::InviteCreated {
@@ -685,6 +692,66 @@ mod tests {
         assert!(matches!(
             back,
             CommandResult::MessagesPage { next_before_id: None, .. }
+        ));
+    }
+
+    #[test]
+    fn message_sent_with_record_round_trips() {
+        let rec = MessageRecord {
+            row_id: 11,
+            message_id: Hex16::from([3; 16]),
+            contact: crate::identity::PublicKey([4; 32]),
+            direction: Direction::Outgoing,
+            kind: Kind::Text { body: "hi".into() },
+            mls_generation: 1,
+            ts_daemon_recv: 200,
+            ts_envelope: 199,
+        };
+        let r = CommandResult::MessageSent {
+            message_id: Hex16::from([3; 16]),
+            status: SendStatus::Delivered,
+            record: Some(rec),
+        };
+        let back: CommandResult = roundtrip(&r);
+        match back {
+            CommandResult::MessageSent {
+                status: SendStatus::Delivered,
+                record: Some(rec),
+                ..
+            } => assert_eq!(rec.row_id, 11),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn message_sent_legacy_payload_decodes_with_none_record() {
+        // Build a CBOR `MessageSent` payload that lacks the `record` field
+        // (simulating a daemon that predates this field). `message_id` is
+        // serialised as a hex string by `Hex16`'s custom serde impl.
+        let legacy_cbor = {
+            let mut buf = Vec::new();
+            let v = ciborium::value::Value::Map(vec![
+                ("result".into(), ciborium::value::Value::Text("message_sent".into())),
+                (
+                    "data".into(),
+                    ciborium::value::Value::Map(vec![
+                        (
+                            "message_id".into(),
+                            ciborium::value::Value::Text(
+                                "03030303030303030303030303030303".into(),
+                            ),
+                        ),
+                        ("status".into(), ciborium::value::Value::Text("queued".into())),
+                    ]),
+                ),
+            ]);
+            ciborium::ser::into_writer(&v, &mut buf).unwrap();
+            buf
+        };
+        let back: CommandResult = ciborium::de::from_reader(&legacy_cbor[..]).unwrap();
+        assert!(matches!(
+            back,
+            CommandResult::MessageSent { record: None, status: SendStatus::Queued, .. }
         ));
     }
 }
