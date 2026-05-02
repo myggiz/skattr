@@ -30,7 +30,7 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo clippy --workspace --exclude skattr-ui --all-targets --all-features -- -D warnings
 
   test:
     name: test (${{ matrix.os }})
@@ -43,8 +43,73 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --workspace --all-targets
-      - run: cargo test  --workspace --all-targets
+      - run: cargo build --workspace --exclude skattr-ui --all-targets
+      - run: cargo test  --workspace --exclude skattr-ui --all-targets
+
+  ui:
+    name: ui (skattr-ui)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Tauri 2 Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libxdo-dev \
+            libssl-dev \
+            build-essential \
+            pkg-config
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ui
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Activate pnpm via corepack
+        run: |
+          corepack enable
+          corepack prepare pnpm@9 --activate
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/pnpm/store
+          key: pnpm-${{ runner.os }}-${{ hashFiles('crates/ui/src-svelte/pnpm-lock.yaml') }}
+          restore-keys: |
+            pnpm-${{ runner.os }}-
+
+      - name: Generate ts-rs bindings
+        run: cargo test -p skattr-core --features test-harness
+
+      - name: Install frontend deps
+        working-directory: crates/ui/src-svelte
+        run: pnpm install --frozen-lockfile
+
+      - name: Build SvelteKit frontend
+        working-directory: crates/ui/src-svelte
+        run: pnpm build
+
+      - name: Clippy (skattr-ui)
+        run: cargo clippy -p skattr-ui --all-targets --all-features -- -D warnings
+
+      - name: Build (skattr-ui)
+        run: cargo build -p skattr-ui --all-targets
+
+      - name: Test (skattr-ui)
+        run: cargo test -p skattr-ui --all-targets
 
   deny:
     name: cargo-deny
