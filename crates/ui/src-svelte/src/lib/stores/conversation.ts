@@ -186,6 +186,7 @@ export function isWithinBottomThreshold(el: HTMLElement): boolean {
 
 let markReadTimer: ReturnType<typeof setTimeout> | null = null;
 let pendingHighestRowId: bigint = 0n;
+let pendingContact: PublicKey | null = null;
 
 import { recordDeliveryStatus, hex16ToString } from "./delivery";
 
@@ -235,14 +236,18 @@ export function markReadIfAtBottom(rowId: bigint): void {
   const state = get(conversation);
   if (state.contact === null) return;
   if (rowId <= state.readCursor) return;
+  pendingContact = state.contact;
   if (rowId > pendingHighestRowId) pendingHighestRowId = rowId;
   if (markReadTimer) clearTimeout(markReadTimer);
   markReadTimer = setTimeout(async () => {
     const target = pendingHighestRowId;
+    const scheduledContact = pendingContact;
     pendingHighestRowId = 0n;
+    pendingContact = null;
     markReadTimer = null;
     const cur = get(conversation);
-    if (cur.contact === null || target <= cur.readCursor) return;
+    if (cur.contact !== scheduledContact) return;
+    if (target <= cur.readCursor) return;
     try {
       await ipcClient.request({
         cmd: "mark_read",
@@ -251,7 +256,6 @@ export function markReadIfAtBottom(rowId: bigint): void {
       });
       conversation.update((s) => ({ ...s, readCursor: target }));
     } catch (e) {
-      // Swallow per spec §4.4 — non-critical; next open retries.
       console.warn("mark_read failed:", e);
     }
   }, MARK_READ_DEBOUNCE_MS);

@@ -212,6 +212,20 @@ describe("mark-read", () => {
     spy.mockRestore();
     vi.useRealTimers();
   });
+
+  test("markReadIfAtBottom does not fire for a different contact after switch", async () => {
+    vi.useFakeTimers();
+    conversation.update((s) => ({ ...s, contact: peer, readCursor: 0n }));
+    const spy = vi.spyOn(ipcClient, "request");
+    markReadIfAtBottom(99n);
+    // Switch contacts before the debounce fires.
+    const otherPeer = "0909090909090909090909090909090909090909090909090909090909090909";
+    conversation.update((s) => ({ ...s, contact: otherPeer, readCursor: 0n }));
+    await vi.advanceTimersByTimeAsync(600);
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+    vi.useRealTimers();
+  });
 });
 
 describe("openConversationFromSummary", () => {
