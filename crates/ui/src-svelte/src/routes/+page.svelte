@@ -40,9 +40,7 @@
   );
 
   let composerDisabled = $derived(
-    activeSummary === undefined ||
-      activeSummary.group_state === "corrupt" ||
-      activeSummary.group_state === "pending_join",
+    activeSummary === undefined || activeSummary.group_state !== "active",
   );
 
   let disabledReason = $derived(
@@ -52,7 +50,9 @@
         ? "Conversation unavailable"
         : activeSummary.group_state === "pending_join"
           ? "Joining group…"
-          : undefined,
+          : activeSummary.group_state === null || activeSummary.group_state === undefined
+            ? "Setting up conversation…"
+            : undefined,
   );
 
   // Subscribe to events on mount; update stores.
