@@ -37,7 +37,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # Windows omitted: the daemon IPC stack (core::daemon::ipc::{server,client})
+        # is hard-coded to AF_UNIX (UnixListener, peer_cred, 0600 mode bits) and
+        # the CLI/UI hold IpcClient<UnixStream> concretely. A real Windows port
+        # needs Named Pipes + DACL-based peer auth; revisit when Windows is a
+        # supported runtime target.
+        os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

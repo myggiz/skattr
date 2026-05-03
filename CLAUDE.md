@@ -311,7 +311,12 @@ cargo run -p cli -- add <link>
 cargo run -p cli -- send <contact> <text>
 ```
 
-CI (per bootstrap prompt) runs fmt + clippy + test on `ubuntu-latest`, `macos-latest`, `windows-latest`.
+CI runs fmt + clippy + test on `ubuntu-latest` and `macos-latest`, plus
+a dedicated `ui` job on `ubuntu-latest` for the Tauri 2 + SvelteKit
+crate. Windows is not in the matrix today: the daemon IPC stack is
+hard-coded to AF_UNIX (UnixListener, peer_cred, mode bits) and would
+need a Named-Pipes + DACL port before it can compile, let alone run,
+on Windows. Revisit when Windows becomes a supported runtime target.
 
 ## When extending the design
 
