@@ -96,7 +96,7 @@ async fn spawn_real_daemon(
 /// Poll Alice's `ListContacts` until the entry for `bob_pubkey` has
 /// `group_state == Active`, or panic after `timeout`.
 async fn wait_for_alice_group_active(
-    alice_ipc: &std::path::PathBuf,
+    alice_ipc: &std::path::Path,
     bob_pubkey: skattr_core::identity::PublicKey,
     timeout: Duration,
 ) {
@@ -131,7 +131,7 @@ async fn wait_for_alice_group_active(
 /// and wait until an event with `body == expected_body` arrives, or panic
 /// after `timeout`.
 async fn wait_for_message_received(
-    ipc_path: &std::path::PathBuf,
+    ipc_path: &std::path::Path,
     sender_pubkey: skattr_core::identity::PublicKey,
     expected_body: &str,
     timeout: Duration,
