@@ -43,6 +43,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     jobs: mpsc::Sender<DeliveryJob>,
+    welcome_jobs: mpsc::Sender<crate::delivery::peer::WelcomeJob>,
     ctrl: mpsc::Sender<PeerCtrl<S>>,
 }
 
@@ -53,6 +54,7 @@ where
     fn clone(&self) -> Self {
         Self {
             jobs: self.jobs.clone(),
+            welcome_jobs: self.welcome_jobs.clone(),
             ctrl: self.ctrl.clone(),
         }
     }
@@ -181,16 +183,20 @@ where
         peer: PublicKey,
     ) -> PeerChannels<S> {
         let (jobs_tx, jobs_rx) = mpsc::channel::<DeliveryJob>(JOB_CHAN_CAP);
+        let (welcome_jobs_tx, welcome_jobs_rx) =
+            mpsc::channel::<crate::delivery::peer::WelcomeJob>(JOB_CHAN_CAP);
         let (ctrl_tx, ctrl_rx) = mpsc::channel::<PeerCtrl<S>>(CTRL_CHAN_CAP);
         let _handle = PeerConnection::spawn::<S>(
             peer,
             jobs_rx,
+            welcome_jobs_rx,
             ctrl_rx,
             self.pool.clone(),
             self.inbound.clone(),
         );
         let channels = PeerChannels {
             jobs: jobs_tx,
+            welcome_jobs: welcome_jobs_tx,
             ctrl: ctrl_tx,
         };
         peers.insert(peer, channels.clone());
@@ -243,6 +249,43 @@ where
         }
         let channels = self.spawn_peer_actor(&mut peers, peer);
         channels.jobs
+    }
+
+    /// Submit a Welcome job for `peer`. Spawns the peer actor on first
+    /// use. The Welcome is sent over the existing Noise_XK transport
+    /// as `Frame::MlsWelcome(bytes)`. ACK correlation uses
+    /// `welcome_msg_id(bytes)` (BLAKE2s prefix), which the receiver
+    /// computes identically.
+    ///
+    /// On success: the returned oneshot resolves `Ok(())` when the
+    /// peer ACKs (synchronous in the typical "Alice is online" path).
+    /// On failure (no live conn, dropped actor): `Err(())`.
+    pub async fn send_welcome(
+        &self,
+        peer: PublicKey,
+        welcome_bytes: Vec<u8>,
+    ) -> Result<oneshot::Receiver<std::result::Result<(), ()>>> {
+        let (ack_tx, ack_rx) = oneshot::channel::<std::result::Result<(), ()>>();
+        let welcome_jobs_tx = self.ensure_welcome_actor(peer).await;
+        let _ = welcome_jobs_tx
+            .send(crate::delivery::peer::WelcomeJob {
+                welcome_bytes,
+                ack_tx,
+            })
+            .await;
+        Ok(ack_rx)
+    }
+
+    async fn ensure_welcome_actor(
+        &self,
+        peer: PublicKey,
+    ) -> mpsc::Sender<crate::delivery::peer::WelcomeJob> {
+        let mut peers = self.peers.lock().await;
+        if let Some(ch) = peers.get(&peer) {
+            return ch.welcome_jobs.clone();
+        }
+        let channels = self.spawn_peer_actor(&mut peers, peer);
+        channels.welcome_jobs
     }
 
     /// Direct → mailbox fallback orchestrator (Task 20).

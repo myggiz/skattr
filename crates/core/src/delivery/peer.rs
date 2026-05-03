@@ -44,6 +44,20 @@ pub struct DeliveryJob {
     pub(crate) ack_tx: oneshot::Sender<std::result::Result<(), ()>>,
 }
 
+/// One outbound Welcome, submitted by the hub. Parallel to
+/// `DeliveryJob` but carries opaque Welcome bytes destined for a
+/// `Frame::MlsWelcome` frame instead of `Frame::MlsApp`. ACK
+/// correlation uses the deterministic `welcome_msg_id(bytes)`.
+pub struct WelcomeJob {
+    /// TLS-serialized Welcome bytes.
+    pub welcome_bytes: Vec<u8>,
+    /// Fires `Ok(())` on successful ACK, `Err(())` if the ack path is
+    /// torn down (conn dropped, actor cancelled, no live conn at submit
+    /// time). Caller treats `Err` as "Welcome did not reach the
+    /// inviter — surface via UI."
+    pub(crate) ack_tx: oneshot::Sender<std::result::Result<(), ()>>,
+}
+
 /// Per-peer actor handle. Returned by `PeerConnection::spawn*` so the
 /// hub can `.await` it on shutdown.
 pub(crate) type PeerHandle = JoinHandle<()>;
@@ -120,6 +134,7 @@ impl PeerConnection {
     pub fn spawn<S>(
         peer: PublicKey,
         jobs: mpsc::Receiver<DeliveryJob>,
+        welcome_jobs: mpsc::Receiver<WelcomeJob>,
         ctrl: mpsc::Receiver<PeerCtrl<S>>,
         pool: std::sync::Arc<crate::storage::Pool>,
         inbound: Option<std::sync::Arc<dyn InboundDispatch>>,
@@ -128,7 +143,7 @@ impl PeerConnection {
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         tokio::spawn(async move {
-            let _ = full_run::<S>(peer, None, jobs, ctrl, pool, inbound).await;
+            let _ = full_run::<S>(peer, None, jobs, welcome_jobs, ctrl, pool, inbound).await;
         })
     }
 
@@ -149,7 +164,8 @@ impl PeerConnection {
     {
         tokio::spawn(async move {
             let (_ctrl_tx, ctrl_rx) = mpsc::channel::<PeerCtrl<S>>(4);
-            let _ = full_run(peer, Some(*conn), jobs, ctrl_rx, pool, inbound).await;
+            let (_welcome_tx, welcome_rx) = mpsc::channel::<WelcomeJob>(4);
+            let _ = full_run(peer, Some(*conn), jobs, welcome_rx, ctrl_rx, pool, inbound).await;
         })
     }
 }
@@ -233,6 +249,7 @@ async fn full_run<S>(
     peer: PublicKey,
     mut conn: Option<AuthenticatedConnection<S>>,
     mut jobs: mpsc::Receiver<DeliveryJob>,
+    mut _welcome_jobs: mpsc::Receiver<WelcomeJob>,
     mut ctrl: mpsc::Receiver<PeerCtrl<S>>,
     pool: std::sync::Arc<crate::storage::Pool>,
     inbound: Option<std::sync::Arc<dyn InboundDispatch>>,
