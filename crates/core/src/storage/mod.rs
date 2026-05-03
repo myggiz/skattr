@@ -25,6 +25,7 @@ pub(crate) mod mailboxes;
 pub(crate) mod messages;
 pub(crate) mod migrations;
 pub(crate) mod outbox;
+pub(crate) mod outstanding_invites;
 pub(crate) mod pool;
 pub(crate) mod read_state;
 pub(crate) mod seen_messages;
@@ -44,6 +45,8 @@ pub(crate) use mailboxes::{MailboxRepo, MailboxRow, MailboxStatus};
 #[cfg(not(feature = "test-harness"))]
 pub(crate) use messages::{InsertParams, MessageRepo};
 #[cfg(not(feature = "test-harness"))]
+pub(crate) use outstanding_invites::OutstandingInviteRepo;
+#[cfg(not(feature = "test-harness"))]
 pub(crate) use pool::Pool;
 #[cfg(not(feature = "test-harness"))]
 pub(crate) use read_state::ReadStateRepo;
@@ -60,6 +63,8 @@ pub use key_packages::KeyPackageRepo;
 pub use mailboxes::{MailboxRepo, MailboxRow, MailboxStatus};
 #[cfg(feature = "test-harness")]
 pub use messages::{InsertParams, MessageRepo};
+#[cfg(feature = "test-harness")]
+pub use outstanding_invites::OutstandingInviteRepo;
 #[cfg(feature = "test-harness")]
 pub use pool::Pool;
 #[cfg(feature = "test-harness")]
