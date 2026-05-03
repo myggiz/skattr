@@ -70,6 +70,25 @@ pub trait InboundDispatch: Send + Sync + 'static {
     /// Decrypt and ingest an inbound MLS ciphertext from `peer`.
     /// Returns the `MessageId` on success (for ACK) or `None` on failure.
     fn dispatch(&self, peer: PublicKey, ciphertext: &[u8]) -> Option<MessageId>;
+
+    /// Process an inbound MLS Welcome from `peer` (the inviter side
+    /// of the invite link). Default impl ignores the message and
+    /// returns `None` so existing impls compile unchanged. Production
+    /// `DaemonInbound` overrides this to look up the PSK in
+    /// `outstanding_invites`, call `Group::join_from_welcome`, persist
+    /// the new group + contact + group_id link, and emit
+    /// `Event::ContactUpdated`.
+    ///
+    /// The returned `MessageId` (when `Some`) MUST equal
+    /// `welcome_msg_id(welcome)` so the synthetic ACK correlates with
+    /// the sender's outstanding oneshot.
+    fn dispatch_welcome(
+        &self,
+        _peer: PublicKey,
+        _welcome: &[u8],
+    ) -> Option<MessageId> {
+        None
+    }
 }
 
 /// Per-peer actor. Owns an `Option<AuthenticatedConnection<S>>`, a
@@ -404,6 +423,41 @@ mod tests {
     use crate::transport::frame::Frame;
     use crate::transport::noise::{handshake_initiator, handshake_responder};
     use tokio::sync::{mpsc, oneshot};
+
+    #[test]
+    fn inbound_dispatch_welcome_default_returns_none() {
+        struct Stub;
+        impl InboundDispatch for Stub {
+            fn dispatch(&self, _peer: PublicKey, _ct: &[u8]) -> Option<MessageId> {
+                None
+            }
+        }
+        let s = Stub;
+        assert!(s.dispatch_welcome(PublicKey([0u8; 32]), b"x").is_none());
+    }
+
+    #[test]
+    fn inbound_dispatch_welcome_override_is_called() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct Stub(AtomicBool);
+        impl InboundDispatch for Stub {
+            fn dispatch(&self, _peer: PublicKey, _ct: &[u8]) -> Option<MessageId> {
+                None
+            }
+            fn dispatch_welcome(
+                &self,
+                _peer: PublicKey,
+                welcome: &[u8],
+            ) -> Option<MessageId> {
+                self.0.store(true, Ordering::SeqCst);
+                Some(super::welcome_msg_id(welcome))
+            }
+        }
+        let s = Stub(AtomicBool::new(false));
+        let id = s.dispatch_welcome(PublicKey([0u8; 32]), b"hello").unwrap();
+        assert_eq!(id.0, super::welcome_msg_id(b"hello").0);
+        assert!(s.0.load(Ordering::SeqCst));
+    }
 
     #[test]
     fn welcome_msg_id_is_deterministic_blake2s_prefix() {
