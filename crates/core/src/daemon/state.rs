@@ -105,6 +105,7 @@ impl Daemon {
         let seed = derive_storage_seed(identity_for_seed)?;
         let (_vault2, identity) = Vault::open(&vault_path, passphrase.as_str())?;
         let (_vault3, identity_for_poller) = Vault::open(&vault_path, passphrase.as_str())?;
+        let (_vault4, identity_for_inbound) = Vault::open(&vault_path, passphrase.as_str())?;
 
         // Step 2: open Pool (migrations are applied inside Pool::open).
         let pool = Arc::new(Pool::open(data_dir, &seed)?);
@@ -154,8 +155,9 @@ impl Daemon {
         let (events_tx, _) = broadcast::channel::<Event>(EVENT_CHANNEL_CAPACITY);
 
         // Step 5: DaemonInbound + DeliveryHub.
-        let inbound = Arc::new(DaemonInbound::new(pool.clone(), events_tx.clone()))
-            as Arc<dyn InboundDispatch>;
+        let inbound_impl = DaemonInbound::new(pool.clone(), events_tx.clone());
+        inbound_impl.set_identity(Arc::new(identity_for_inbound));
+        let inbound = Arc::new(inbound_impl) as Arc<dyn InboundDispatch>;
         // Use DataStream as the transport type parameter. The hub stores
         // per-peer actor channels; actual DataStream-backed connections are
         // injected via `hub.ingest()` from the onion-listener accept loop

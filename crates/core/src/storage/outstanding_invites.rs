@@ -27,6 +27,10 @@ impl<'p> OutstandingInviteRepo<'p> {
     /// `kp_hash` collision (overwrite is intentional — `CreateInvite`
     /// regenerates a fresh KP each time so collisions only occur on
     /// retries of the same operation).
+    ///
+    /// `provider_snapshot` is the ciborium-serialized `MlsProvider` state
+    /// that holds the init private key for `inviter_kp`; it is required by
+    /// `dispatch_welcome_inner` to process the incoming Welcome.
     pub fn put(
         &self,
         kp_hash: &[u8; 32],
@@ -49,6 +53,38 @@ impl<'p> OutstandingInviteRepo<'p> {
                 ],
             )
             .map_err(|e| CoreError::Storage(StorageErrorKind::Other(format!("oi: put: {e}"))))?;
+            Ok(())
+        })
+    }
+
+    /// Like `put` but also stores the MLS provider snapshot so it can be
+    /// restored when processing the incoming Welcome.
+    pub fn put_with_provider(
+        &self,
+        kp_hash: &[u8; 32],
+        psk: &Zeroizing<[u8; 32]>,
+        inviter_kp: &[u8],
+        provider_snapshot: &[u8],
+        expires_at: i64,
+        created_at: i64,
+    ) -> Result<()> {
+        self.pool.with_mut(|c| {
+            c.execute(
+                "INSERT OR REPLACE INTO outstanding_invites \
+                 (kp_hash, psk, inviter_kp, provider_snapshot, expires_at, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    &kp_hash[..],
+                    &psk.as_ref()[..],
+                    inviter_kp,
+                    provider_snapshot,
+                    expires_at,
+                    created_at,
+                ],
+            )
+            .map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!("oi: put_with_provider: {e}")))
+            })?;
             Ok(())
         })
     }
@@ -104,6 +140,76 @@ impl<'p> OutstandingInviteRepo<'p> {
                 })?;
             Ok(deleted as u64)
         })
+    }
+
+    /// Like `get_psk` but also returns the `inviter_kp` bytes and optional
+    /// provider snapshot so the caller can:
+    ///  - reconstruct the `KeyPackage` and derive its SHA-256 for `key_packages.mark_consumed_in_tx`
+    ///  - restore the `MlsProvider` (with the init private key) to process the Welcome
+    pub fn get_psk_and_kp_bytes(
+        &self,
+        kp_ref: &[u8; 32],
+    ) -> Result<Option<(Zeroizing<[u8; 32]>, Vec<u8>, Option<Vec<u8>>, i64)>> {
+        self.pool.with(|c| {
+            let result = c.query_row(
+                "SELECT psk, inviter_kp, provider_snapshot, expires_at \
+                 FROM outstanding_invites WHERE kp_hash = ?1",
+                rusqlite::params![&kp_ref[..]],
+                |r| {
+                    let psk_bytes: Vec<u8> = r.get(0)?;
+                    let kp_bytes: Vec<u8> = r.get(1)?;
+                    let provider_snap: Option<Vec<u8>> = r.get(2)?;
+                    let expires_at: i64 = r.get(3)?;
+                    Ok((psk_bytes, kp_bytes, provider_snap, expires_at))
+                },
+            );
+            match result {
+                Ok((psk_bytes, kp_bytes, provider_snap, expires_at)) => {
+                    if psk_bytes.len() != 32 {
+                        return Err(CoreError::Storage(StorageErrorKind::Other(format!(
+                            "oi: psk wrong length: {}",
+                            psk_bytes.len()
+                        ))));
+                    }
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&psk_bytes);
+                    Ok(Some((Zeroizing::new(arr), kp_bytes, provider_snap, expires_at)))
+                }
+                Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+                Err(e) => Err(CoreError::Storage(StorageErrorKind::Other(format!(
+                    "oi: get_with_kp: {e}"
+                )))),
+            }
+        })
+    }
+
+    /// Zeroize the PSK column then delete the row inside a caller-owned
+    /// transaction. Used by `dispatch_welcome_inner` to consume the row
+    /// atomically alongside the group-save and contact upsert.
+    pub(crate) fn mark_consumed_in_tx(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        kp_ref: &[u8; 32],
+    ) -> Result<()> {
+        tx.execute(
+            "UPDATE outstanding_invites SET psk = zeroblob(32) WHERE kp_hash = ?1",
+            rusqlite::params![&kp_ref[..]],
+        )
+        .map_err(|e| {
+            CoreError::Storage(StorageErrorKind::Other(format!(
+                "oi: zeroize_in_tx: {e}"
+            )))
+        })?;
+        tx.execute(
+            "DELETE FROM outstanding_invites WHERE kp_hash = ?1",
+            rusqlite::params![&kp_ref[..]],
+        )
+        .map_err(|e| {
+            CoreError::Storage(StorageErrorKind::Other(format!(
+                "oi: delete_in_tx: {e}"
+            )))
+        })?;
+        Ok(())
     }
 
     /// Look up the PSK + expires_at for `kp_hash`. Returns `Ok(None)`

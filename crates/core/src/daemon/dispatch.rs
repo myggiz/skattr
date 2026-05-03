@@ -227,9 +227,12 @@ where
     let url = link.to_url().map_err(map_err)?;
     let expires_at = u64::try_from(now + ttl as i64).unwrap_or(0);
 
-    // Persist the PSK so the inviter can reconstruct it at Welcome-receive time.
+    // Persist the PSK + provider snapshot so the inviter can reconstruct both
+    // at Welcome-receive time. The provider snapshot holds the init private
+    // key that OpenMLS needs to process the Welcome via join_from_welcome.
+    let provider_snap = provider.snapshot().map_err(map_err)?;
     let oi = OutstandingInviteRepo::new(&handle.pool);
-    oi.put(&kp_ref, &psk, &kp_bytes, now + ttl as i64, now)
+    oi.put_with_provider(&kp_ref, &psk, &kp_bytes, &provider_snap, now + ttl as i64, now)
         .map_err(map_err)?;
 
     Ok(CommandResult::InviteCreated {
