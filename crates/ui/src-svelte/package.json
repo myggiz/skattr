@@ -32,9 +32,10 @@
     }
   },
   "dependencies": {
+    "@tanstack/svelte-virtual": "3.10.9",
     "@tauri-apps/api": "2.0.0",
     "@zxcvbn-ts/core": "3.0.4",
     "@zxcvbn-ts/language-en": "3.0.2",
-    "@tanstack/svelte-virtual": "3.10.9"
+    "jsqr": "1.4.0"
   }
 }

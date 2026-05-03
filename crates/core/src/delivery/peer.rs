@@ -44,9 +44,38 @@ pub struct DeliveryJob {
     pub(crate) ack_tx: oneshot::Sender<std::result::Result<(), ()>>,
 }
 
+/// One outbound Welcome, submitted by the hub. Parallel to
+/// `DeliveryJob` but carries opaque Welcome bytes destined for a
+/// `Frame::MlsWelcome` frame instead of `Frame::MlsApp`. ACK
+/// correlation uses the deterministic `welcome_msg_id(bytes)`.
+pub struct WelcomeJob {
+    /// TLS-serialized Welcome bytes.
+    pub welcome_bytes: Vec<u8>,
+    /// Fires `Ok(())` on successful ACK, `Err(())` if the ack path is
+    /// torn down (conn dropped, actor cancelled, no live conn at submit
+    /// time). Caller treats `Err` as "Welcome did not reach the
+    /// inviter — surface via UI."
+    pub(crate) ack_tx: oneshot::Sender<std::result::Result<(), ()>>,
+}
+
 /// Per-peer actor handle. Returned by `PeerConnection::spawn*` so the
 /// hub can `.await` it on shutdown.
 pub(crate) type PeerHandle = JoinHandle<()>;
+
+/// Deterministic synthetic message id for ACK correlation of an
+/// outbound Welcome. Defined identically on both sides so the
+/// inviter (sender) and the joiner (receiver) compute the same
+/// `MessageId` from the Welcome bytes — letting the existing
+/// `Frame::Ack(MessageId)` correlator round-trip without changes.
+pub(crate) fn welcome_msg_id(bytes: &[u8]) -> MessageId {
+    use blake2::{Blake2s256, Digest};
+    let mut h = Blake2s256::new();
+    h.update(bytes);
+    let out = h.finalize();
+    let mut id = [0u8; 16];
+    id.copy_from_slice(&out[..16]);
+    MessageId(id)
+}
 
 /// Inbound-MLS dispatch strategy, injected per peer actor. See Task 8
 /// preamble for the rationale — keeps `openmls` out of the actor
@@ -55,6 +84,21 @@ pub trait InboundDispatch: Send + Sync + 'static {
     /// Decrypt and ingest an inbound MLS ciphertext from `peer`.
     /// Returns the `MessageId` on success (for ACK) or `None` on failure.
     fn dispatch(&self, peer: PublicKey, ciphertext: &[u8]) -> Option<MessageId>;
+
+    /// Process an inbound MLS Welcome from `peer` (the inviter side
+    /// of the invite link). Default impl ignores the message and
+    /// returns `None` so existing impls compile unchanged. Production
+    /// `DaemonInbound` overrides this to look up the PSK in
+    /// `outstanding_invites`, call `Group::join_from_welcome`, persist
+    /// the new group + contact + group_id link, and emit
+    /// `Event::ContactUpdated`.
+    ///
+    /// The returned `MessageId` (when `Some`) MUST equal
+    /// `welcome_msg_id(welcome)` so the synthetic ACK correlates with
+    /// the sender's outstanding oneshot.
+    fn dispatch_welcome(&self, _peer: PublicKey, _welcome: &[u8]) -> Option<MessageId> {
+        None
+    }
 }
 
 /// Per-peer actor. Owns an `Option<AuthenticatedConnection<S>>`, a
@@ -86,6 +130,7 @@ impl PeerConnection {
     pub fn spawn<S>(
         peer: PublicKey,
         jobs: mpsc::Receiver<DeliveryJob>,
+        welcome_jobs: mpsc::Receiver<WelcomeJob>,
         ctrl: mpsc::Receiver<PeerCtrl<S>>,
         pool: std::sync::Arc<crate::storage::Pool>,
         inbound: Option<std::sync::Arc<dyn InboundDispatch>>,
@@ -94,7 +139,7 @@ impl PeerConnection {
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         tokio::spawn(async move {
-            let _ = full_run::<S>(peer, None, jobs, ctrl, pool, inbound).await;
+            let _ = full_run::<S>(peer, None, jobs, welcome_jobs, ctrl, pool, inbound).await;
         })
     }
 
@@ -115,7 +160,8 @@ impl PeerConnection {
     {
         tokio::spawn(async move {
             let (_ctrl_tx, ctrl_rx) = mpsc::channel::<PeerCtrl<S>>(4);
-            let _ = full_run(peer, Some(*conn), jobs, ctrl_rx, pool, inbound).await;
+            let (_welcome_tx, welcome_rx) = mpsc::channel::<WelcomeJob>(4);
+            let _ = full_run(peer, Some(*conn), jobs, welcome_rx, ctrl_rx, pool, inbound).await;
         })
     }
 }
@@ -199,6 +245,7 @@ async fn full_run<S>(
     peer: PublicKey,
     mut conn: Option<AuthenticatedConnection<S>>,
     mut jobs: mpsc::Receiver<DeliveryJob>,
+    mut welcome_jobs: mpsc::Receiver<WelcomeJob>,
     mut ctrl: mpsc::Receiver<PeerCtrl<S>>,
     pool: std::sync::Arc<crate::storage::Pool>,
     inbound: Option<std::sync::Arc<dyn InboundDispatch>>,
@@ -237,6 +284,22 @@ where
                 }
                 pending.insert(job.message_id, job.ack_tx);
                 last_traffic = tokio::time::Instant::now();
+            }
+            wj = welcome_jobs.recv() => {
+                let Some(wj) = wj else { break; };
+                let synthetic_id = welcome_msg_id(&wj.welcome_bytes);
+                if let Some(c) = conn.as_mut() {
+                    if c.send(Frame::MlsWelcome(wj.welcome_bytes)).await.is_err() {
+                        let _ = wj.ack_tx.send(Err(()));
+                        conn = None;
+                        drain_pending(&mut pending);
+                    } else {
+                        pending.insert(synthetic_id, wj.ack_tx);
+                        last_traffic = tokio::time::Instant::now();
+                    }
+                } else {
+                    let _ = wj.ack_tx.send(Err(()));
+                }
             }
             _ = retry_tick.tick() => {
                 let ob = Outbox::new(&pool);
@@ -335,6 +398,23 @@ where
                             );
                         }
                     }
+                    Ok(Some(Frame::MlsWelcome(welcome_bytes))) => {
+                        last_traffic = tokio::time::Instant::now();
+                        if let Some(d) = inbound.as_ref() {
+                            if let Some(synthetic_id) =
+                                d.dispatch_welcome(peer, &welcome_bytes)
+                            {
+                                if let Some(c) = conn.as_mut() {
+                                    let _ = c.send(Frame::Ack(synthetic_id.0)).await;
+                                }
+                            }
+                        } else {
+                            tracing::warn!(
+                                "peer: inbound MlsWelcome received but no \
+                                 InboundDispatch configured"
+                            );
+                        }
+                    }
                     Ok(Some(other)) => {
                         tracing::warn!(ty = ?other, "peer: dropping unexpected frame");
                     }
@@ -389,6 +469,54 @@ mod tests {
     use crate::transport::frame::Frame;
     use crate::transport::noise::{handshake_initiator, handshake_responder};
     use tokio::sync::{mpsc, oneshot};
+
+    #[test]
+    fn inbound_dispatch_welcome_default_returns_none() {
+        struct Stub;
+        impl InboundDispatch for Stub {
+            fn dispatch(&self, _peer: PublicKey, _ct: &[u8]) -> Option<MessageId> {
+                None
+            }
+        }
+        let s = Stub;
+        assert!(s.dispatch_welcome(PublicKey([0u8; 32]), b"x").is_none());
+    }
+
+    #[test]
+    fn inbound_dispatch_welcome_override_is_called() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct Stub(AtomicBool);
+        impl InboundDispatch for Stub {
+            fn dispatch(&self, _peer: PublicKey, _ct: &[u8]) -> Option<MessageId> {
+                None
+            }
+            fn dispatch_welcome(&self, _peer: PublicKey, welcome: &[u8]) -> Option<MessageId> {
+                self.0.store(true, Ordering::SeqCst);
+                Some(super::welcome_msg_id(welcome))
+            }
+        }
+        let s = Stub(AtomicBool::new(false));
+        let id = s.dispatch_welcome(PublicKey([0u8; 32]), b"hello").unwrap();
+        assert_eq!(id.0, super::welcome_msg_id(b"hello").0);
+        assert!(s.0.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn welcome_msg_id_is_deterministic_blake2s_prefix() {
+        let bytes = b"hello welcome";
+        let id1 = super::welcome_msg_id(bytes);
+        let id2 = super::welcome_msg_id(bytes);
+        assert_eq!(id1.0, id2.0, "must be deterministic");
+
+        let other = super::welcome_msg_id(b"different bytes");
+        assert_ne!(
+            id1.0, other.0,
+            "different inputs must produce different ids"
+        );
+
+        assert_eq!(id1.0.len(), 16);
+        assert!(id1.0.iter().any(|&b| b != 0));
+    }
 
     /// Spawn a matching responder task over one half of a duplex pair.
     /// Returns a join handle that resolves when the responder observes
@@ -551,5 +679,75 @@ mod tests {
         // Responder should have received the Ping.
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), responder_task).await;
         handle.abort();
+    }
+
+    /// Verify a WelcomeJob round-trips: actor emits Frame::MlsWelcome,
+    /// the test responder ACKs with the synthetic id, the oneshot
+    /// resolves Ok.
+    #[tokio::test]
+    async fn welcome_job_round_trips_via_frame_mls_welcome() {
+        let pool = std::sync::Arc::new(crate::storage::Pool::in_memory());
+
+        let actor_id = IdentityKey::generate().unwrap();
+        let responder_id = IdentityKey::generate().unwrap();
+        let responder_static = responder_id.noise_static_public();
+        let peer = PublicKey(responder_id.public().0);
+
+        let (client_stream, server_stream) = tokio::io::duplex(64 * 1024);
+
+        // Handshakes must run concurrently (both sides block until the
+        // other responds). Run the responder in a spawned task and join.
+        let responder_task = tokio::spawn(async move {
+            handshake_responder(server_stream, &responder_id, None)
+                .await
+                .unwrap()
+        });
+        let (actor_conn, _) =
+            handshake_initiator(client_stream, &actor_id, &responder_static, None)
+                .await
+                .unwrap();
+        let (mut responder_conn, _) = responder_task.await.unwrap();
+
+        let (_jobs_tx, jobs_rx) = mpsc::channel::<DeliveryJob>(4);
+        let (welcome_tx, welcome_rx) = mpsc::channel::<WelcomeJob>(4);
+        let (_ctrl_tx, ctrl_rx) = mpsc::channel::<PeerCtrl<tokio::io::DuplexStream>>(4);
+
+        let _h = tokio::spawn(async move {
+            let _ = super::full_run::<tokio::io::DuplexStream>(
+                peer,
+                Some(actor_conn),
+                jobs_rx,
+                welcome_rx,
+                ctrl_rx,
+                pool,
+                None,
+            )
+            .await;
+        });
+
+        let welcome_bytes = b"fake welcome bytes".to_vec();
+        let synthetic_id = super::welcome_msg_id(&welcome_bytes);
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        welcome_tx
+            .send(WelcomeJob {
+                welcome_bytes: welcome_bytes.clone(),
+                ack_tx,
+            })
+            .await
+            .unwrap();
+
+        match responder_conn.recv().await {
+            Ok(Some(Frame::MlsWelcome(got))) => assert_eq!(got, welcome_bytes),
+            other => panic!("expected MlsWelcome, got {other:?}"),
+        }
+        responder_conn
+            .send(Frame::Ack(synthetic_id.0))
+            .await
+            .unwrap();
+
+        match tokio::time::timeout(std::time::Duration::from_secs(2), ack_rx).await {
+            Ok(Ok(Ok(()))) => {}
+            other => panic!("expected ACK, got {other:?}"),
+        }
     }
 }

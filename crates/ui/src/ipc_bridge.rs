@@ -10,6 +10,19 @@ use skattr_core::daemon::ipc::wire::{IpcError, IpcResponse};
 
 use crate::daemon::AppState;
 
+/// Render an invite link to SVG markup. Pre-daemon-friendly — does
+/// not touch `AppState`. Used by `InviteGenerateDialog`.
+#[tauri::command]
+pub async fn render_invite_qr(url: String) -> Result<String, String> {
+    use skattr_core::invite::InviteLink;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .map_err(|e| format!("clock: {e}"))?;
+    let link = InviteLink::from_url(&url, now).map_err(|e| format!("parse invite: {e}"))?;
+    skattr_core::invite::qr::render_svg(&link).map_err(|e| format!("render qr: {e}"))
+}
+
 #[tauri::command]
 pub async fn ipc_request(
     state: tauri::State<'_, AppState>,

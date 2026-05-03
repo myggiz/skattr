@@ -23,7 +23,17 @@ const _fixture200Msgs =
   typeof window !== "undefined" &&
   new URLSearchParams(window.location.search).get("fixture") === "seeded-200-msgs";
 
-let _vault = _preseeded || _fixtureSeeded || _fixture200Msgs;
+// Activate invite-generation mock when ?fixture=invite-flow.
+const _fixtureInviteFlow =
+  typeof window !== "undefined" &&
+  new URLSearchParams(window.location.search).get("fixture") === "invite-flow";
+
+// Activate add-contact mock when ?fixture=add-contact-flow.
+const _fixtureAddContactFlow =
+  typeof window !== "undefined" &&
+  new URLSearchParams(window.location.search).get("fixture") === "add-contact-flow";
+
+let _vault = _preseeded || _fixtureSeeded || _fixture200Msgs || _fixtureInviteFlow || _fixtureAddContactFlow;
 
 // Active subscribe channel — used by fixture to emit delivery_status_changed.
 let _subscribeChannel: Channel<unknown> | null = null;
@@ -236,6 +246,45 @@ export async function invoke<T = unknown>(
           },
         } as unknown as T;
       }
+      if (cmdObj.cmd === "create_invite" && _fixtureInviteFlow) {
+        return {
+          resp: "ok",
+          data: {
+            result: "invite_created",
+            data: {
+              url: "skattr://invite/v1#fixture",
+              key_package_id: "0".repeat(64),
+              expires_at: 1_700_010_000,
+            },
+          },
+        } as unknown as T;
+      }
+      if (cmdObj.cmd === "add_contact" && _fixtureAddContactFlow) {
+        return {
+          resp: "ok",
+          data: {
+            result: "contact_added",
+            data: {
+              pubkey: "ab".repeat(32),
+              nickname: "Fixture Peer",
+              onion: "fixture.onion",
+              card_version: 1,
+              added_at: 0,
+              unread_count: 0,
+              last_message_preview: null,
+              last_ts_recv: null,
+              group_state: "active",
+              last_read_row_id: null,
+            },
+          },
+        } as unknown as T;
+      }
+      if (cmdObj.cmd === "rename_contact") {
+        return { resp: "ok", data: { result: "ok", data: null } } as unknown as T;
+      }
+      if (cmdObj.cmd === "remove_contact") {
+        return { resp: "ok", data: { result: "ok", data: null } } as unknown as T;
+      }
       throw new Error(`ipc_request: no mock for cmd=${cmdObj.cmd}`);
     }
 
@@ -251,6 +300,9 @@ export async function invoke<T = unknown>(
       }, 50);
       return undefined as unknown as T;
     }
+
+    case "render_invite_qr":
+      return "<svg xmlns='http://www.w3.org/2000/svg' width='100' height='100'><rect width='100' height='100' fill='black'/></svg>" as unknown as T;
 
     default:
       throw new Error(`tauri-mock: unhandled invoke cmd="${cmd}"`);

@@ -311,6 +311,33 @@ async fn full_flow_invite_add_send_queued() {
         "Bob must have a non-empty group_id for Alice"
     );
 
+    // Phase 2.E: Bob's group with Alice must be Active immediately after
+    // AddContact — Bob is the one who created the group, so it is already
+    // persisted in the MLS group repo.
+    //
+    // Alice's group_state cannot be asserted here because Alice uses
+    // NoopInbound (drops Welcome frames). The symmetric round-trip —
+    // Welcome propagation → Alice's group Active → bidirectional message
+    // exchange — is validated by the `welcome_propagation` integration
+    // test (real-Tor, #[ignore]-gated).
+    {
+        use skattr_core::daemon::commands::MlsGroupStateLabel;
+        let bob_contacts = bob.exec(Command::ListContacts).await.unwrap();
+        let alice_entry = match bob_contacts {
+            CommandResult::Contacts(ref v) => {
+                v.iter().find(|s| s.pubkey == alice.pubkey()).cloned()
+            }
+            other => panic!("expected Contacts, got {other:?}"),
+        };
+        let alice_entry =
+            alice_entry.expect("Bob must have Alice in contact list after AddContact");
+        assert_eq!(
+            alice_entry.group_state,
+            Some(MlsGroupStateLabel::Active),
+            "Phase 2.E: Bob's group with Alice must be Active immediately after AddContact"
+        );
+    }
+
     // --- Bob sends to Alice ---
     //
     // Expected: Queued — Alice's NoopInbound drops the frame → no ACK.

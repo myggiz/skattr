@@ -65,6 +65,26 @@ impl<'p> KeyPackageRepo<'p> {
         })
     }
 
+    /// Mark a KeyPackage consumed inside a caller-owned transaction.
+    /// Used by `dispatch_welcome_inner` to atomically consume the KP
+    /// alongside the group-save and outstanding-invite delete.
+    pub(crate) fn mark_consumed_in_tx(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        kp_hash: &[u8; 32],
+    ) -> Result<()> {
+        tx.execute(
+            "UPDATE key_packages SET consumed = 1 WHERE kp_hash = ?1",
+            rusqlite::params![&kp_hash[..]],
+        )
+        .map_err(|e| {
+            CoreError::Storage(StorageErrorKind::Other(format!(
+                "kp: mark_consumed_in_tx: {e}"
+            )))
+        })?;
+        Ok(())
+    }
+
     /// Mark a KeyPackage consumed. Idempotent.
     pub fn mark_consumed(&self, hash: &[u8; 32]) -> Result<()> {
         self.pool.with_mut(|c| {

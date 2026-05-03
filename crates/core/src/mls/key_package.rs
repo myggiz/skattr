@@ -152,6 +152,93 @@ pub(crate) fn credential_with_key(
     }
 }
 
+/// Extract the new-member KeyPackage hash from a TLS-serialized
+/// Welcome blob. Used by the inviter to look up the matching
+/// `outstanding_invites` row.
+///
+/// Phase 2 scope: 2-member groups only — Welcomes carry exactly one
+/// `EncryptedGroupSecrets`. Returns the first entry's
+/// `KeyPackageRef` (32 bytes).
+///
+/// On parse failure (corrupt bytes, wrong message type, multiple
+/// secrets, mis-sized hash) returns `Err(MlsErrorKind::Other(_))`.
+pub(crate) fn parse_welcome_kp_hash(welcome: &[u8]) -> crate::error::Result<[u8; 32]> {
+    use openmls::framing::{MlsMessageBodyIn, MlsMessageIn};
+    use openmls::prelude::tls_codec::Deserialize as _;
+
+    use crate::error::CoreError;
+    use crate::mls::error_kind::MlsErrorKind;
+
+    let msg = MlsMessageIn::tls_deserialize_exact(welcome).map_err(|e| {
+        CoreError::from(MlsErrorKind::Other(format!(
+            "welcome parse: deserialize: {e}"
+        )))
+    })?;
+
+    let inner = match msg.extract() {
+        MlsMessageBodyIn::Welcome(w) => w,
+        _ => {
+            return Err(CoreError::from(MlsErrorKind::Other(
+                "welcome parse: not a Welcome".into(),
+            )))
+        }
+    };
+
+    let secrets = inner.secrets();
+    if secrets.is_empty() {
+        return Err(CoreError::from(MlsErrorKind::Other(
+            "welcome parse: empty secrets".into(),
+        )));
+    }
+    if secrets.len() > 1 {
+        return Err(CoreError::from(MlsErrorKind::Other(format!(
+            "welcome parse: {} secrets, only 1 supported in Phase 2",
+            secrets.len()
+        ))));
+    }
+    let kp_ref = secrets[0].new_member();
+    let bytes = kp_ref.as_slice();
+    if bytes.len() != 32 {
+        return Err(CoreError::from(MlsErrorKind::Other(format!(
+            "welcome parse: kp_ref wrong length {}",
+            bytes.len()
+        ))));
+    }
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(bytes);
+    Ok(arr)
+}
+
+/// Compute the canonical MLS `KeyPackageRef` (32 bytes) for `kp`.
+///
+/// This is `RefHash("MLS 1.0 KeyPackage Reference", tls_kp_bytes)`,
+/// NOT a plain SHA-256 of the bytes. The Welcome message routes by this
+/// ref — see `parse_welcome_kp_hash`. Use this as the primary key for
+/// `outstanding_invites` rows so the inviter can look up the PSK when a
+/// Welcome arrives.
+pub(crate) fn key_package_ref(kp: &KeyPackage) -> Result<[u8; 32]> {
+    use openmls::ciphersuite::hash_ref::make_key_package_ref;
+    use openmls_rust_crypto::OpenMlsRustCrypto;
+
+    let tls_bytes = kp
+        .inner
+        .tls_serialize_detached()
+        .map_err(|e| CoreError::from(MlsErrorKind::Other(format!("kpref: serialize: {e}"))))?;
+    let crypto = OpenMlsRustCrypto::default();
+    let kp_ref = make_key_package_ref(&tls_bytes, MLS_CIPHERSUITE, crypto.crypto())
+        .map_err(|e| CoreError::from(MlsErrorKind::Other(format!("kpref: compute: {e}"))))?;
+    let slice = kp_ref.as_slice();
+    if slice.len() != 32 {
+        return Err(CoreError::from(MlsErrorKind::Other(format!(
+            "kpref: wrong length {}",
+            slice.len()
+        ))));
+    }
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(slice);
+    Ok(arr)
+}
+
 fn sha256(bytes: &[u8]) -> [u8; 32] {
     let mut h = Sha256::new();
     h.update(bytes);
@@ -159,6 +246,63 @@ fn sha256(bytes: &[u8]) -> [u8; 32] {
     let mut arr = [0u8; 32];
     arr.copy_from_slice(&out);
     arr
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod welcome_hash_tests {
+    use super::*;
+    use crate::identity::IdentityKey;
+    use crate::mls::group::Group;
+    use crate::mls::provider::MlsProvider;
+    use crate::storage::key_packages::KeyPackageRepo;
+    use crate::storage::Pool;
+
+    /// Compute the canonical MLS KeyPackageRef for a KeyPackage.
+    ///
+    /// This is RefHash("MLS 1.0 KeyPackage Reference", tls_kp_bytes),
+    /// NOT a plain SHA-256 of the bytes. The Welcome message routes
+    /// using this ref, not bob_kp.hash(). See openmls hash_ref.rs.
+    fn kp_ref_from_kp(kp: &KeyPackage) -> [u8; 32] {
+        use openmls::ciphersuite::hash_ref::make_key_package_ref;
+        use openmls_rust_crypto::OpenMlsRustCrypto;
+        use tls_codec::Serialize as _;
+
+        let crypto = OpenMlsRustCrypto::default();
+        let tls_bytes = kp.as_openmls().tls_serialize_detached().unwrap();
+        let kp_ref = make_key_package_ref(&tls_bytes, MLS_CIPHERSUITE, crypto.crypto()).unwrap();
+        let bytes = kp_ref.as_slice();
+        assert_eq!(bytes.len(), 32, "SHA-256 ref must be 32 bytes");
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(bytes);
+        arr
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[test]
+    fn parse_welcome_kp_hash_returns_invitee_kp_ref() {
+        let pool = Pool::in_memory();
+        let alice = IdentityKey::from_seed(&crate::identity::Seed::generate().unwrap()).unwrap();
+        let bob = IdentityKey::from_seed(&crate::identity::Seed::generate().unwrap()).unwrap();
+
+        let bob_provider = MlsProvider::new();
+        let kp_repo = KeyPackageRepo::new(&pool);
+        let bob_kp = KeyPackage::generate(&bob, &bob_provider, &kp_repo).unwrap();
+
+        // The canonical expected value is the MLS KeyPackageRef (RefHash),
+        // not the plain SHA-256 from bob_kp.hash(). The Welcome message
+        // routes by KeyPackageRef, so parse_welcome_kp_hash must return
+        // that value.
+        let expected_kp_ref = kp_ref_from_kp(&bob_kp);
+
+        let mut alice_group = Group::create_solo(&alice, None, MlsProvider::new()).unwrap();
+        let (welcome, _commit) = alice_group.add_member(&bob_kp, None).unwrap();
+
+        let parsed = parse_welcome_kp_hash(&welcome).unwrap();
+        assert_eq!(parsed, expected_kp_ref);
+        assert_eq!(parsed.len(), 32);
+        assert!(parsed.iter().any(|&b| b != 0), "must be non-zero");
+    }
 }
 
 #[cfg(test)]

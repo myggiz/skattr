@@ -84,6 +84,7 @@ impl<'p> ContactRepo<'p> {
             let mut stmt = c
                 .prepare(
                     "SELECT identity_pubkey, display_name, added_at FROM contacts \
+                     WHERE hidden = 0 \
                      ORDER BY display_name IS NULL, display_name COLLATE NOCASE",
                 )
                 .map_err(|e| {
@@ -347,6 +348,84 @@ impl<'p> ContactRepo<'p> {
                 )))),
             }
         })
+    }
+
+    /// Update the local display name. `None` clears it. Returns
+    /// `ContactErrorKind::NotFound` if no row matched.
+    pub fn set_display_name(&self, identity: &PublicKey, name: Option<&str>) -> Result<()> {
+        self.pool.with_mut(|c| {
+            let changed = c
+                .execute(
+                    "UPDATE contacts SET display_name = ?1 WHERE identity_pubkey = ?2",
+                    rusqlite::params![name, &identity.0[..]],
+                )
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!("set display_name: {e}")))
+                })?;
+            if changed == 0 {
+                return Err(CoreError::Contact(ContactErrorKind::NotFound));
+            }
+            Ok(())
+        })
+    }
+
+    /// Set the `hidden` soft-delete bit. Idempotent. Returns
+    /// `ContactErrorKind::NotFound` if no row matched.
+    pub fn set_hidden(&self, identity: &PublicKey, hidden: bool) -> Result<()> {
+        self.pool.with_mut(|c| {
+            let changed = c
+                .execute(
+                    "UPDATE contacts SET hidden = ?1 WHERE identity_pubkey = ?2",
+                    rusqlite::params![if hidden { 1i64 } else { 0i64 }, &identity.0[..]],
+                )
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!("set hidden: {e}")))
+                })?;
+            if changed == 0 {
+                return Err(CoreError::Contact(ContactErrorKind::NotFound));
+            }
+            Ok(())
+        })
+    }
+
+    /// Like `list()` but does NOT filter `hidden = 0`. Used by
+    /// `Command::ListContactsWithFilter { include_hidden: true }`.
+    pub(crate) fn list_all(&self) -> Result<Vec<Contact>> {
+        let mut contacts: Vec<Contact> = self.pool.with(|c| {
+            let mut stmt = c
+                .prepare(
+                    "SELECT identity_pubkey, display_name, added_at FROM contacts \
+                     ORDER BY display_name IS NULL, display_name COLLATE NOCASE",
+                )
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!("prepare list_all: {e}")))
+                })?;
+            let rows = stmt
+                .query_map([], |r| {
+                    let pub_bytes: Vec<u8> = r.get(0)?;
+                    let mut arr = [0u8; 32];
+                    if pub_bytes.len() == 32 {
+                        arr.copy_from_slice(&pub_bytes);
+                    }
+                    Ok(Contact {
+                        identity: PublicKey(arr),
+                        display_name: r.get(1)?,
+                        added_at: r.get(2)?,
+                        card: None,
+                    })
+                })
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!("query list_all: {e}")))
+                })?;
+            let out: std::result::Result<Vec<_>, _> = rows.collect();
+            out.map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!("collect list_all: {e}")))
+            })
+        })?;
+        for contact in &mut contacts {
+            contact.card = self.latest_card(&contact.identity)?;
+        }
+        Ok(contacts)
     }
 
     /// Find every contact whose hex-encoded `identity_pubkey` starts
@@ -800,5 +879,71 @@ mod tests {
         let gid = [0x44u8; 32];
         let got = repo.contact_for_group(&gid).unwrap();
         assert_eq!(got, None);
+    }
+
+    #[test]
+    fn set_display_name_round_trips() {
+        let pool = Pool::in_memory();
+        let repo = ContactRepo::new(&pool);
+        let alice = sample_contact(0x40);
+        repo.upsert(&alice).unwrap();
+
+        repo.set_display_name(&alice.identity, Some("renamed"))
+            .unwrap();
+        assert_eq!(
+            repo.get(&alice.identity).unwrap().unwrap().display_name,
+            Some("renamed".into())
+        );
+
+        repo.set_display_name(&alice.identity, None).unwrap();
+        assert!(repo
+            .get(&alice.identity)
+            .unwrap()
+            .unwrap()
+            .display_name
+            .is_none());
+    }
+
+    #[test]
+    fn set_display_name_returns_not_found_for_missing_contact() {
+        let pool = Pool::in_memory();
+        let repo = ContactRepo::new(&pool);
+        let err = repo
+            .set_display_name(&PublicKey([0x99; 32]), Some("x"))
+            .expect_err("missing contact");
+        assert!(matches!(
+            err,
+            CoreError::Contact(ContactErrorKind::NotFound)
+        ));
+    }
+
+    #[test]
+    fn set_hidden_filters_list_but_keeps_list_all() {
+        let pool = Pool::in_memory();
+        let repo = ContactRepo::new(&pool);
+        let visible = sample_contact(0x50);
+        let archived = sample_contact(0x60);
+        repo.upsert(&visible).unwrap();
+        repo.upsert(&archived).unwrap();
+
+        repo.set_hidden(&archived.identity, true).unwrap();
+
+        let listed = repo.list().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].identity, visible.identity);
+
+        let listed_all = repo.list_all().unwrap();
+        assert_eq!(listed_all.len(), 2);
+    }
+
+    #[test]
+    fn set_hidden_is_idempotent() {
+        let pool = Pool::in_memory();
+        let repo = ContactRepo::new(&pool);
+        let alice = sample_contact(0x70);
+        repo.upsert(&alice).unwrap();
+        repo.set_hidden(&alice.identity, true).unwrap();
+        repo.set_hidden(&alice.identity, true).unwrap();
+        assert_eq!(repo.list().unwrap().len(), 0);
     }
 }

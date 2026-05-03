@@ -25,6 +25,9 @@ importers:
       '@zxcvbn-ts/language-en':
         specifier: 3.0.2
         version: 3.0.2
+      jsqr:
+        specifier: 1.4.0
+        version: 1.4.0
     devDependencies:
       '@playwright/test':
         specifier: 1.47.0
@@ -781,6 +784,9 @@ packages:
     peerDependenciesMeta:
       canvas:
         optional: true
+
+  jsqr@1.4.0:
+    resolution: {integrity: sha512-dxLob7q65Xg2DvstYkRpkYtmKm2sPJ9oFhrhmudT1dZvNFFTlroai3AWSpLey/w5vMcLBXRgOJsbXpdN9HzU/A==}
 
   kleur@4.1.5:
     resolution: {integrity: sha512-o+NO+8WrRiQEE4/7nwRJhN1HWpVmJm511pBHUxPLtp0BUISzlBplORYSmTclCnJvQq2tKu/sgl3xVpkc7ZWuQQ==}
@@ -1745,6 +1751,8 @@ snapshots:
       - bufferutil
       - supports-color
       - utf-8-validate
+
+  jsqr@1.4.0: {}
 
   kleur@4.1.5: {}
 

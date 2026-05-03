@@ -28,7 +28,7 @@ use crate::delivery::peer::InboundDispatch;
 use crate::delivery::receiver::{receive_in_tx, ReceiveOutcome};
 use crate::envelope::MessageId;
 use crate::error::{CoreError, Result};
-use crate::identity::PublicKey;
+use crate::identity::{IdentityKey, PublicKey};
 use crate::mls::{Group, GroupId, MlsErrorKind};
 use crate::storage::seen_messages::SeenMessagesRepo;
 use crate::storage::{ContactRepo, MessageRepo, MlsGroupRepo, Pool};
@@ -40,12 +40,27 @@ use crate::storage::{ContactRepo, MessageRepo, MlsGroupRepo, Pool};
 pub(crate) struct DaemonInbound {
     pub pool: Arc<Pool>,
     pub events_tx: broadcast::Sender<Event>,
+    /// Local identity for MLS Welcome processing. Set once after
+    /// construction via [`set_identity`]; `None` until that call.
+    pub identity: std::sync::RwLock<Option<Arc<IdentityKey>>>,
 }
 
 impl DaemonInbound {
     /// Create a new `DaemonInbound`.
     pub(crate) fn new(pool: Arc<Pool>, events_tx: broadcast::Sender<Event>) -> Self {
-        Self { pool, events_tx }
+        Self {
+            pool,
+            events_tx,
+            identity: std::sync::RwLock::new(None),
+        }
+    }
+
+    /// Wire the local identity so Welcome messages can be processed.
+    /// Must be called before any Welcome frame can arrive.
+    pub(crate) fn set_identity(&self, identity: Arc<IdentityKey>) {
+        if let Ok(mut guard) = self.identity.write() {
+            *guard = Some(identity);
+        }
     }
 
     /// Production-side dispatch: look up the peer's group via contacts,
@@ -218,6 +233,98 @@ impl DaemonInbound {
 
         Ok(msg_id)
     }
+
+    /// Join an MLS group from a Welcome, persist group + contact + consumed
+    /// markers atomically, and emit `Event::ContactUpdated`.
+    fn dispatch_welcome_inner(&self, peer: PublicKey, welcome_bytes: &[u8]) -> Result<()> {
+        use crate::mls::key_package::{parse_welcome_kp_hash, KeyPackage};
+        use crate::mls::provider::MlsProvider;
+        use crate::storage::key_packages::KeyPackageRepo;
+        use crate::storage::OutstandingInviteRepo;
+
+        let identity_arc = self
+            .identity
+            .read()
+            .ok()
+            .and_then(|g| g.clone())
+            .ok_or_else(|| {
+                CoreError::from(MlsErrorKind::Other(
+                    "inbound welcome: identity not wired".into(),
+                ))
+            })?;
+
+        // Canonical KeyPackageRef (32 bytes) for outstanding_invites lookup.
+        let kp_ref = parse_welcome_kp_hash(welcome_bytes)?;
+
+        let oi = OutstandingInviteRepo::new(&self.pool);
+        let (psk, inviter_kp_bytes, provider_snap_opt, expires_at) =
+            oi.get_psk_and_kp_bytes(&kp_ref)?.ok_or_else(|| {
+                CoreError::from(MlsErrorKind::Other(
+                    "inbound welcome: unknown kp_ref".into(),
+                ))
+            })?;
+
+        let now = now_unix_seconds();
+        if expires_at < now {
+            return Err(CoreError::from(MlsErrorKind::Other(
+                "inbound welcome: invite expired".into(),
+            )));
+        }
+
+        // SHA-256 hash for the key_packages table (different from KeyPackageRef).
+        let inviter_kp = KeyPackage::from_bytes(&inviter_kp_bytes)?;
+        let kp_sha256 = inviter_kp.hash()?;
+
+        // Restore the MlsProvider that was used to generate the KP so OpenMLS
+        // can find the init private key. If no snapshot was stored (legacy rows
+        // or pre-migration invites) we fall back to a fresh provider — this will
+        // likely fail with NoMatchingKeyPackage, but that's safer than panic.
+        let provider = if let Some(snap) = provider_snap_opt {
+            MlsProvider::load(&snap)?
+        } else {
+            MlsProvider::new()
+        };
+
+        let group = Group::join_from_welcome(&identity_arc, welcome_bytes, Some(&*psk), provider)?;
+        let group_id = group.id().0.clone();
+
+        let group_repo = MlsGroupRepo::new(&self.pool);
+        let kp_repo = KeyPackageRepo::new(&self.pool);
+
+        self.pool.transaction(|tx| {
+            group.save_in_tx(&group_repo, tx)?;
+            // Execute contact upsert + group_id link directly on `tx` to
+            // avoid re-locking the Pool mutex (pool.transaction already holds
+            // the mutex; ContactRepo::upsert / set_group_id call pool.with_mut
+            // and would deadlock).
+            tx.execute(
+                "INSERT INTO contacts (identity_pubkey, display_name, added_at) \
+                 VALUES (?1, ?2, ?3) \
+                 ON CONFLICT(identity_pubkey) DO UPDATE SET display_name=excluded.display_name",
+                rusqlite::params![&peer.0[..], Option::<String>::None, now],
+            )
+            .map_err(|e| {
+                CoreError::Storage(crate::storage::StorageErrorKind::Other(format!(
+                    "welcome: upsert contact: {e}"
+                )))
+            })?;
+            tx.execute(
+                "UPDATE contacts SET group_id = ?1 WHERE identity_pubkey = ?2",
+                rusqlite::params![&group_id[..], &peer.0[..]],
+            )
+            .map_err(|e| {
+                CoreError::Storage(crate::storage::StorageErrorKind::Other(format!(
+                    "welcome: set group_id: {e}"
+                )))
+            })?;
+            kp_repo.mark_consumed_in_tx(tx, &kp_sha256)?;
+            oi.mark_consumed_in_tx(tx, &kp_ref)?;
+            Ok(())
+        })?;
+
+        let _ = self.events_tx.send(Event::ContactUpdated(peer));
+        Ok(())
+    }
 }
 
 impl InboundDispatch for DaemonInbound {
@@ -229,6 +336,21 @@ impl InboundDispatch for DaemonInbound {
                     peer = ?peer,
                     err = %e,
                     "inbound: dispatch failed, dropping frame"
+                );
+                None
+            }
+        }
+    }
+
+    fn dispatch_welcome(&self, peer: PublicKey, welcome: &[u8]) -> Option<MessageId> {
+        let synthetic_id = crate::delivery::peer::welcome_msg_id(welcome);
+        match self.dispatch_welcome_inner(peer, welcome) {
+            Ok(()) => Some(synthetic_id),
+            Err(e) => {
+                tracing::warn!(
+                    peer = ?peer,
+                    err = %e,
+                    "inbound: dispatch_welcome failed, not ACKing"
                 );
                 None
             }
@@ -681,6 +803,160 @@ mod tests {
             contact_repo.latest_card(&peer).unwrap().is_none(),
             "no card must be stored for bob after mismatch rejection"
         );
+    }
+
+    #[tokio::test]
+    async fn dispatch_welcome_joins_group_and_emits_contact_updated() {
+        use crate::mls::key_package::{key_package_ref, KeyPackage};
+        use crate::mls::provider::MlsProvider;
+        use crate::storage::key_packages::KeyPackageRepo;
+        use crate::storage::OutstandingInviteRepo;
+
+        let pool = Arc::new(Pool::in_memory());
+        let (events_tx, mut rx) = broadcast::channel::<Event>(16);
+
+        // Alice = inviter
+        let alice =
+            crate::identity::IdentityKey::from_seed(&crate::identity::Seed::generate().unwrap())
+                .unwrap();
+        let alice_provider = MlsProvider::new();
+        let kp_repo = KeyPackageRepo::new(&pool);
+        let alice_kp = KeyPackage::generate(&alice, &alice_provider, &kp_repo).unwrap();
+        let alice_kp_ref = key_package_ref(&alice_kp).unwrap();
+        let alice_kp_bytes = alice_kp.to_bytes().unwrap();
+
+        // outstanding_invites row keyed on KeyPackageRef
+        let psk_bytes = [0xABu8; 32];
+        let provider_snap = alice_provider.snapshot().unwrap();
+        let oi = OutstandingInviteRepo::new(&pool);
+        oi.put_with_provider(
+            &alice_kp_ref,
+            &zeroize::Zeroizing::new(psk_bytes),
+            &alice_kp_bytes,
+            &provider_snap,
+            crate::daemon::clock::now_unix_seconds() + 3600,
+            crate::daemon::clock::now_unix_seconds(),
+        )
+        .unwrap();
+
+        // Bob builds his solo group, adds Alice's KP
+        let bob =
+            crate::identity::IdentityKey::from_seed(&crate::identity::Seed::generate().unwrap())
+                .unwrap();
+        let mut bob_group =
+            crate::mls::Group::create_solo(&bob, Some(&psk_bytes), MlsProvider::new()).unwrap();
+        let alice_kp_for_add = KeyPackage::from_bytes(&alice_kp_bytes).unwrap();
+        let (welcome_bytes, _commit) = bob_group
+            .add_member(&alice_kp_for_add, Some(&psk_bytes))
+            .unwrap();
+
+        // Drive Alice's dispatch_welcome
+        let alice_arc = Arc::new(alice);
+        let inbound = DaemonInbound::new(pool.clone(), events_tx.clone());
+        inbound.set_identity(alice_arc.clone());
+        let bob_pubkey = bob.public();
+        let result = crate::delivery::peer::InboundDispatch::dispatch_welcome(
+            &inbound,
+            bob_pubkey,
+            &welcome_bytes,
+        );
+        assert!(result.is_some(), "dispatch_welcome must succeed");
+        let returned_id = result.unwrap();
+        assert_eq!(
+            returned_id.0,
+            crate::delivery::peer::welcome_msg_id(&welcome_bytes).0
+        );
+
+        // ContactUpdated event must fire
+        match tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv()).await {
+            Ok(Ok(Event::ContactUpdated(p))) => assert_eq!(p, bob_pubkey),
+            other => panic!("expected ContactUpdated, got {other:?}"),
+        }
+
+        // outstanding_invites row gone
+        assert!(oi.get_psk(&alice_kp_ref).unwrap().is_none());
+
+        // Alice's contact for Bob exists with group_id linked
+        let cr = crate::storage::ContactRepo::new(&pool);
+        let stored = cr
+            .get(&bob_pubkey)
+            .unwrap()
+            .unwrap_or_else(|| panic!("contact must be persisted"));
+        let gid = cr
+            .get_group_id(&bob_pubkey)
+            .unwrap()
+            .unwrap_or_else(|| panic!("gid must be set"));
+        assert_eq!(gid.len(), 32);
+        assert_eq!(stored.identity, bob_pubkey);
+    }
+
+    #[tokio::test]
+    async fn dispatch_welcome_rejects_unknown_kp_hash() {
+        let pool = Arc::new(Pool::in_memory());
+        let (events_tx, _rx) = broadcast::channel::<Event>(16);
+        let alice_arc = Arc::new(
+            crate::identity::IdentityKey::from_seed(&crate::identity::Seed::generate().unwrap())
+                .unwrap(),
+        );
+        let inbound = DaemonInbound::new(pool, events_tx);
+        inbound.set_identity(alice_arc);
+
+        let result = crate::delivery::peer::InboundDispatch::dispatch_welcome(
+            &inbound,
+            crate::identity::PublicKey([0xCCu8; 32]),
+            b"not a real welcome",
+        );
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn dispatch_welcome_rejects_expired_invite() {
+        use crate::mls::key_package::{key_package_ref, KeyPackage};
+        use crate::mls::provider::MlsProvider;
+        use crate::storage::key_packages::KeyPackageRepo;
+        use crate::storage::OutstandingInviteRepo;
+
+        let pool = Arc::new(Pool::in_memory());
+        let (events_tx, _rx) = broadcast::channel::<Event>(16);
+        let alice =
+            crate::identity::IdentityKey::from_seed(&crate::identity::Seed::generate().unwrap())
+                .unwrap();
+        let kp_repo = KeyPackageRepo::new(&pool);
+        let alice_kp = KeyPackage::generate(&alice, &MlsProvider::new(), &kp_repo).unwrap();
+        let alice_kp_ref = key_package_ref(&alice_kp).unwrap();
+        let alice_kp_bytes = alice_kp.to_bytes().unwrap();
+
+        let psk = [0u8; 32];
+        let provider_snap = MlsProvider::new().snapshot().unwrap();
+        OutstandingInviteRepo::new(&pool)
+            .put_with_provider(
+                &alice_kp_ref,
+                &zeroize::Zeroizing::new(psk),
+                &alice_kp_bytes,
+                &provider_snap,
+                crate::daemon::clock::now_unix_seconds() - 1, // expired
+                crate::daemon::clock::now_unix_seconds() - 3600,
+            )
+            .unwrap();
+
+        let bob =
+            crate::identity::IdentityKey::from_seed(&crate::identity::Seed::generate().unwrap())
+                .unwrap();
+        let mut bob_group =
+            crate::mls::Group::create_solo(&bob, Some(&psk), MlsProvider::new()).unwrap();
+        let alice_kp_for_add = KeyPackage::from_bytes(&alice_kp_bytes).unwrap();
+        let (welcome_bytes, _) = bob_group.add_member(&alice_kp_for_add, Some(&psk)).unwrap();
+
+        let alice_arc = Arc::new(alice);
+        let inbound = DaemonInbound::new(pool, events_tx);
+        inbound.set_identity(alice_arc);
+
+        let result = crate::delivery::peer::InboundDispatch::dispatch_welcome(
+            &inbound,
+            bob.public(),
+            &welcome_bytes,
+        );
+        assert!(result.is_none(), "expired invite must not be processed");
     }
 
     /// When no group exists for the given id, dispatch_for_group must

@@ -33,7 +33,7 @@ where
     match cmd {
         Command::Shutdown => Ok(CommandResult::Ok),
         Command::RotateOnion => handle_rotate_onion(handle).await,
-        Command::ListContacts => list_contacts(&handle).await,
+        Command::ListContacts => list_contacts(&handle, false).await,
         Command::CreateInvite { nickname, ttl_secs } => {
             create_invite(&handle, nickname, ttl_secs).await
         }
@@ -46,6 +46,13 @@ where
             paged,
         } => recent_messages(&handle, contact, limit, before_id, paged).await,
         Command::CreateGroup { .. } => Err(IpcError::UnknownCommand),
+        Command::RenameContact { contact, nickname } => {
+            rename_contact(&handle, contact, nickname).await
+        }
+        Command::RemoveContact { contact } => remove_contact(&handle, contact).await,
+        Command::ListContactsWithFilter { include_hidden } => {
+            list_contacts(&handle, include_hidden).await
+        }
         Command::SearchMessages {
             query,
             contact,
@@ -76,6 +83,7 @@ where
 
 async fn list_contacts<S>(
     handle: &Arc<DaemonHandle<S>>,
+    include_hidden: bool,
 ) -> std::result::Result<CommandResult, IpcError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -87,7 +95,11 @@ where
     let msg_repo = MessageRepo::new(&handle.pool);
     let group_repo = MlsGroupRepo::new(&handle.pool);
     let read_repo = ReadStateRepo::new(&handle.pool);
-    let contacts = repo.list().map_err(map_err)?;
+    let contacts = if include_hidden {
+        repo.list_all().map_err(map_err)?
+    } else {
+        repo.list().map_err(map_err)?
+    };
 
     let mut summaries: Vec<ContactSummary> = Vec::with_capacity(contacts.len());
     for c in contacts {
@@ -180,41 +192,59 @@ where
     use crate::daemon::error_kind::DaemonErrorKind;
     use crate::daemon::hex::Hex32;
     use crate::invite::InviteLink;
-    use crate::mls::key_package::KeyPackage;
+    use crate::mls::key_package::{key_package_ref, KeyPackage};
     use crate::mls::provider::MlsProvider;
-    use crate::storage::KeyPackageRepo;
+    use crate::storage::{KeyPackageRepo, OutstandingInviteRepo};
     use rand_core::{OsRng, RngCore as _};
+    use zeroize::Zeroizing;
 
     let onion = handle
         .onion()
         .ok_or(IpcError::Daemon(DaemonErrorKind::TorNotReady))?;
 
     let ttl = ttl_secs.unwrap_or(24 * 3600);
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .map_err(|e| map_err(CoreError::Config(format!("clock: {e}"))))?;
+    let now = crate::daemon::clock::now_unix_seconds();
 
     // Generate a fresh MLS KeyPackage. `generate` internally stores the
     // KP bytes in `KeyPackageRepo` with direction="ours", consumed=false.
     let provider = MlsProvider::new();
     let kp_repo = KeyPackageRepo::new(&handle.pool);
     let kp = KeyPackage::generate(&handle.identity, &provider, &kp_repo).map_err(map_err)?;
-    let kp_hash = kp.hash().map_err(map_err)?;
+
+    // Canonical MLS KeyPackageRef — the value the Welcome message routes by.
+    // This is the primary key for outstanding_invites so the inviter can look
+    // up the PSK when the Welcome arrives (see parse_welcome_kp_hash).
+    let kp_ref = key_package_ref(&kp).map_err(map_err)?;
     let kp_bytes = kp.to_bytes().map_err(map_err)?;
 
     // 32-byte one-time PSK.
-    let mut psk = [0u8; 32];
-    OsRng.fill_bytes(&mut psk);
+    let mut psk_raw = [0u8; 32];
+    OsRng.fill_bytes(&mut psk_raw);
+    let psk = Zeroizing::new(psk_raw);
 
-    let link =
-        InviteLink::generate(&handle.identity, onion, kp_bytes, psk, ttl, now).map_err(map_err)?;
+    let link = InviteLink::generate(&handle.identity, onion, kp_bytes.clone(), psk_raw, ttl, now)
+        .map_err(map_err)?;
     let url = link.to_url().map_err(map_err)?;
     let expires_at = u64::try_from(now + ttl as i64).unwrap_or(0);
 
+    // Persist the PSK + provider snapshot so the inviter can reconstruct both
+    // at Welcome-receive time. The provider snapshot holds the init private
+    // key that OpenMLS needs to process the Welcome via join_from_welcome.
+    let provider_snap = provider.snapshot().map_err(map_err)?;
+    let oi = OutstandingInviteRepo::new(&handle.pool);
+    oi.put_with_provider(
+        &kp_ref,
+        &psk,
+        &kp_bytes,
+        &provider_snap,
+        now + ttl as i64,
+        now,
+    )
+    .map_err(map_err)?;
+
     Ok(CommandResult::InviteCreated {
         url,
-        key_package_id: Hex32::from(kp_hash),
+        key_package_id: Hex32::from(kp_ref),
         expires_at,
     })
 }
@@ -258,7 +288,7 @@ where
         Group::create_solo(&handle.identity, Some(&link.psk.0), provider).map_err(map_err)?;
 
     let invitee_kp = KeyPackage::from_bytes(&link.body.key_package).map_err(map_err)?;
-    let (_welcome, _commit) = group
+    let (welcome, _commit) = group
         .add_member(&invitee_kp, Some(&link.psk.0))
         .map_err(map_err)?;
     let group_id = group.id().0.clone();
@@ -286,6 +316,16 @@ where
     let _ = handle
         .events_tx
         .send(Event::ContactUpdated(link.body.identity));
+
+    // Submit Welcome to the inviter via the hub. We do not await the
+    // ACK here — UI responsiveness comes first, and a failed delivery
+    // surfaces via Event::DeliveryStatusChanged through the hub's
+    // existing failure path.
+    handle
+        .hub
+        .send_welcome(link.body.identity, welcome)
+        .await
+        .map_err(map_err)?;
 
     Ok(CommandResult::ContactAdded(ContactSummary {
         pubkey: link.body.identity,
@@ -1123,6 +1163,59 @@ where
     })
 }
 
+async fn rename_contact<S>(
+    handle: &Arc<DaemonHandle<S>>,
+    contact: crate::identity::PublicKey,
+    nickname: Option<String>,
+) -> std::result::Result<CommandResult, IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    use crate::daemon::error_kind::DaemonErrorKind;
+    use crate::daemon::events::Event;
+    use crate::storage::ContactRepo;
+
+    let trimmed = match nickname {
+        None => None,
+        Some(s) => {
+            let t = s.trim().to_string();
+            if t.is_empty() {
+                return Err(IpcError::Daemon(DaemonErrorKind::InvalidArgument {
+                    message: "nickname must not be empty or whitespace-only".into(),
+                }));
+            }
+            if t.chars().count() > 64 {
+                return Err(IpcError::Daemon(DaemonErrorKind::InvalidArgument {
+                    message: "nickname must be 64 characters or fewer".into(),
+                }));
+            }
+            Some(t)
+        }
+    };
+
+    let repo = ContactRepo::new(&handle.pool);
+    repo.set_display_name(&contact, trimmed.as_deref())
+        .map_err(map_err)?;
+    let _ = handle.events_tx.send(Event::ContactUpdated(contact));
+    Ok(CommandResult::Ok)
+}
+
+async fn remove_contact<S>(
+    handle: &Arc<DaemonHandle<S>>,
+    contact: crate::identity::PublicKey,
+) -> std::result::Result<CommandResult, IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    use crate::daemon::events::Event;
+    use crate::storage::ContactRepo;
+
+    let repo = ContactRepo::new(&handle.pool);
+    repo.set_hidden(&contact, true).map_err(map_err)?;
+    let _ = handle.events_tx.send(Event::ContactUpdated(contact));
+    Ok(CommandResult::Ok)
+}
+
 /// Map any `CoreError` to an `IpcError`. Projects via `CoreError::kind`
 /// into `DaemonErrorKind`; otherwise `Internal(...)` with a truncated
 /// display. Logs the full error server-side.
@@ -1220,10 +1313,39 @@ mod tests {
         let parsed = crate::invite::InviteLink::from_url(&url, 1).unwrap();
         assert_eq!(parsed.body.onion, "testonion".repeat(8));
 
-        // The KeyPackage is recorded in storage (single-use tracking).
-        use crate::storage::KeyPackageRepo;
-        let kp_repo = KeyPackageRepo::new(&handle.pool);
-        assert!(kp_repo.get(&kpi.0).unwrap().is_some());
+        // key_package_id is now the canonical MLS KeyPackageRef (KeyPackageRef
+        // computed by make_key_package_ref), not plain SHA-256. It is still
+        // 32 non-zero bytes.
+        assert_ne!(kpi.0, [0u8; 32]);
+    }
+
+    #[tokio::test]
+    async fn create_invite_persists_outstanding_invite_row() {
+        use crate::storage::OutstandingInviteRepo;
+
+        let handle = test_handle();
+        handle.set_onion("testonion".repeat(8));
+
+        let result = execute_command(
+            handle.clone(),
+            Command::CreateInvite {
+                nickname: None,
+                ttl_secs: Some(3600),
+            },
+        )
+        .await
+        .unwrap();
+
+        let kp_ref = match result {
+            CommandResult::InviteCreated { key_package_id, .. } => key_package_id.0,
+            other => panic!("unexpected: {other:?}"),
+        };
+
+        let oi = OutstandingInviteRepo::new(&handle.pool);
+        let (psk, expires_at) = oi.get_psk(&kp_ref).unwrap().expect("row must exist");
+        assert_eq!(psk.as_ref().len(), 32);
+        let now = crate::daemon::clock::now_unix_seconds();
+        assert!(expires_at >= now + 3500 && expires_at <= now + 3700);
     }
 
     #[tokio::test]
@@ -3098,5 +3220,255 @@ mod tests {
             other => panic!("expected Contacts, got {other:?}"),
         };
         assert_eq!(summary.group_state, Some(MlsGroupStateLabel::Corrupt));
+    }
+
+    // ── Task 8: rename_contact dispatcher ───────────────────────────────────
+
+    #[tokio::test]
+    async fn rename_contact_validates_nickname() {
+        use crate::daemon::error_kind::DaemonErrorKind;
+        let handle = test_handle();
+        let peer = PublicKey([0x77; 32]);
+
+        // Pre-create the contact row so set_display_name finds something to update.
+        let repo = crate::storage::ContactRepo::new(&handle.pool);
+        repo.upsert(&crate::contact::Contact {
+            identity: peer,
+            display_name: None,
+            added_at: 0,
+            card: None,
+        })
+        .unwrap();
+
+        // empty after trim
+        let err = execute_command(
+            handle.clone(),
+            Command::RenameContact {
+                contact: peer,
+                nickname: Some("   ".into()),
+            },
+        )
+        .await
+        .expect_err("empty after trim must reject");
+        assert!(matches!(
+            err,
+            IpcError::Daemon(DaemonErrorKind::InvalidArgument { .. })
+        ));
+
+        // > 64 chars
+        let too_long = "x".repeat(65);
+        let err = execute_command(
+            handle.clone(),
+            Command::RenameContact {
+                contact: peer,
+                nickname: Some(too_long),
+            },
+        )
+        .await
+        .expect_err("> 64 chars must reject");
+        assert!(matches!(
+            err,
+            IpcError::Daemon(DaemonErrorKind::InvalidArgument { .. })
+        ));
+
+        // happy path
+        let ok = execute_command(
+            handle.clone(),
+            Command::RenameContact {
+                contact: peer,
+                nickname: Some("Alice".into()),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(ok, CommandResult::Ok));
+
+        // verify persisted
+        let stored = repo.get(&peer).unwrap().unwrap();
+        assert_eq!(stored.display_name.as_deref(), Some("Alice"));
+    }
+
+    #[tokio::test]
+    async fn rename_contact_emits_contact_updated_event() {
+        let handle = test_handle();
+        let peer = PublicKey([0x88; 32]);
+        crate::storage::ContactRepo::new(&handle.pool)
+            .upsert(&crate::contact::Contact {
+                identity: peer,
+                display_name: None,
+                added_at: 0,
+                card: None,
+            })
+            .unwrap();
+
+        let mut rx = handle.events_tx.subscribe();
+        let _ = execute_command(
+            handle.clone(),
+            Command::RenameContact {
+                contact: peer,
+                nickname: Some("Bob".into()),
+            },
+        )
+        .await
+        .unwrap();
+
+        match tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv()).await {
+            Ok(Ok(crate::daemon::events::Event::ContactUpdated(p))) => assert_eq!(p, peer),
+            other => panic!("expected ContactUpdated, got {other:?}"),
+        }
+    }
+
+    // ── Task 9: remove_contact dispatcher ────────────────────────────────────
+
+    #[tokio::test]
+    async fn remove_contact_is_idempotent() {
+        let handle = test_handle();
+        let peer = PublicKey([0x91; 32]);
+        crate::storage::ContactRepo::new(&handle.pool)
+            .upsert(&crate::contact::Contact {
+                identity: peer,
+                display_name: Some("Bob".into()),
+                added_at: 0,
+                card: None,
+            })
+            .unwrap();
+
+        let r1 = execute_command(handle.clone(), Command::RemoveContact { contact: peer })
+            .await
+            .unwrap();
+        let r2 = execute_command(handle.clone(), Command::RemoveContact { contact: peer })
+            .await
+            .unwrap();
+        assert!(matches!(r1, CommandResult::Ok));
+        assert!(matches!(r2, CommandResult::Ok));
+
+        // Default ListContacts filters them out.
+        let listed = execute_command(handle.clone(), Command::ListContacts)
+            .await
+            .unwrap();
+        match listed {
+            CommandResult::Contacts(v) => assert!(v.is_empty()),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn remove_contact_preserves_mls_group_state() {
+        let handle = test_handle();
+        use crate::mls::key_package::KeyPackage;
+        use crate::mls::provider::MlsProvider;
+        let bob_id =
+            crate::identity::IdentityKey::from_seed(&crate::identity::Seed::generate().unwrap())
+                .unwrap();
+        let bob_provider = MlsProvider::new();
+        let kp_repo = crate::storage::KeyPackageRepo::new(&handle.pool);
+        let bob_kp = KeyPackage::generate(&bob_id, &bob_provider, &kp_repo).unwrap();
+        let mut group =
+            crate::mls::Group::create_solo(&handle.identity, None, MlsProvider::new()).unwrap();
+        let _ = group.add_member(&bob_kp, None).unwrap();
+        let group_repo = crate::storage::MlsGroupRepo::new(&handle.pool);
+        group.save(&group_repo).unwrap();
+        let gid = group.id().0.clone();
+        let blob_before: Vec<u8> = handle
+            .pool
+            .with(|c| {
+                c.query_row(
+                    "SELECT state_blob FROM mls_groups WHERE group_id = ?1",
+                    rusqlite::params![&gid[..]],
+                    |r| r.get::<_, Vec<u8>>(0),
+                )
+                .map_err(|e| {
+                    crate::error::CoreError::Storage(crate::storage::StorageErrorKind::Other(
+                        e.to_string(),
+                    ))
+                })
+            })
+            .unwrap();
+
+        let bob_pk = bob_id.public();
+        let repo = crate::storage::ContactRepo::new(&handle.pool);
+        repo.upsert(&crate::contact::Contact {
+            identity: bob_pk,
+            display_name: None,
+            added_at: 0,
+            card: None,
+        })
+        .unwrap();
+        repo.set_group_id(&bob_pk, &gid).unwrap();
+
+        let _ = execute_command(handle.clone(), Command::RemoveContact { contact: bob_pk })
+            .await
+            .unwrap();
+
+        let blob_after: Vec<u8> = handle
+            .pool
+            .with(|c| {
+                c.query_row(
+                    "SELECT state_blob FROM mls_groups WHERE group_id = ?1",
+                    rusqlite::params![&gid[..]],
+                    |r| r.get::<_, Vec<u8>>(0),
+                )
+                .map_err(|e| {
+                    crate::error::CoreError::Storage(crate::storage::StorageErrorKind::Other(
+                        e.to_string(),
+                    ))
+                })
+            })
+            .unwrap();
+        assert_eq!(
+            blob_before, blob_after,
+            "RemoveContact must not touch MLS state"
+        );
+    }
+
+    // ── Task 10: list_contacts_with_filter ────────────────────────────────────
+
+    #[tokio::test]
+    async fn list_contacts_with_filter_includes_hidden_when_opted_in() {
+        let handle = test_handle();
+        let visible = PublicKey([0xA1; 32]);
+        let archived = PublicKey([0xA2; 32]);
+        let repo = crate::storage::ContactRepo::new(&handle.pool);
+        repo.upsert(&crate::contact::Contact {
+            identity: visible,
+            display_name: Some("Visible".into()),
+            added_at: 0,
+            card: None,
+        })
+        .unwrap();
+        repo.upsert(&crate::contact::Contact {
+            identity: archived,
+            display_name: Some("Archived".into()),
+            added_at: 0,
+            card: None,
+        })
+        .unwrap();
+        repo.set_hidden(&archived, true).unwrap();
+
+        // Default: only visible.
+        let r = execute_command(handle.clone(), Command::ListContacts)
+            .await
+            .unwrap();
+        match r {
+            CommandResult::Contacts(v) => {
+                assert_eq!(v.len(), 1);
+                assert_eq!(v[0].pubkey, visible);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        // include_hidden = true: both.
+        let r = execute_command(
+            handle.clone(),
+            Command::ListContactsWithFilter {
+                include_hidden: true,
+            },
+        )
+        .await
+        .unwrap();
+        match r {
+            CommandResult::Contacts(v) => assert_eq!(v.len(), 2),
+            other => panic!("unexpected: {other:?}"),
+        }
     }
 }
