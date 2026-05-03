@@ -32,20 +32,35 @@ pub fn spawn_sweep(
         loop {
             tokio::select! {
                 _ = tokio::time::sleep(tick) => {
-                    if retention_days == 0 {
-                        continue;
+                    // Message-pruning step (gated on retention_days).
+                    if retention_days != 0 {
+                        let cutoff = now_unix_seconds()
+                            .saturating_sub(i64::from(retention_days).saturating_mul(86_400));
+                        match MessageRepo::new(&pool).prune_before(None, cutoff) {
+                            Ok(n) if n > 0 => tracing::info!(
+                                rows = n, cutoff_ts_recv = cutoff,
+                                "retention sweep deleted rows"
+                            ),
+                            Ok(_) => {}
+                            Err(e) => tracing::warn!(
+                                error = %e,
+                                "retention sweep failed; will retry next tick"
+                            ),
+                        }
                     }
-                    let cutoff = now_unix_seconds()
-                        .saturating_sub(i64::from(retention_days).saturating_mul(86_400));
-                    match MessageRepo::new(&pool).prune_before(None, cutoff) {
-                        Ok(n) if n > 0 => tracing::info!(
-                            rows = n, cutoff_ts_recv = cutoff,
-                            "retention sweep deleted rows"
+
+                    // Outstanding-invite expiry sweep — always runs.
+                    let now = now_unix_seconds();
+                    let oi = crate::storage::OutstandingInviteRepo::new(&pool);
+                    match oi.purge_expired(now) {
+                        Ok(n) if n > 0 => tracing::debug!(
+                            rows = n,
+                            "retention: purged expired outstanding invites"
                         ),
                         Ok(_) => {}
                         Err(e) => tracing::warn!(
                             error = %e,
-                            "retention sweep failed; will retry next tick"
+                            "retention: outstanding invite purge failed"
                         ),
                     }
                 }
@@ -143,5 +158,28 @@ mod tests {
             n <= 2,
             "expected at most 2 rows after 1-day cutoff sweep, got {n}"
         );
+    }
+
+    #[tokio::test]
+    async fn sweep_purges_expired_outstanding_invites() {
+        use crate::storage::OutstandingInviteRepo;
+        use zeroize::Zeroizing;
+
+        let pool = Arc::new(Pool::in_memory());
+        let now = now_unix_seconds();
+
+        let oi = OutstandingInviteRepo::new(&pool);
+        oi.put(&[0x10; 32], &Zeroizing::new([0u8; 32]), &[], now - 1, now - 3600).unwrap();
+        oi.put(&[0x20; 32], &Zeroizing::new([0u8; 32]), &[], now + 3600, now).unwrap();
+
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let h = spawn_sweep(pool.clone(), 0, Duration::from_millis(20), rx);
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        let _ = tx.send(true);
+        let _ = h.await;
+
+        // Expired row purged; non-expired retained.
+        assert!(oi.get_psk(&[0x10; 32]).unwrap().is_none());
+        assert!(oi.get_psk(&[0x20; 32]).unwrap().is_some());
     }
 }
