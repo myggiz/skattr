@@ -48,6 +48,21 @@ pub struct DeliveryJob {
 /// hub can `.await` it on shutdown.
 pub(crate) type PeerHandle = JoinHandle<()>;
 
+/// Deterministic synthetic message id for ACK correlation of an
+/// outbound Welcome. Defined identically on both sides so the
+/// inviter (sender) and the joiner (receiver) compute the same
+/// `MessageId` from the Welcome bytes — letting the existing
+/// `Frame::Ack(MessageId)` correlator round-trip without changes.
+pub(crate) fn welcome_msg_id(bytes: &[u8]) -> MessageId {
+    use blake2::{Blake2s256, Digest};
+    let mut h = Blake2s256::new();
+    h.update(bytes);
+    let out = h.finalize();
+    let mut id = [0u8; 16];
+    id.copy_from_slice(&out[..16]);
+    MessageId(id)
+}
+
 /// Inbound-MLS dispatch strategy, injected per peer actor. See Task 8
 /// preamble for the rationale — keeps `openmls` out of the actor
 /// and keeps tests that don't need real MLS trivially easy to write.
@@ -389,6 +404,20 @@ mod tests {
     use crate::transport::frame::Frame;
     use crate::transport::noise::{handshake_initiator, handshake_responder};
     use tokio::sync::{mpsc, oneshot};
+
+    #[test]
+    fn welcome_msg_id_is_deterministic_blake2s_prefix() {
+        let bytes = b"hello welcome";
+        let id1 = super::welcome_msg_id(bytes);
+        let id2 = super::welcome_msg_id(bytes);
+        assert_eq!(id1.0, id2.0, "must be deterministic");
+
+        let other = super::welcome_msg_id(b"different bytes");
+        assert_ne!(id1.0, other.0, "different inputs must produce different ids");
+
+        assert_eq!(id1.0.len(), 16);
+        assert!(id1.0.iter().any(|&b| b != 0));
+    }
 
     /// Spawn a matching responder task over one half of a duplex pair.
     /// Returns a join handle that resolves when the responder observes
