@@ -46,6 +46,9 @@ where
             paged,
         } => recent_messages(&handle, contact, limit, before_id, paged).await,
         Command::CreateGroup { .. } => Err(IpcError::UnknownCommand),
+        Command::RenameContact { .. }
+        | Command::RemoveContact { .. }
+        | Command::ListContactsWithFilter { .. } => Err(IpcError::UnknownCommand),
         Command::SearchMessages {
             query,
             contact,

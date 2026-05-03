@@ -136,6 +136,30 @@ pub enum Command {
         /// Max rows per page.
         limit: u32,
     },
+    /// Set or clear the local nickname for `contact`. Local-only —
+    /// does not propagate to the peer's `ContactCard`.
+    /// Validation: empty / whitespace-only after trim → InvalidArgument;
+    /// nickname > 64 chars → InvalidArgument.
+    RenameContact {
+        /// Peer identity pubkey.
+        contact: PublicKey,
+        /// `Some(nick)` sets; `None` clears.
+        nickname: Option<String>,
+    },
+    /// Soft-delete a contact (`contacts.hidden = 1`). MLS group state,
+    /// messages, outbox, mailbox, and read-state rows are preserved.
+    /// Idempotent: re-archiving a hidden contact returns `Ok`.
+    RemoveContact {
+        /// Peer identity pubkey.
+        contact: PublicKey,
+    },
+    /// Like `ListContacts` but with explicit `include_hidden` opt-in.
+    /// `ListContacts` (the existing unit variant) implicitly passes
+    /// `include_hidden = false`.
+    ListContactsWithFilter {
+        /// If true, include hidden contacts.
+        include_hidden: bool,
+    },
 }
 
 /// Outcome of a `SendMessage` command after the inline-delivery wait.
@@ -736,6 +760,51 @@ mod tests {
             } => assert_eq!(rec.row_id, 11),
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn rename_contact_command_round_trips_cbor() {
+        let cmd = Command::RenameContact {
+            contact: PublicKey([0x44; 32]),
+            nickname: Some("Alice".into()),
+        };
+        let back: Command = roundtrip(&cmd);
+        assert!(matches!(
+            back,
+            Command::RenameContact { nickname: Some(ref s), .. } if s == "Alice"
+        ));
+    }
+
+    #[test]
+    fn rename_contact_command_with_none_round_trips_cbor() {
+        let cmd = Command::RenameContact {
+            contact: PublicKey([0x55; 32]),
+            nickname: None,
+        };
+        let back: Command = roundtrip(&cmd);
+        assert!(matches!(
+            back,
+            Command::RenameContact { nickname: None, .. }
+        ));
+    }
+
+    #[test]
+    fn remove_contact_command_round_trips_cbor() {
+        let cmd = Command::RemoveContact {
+            contact: PublicKey([0x66; 32]),
+        };
+        let back: Command = roundtrip(&cmd);
+        assert!(matches!(back, Command::RemoveContact { .. }));
+    }
+
+    #[test]
+    fn list_contacts_with_filter_round_trips_cbor() {
+        let cmd = Command::ListContactsWithFilter { include_hidden: true };
+        let back: Command = roundtrip(&cmd);
+        assert!(matches!(
+            back,
+            Command::ListContactsWithFilter { include_hidden: true }
+        ));
     }
 
     #[test]
