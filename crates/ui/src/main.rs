@@ -28,6 +28,7 @@ fn main() {
             bootstrap::identity_init,
             bootstrap::vault_unlock,
             ipc_bridge::ipc_request,
+            ipc_bridge::render_invite_qr,
             events::ipc_subscribe,
             daemon::start_in_process_cmd,
         ])
