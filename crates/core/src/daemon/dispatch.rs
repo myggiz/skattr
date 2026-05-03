@@ -33,7 +33,7 @@ where
     match cmd {
         Command::Shutdown => Ok(CommandResult::Ok),
         Command::RotateOnion => handle_rotate_onion(handle).await,
-        Command::ListContacts => list_contacts(&handle).await,
+        Command::ListContacts => list_contacts(&handle, false).await,
         Command::CreateInvite { nickname, ttl_secs } => {
             create_invite(&handle, nickname, ttl_secs).await
         }
@@ -50,7 +50,9 @@ where
             rename_contact(&handle, contact, nickname).await
         }
         Command::RemoveContact { contact } => remove_contact(&handle, contact).await,
-        Command::ListContactsWithFilter { .. } => Err(IpcError::UnknownCommand),
+        Command::ListContactsWithFilter { include_hidden } => {
+            list_contacts(&handle, include_hidden).await
+        }
         Command::SearchMessages {
             query,
             contact,
@@ -81,6 +83,7 @@ where
 
 async fn list_contacts<S>(
     handle: &Arc<DaemonHandle<S>>,
+    include_hidden: bool,
 ) -> std::result::Result<CommandResult, IpcError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -92,7 +95,11 @@ where
     let msg_repo = MessageRepo::new(&handle.pool);
     let group_repo = MlsGroupRepo::new(&handle.pool);
     let read_repo = ReadStateRepo::new(&handle.pool);
-    let contacts = repo.list().map_err(map_err)?;
+    let contacts = if include_hidden {
+        repo.list_all().map_err(map_err)?
+    } else {
+        repo.list().map_err(map_err)?
+    };
 
     let mut summaries: Vec<ContactSummary> = Vec::with_capacity(contacts.len());
     for c in contacts {
@@ -3318,5 +3325,48 @@ mod tests {
             ))
         }).unwrap();
         assert_eq!(blob_before, blob_after, "RemoveContact must not touch MLS state");
+    }
+
+    // ── Task 10: list_contacts_with_filter ────────────────────────────────────
+
+    #[tokio::test]
+    async fn list_contacts_with_filter_includes_hidden_when_opted_in() {
+        let handle = test_handle();
+        let visible = PublicKey([0xA1; 32]);
+        let archived = PublicKey([0xA2; 32]);
+        let repo = crate::storage::ContactRepo::new(&handle.pool);
+        repo.upsert(&crate::contact::Contact {
+            identity: visible,
+            display_name: Some("Visible".into()),
+            added_at: 0,
+            card: None,
+        }).unwrap();
+        repo.upsert(&crate::contact::Contact {
+            identity: archived,
+            display_name: Some("Archived".into()),
+            added_at: 0,
+            card: None,
+        }).unwrap();
+        repo.set_hidden(&archived, true).unwrap();
+
+        // Default: only visible.
+        let r = execute_command(handle.clone(), Command::ListContacts).await.unwrap();
+        match r {
+            CommandResult::Contacts(v) => {
+                assert_eq!(v.len(), 1);
+                assert_eq!(v[0].pubkey, visible);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        // include_hidden = true: both.
+        let r = execute_command(
+            handle.clone(),
+            Command::ListContactsWithFilter { include_hidden: true },
+        ).await.unwrap();
+        match r {
+            CommandResult::Contacts(v) => assert_eq!(v.len(), 2),
+            other => panic!("unexpected: {other:?}"),
+        }
     }
 }
