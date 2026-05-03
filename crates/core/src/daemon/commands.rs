@@ -15,6 +15,104 @@ use crate::envelope::Kind;
 use crate::identity::PublicKey;
 use crate::invite::InviteLink;
 
+/// Mode controlling what notification body is rendered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, ts_rs::TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export, export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/")]
+pub enum NotificationMode {
+    /// Sender nickname + body preview ("Alice: hey, can you...")
+    #[default]
+    Full,
+    /// Sender only ("Alice").
+    Minimal,
+    /// Placeholder only ("New message").
+    Generic,
+    /// No notifications at all.
+    Off,
+}
+
+/// Tracing log level, projected onto the wire so the UI logs viewer can
+/// colour-code records. Mirrors `tracing::Level` but is `Serialize`able.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export, export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/")]
+pub enum LogLevel {
+    /// Trace level.
+    Trace,
+    /// Debug level.
+    Debug,
+    /// Info level.
+    Info,
+    /// Warn level.
+    Warn,
+    /// Error level.
+    Error,
+}
+
+/// One redacted log record streamed from the daemon ring buffer.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/")]
+pub struct LogRecord {
+    /// Monotonic per-buffer sequence number; UI uses this as the
+    /// `since_seq` cursor for incremental tail.
+    pub seq: u64,
+    /// Wall-clock at the time the record was emitted.
+    pub ts_unix_ms: u64,
+    /// Log level of this record.
+    pub level: LogLevel,
+    /// e.g. "skattr_core::delivery::hub"
+    pub target: String,
+    /// Already-redacted message body (no pubkeys / onions / message
+    /// contents above the `debug` level).
+    pub message: String,
+}
+
+/// Snapshot of all UI-relevant config knobs. Sensitive paths
+/// (`data_dir`, `ipc_socket`) are intentionally NOT projected — the UI
+/// reads them via `Command::DaemonInfo`.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/")]
+pub struct ConfigSnapshot {
+    /// Message history retention in days.
+    pub history_retention_days: u32,
+    /// Direct peer timeout in seconds.
+    pub direct_timeout_secs: u32,
+    /// Notification display mode.
+    pub notification_mode: NotificationMode,
+    /// Whether to minimize to tray on close.
+    pub close_to_tray: bool,
+    /// Whether to start the app minimised.
+    pub start_minimised: bool,
+    /// Whether to persist logs to disk.
+    pub persist_logs_to_disk: bool,
+}
+
+/// Patch sent by `Command::SetConfig`. Each field is `Option<T>`; the
+/// daemon applies only `Some(_)` fields, validates each, then atomically
+/// rewrites `config.toml`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/")]
+pub struct ConfigPatch {
+    /// If `Some`, update message history retention in days.
+    #[serde(default)]
+    pub history_retention_days: Option<u32>,
+    /// If `Some`, update direct peer timeout in seconds.
+    #[serde(default)]
+    pub direct_timeout_secs: Option<u32>,
+    /// If `Some`, update notification display mode.
+    #[serde(default)]
+    pub notification_mode: Option<NotificationMode>,
+    /// If `Some`, update whether to minimize to tray on close.
+    #[serde(default)]
+    pub close_to_tray: Option<bool>,
+    /// If `Some`, update whether to start the app minimised.
+    #[serde(default)]
+    pub start_minimised: Option<bool>,
+    /// If `Some`, update whether to persist logs to disk.
+    #[serde(default)]
+    pub persist_logs_to_disk: Option<bool>,
+}
+
 /// Request sent into the daemon.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
@@ -983,5 +1081,38 @@ mod phase_1g_wire_tests {
             } => {}
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn config_patch_default_is_all_none() {
+        let p = ConfigPatch::default();
+        assert!(p.history_retention_days.is_none());
+        assert!(p.notification_mode.is_none());
+        assert!(p.close_to_tray.is_none());
+    }
+
+    #[test]
+    fn config_patch_serde_roundtrip() {
+        let p = ConfigPatch {
+            history_retention_days: Some(30),
+            notification_mode: Some(NotificationMode::Minimal),
+            ..Default::default()
+        };
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&p, &mut bytes).unwrap();
+        let back: ConfigPatch = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        assert_eq!(back.history_retention_days, Some(30));
+        assert!(matches!(
+            back.notification_mode,
+            Some(NotificationMode::Minimal)
+        ));
+        assert!(back.close_to_tray.is_none());
+    }
+
+    #[test]
+    fn notification_mode_serde_lowercase_kebab() {
+        let m = NotificationMode::Generic;
+        let s = serde_json::to_string(&m).unwrap();
+        assert_eq!(s, "\"generic\"");
     }
 }

@@ -80,11 +80,15 @@ qrcode = { workspace = true, optional = true }
 arbitrary = { workspace = true, optional = true }
 libc = "0.2.185"
 
+# Password strength scoring
+zxcvbn = { version = "3", default-features = false }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 proptest = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 tracing-subscriber = { workspace = true }
+serde_json = "1"
 
 [features]
 default = ["qr"]
