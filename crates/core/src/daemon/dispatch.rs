@@ -46,8 +46,10 @@ where
             paged,
         } => recent_messages(&handle, contact, limit, before_id, paged).await,
         Command::CreateGroup { .. } => Err(IpcError::UnknownCommand),
-        Command::RenameContact { .. }
-        | Command::RemoveContact { .. }
+        Command::RenameContact { contact, nickname } => {
+            rename_contact(&handle, contact, nickname).await
+        }
+        Command::RemoveContact { .. }
         | Command::ListContactsWithFilter { .. } => Err(IpcError::UnknownCommand),
         Command::SearchMessages {
             query,
@@ -1124,6 +1126,43 @@ where
         daemon_version,
         schema_version,
     })
+}
+
+async fn rename_contact<S>(
+    handle: &Arc<DaemonHandle<S>>,
+    contact: crate::identity::PublicKey,
+    nickname: Option<String>,
+) -> std::result::Result<CommandResult, IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    use crate::daemon::error_kind::DaemonErrorKind;
+    use crate::daemon::events::Event;
+    use crate::storage::ContactRepo;
+
+    let trimmed = match nickname {
+        None => None,
+        Some(s) => {
+            let t = s.trim().to_string();
+            if t.is_empty() {
+                return Err(IpcError::Daemon(DaemonErrorKind::InvalidArgument {
+                    message: "nickname must not be empty or whitespace-only".into(),
+                }));
+            }
+            if t.chars().count() > 64 {
+                return Err(IpcError::Daemon(DaemonErrorKind::InvalidArgument {
+                    message: "nickname must be 64 characters or fewer".into(),
+                }));
+            }
+            Some(t)
+        }
+    };
+
+    let repo = ContactRepo::new(&handle.pool);
+    repo.set_display_name(&contact, trimmed.as_deref())
+        .map_err(map_err)?;
+    let _ = handle.events_tx.send(Event::ContactUpdated(contact));
+    Ok(CommandResult::Ok)
 }
 
 /// Map any `CoreError` to an `IpcError`. Projects via `CoreError::kind`
@@ -3101,5 +3140,83 @@ mod tests {
             other => panic!("expected Contacts, got {other:?}"),
         };
         assert_eq!(summary.group_state, Some(MlsGroupStateLabel::Corrupt));
+    }
+
+    // ── Task 8: rename_contact dispatcher ───────────────────────────────────
+
+    #[tokio::test]
+    async fn rename_contact_validates_nickname() {
+        use crate::daemon::error_kind::DaemonErrorKind;
+        let handle = test_handle();
+        let peer = PublicKey([0x77; 32]);
+
+        // Pre-create the contact row so set_display_name finds something to update.
+        let repo = crate::storage::ContactRepo::new(&handle.pool);
+        repo.upsert(&crate::contact::Contact {
+            identity: peer,
+            display_name: None,
+            added_at: 0,
+            card: None,
+        })
+        .unwrap();
+
+        // empty after trim
+        let err = execute_command(
+            handle.clone(),
+            Command::RenameContact { contact: peer, nickname: Some("   ".into()) },
+        )
+        .await
+        .expect_err("empty after trim must reject");
+        assert!(matches!(err, IpcError::Daemon(DaemonErrorKind::InvalidArgument { .. })));
+
+        // > 64 chars
+        let too_long = "x".repeat(65);
+        let err = execute_command(
+            handle.clone(),
+            Command::RenameContact { contact: peer, nickname: Some(too_long) },
+        )
+        .await
+        .expect_err("> 64 chars must reject");
+        assert!(matches!(err, IpcError::Daemon(DaemonErrorKind::InvalidArgument { .. })));
+
+        // happy path
+        let ok = execute_command(
+            handle.clone(),
+            Command::RenameContact { contact: peer, nickname: Some("Alice".into()) },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(ok, CommandResult::Ok));
+
+        // verify persisted
+        let stored = repo.get(&peer).unwrap().unwrap();
+        assert_eq!(stored.display_name.as_deref(), Some("Alice"));
+    }
+
+    #[tokio::test]
+    async fn rename_contact_emits_contact_updated_event() {
+        let handle = test_handle();
+        let peer = PublicKey([0x88; 32]);
+        crate::storage::ContactRepo::new(&handle.pool)
+            .upsert(&crate::contact::Contact {
+                identity: peer,
+                display_name: None,
+                added_at: 0,
+                card: None,
+            })
+            .unwrap();
+
+        let mut rx = handle.events_tx.subscribe();
+        let _ = execute_command(
+            handle.clone(),
+            Command::RenameContact { contact: peer, nickname: Some("Bob".into()) },
+        )
+        .await
+        .unwrap();
+
+        match tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv()).await {
+            Ok(Ok(crate::daemon::events::Event::ContactUpdated(p))) => assert_eq!(p, peer),
+            other => panic!("expected ContactUpdated, got {other:?}"),
+        }
     }
 }
