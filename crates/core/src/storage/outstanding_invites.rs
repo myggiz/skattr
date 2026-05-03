@@ -53,6 +53,32 @@ impl<'p> OutstandingInviteRepo<'p> {
         })
     }
 
+    /// Zeroize the PSK column then delete the row in one transaction.
+    /// Calling on a missing row succeeds silently (idempotent).
+    pub fn mark_consumed(&self, kp_hash: &[u8; 32]) -> Result<()> {
+        self.pool.transaction(|tx| {
+            tx.execute(
+                "UPDATE outstanding_invites SET psk = zeroblob(32) WHERE kp_hash = ?1",
+                rusqlite::params![&kp_hash[..]],
+            )
+            .map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!(
+                    "oi: zeroize: {e}"
+                )))
+            })?;
+            tx.execute(
+                "DELETE FROM outstanding_invites WHERE kp_hash = ?1",
+                rusqlite::params![&kp_hash[..]],
+            )
+            .map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!(
+                    "oi: delete: {e}"
+                )))
+            })?;
+            Ok(())
+        })
+    }
+
     /// Look up the PSK + expires_at for `kp_hash`. Returns `Ok(None)`
     /// if the row is absent or has been consumed.
     pub fn get_psk(&self, kp_hash: &[u8; 32]) -> Result<Option<(Zeroizing<[u8; 32]>, i64)>> {
@@ -116,5 +142,27 @@ mod tests {
         let repo = OutstandingInviteRepo::new(&pool);
         let kp_hash = [0xDDu8; 32];
         assert!(repo.get_psk(&kp_hash).unwrap().is_none());
+    }
+
+    #[test]
+    fn mark_consumed_zeroizes_then_deletes() {
+        let pool = Pool::in_memory();
+        let repo = OutstandingInviteRepo::new(&pool);
+        let kp_hash = [0x01u8; 32];
+        let psk = Zeroizing::new([0xEEu8; 32]);
+        repo.put(&kp_hash, &psk, &[], 0, 0).unwrap();
+
+        repo.mark_consumed(&kp_hash).unwrap();
+
+        // Row is gone.
+        assert!(repo.get_psk(&kp_hash).unwrap().is_none());
+    }
+
+    #[test]
+    fn mark_consumed_is_idempotent_on_missing_row() {
+        let pool = Pool::in_memory();
+        let repo = OutstandingInviteRepo::new(&pool);
+        // No put — mark_consumed must succeed silently.
+        repo.mark_consumed(&[0x02u8; 32]).unwrap();
     }
 }
