@@ -7,14 +7,21 @@
 
   import TorPill from "$lib/components/TorPill.svelte";
   import ContactRow from "$lib/components/ContactRow.svelte";
+  import ContactDetailsPanel from "$lib/components/ContactDetailsPanel.svelte";
   import VirtualMessageList from "$lib/components/VirtualMessageList.svelte";
   import Composer from "$lib/components/Composer.svelte";
-  import { contacts, refreshContacts } from "$lib/stores/contacts";
+  import InviteGenerateDialog from "$lib/components/InviteGenerateDialog.svelte";
+  import AddContactDialog from "$lib/components/AddContactDialog.svelte";
+  import Toast from "$lib/components/Toast.svelte";
+  import { contacts, refreshContacts, expandedPubkey, toggleExpanded } from "$lib/stores/contacts";
   import { conversation, openConversationFromSummary, appendMessage } from "$lib/stores/conversation";
   import { torStatus } from "$lib/stores/tor_status";
   import { recordDeliveryStatus, hex16ToString } from "$lib/stores/delivery";
   import { ipcClient } from "$lib/ipc/tauri";
   import type { ContactSummary, PublicKey } from "$lib/ipc/types";
+
+  let inviteOpen = $state(false);
+  let addOpen = $state(false);
 
   onMount(async () => {
     // If no vault exists yet, go to first-run to initialise identity.
@@ -78,12 +85,25 @@
 
 <div class="shell">
   <aside class="rail">
+    <div class="rail-header">
+      <button type="button" class="rail-btn" onclick={() => (inviteOpen = true)}>
+        Generate invite
+      </button>
+      <button type="button" class="rail-btn" onclick={() => (addOpen = true)}>
+        + Add
+      </button>
+    </div>
     {#each $contacts as c}
       <ContactRow
         summary={c}
         active={$conversation.contact === c.pubkey}
+        expanded={$expandedPubkey === c.pubkey}
         onclick={() => selectContact(c)}
+        onToggleExpanded={() => toggleExpanded(c.pubkey)}
       />
+      {#if $expandedPubkey === c.pubkey}
+        <ContactDetailsPanel summary={c} />
+      {/if}
     {/each}
   </aside>
   <main class="pane">
@@ -103,9 +123,35 @@
   </main>
 </div>
 
+{#if inviteOpen}
+  <InviteGenerateDialog onClose={() => (inviteOpen = false)} />
+{/if}
+{#if addOpen}
+  <AddContactDialog onClose={() => (addOpen = false)} />
+{/if}
+
+<Toast />
+
 <style>
   .shell { display: grid; grid-template-columns: 280px 1fr; grid-template-rows: 100vh; height: 100vh; overflow: hidden; }
   .rail { background: var(--bg); border-right: 1px solid var(--bg-elevated); overflow-y: auto; }
+  .rail-header {
+    display: flex;
+    gap: var(--s-1);
+    padding: var(--s-2) var(--s-3);
+    border-bottom: 1px solid var(--bg-elevated);
+  }
+  .rail-btn {
+    flex: 1;
+    padding: 6px var(--s-2);
+    background: var(--bg-elevated);
+    border: none;
+    border-radius: 4px;
+    color: var(--text);
+    font: var(--t-ui);
+    cursor: pointer;
+  }
+  .rail-btn:hover { background: var(--accent); color: var(--bg); }
   .pane { display: flex; flex-direction: column; background: var(--bg); height: 100%; }
   .pane :global(.list) { flex: 1; min-height: 0; }
   .empty { padding: var(--s-3); color: var(--fg-dim, #888); margin: auto; }
