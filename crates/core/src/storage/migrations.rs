@@ -75,6 +75,10 @@ const ALL_MIGRATIONS: &[Migration] = &[
         version: 13,
         sql: include_str!("migrations/0013_contacts_muted.sql"),
     },
+    Migration {
+        version: 14,
+        sql: include_str!("migrations/0014_passphrase_audit.sql"),
+    },
 ];
 
 /// Apply all pending migrations in order. Idempotent — re-running does
@@ -459,6 +463,42 @@ mod tests {
             )
             .unwrap();
         assert_eq!(muted, 0);
+    }
+
+    #[test]
+    fn migration_0014_creates_passphrase_audit_table() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        apply(&mut conn).unwrap();
+
+        let exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type='table' AND name='passphrase_audit'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(exists, 1, "passphrase_audit table must exist");
+
+        // CHECK constraint enforces the three valid values.
+        let bad = conn.execute(
+            "INSERT INTO passphrase_audit (ts_unix, outcome) VALUES (1, 'bogus')",
+            [],
+        );
+        assert!(bad.is_err(), "CHECK constraint must reject invalid outcome");
+
+        for outcome in ["changed", "rolled_back", "recovered"] {
+            conn.execute(
+                "INSERT INTO passphrase_audit (ts_unix, outcome) VALUES (?1, ?2)",
+                rusqlite::params![1_700_000_000_i64, outcome],
+            )
+            .unwrap();
+        }
+
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM passphrase_audit", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 3);
     }
 
     #[test]
