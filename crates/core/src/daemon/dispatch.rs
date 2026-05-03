@@ -278,7 +278,7 @@ where
         Group::create_solo(&handle.identity, Some(&link.psk.0), provider).map_err(map_err)?;
 
     let invitee_kp = KeyPackage::from_bytes(&link.body.key_package).map_err(map_err)?;
-    let (_welcome, _commit) = group
+    let (welcome, _commit) = group
         .add_member(&invitee_kp, Some(&link.psk.0))
         .map_err(map_err)?;
     let group_id = group.id().0.clone();
@@ -306,6 +306,16 @@ where
     let _ = handle
         .events_tx
         .send(Event::ContactUpdated(link.body.identity));
+
+    // Submit Welcome to the inviter via the hub. We do not await the
+    // ACK here — UI responsiveness comes first, and a failed delivery
+    // surfaces via Event::DeliveryStatusChanged through the hub's
+    // existing failure path.
+    let _ = handle
+        .hub
+        .send_welcome(link.body.identity, welcome)
+        .await
+        .map_err(map_err)?;
 
     Ok(CommandResult::ContactAdded(ContactSummary {
         pubkey: link.body.identity,
