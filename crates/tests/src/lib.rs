@@ -57,6 +57,8 @@ mod rotate_onion_during_offline;
 mod ui_first_run;
 #[cfg(test)]
 mod ui_send_roundtrip;
+#[cfg(test)]
+mod welcome_propagation;
 
 use std::time::Duration;
 
