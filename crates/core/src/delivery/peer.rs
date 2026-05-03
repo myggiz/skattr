@@ -96,11 +96,7 @@ pub trait InboundDispatch: Send + Sync + 'static {
     /// The returned `MessageId` (when `Some`) MUST equal
     /// `welcome_msg_id(welcome)` so the synthetic ACK correlates with
     /// the sender's outstanding oneshot.
-    fn dispatch_welcome(
-        &self,
-        _peer: PublicKey,
-        _welcome: &[u8],
-    ) -> Option<MessageId> {
+    fn dispatch_welcome(&self, _peer: PublicKey, _welcome: &[u8]) -> Option<MessageId> {
         None
     }
 }
@@ -494,11 +490,7 @@ mod tests {
             fn dispatch(&self, _peer: PublicKey, _ct: &[u8]) -> Option<MessageId> {
                 None
             }
-            fn dispatch_welcome(
-                &self,
-                _peer: PublicKey,
-                welcome: &[u8],
-            ) -> Option<MessageId> {
+            fn dispatch_welcome(&self, _peer: PublicKey, welcome: &[u8]) -> Option<MessageId> {
                 self.0.store(true, Ordering::SeqCst);
                 Some(super::welcome_msg_id(welcome))
             }
@@ -517,7 +509,10 @@ mod tests {
         assert_eq!(id1.0, id2.0, "must be deterministic");
 
         let other = super::welcome_msg_id(b"different bytes");
-        assert_ne!(id1.0, other.0, "different inputs must produce different ids");
+        assert_ne!(
+            id1.0, other.0,
+            "different inputs must produce different ids"
+        );
 
         assert_eq!(id1.0.len(), 16);
         assert!(id1.0.iter().any(|&b| b != 0));
@@ -715,8 +710,7 @@ mod tests {
 
         let (_jobs_tx, jobs_rx) = mpsc::channel::<DeliveryJob>(4);
         let (welcome_tx, welcome_rx) = mpsc::channel::<WelcomeJob>(4);
-        let (_ctrl_tx, ctrl_rx) =
-            mpsc::channel::<PeerCtrl<tokio::io::DuplexStream>>(4);
+        let (_ctrl_tx, ctrl_rx) = mpsc::channel::<PeerCtrl<tokio::io::DuplexStream>>(4);
 
         let _h = tokio::spawn(async move {
             let _ = super::full_run::<tokio::io::DuplexStream>(

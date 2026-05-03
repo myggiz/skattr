@@ -324,7 +324,9 @@ async fn full_flow_invite_add_send_queued() {
         use skattr_core::daemon::commands::MlsGroupStateLabel;
         let bob_contacts = bob.exec(Command::ListContacts).await.unwrap();
         let alice_entry = match bob_contacts {
-            CommandResult::Contacts(ref v) => v.iter().find(|s| s.pubkey == alice.pubkey()).cloned(),
+            CommandResult::Contacts(ref v) => {
+                v.iter().find(|s| s.pubkey == alice.pubkey()).cloned()
+            }
             other => panic!("expected Contacts, got {other:?}"),
         };
         let alice_entry =

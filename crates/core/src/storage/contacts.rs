@@ -352,11 +352,7 @@ impl<'p> ContactRepo<'p> {
 
     /// Update the local display name. `None` clears it. Returns
     /// `ContactErrorKind::NotFound` if no row matched.
-    pub fn set_display_name(
-        &self,
-        identity: &PublicKey,
-        name: Option<&str>,
-    ) -> Result<()> {
+    pub fn set_display_name(&self, identity: &PublicKey, name: Option<&str>) -> Result<()> {
         self.pool.with_mut(|c| {
             let changed = c
                 .execute(
@@ -364,9 +360,7 @@ impl<'p> ContactRepo<'p> {
                     rusqlite::params![name, &identity.0[..]],
                 )
                 .map_err(|e| {
-                    CoreError::Storage(StorageErrorKind::Other(format!(
-                        "set display_name: {e}"
-                    )))
+                    CoreError::Storage(StorageErrorKind::Other(format!("set display_name: {e}")))
                 })?;
             if changed == 0 {
                 return Err(CoreError::Contact(ContactErrorKind::NotFound));
@@ -404,9 +398,7 @@ impl<'p> ContactRepo<'p> {
                      ORDER BY display_name IS NULL, display_name COLLATE NOCASE",
                 )
                 .map_err(|e| {
-                    CoreError::Storage(StorageErrorKind::Other(format!(
-                        "prepare list_all: {e}"
-                    )))
+                    CoreError::Storage(StorageErrorKind::Other(format!("prepare list_all: {e}")))
                 })?;
             let rows = stmt
                 .query_map([], |r| {
@@ -423,15 +415,11 @@ impl<'p> ContactRepo<'p> {
                     })
                 })
                 .map_err(|e| {
-                    CoreError::Storage(StorageErrorKind::Other(format!(
-                        "query list_all: {e}"
-                    )))
+                    CoreError::Storage(StorageErrorKind::Other(format!("query list_all: {e}")))
                 })?;
             let out: std::result::Result<Vec<_>, _> = rows.collect();
             out.map_err(|e| {
-                CoreError::Storage(StorageErrorKind::Other(format!(
-                    "collect list_all: {e}"
-                )))
+                CoreError::Storage(StorageErrorKind::Other(format!("collect list_all: {e}")))
             })
         })?;
         for contact in &mut contacts {
@@ -900,14 +888,20 @@ mod tests {
         let alice = sample_contact(0x40);
         repo.upsert(&alice).unwrap();
 
-        repo.set_display_name(&alice.identity, Some("renamed")).unwrap();
+        repo.set_display_name(&alice.identity, Some("renamed"))
+            .unwrap();
         assert_eq!(
             repo.get(&alice.identity).unwrap().unwrap().display_name,
             Some("renamed".into())
         );
 
         repo.set_display_name(&alice.identity, None).unwrap();
-        assert!(repo.get(&alice.identity).unwrap().unwrap().display_name.is_none());
+        assert!(repo
+            .get(&alice.identity)
+            .unwrap()
+            .unwrap()
+            .display_name
+            .is_none());
     }
 
     #[test]

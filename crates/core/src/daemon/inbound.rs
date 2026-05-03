@@ -285,12 +285,7 @@ impl DaemonInbound {
             MlsProvider::new()
         };
 
-        let group = Group::join_from_welcome(
-            &identity_arc,
-            welcome_bytes,
-            Some(&*psk),
-            provider,
-        )?;
+        let group = Group::join_from_welcome(&identity_arc, welcome_bytes, Some(&*psk), provider)?;
         let group_id = group.id().0.clone();
 
         let group_repo = MlsGroupRepo::new(&self.pool);
@@ -821,10 +816,9 @@ mod tests {
         let (events_tx, mut rx) = broadcast::channel::<Event>(16);
 
         // Alice = inviter
-        let alice = crate::identity::IdentityKey::from_seed(
-            &crate::identity::Seed::generate().unwrap(),
-        )
-        .unwrap();
+        let alice =
+            crate::identity::IdentityKey::from_seed(&crate::identity::Seed::generate().unwrap())
+                .unwrap();
         let alice_provider = MlsProvider::new();
         let kp_repo = KeyPackageRepo::new(&pool);
         let alice_kp = KeyPackage::generate(&alice, &alice_provider, &kp_repo).unwrap();
@@ -846,15 +840,15 @@ mod tests {
         .unwrap();
 
         // Bob builds his solo group, adds Alice's KP
-        let bob = crate::identity::IdentityKey::from_seed(
-            &crate::identity::Seed::generate().unwrap(),
-        )
-        .unwrap();
+        let bob =
+            crate::identity::IdentityKey::from_seed(&crate::identity::Seed::generate().unwrap())
+                .unwrap();
         let mut bob_group =
             crate::mls::Group::create_solo(&bob, Some(&psk_bytes), MlsProvider::new()).unwrap();
         let alice_kp_for_add = KeyPackage::from_bytes(&alice_kp_bytes).unwrap();
-        let (welcome_bytes, _commit) =
-            bob_group.add_member(&alice_kp_for_add, Some(&psk_bytes)).unwrap();
+        let (welcome_bytes, _commit) = bob_group
+            .add_member(&alice_kp_for_add, Some(&psk_bytes))
+            .unwrap();
 
         // Drive Alice's dispatch_welcome
         let alice_arc = Arc::new(alice);
@@ -901,10 +895,8 @@ mod tests {
         let pool = Arc::new(Pool::in_memory());
         let (events_tx, _rx) = broadcast::channel::<Event>(16);
         let alice_arc = Arc::new(
-            crate::identity::IdentityKey::from_seed(
-                &crate::identity::Seed::generate().unwrap(),
-            )
-            .unwrap(),
+            crate::identity::IdentityKey::from_seed(&crate::identity::Seed::generate().unwrap())
+                .unwrap(),
         );
         let inbound = DaemonInbound::new(pool, events_tx);
         inbound.set_identity(alice_arc);
@@ -926,10 +918,9 @@ mod tests {
 
         let pool = Arc::new(Pool::in_memory());
         let (events_tx, _rx) = broadcast::channel::<Event>(16);
-        let alice = crate::identity::IdentityKey::from_seed(
-            &crate::identity::Seed::generate().unwrap(),
-        )
-        .unwrap();
+        let alice =
+            crate::identity::IdentityKey::from_seed(&crate::identity::Seed::generate().unwrap())
+                .unwrap();
         let kp_repo = KeyPackageRepo::new(&pool);
         let alice_kp = KeyPackage::generate(&alice, &MlsProvider::new(), &kp_repo).unwrap();
         let alice_kp_ref = key_package_ref(&alice_kp).unwrap();
@@ -948,10 +939,9 @@ mod tests {
             )
             .unwrap();
 
-        let bob = crate::identity::IdentityKey::from_seed(
-            &crate::identity::Seed::generate().unwrap(),
-        )
-        .unwrap();
+        let bob =
+            crate::identity::IdentityKey::from_seed(&crate::identity::Seed::generate().unwrap())
+                .unwrap();
         let mut bob_group =
             crate::mls::Group::create_solo(&bob, Some(&psk), MlsProvider::new()).unwrap();
         let alice_kp_for_add = KeyPackage::from_bytes(&alice_kp_bytes).unwrap();

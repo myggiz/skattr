@@ -115,10 +115,7 @@ async fn wait_for_alice_group_active(
                     eprintln!("Alice's group_state is now Active.");
                     return;
                 }
-                eprintln!(
-                    "Alice's group_state = {:?}; waiting…",
-                    s.group_state
-                );
+                eprintln!("Alice's group_state = {:?}; waiting…", s.group_state);
             } else {
                 eprintln!("Bob not yet in Alice's contact list; waiting…");
             }
@@ -170,7 +167,9 @@ async fn wait_for_message_received(
                             return;
                         }
                         other => {
-                            eprintln!("MessageReceived with different body/kind: {other:?}; continuing…");
+                            eprintln!(
+                                "MessageReceived with different body/kind: {other:?}; continuing…"
+                            );
                         }
                     }
                 }
@@ -268,12 +267,7 @@ async fn welcome_propagates_and_round_trip_message_decrypts() {
 
     // --- Step 4: Wait for Alice's group to become Active (Welcome propagation) ---
     eprintln!("Waiting for Alice's group to become Active (Welcome propagation)…");
-    wait_for_alice_group_active(
-        &ready_a.ipc_socket,
-        bob_pubkey,
-        Duration::from_secs(30),
-    )
-    .await;
+    wait_for_alice_group_active(&ready_a.ipc_socket, bob_pubkey, Duration::from_secs(30)).await;
 
     // --- Step 5: Alice sends to Bob ---
     eprintln!("Alice sends to Bob…");

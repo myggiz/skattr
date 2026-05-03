@@ -8,7 +8,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Phase 2.A (mailbox server) is complete; Phase 2.B (mailbox client +
 ContactCard rotation) is complete (merged 2026-05-01); Phase 2.C
 (UI bootstrap, read-only conversation MVP) is complete (merged
-2026-05-02).** Phase 0 shipped all five workstreams (0.A scaffold,
+2026-05-02); Phase 2.D (conversation view) is complete (merged
+2026-05-02); Phase 2.E (invite & contact UX) is complete (merged
+2026-05-03).** Phase 0 shipped all five workstreams (0.A scaffold,
 0.B identity & crypto, 0.C Arti integration, 0.D storage layer, 0.E
 documentation baseline). Phase 1.A added `transport::frame::FrameCodec`.
 Phase 1.B added `transport::noise::handshake_{initiator,responder}`
@@ -191,12 +193,36 @@ messages from the new contact until this is wired up. Tracked as
 a follow-up beyond 2.D's exit criterion; the
 `ui_send_roundtrip` `#[ignore]`-gated test documents it.
 
+Phase 2.E added invite-generate / add-contact dialogs, an inline
+ContactDetailsPanel with rename + archive, and the daemon-side
+Welcome-propagation fix. Migration `0010` adds an `outstanding_invites`
+table for inviter-side PSK persistence; migration `0011` adds
+`contacts.hidden` for soft-delete; migration `0012` adds
+`outstanding_invites.provider_snapshot` so the MlsProvider's KP init
+key survives the create_invite → dispatch_welcome boundary.
+`Frame::MlsWelcome` (codec slot 0x03, reserved since 1.A) is now
+load-bearing: `DeliveryHub::send_welcome` + a new peer-actor send/read
+arm + `InboundDispatch::dispatch_welcome` turn Bob's `AddContact`
+Welcome into Alice's `Group::join_from_welcome`, so Alice's group
+transitions `PendingJoin → Active` and she can decrypt Bob's first
+message. Wire-format is strictly additive: three new `Command`
+variants (`RenameContact`, `RemoveContact`, `ListContactsWithFilter`),
+no new `CommandResult` variants, no new `Event` variants (rename /
+archive reuse `ContactUpdated`). The `key_package_id` returned in
+`CommandResult::InviteCreated` is now the canonical MLS
+`KeyPackageRef` (was plain SHA-256 in 1.D — same shape on the wire).
+
+One TODO tracks follow-up work deferred from 2.E: **Task 2.E.5** is
+mailbox fallback for Welcome propagation — direct-only Welcome ships
+in 2.E; mailbox fallback is deferred because it would touch the 2.B
+mailbox protocol freeze (ADR 0006).
+
 Phase 1 is complete (1.H merged 2026-04-24); Phase 2.A (mailbox
 server) merged at the head of `phase-2a-mailbox-server`; Phase 2.B
 is complete (merged 2026-05-01); Phase 2.C is complete (merged
-2026-05-02); Phase 2.D is complete (merged 2026-05-02). The next
-workstream is Phase 2.E (invite UX + contact rename/remove;
-depends on 2.D) — see
+2026-05-02); Phase 2.D is complete (merged 2026-05-02); Phase 2.E
+is complete (merged 2026-05-03). The next workstream is Phase 2.F
+(settings & history; depends on 2.E) — see
 `docs/superpowers/specs/2026-04-26-phase-2-ui-decomposition.md`
 for the Phase 2 decomposition,
 `docs/superpowers/specs/2026-05-02-phase-2d-conversation-view-design.md`

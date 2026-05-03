@@ -87,7 +87,9 @@ impl<'p> OutstandingInviteRepo<'p> {
                 ],
             )
             .map_err(|e| {
-                CoreError::Storage(StorageErrorKind::Other(format!("oi: put_with_provider: {e}")))
+                CoreError::Storage(StorageErrorKind::Other(format!(
+                    "oi: put_with_provider: {e}"
+                )))
             })?;
             Ok(())
         })
@@ -102,19 +104,13 @@ impl<'p> OutstandingInviteRepo<'p> {
                 rusqlite::params![&kp_hash[..]],
             )
             .map_err(|e| {
-                CoreError::Storage(StorageErrorKind::Other(format!(
-                    "oi: zeroize: {e}"
-                )))
+                CoreError::Storage(StorageErrorKind::Other(format!("oi: zeroize: {e}")))
             })?;
             tx.execute(
                 "DELETE FROM outstanding_invites WHERE kp_hash = ?1",
                 rusqlite::params![&kp_hash[..]],
             )
-            .map_err(|e| {
-                CoreError::Storage(StorageErrorKind::Other(format!(
-                    "oi: delete: {e}"
-                )))
-            })?;
+            .map_err(|e| CoreError::Storage(StorageErrorKind::Other(format!("oi: delete: {e}"))))?;
             Ok(())
         })
     }
@@ -128,9 +124,7 @@ impl<'p> OutstandingInviteRepo<'p> {
                 rusqlite::params![now],
             )
             .map_err(|e| {
-                CoreError::Storage(StorageErrorKind::Other(format!(
-                    "oi: purge zeroize: {e}"
-                )))
+                CoreError::Storage(StorageErrorKind::Other(format!("oi: purge zeroize: {e}")))
             })?;
             let deleted = tx
                 .execute(
@@ -138,9 +132,7 @@ impl<'p> OutstandingInviteRepo<'p> {
                     rusqlite::params![now],
                 )
                 .map_err(|e| {
-                    CoreError::Storage(StorageErrorKind::Other(format!(
-                        "oi: purge delete: {e}"
-                    )))
+                    CoreError::Storage(StorageErrorKind::Other(format!("oi: purge delete: {e}")))
                 })?;
             Ok(deleted as u64)
         })
@@ -150,10 +142,7 @@ impl<'p> OutstandingInviteRepo<'p> {
     /// provider snapshot so the caller can:
     ///  - reconstruct the `KeyPackage` and derive its SHA-256 for `key_packages.mark_consumed_in_tx`
     ///  - restore the `MlsProvider` (with the init private key) to process the Welcome
-    pub fn get_psk_and_kp_bytes(
-        &self,
-        kp_ref: &[u8; 32],
-    ) -> Result<Option<OutstandingInviteRow>> {
+    pub fn get_psk_and_kp_bytes(&self, kp_ref: &[u8; 32]) -> Result<Option<OutstandingInviteRow>> {
         self.pool.with(|c| {
             let result = c.query_row(
                 "SELECT psk, inviter_kp, provider_snapshot, expires_at \
@@ -177,7 +166,12 @@ impl<'p> OutstandingInviteRepo<'p> {
                     }
                     let mut arr = [0u8; 32];
                     arr.copy_from_slice(&psk_bytes);
-                    Ok(Some((Zeroizing::new(arr), kp_bytes, provider_snap, expires_at)))
+                    Ok(Some((
+                        Zeroizing::new(arr),
+                        kp_bytes,
+                        provider_snap,
+                        expires_at,
+                    )))
                 }
                 Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
                 Err(e) => Err(CoreError::Storage(StorageErrorKind::Other(format!(
@@ -200,18 +194,14 @@ impl<'p> OutstandingInviteRepo<'p> {
             rusqlite::params![&kp_ref[..]],
         )
         .map_err(|e| {
-            CoreError::Storage(StorageErrorKind::Other(format!(
-                "oi: zeroize_in_tx: {e}"
-            )))
+            CoreError::Storage(StorageErrorKind::Other(format!("oi: zeroize_in_tx: {e}")))
         })?;
         tx.execute(
             "DELETE FROM outstanding_invites WHERE kp_hash = ?1",
             rusqlite::params![&kp_ref[..]],
         )
         .map_err(|e| {
-            CoreError::Storage(StorageErrorKind::Other(format!(
-                "oi: delete_in_tx: {e}"
-            )))
+            CoreError::Storage(StorageErrorKind::Other(format!("oi: delete_in_tx: {e}")))
         })?;
         Ok(())
     }
@@ -309,10 +299,12 @@ mod tests {
         let repo = OutstandingInviteRepo::new(&pool);
         let now = 1_700_000_000;
 
-        let kp1 = [0x10u8; 32];   // expired
-        let kp2 = [0x20u8; 32];   // still valid
-        repo.put(&kp1, &Zeroizing::new([0u8; 32]), &[], now - 1, 0).unwrap();
-        repo.put(&kp2, &Zeroizing::new([0u8; 32]), &[], now + 3600, 0).unwrap();
+        let kp1 = [0x10u8; 32]; // expired
+        let kp2 = [0x20u8; 32]; // still valid
+        repo.put(&kp1, &Zeroizing::new([0u8; 32]), &[], now - 1, 0)
+            .unwrap();
+        repo.put(&kp2, &Zeroizing::new([0u8; 32]), &[], now + 3600, 0)
+            .unwrap();
 
         let purged = repo.purge_expired(now).unwrap();
         assert_eq!(purged, 1);
@@ -326,8 +318,14 @@ mod tests {
         let pool = Pool::in_memory();
         let repo = OutstandingInviteRepo::new(&pool);
         let now = 1_700_000_000;
-        repo.put(&[0x30u8; 32], &Zeroizing::new([0u8; 32]), &[], now + 3600, 0)
-            .unwrap();
+        repo.put(
+            &[0x30u8; 32],
+            &Zeroizing::new([0u8; 32]),
+            &[],
+            now + 3600,
+            0,
+        )
+        .unwrap();
         assert_eq!(repo.purge_expired(now).unwrap(), 0);
     }
 }

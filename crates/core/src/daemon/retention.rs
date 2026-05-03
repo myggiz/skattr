@@ -169,8 +169,22 @@ mod tests {
         let now = now_unix_seconds();
 
         let oi = OutstandingInviteRepo::new(&pool);
-        oi.put(&[0x10; 32], &Zeroizing::new([0u8; 32]), &[], now - 1, now - 3600).unwrap();
-        oi.put(&[0x20; 32], &Zeroizing::new([0u8; 32]), &[], now + 3600, now).unwrap();
+        oi.put(
+            &[0x10; 32],
+            &Zeroizing::new([0u8; 32]),
+            &[],
+            now - 1,
+            now - 3600,
+        )
+        .unwrap();
+        oi.put(
+            &[0x20; 32],
+            &Zeroizing::new([0u8; 32]),
+            &[],
+            now + 3600,
+            now,
+        )
+        .unwrap();
 
         let (tx, rx) = tokio::sync::watch::channel(false);
         let h = spawn_sweep(pool.clone(), 0, Duration::from_millis(20), rx);

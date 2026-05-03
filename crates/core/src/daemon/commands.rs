@@ -799,11 +799,15 @@ mod tests {
 
     #[test]
     fn list_contacts_with_filter_round_trips_cbor() {
-        let cmd = Command::ListContactsWithFilter { include_hidden: true };
+        let cmd = Command::ListContactsWithFilter {
+            include_hidden: true,
+        };
         let back: Command = roundtrip(&cmd);
         assert!(matches!(
             back,
-            Command::ListContactsWithFilter { include_hidden: true }
+            Command::ListContactsWithFilter {
+                include_hidden: true
+            }
         ));
     }
 

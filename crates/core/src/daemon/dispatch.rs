@@ -232,8 +232,15 @@ where
     // key that OpenMLS needs to process the Welcome via join_from_welcome.
     let provider_snap = provider.snapshot().map_err(map_err)?;
     let oi = OutstandingInviteRepo::new(&handle.pool);
-    oi.put_with_provider(&kp_ref, &psk, &kp_bytes, &provider_snap, now + ttl as i64, now)
-        .map_err(map_err)?;
+    oi.put_with_provider(
+        &kp_ref,
+        &psk,
+        &kp_bytes,
+        &provider_snap,
+        now + ttl as i64,
+        now,
+    )
+    .map_err(map_err)?;
 
     Ok(CommandResult::InviteCreated {
         url,
@@ -3236,26 +3243,41 @@ mod tests {
         // empty after trim
         let err = execute_command(
             handle.clone(),
-            Command::RenameContact { contact: peer, nickname: Some("   ".into()) },
+            Command::RenameContact {
+                contact: peer,
+                nickname: Some("   ".into()),
+            },
         )
         .await
         .expect_err("empty after trim must reject");
-        assert!(matches!(err, IpcError::Daemon(DaemonErrorKind::InvalidArgument { .. })));
+        assert!(matches!(
+            err,
+            IpcError::Daemon(DaemonErrorKind::InvalidArgument { .. })
+        ));
 
         // > 64 chars
         let too_long = "x".repeat(65);
         let err = execute_command(
             handle.clone(),
-            Command::RenameContact { contact: peer, nickname: Some(too_long) },
+            Command::RenameContact {
+                contact: peer,
+                nickname: Some(too_long),
+            },
         )
         .await
         .expect_err("> 64 chars must reject");
-        assert!(matches!(err, IpcError::Daemon(DaemonErrorKind::InvalidArgument { .. })));
+        assert!(matches!(
+            err,
+            IpcError::Daemon(DaemonErrorKind::InvalidArgument { .. })
+        ));
 
         // happy path
         let ok = execute_command(
             handle.clone(),
-            Command::RenameContact { contact: peer, nickname: Some("Alice".into()) },
+            Command::RenameContact {
+                contact: peer,
+                nickname: Some("Alice".into()),
+            },
         )
         .await
         .unwrap();
@@ -3282,7 +3304,10 @@ mod tests {
         let mut rx = handle.events_tx.subscribe();
         let _ = execute_command(
             handle.clone(),
-            Command::RenameContact { contact: peer, nickname: Some("Bob".into()) },
+            Command::RenameContact {
+                contact: peer,
+                nickname: Some("Bob".into()),
+            },
         )
         .await
         .unwrap();
@@ -3309,14 +3334,18 @@ mod tests {
             .unwrap();
 
         let r1 = execute_command(handle.clone(), Command::RemoveContact { contact: peer })
-            .await.unwrap();
+            .await
+            .unwrap();
         let r2 = execute_command(handle.clone(), Command::RemoveContact { contact: peer })
-            .await.unwrap();
+            .await
+            .unwrap();
         assert!(matches!(r1, CommandResult::Ok));
         assert!(matches!(r2, CommandResult::Ok));
 
         // Default ListContacts filters them out.
-        let listed = execute_command(handle.clone(), Command::ListContacts).await.unwrap();
+        let listed = execute_command(handle.clone(), Command::ListContacts)
+            .await
+            .unwrap();
         match listed {
             CommandResult::Contacts(v) => assert!(v.is_empty()),
             other => panic!("unexpected: {other:?}"),
@@ -3328,9 +3357,9 @@ mod tests {
         let handle = test_handle();
         use crate::mls::key_package::KeyPackage;
         use crate::mls::provider::MlsProvider;
-        let bob_id = crate::identity::IdentityKey::from_seed(
-            &crate::identity::Seed::generate().unwrap()
-        ).unwrap();
+        let bob_id =
+            crate::identity::IdentityKey::from_seed(&crate::identity::Seed::generate().unwrap())
+                .unwrap();
         let bob_provider = MlsProvider::new();
         let kp_repo = crate::storage::KeyPackageRepo::new(&handle.pool);
         let bob_kp = KeyPackage::generate(&bob_id, &bob_provider, &kp_repo).unwrap();
@@ -3340,16 +3369,21 @@ mod tests {
         let group_repo = crate::storage::MlsGroupRepo::new(&handle.pool);
         group.save(&group_repo).unwrap();
         let gid = group.id().0.clone();
-        let blob_before: Vec<u8> = handle.pool.with(|c| {
-            c.query_row(
-                "SELECT state_blob FROM mls_groups WHERE group_id = ?1",
-                rusqlite::params![&gid[..]],
-                |r| r.get::<_, Vec<u8>>(0),
-            )
-            .map_err(|e| crate::error::CoreError::Storage(
-                crate::storage::StorageErrorKind::Other(e.to_string())
-            ))
-        }).unwrap();
+        let blob_before: Vec<u8> = handle
+            .pool
+            .with(|c| {
+                c.query_row(
+                    "SELECT state_blob FROM mls_groups WHERE group_id = ?1",
+                    rusqlite::params![&gid[..]],
+                    |r| r.get::<_, Vec<u8>>(0),
+                )
+                .map_err(|e| {
+                    crate::error::CoreError::Storage(crate::storage::StorageErrorKind::Other(
+                        e.to_string(),
+                    ))
+                })
+            })
+            .unwrap();
 
         let bob_pk = bob_id.public();
         let repo = crate::storage::ContactRepo::new(&handle.pool);
@@ -3358,23 +3392,33 @@ mod tests {
             display_name: None,
             added_at: 0,
             card: None,
-        }).unwrap();
+        })
+        .unwrap();
         repo.set_group_id(&bob_pk, &gid).unwrap();
 
         let _ = execute_command(handle.clone(), Command::RemoveContact { contact: bob_pk })
-            .await.unwrap();
+            .await
+            .unwrap();
 
-        let blob_after: Vec<u8> = handle.pool.with(|c| {
-            c.query_row(
-                "SELECT state_blob FROM mls_groups WHERE group_id = ?1",
-                rusqlite::params![&gid[..]],
-                |r| r.get::<_, Vec<u8>>(0),
-            )
-            .map_err(|e| crate::error::CoreError::Storage(
-                crate::storage::StorageErrorKind::Other(e.to_string())
-            ))
-        }).unwrap();
-        assert_eq!(blob_before, blob_after, "RemoveContact must not touch MLS state");
+        let blob_after: Vec<u8> = handle
+            .pool
+            .with(|c| {
+                c.query_row(
+                    "SELECT state_blob FROM mls_groups WHERE group_id = ?1",
+                    rusqlite::params![&gid[..]],
+                    |r| r.get::<_, Vec<u8>>(0),
+                )
+                .map_err(|e| {
+                    crate::error::CoreError::Storage(crate::storage::StorageErrorKind::Other(
+                        e.to_string(),
+                    ))
+                })
+            })
+            .unwrap();
+        assert_eq!(
+            blob_before, blob_after,
+            "RemoveContact must not touch MLS state"
+        );
     }
 
     // ── Task 10: list_contacts_with_filter ────────────────────────────────────
@@ -3390,17 +3434,21 @@ mod tests {
             display_name: Some("Visible".into()),
             added_at: 0,
             card: None,
-        }).unwrap();
+        })
+        .unwrap();
         repo.upsert(&crate::contact::Contact {
             identity: archived,
             display_name: Some("Archived".into()),
             added_at: 0,
             card: None,
-        }).unwrap();
+        })
+        .unwrap();
         repo.set_hidden(&archived, true).unwrap();
 
         // Default: only visible.
-        let r = execute_command(handle.clone(), Command::ListContacts).await.unwrap();
+        let r = execute_command(handle.clone(), Command::ListContacts)
+            .await
+            .unwrap();
         match r {
             CommandResult::Contacts(v) => {
                 assert_eq!(v.len(), 1);
@@ -3412,8 +3460,12 @@ mod tests {
         // include_hidden = true: both.
         let r = execute_command(
             handle.clone(),
-            Command::ListContactsWithFilter { include_hidden: true },
-        ).await.unwrap();
+            Command::ListContactsWithFilter {
+                include_hidden: true,
+            },
+        )
+        .await
+        .unwrap();
         match r {
             CommandResult::Contacts(v) => assert_eq!(v.len(), 2),
             other => panic!("unexpected: {other:?}"),

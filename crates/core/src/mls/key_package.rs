@@ -220,9 +220,10 @@ pub(crate) fn key_package_ref(kp: &KeyPackage) -> Result<[u8; 32]> {
     use openmls::ciphersuite::hash_ref::make_key_package_ref;
     use openmls_rust_crypto::OpenMlsRustCrypto;
 
-    let tls_bytes = kp.inner.tls_serialize_detached().map_err(|e| {
-        CoreError::from(MlsErrorKind::Other(format!("kpref: serialize: {e}")))
-    })?;
+    let tls_bytes = kp
+        .inner
+        .tls_serialize_detached()
+        .map_err(|e| CoreError::from(MlsErrorKind::Other(format!("kpref: serialize: {e}"))))?;
     let crypto = OpenMlsRustCrypto::default();
     let kp_ref = make_key_package_ref(&tls_bytes, MLS_CIPHERSUITE, crypto.crypto())
         .map_err(|e| CoreError::from(MlsErrorKind::Other(format!("kpref: compute: {e}"))))?;
@@ -294,8 +295,7 @@ mod welcome_hash_tests {
         // that value.
         let expected_kp_ref = kp_ref_from_kp(&bob_kp);
 
-        let mut alice_group =
-            Group::create_solo(&alice, None, MlsProvider::new()).unwrap();
+        let mut alice_group = Group::create_solo(&alice, None, MlsProvider::new()).unwrap();
         let (welcome, _commit) = alice_group.add_member(&bob_kp, None).unwrap();
 
         let parsed = parse_welcome_kp_hash(&welcome).unwrap();

@@ -19,8 +19,7 @@ pub async fn render_invite_qr(url: String) -> Result<String, String> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .map_err(|e| format!("clock: {e}"))?;
-    let link = InviteLink::from_url(&url, now)
-        .map_err(|e| format!("parse invite: {e}"))?;
+    let link = InviteLink::from_url(&url, now).map_err(|e| format!("parse invite: {e}"))?;
     skattr_core::invite::qr::render_svg(&link).map_err(|e| format!("render qr: {e}"))
 }
 
