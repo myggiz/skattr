@@ -79,6 +79,33 @@ impl<'p> OutstandingInviteRepo<'p> {
         })
     }
 
+    /// Zeroize-then-delete every row whose `expires_at < now`.
+    /// Returns the number of rows deleted.
+    pub fn purge_expired(&self, now: i64) -> Result<u64> {
+        self.pool.transaction(|tx| {
+            tx.execute(
+                "UPDATE outstanding_invites SET psk = zeroblob(32) WHERE expires_at < ?1",
+                rusqlite::params![now],
+            )
+            .map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!(
+                    "oi: purge zeroize: {e}"
+                )))
+            })?;
+            let deleted = tx
+                .execute(
+                    "DELETE FROM outstanding_invites WHERE expires_at < ?1",
+                    rusqlite::params![now],
+                )
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!(
+                        "oi: purge delete: {e}"
+                    )))
+                })?;
+            Ok(deleted as u64)
+        })
+    }
+
     /// Look up the PSK + expires_at for `kp_hash`. Returns `Ok(None)`
     /// if the row is absent or has been consumed.
     pub fn get_psk(&self, kp_hash: &[u8; 32]) -> Result<Option<(Zeroizing<[u8; 32]>, i64)>> {
@@ -164,5 +191,33 @@ mod tests {
         let repo = OutstandingInviteRepo::new(&pool);
         // No put — mark_consumed must succeed silently.
         repo.mark_consumed(&[0x02u8; 32]).unwrap();
+    }
+
+    #[test]
+    fn purge_expired_removes_only_expired_rows() {
+        let pool = Pool::in_memory();
+        let repo = OutstandingInviteRepo::new(&pool);
+        let now = 1_700_000_000;
+
+        let kp1 = [0x10u8; 32];   // expired
+        let kp2 = [0x20u8; 32];   // still valid
+        repo.put(&kp1, &Zeroizing::new([0u8; 32]), &[], now - 1, 0).unwrap();
+        repo.put(&kp2, &Zeroizing::new([0u8; 32]), &[], now + 3600, 0).unwrap();
+
+        let purged = repo.purge_expired(now).unwrap();
+        assert_eq!(purged, 1);
+
+        assert!(repo.get_psk(&kp1).unwrap().is_none());
+        assert!(repo.get_psk(&kp2).unwrap().is_some());
+    }
+
+    #[test]
+    fn purge_expired_returns_zero_when_no_rows_expired() {
+        let pool = Pool::in_memory();
+        let repo = OutstandingInviteRepo::new(&pool);
+        let now = 1_700_000_000;
+        repo.put(&[0x30u8; 32], &Zeroizing::new([0u8; 32]), &[], now + 3600, 0)
+            .unwrap();
+        assert_eq!(repo.purge_expired(now).unwrap(), 0);
     }
 }
