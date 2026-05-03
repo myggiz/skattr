@@ -23,10 +23,13 @@ fn command_variant_tag(c: &Command) -> &'static str {
     match c {
         Command::AddContact { .. } => "add_contact",
         Command::AddMailbox { .. } => "add_mailbox",
+        Command::ChangePassphrase { .. } => "change_passphrase",
         Command::CreateGroup { .. } => "create_group",
         Command::CreateInvite { .. } => "create_invite",
         Command::DaemonInfo => "daemon_info",
         Command::ExportHistory { .. } => "export_history",
+        Command::GetConfig => "get_config",
+        Command::GetPassphraseAuditLatest => "get_passphrase_audit_latest",
         Command::ListContacts => "list_contacts",
         Command::ListContactsWithFilter { .. } => "list_contacts_with_filter",
         Command::ListMailboxes => "list_mailboxes",
@@ -39,7 +42,11 @@ fn command_variant_tag(c: &Command) -> &'static str {
         Command::RotateOnion => "rotate_onion",
         Command::SearchMessages { .. } => "search_messages",
         Command::SendMessage { .. } => "send_message",
+        Command::SetConfig { .. } => "set_config",
+        Command::SetContactMuted { .. } => "set_contact_muted",
         Command::Shutdown => "shutdown",
+        Command::TailLogs { .. } => "tail_logs",
+        Command::WipeAllData => "wipe_all_data",
     }
 }
 

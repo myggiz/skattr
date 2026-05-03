@@ -258,6 +258,55 @@ pub enum Command {
         /// If true, include hidden contacts.
         include_hidden: bool,
     },
+    /// Read the current config snapshot.
+    GetConfig,
+
+    /// Apply a partial config patch. Daemon validates each field, then
+    /// atomically rewrites config.toml. UI consumers debounce ~500ms so
+    /// rapid edits don't thrash the disk.
+    SetConfig {
+        /// Partial config patch to apply.
+        patch: ConfigPatch,
+    },
+
+    /// Re-encrypt the identity vault and storage age key under a new
+    /// passphrase. Stage-then-rename atomicity; recovery on boot is
+    /// deterministic. See `core::daemon::passphrase`.
+    ChangePassphrase {
+        /// Current passphrase. Wrapped in `Zeroizing<String>` server-side
+        /// as soon as decoded.
+        old: String,
+        /// New passphrase. Wrapped in `Zeroizing<String>` server-side as
+        /// soon as decoded.
+        new: String,
+    },
+
+    /// Toggle desktop-notification + unread-badge suppression for a
+    /// single contact. Persisted in `contacts.muted`.
+    SetContactMuted {
+        /// Peer identity pubkey.
+        contact: PublicKey,
+        /// If true, suppress notifications for this contact.
+        muted: bool,
+    },
+
+    /// Stream the most recent log records from the in-memory ring
+    /// buffer. UI consumes this on Settings → Advanced → Logs open;
+    /// live-tail uses `EventFilter::Logs`.
+    TailLogs {
+        /// `None` = "from the oldest record currently in the buffer".
+        #[serde(default)]
+        since_seq: Option<u64>,
+        /// Hard cap; daemon clamps to ≤ 1000.
+        limit: u32,
+    },
+
+    /// Read the most recent `passphrase_audit` row's `ts_unix`.
+    GetPassphraseAuditLatest,
+
+    /// Stop accepting IPC, drop the storage Pool, remove `data_dir`,
+    /// then `process::exit(0)`. Reply is sent BEFORE the teardown.
+    WipeAllData,
 }
 
 /// Outcome of a `SendMessage` command after the inline-delivery wait.

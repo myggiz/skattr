@@ -78,6 +78,13 @@ where
         Command::RemoveMailbox { id } => handle_remove_mailbox(handle, id).await,
         Command::ListMailboxes => handle_list_mailboxes(handle).await,
         Command::DaemonInfo => handle_daemon_info(handle).await,
+        Command::GetConfig => Err(IpcError::UnknownCommand),
+        Command::SetConfig { .. } => Err(IpcError::UnknownCommand),
+        Command::ChangePassphrase { .. } => Err(IpcError::UnknownCommand),
+        Command::SetContactMuted { .. } => Err(IpcError::UnknownCommand),
+        Command::TailLogs { .. } => Err(IpcError::UnknownCommand),
+        Command::GetPassphraseAuditLatest => Err(IpcError::UnknownCommand),
+        Command::WipeAllData => Err(IpcError::UnknownCommand),
     }
 }
 
