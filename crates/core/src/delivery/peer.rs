@@ -249,7 +249,7 @@ async fn full_run<S>(
     peer: PublicKey,
     mut conn: Option<AuthenticatedConnection<S>>,
     mut jobs: mpsc::Receiver<DeliveryJob>,
-    mut _welcome_jobs: mpsc::Receiver<WelcomeJob>,
+    mut welcome_jobs: mpsc::Receiver<WelcomeJob>,
     mut ctrl: mpsc::Receiver<PeerCtrl<S>>,
     pool: std::sync::Arc<crate::storage::Pool>,
     inbound: Option<std::sync::Arc<dyn InboundDispatch>>,
@@ -288,6 +288,22 @@ where
                 }
                 pending.insert(job.message_id, job.ack_tx);
                 last_traffic = tokio::time::Instant::now();
+            }
+            wj = welcome_jobs.recv() => {
+                let Some(wj) = wj else { break; };
+                let synthetic_id = welcome_msg_id(&wj.welcome_bytes);
+                if let Some(c) = conn.as_mut() {
+                    if c.send(Frame::MlsWelcome(wj.welcome_bytes)).await.is_err() {
+                        let _ = wj.ack_tx.send(Err(()));
+                        conn = None;
+                        drain_pending(&mut pending);
+                    } else {
+                        pending.insert(synthetic_id, wj.ack_tx);
+                        last_traffic = tokio::time::Instant::now();
+                    }
+                } else {
+                    let _ = wj.ack_tx.send(Err(()));
+                }
             }
             _ = retry_tick.tick() => {
                 let ob = Outbox::new(&pool);
@@ -383,6 +399,23 @@ where
                         } else {
                             tracing::warn!(
                                 "peer: inbound MlsApp received but no InboundDispatch configured"
+                            );
+                        }
+                    }
+                    Ok(Some(Frame::MlsWelcome(welcome_bytes))) => {
+                        last_traffic = tokio::time::Instant::now();
+                        if let Some(d) = inbound.as_ref() {
+                            if let Some(synthetic_id) =
+                                d.dispatch_welcome(peer, &welcome_bytes)
+                            {
+                                if let Some(c) = conn.as_mut() {
+                                    let _ = c.send(Frame::Ack(synthetic_id.0)).await;
+                                }
+                            }
+                        } else {
+                            tracing::warn!(
+                                "peer: inbound MlsWelcome received but no \
+                                 InboundDispatch configured"
                             );
                         }
                     }
@@ -651,5 +684,76 @@ mod tests {
         // Responder should have received the Ping.
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), responder_task).await;
         handle.abort();
+    }
+
+    /// Verify a WelcomeJob round-trips: actor emits Frame::MlsWelcome,
+    /// the test responder ACKs with the synthetic id, the oneshot
+    /// resolves Ok.
+    #[tokio::test]
+    async fn welcome_job_round_trips_via_frame_mls_welcome() {
+        let pool = std::sync::Arc::new(crate::storage::Pool::in_memory());
+
+        let actor_id = IdentityKey::generate().unwrap();
+        let responder_id = IdentityKey::generate().unwrap();
+        let responder_static = responder_id.noise_static_public();
+        let peer = PublicKey(responder_id.public().0);
+
+        let (client_stream, server_stream) = tokio::io::duplex(64 * 1024);
+
+        // Handshakes must run concurrently (both sides block until the
+        // other responds). Run the responder in a spawned task and join.
+        let responder_task = tokio::spawn(async move {
+            handshake_responder(server_stream, &responder_id, None)
+                .await
+                .unwrap()
+        });
+        let (actor_conn, _) =
+            handshake_initiator(client_stream, &actor_id, &responder_static, None)
+                .await
+                .unwrap();
+        let (mut responder_conn, _) = responder_task.await.unwrap();
+
+        let (_jobs_tx, jobs_rx) = mpsc::channel::<DeliveryJob>(4);
+        let (welcome_tx, welcome_rx) = mpsc::channel::<WelcomeJob>(4);
+        let (_ctrl_tx, ctrl_rx) =
+            mpsc::channel::<PeerCtrl<tokio::io::DuplexStream>>(4);
+
+        let _h = tokio::spawn(async move {
+            let _ = super::full_run::<tokio::io::DuplexStream>(
+                peer,
+                Some(actor_conn),
+                jobs_rx,
+                welcome_rx,
+                ctrl_rx,
+                pool,
+                None,
+            )
+            .await;
+        });
+
+        let welcome_bytes = b"fake welcome bytes".to_vec();
+        let synthetic_id = super::welcome_msg_id(&welcome_bytes);
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        welcome_tx
+            .send(WelcomeJob {
+                welcome_bytes: welcome_bytes.clone(),
+                ack_tx,
+            })
+            .await
+            .unwrap();
+
+        match responder_conn.recv().await {
+            Ok(Some(Frame::MlsWelcome(got))) => assert_eq!(got, welcome_bytes),
+            other => panic!("expected MlsWelcome, got {other:?}"),
+        }
+        responder_conn
+            .send(Frame::Ack(synthetic_id.0))
+            .await
+            .unwrap();
+
+        match tokio::time::timeout(std::time::Duration::from_secs(2), ack_rx).await {
+            Ok(Ok(Ok(()))) => {}
+            other => panic!("expected ACK, got {other:?}"),
+        }
     }
 }
