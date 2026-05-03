@@ -49,8 +49,8 @@ where
         Command::RenameContact { contact, nickname } => {
             rename_contact(&handle, contact, nickname).await
         }
-        Command::RemoveContact { .. }
-        | Command::ListContactsWithFilter { .. } => Err(IpcError::UnknownCommand),
+        Command::RemoveContact { contact } => remove_contact(&handle, contact).await,
+        Command::ListContactsWithFilter { .. } => Err(IpcError::UnknownCommand),
         Command::SearchMessages {
             query,
             contact,
@@ -1161,6 +1161,22 @@ where
     let repo = ContactRepo::new(&handle.pool);
     repo.set_display_name(&contact, trimmed.as_deref())
         .map_err(map_err)?;
+    let _ = handle.events_tx.send(Event::ContactUpdated(contact));
+    Ok(CommandResult::Ok)
+}
+
+async fn remove_contact<S>(
+    handle: &Arc<DaemonHandle<S>>,
+    contact: crate::identity::PublicKey,
+) -> std::result::Result<CommandResult, IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    use crate::daemon::events::Event;
+    use crate::storage::ContactRepo;
+
+    let repo = ContactRepo::new(&handle.pool);
+    repo.set_hidden(&contact, true).map_err(map_err)?;
     let _ = handle.events_tx.send(Event::ContactUpdated(contact));
     Ok(CommandResult::Ok)
 }
@@ -3218,5 +3234,89 @@ mod tests {
             Ok(Ok(crate::daemon::events::Event::ContactUpdated(p))) => assert_eq!(p, peer),
             other => panic!("expected ContactUpdated, got {other:?}"),
         }
+    }
+
+    // ── Task 9: remove_contact dispatcher ────────────────────────────────────
+
+    #[tokio::test]
+    async fn remove_contact_is_idempotent() {
+        let handle = test_handle();
+        let peer = PublicKey([0x91; 32]);
+        crate::storage::ContactRepo::new(&handle.pool)
+            .upsert(&crate::contact::Contact {
+                identity: peer,
+                display_name: Some("Bob".into()),
+                added_at: 0,
+                card: None,
+            })
+            .unwrap();
+
+        let r1 = execute_command(handle.clone(), Command::RemoveContact { contact: peer })
+            .await.unwrap();
+        let r2 = execute_command(handle.clone(), Command::RemoveContact { contact: peer })
+            .await.unwrap();
+        assert!(matches!(r1, CommandResult::Ok));
+        assert!(matches!(r2, CommandResult::Ok));
+
+        // Default ListContacts filters them out.
+        let listed = execute_command(handle.clone(), Command::ListContacts).await.unwrap();
+        match listed {
+            CommandResult::Contacts(v) => assert!(v.is_empty()),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn remove_contact_preserves_mls_group_state() {
+        let handle = test_handle();
+        use crate::mls::key_package::KeyPackage;
+        use crate::mls::provider::MlsProvider;
+        let bob_id = crate::identity::IdentityKey::from_seed(
+            &crate::identity::Seed::generate().unwrap()
+        ).unwrap();
+        let bob_provider = MlsProvider::new();
+        let kp_repo = crate::storage::KeyPackageRepo::new(&handle.pool);
+        let bob_kp = KeyPackage::generate(&bob_id, &bob_provider, &kp_repo).unwrap();
+        let mut group =
+            crate::mls::Group::create_solo(&handle.identity, None, MlsProvider::new()).unwrap();
+        let _ = group.add_member(&bob_kp, None).unwrap();
+        let group_repo = crate::storage::MlsGroupRepo::new(&handle.pool);
+        group.save(&group_repo).unwrap();
+        let gid = group.id().0.clone();
+        let blob_before: Vec<u8> = handle.pool.with(|c| {
+            c.query_row(
+                "SELECT state_blob FROM mls_groups WHERE group_id = ?1",
+                rusqlite::params![&gid[..]],
+                |r| r.get::<_, Vec<u8>>(0),
+            )
+            .map_err(|e| crate::error::CoreError::Storage(
+                crate::storage::StorageErrorKind::Other(e.to_string())
+            ))
+        }).unwrap();
+
+        let bob_pk = bob_id.public();
+        let repo = crate::storage::ContactRepo::new(&handle.pool);
+        repo.upsert(&crate::contact::Contact {
+            identity: bob_pk,
+            display_name: None,
+            added_at: 0,
+            card: None,
+        }).unwrap();
+        repo.set_group_id(&bob_pk, &gid).unwrap();
+
+        let _ = execute_command(handle.clone(), Command::RemoveContact { contact: bob_pk })
+            .await.unwrap();
+
+        let blob_after: Vec<u8> = handle.pool.with(|c| {
+            c.query_row(
+                "SELECT state_blob FROM mls_groups WHERE group_id = ?1",
+                rusqlite::params![&gid[..]],
+                |r| r.get::<_, Vec<u8>>(0),
+            )
+            .map_err(|e| crate::error::CoreError::Storage(
+                crate::storage::StorageErrorKind::Other(e.to_string())
+            ))
+        }).unwrap();
+        assert_eq!(blob_before, blob_after, "RemoveContact must not touch MLS state");
     }
 }
