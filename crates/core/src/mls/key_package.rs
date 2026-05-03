@@ -209,6 +209,35 @@ pub(crate) fn parse_welcome_kp_hash(welcome: &[u8]) -> crate::error::Result<[u8;
     Ok(arr)
 }
 
+/// Compute the canonical MLS `KeyPackageRef` (32 bytes) for `kp`.
+///
+/// This is `RefHash("MLS 1.0 KeyPackage Reference", tls_kp_bytes)`,
+/// NOT a plain SHA-256 of the bytes. The Welcome message routes by this
+/// ref — see `parse_welcome_kp_hash`. Use this as the primary key for
+/// `outstanding_invites` rows so the inviter can look up the PSK when a
+/// Welcome arrives.
+pub(crate) fn key_package_ref(kp: &KeyPackage) -> Result<[u8; 32]> {
+    use openmls::ciphersuite::hash_ref::make_key_package_ref;
+    use openmls_rust_crypto::OpenMlsRustCrypto;
+
+    let tls_bytes = kp.inner.tls_serialize_detached().map_err(|e| {
+        CoreError::from(MlsErrorKind::Other(format!("kpref: serialize: {e}")))
+    })?;
+    let crypto = OpenMlsRustCrypto::default();
+    let kp_ref = make_key_package_ref(&tls_bytes, MLS_CIPHERSUITE, crypto.crypto())
+        .map_err(|e| CoreError::from(MlsErrorKind::Other(format!("kpref: compute: {e}"))))?;
+    let slice = kp_ref.as_slice();
+    if slice.len() != 32 {
+        return Err(CoreError::from(MlsErrorKind::Other(format!(
+            "kpref: wrong length {}",
+            slice.len()
+        ))));
+    }
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(slice);
+    Ok(arr)
+}
+
 fn sha256(bytes: &[u8]) -> [u8; 32] {
     let mut h = Sha256::new();
     h.update(bytes);

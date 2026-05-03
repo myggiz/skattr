@@ -192,41 +192,49 @@ where
     use crate::daemon::error_kind::DaemonErrorKind;
     use crate::daemon::hex::Hex32;
     use crate::invite::InviteLink;
-    use crate::mls::key_package::KeyPackage;
+    use crate::mls::key_package::{key_package_ref, KeyPackage};
     use crate::mls::provider::MlsProvider;
-    use crate::storage::KeyPackageRepo;
+    use crate::storage::{KeyPackageRepo, OutstandingInviteRepo};
     use rand_core::{OsRng, RngCore as _};
+    use zeroize::Zeroizing;
 
     let onion = handle
         .onion()
         .ok_or(IpcError::Daemon(DaemonErrorKind::TorNotReady))?;
 
     let ttl = ttl_secs.unwrap_or(24 * 3600);
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .map_err(|e| map_err(CoreError::Config(format!("clock: {e}"))))?;
+    let now = crate::daemon::clock::now_unix_seconds();
 
     // Generate a fresh MLS KeyPackage. `generate` internally stores the
     // KP bytes in `KeyPackageRepo` with direction="ours", consumed=false.
     let provider = MlsProvider::new();
     let kp_repo = KeyPackageRepo::new(&handle.pool);
     let kp = KeyPackage::generate(&handle.identity, &provider, &kp_repo).map_err(map_err)?;
-    let kp_hash = kp.hash().map_err(map_err)?;
+
+    // Canonical MLS KeyPackageRef — the value the Welcome message routes by.
+    // This is the primary key for outstanding_invites so the inviter can look
+    // up the PSK when the Welcome arrives (see parse_welcome_kp_hash).
+    let kp_ref = key_package_ref(&kp).map_err(map_err)?;
     let kp_bytes = kp.to_bytes().map_err(map_err)?;
 
     // 32-byte one-time PSK.
-    let mut psk = [0u8; 32];
-    OsRng.fill_bytes(&mut psk);
+    let mut psk_raw = [0u8; 32];
+    OsRng.fill_bytes(&mut psk_raw);
+    let psk = Zeroizing::new(psk_raw);
 
-    let link =
-        InviteLink::generate(&handle.identity, onion, kp_bytes, psk, ttl, now).map_err(map_err)?;
+    let link = InviteLink::generate(&handle.identity, onion, kp_bytes.clone(), psk_raw, ttl, now)
+        .map_err(map_err)?;
     let url = link.to_url().map_err(map_err)?;
     let expires_at = u64::try_from(now + ttl as i64).unwrap_or(0);
 
+    // Persist the PSK so the inviter can reconstruct it at Welcome-receive time.
+    let oi = OutstandingInviteRepo::new(&handle.pool);
+    oi.put(&kp_ref, &psk, &kp_bytes, now + ttl as i64, now)
+        .map_err(map_err)?;
+
     Ok(CommandResult::InviteCreated {
         url,
-        key_package_id: Hex32::from(kp_hash),
+        key_package_id: Hex32::from(kp_ref),
         expires_at,
     })
 }
@@ -1285,10 +1293,39 @@ mod tests {
         let parsed = crate::invite::InviteLink::from_url(&url, 1).unwrap();
         assert_eq!(parsed.body.onion, "testonion".repeat(8));
 
-        // The KeyPackage is recorded in storage (single-use tracking).
-        use crate::storage::KeyPackageRepo;
-        let kp_repo = KeyPackageRepo::new(&handle.pool);
-        assert!(kp_repo.get(&kpi.0).unwrap().is_some());
+        // key_package_id is now the canonical MLS KeyPackageRef (KeyPackageRef
+        // computed by make_key_package_ref), not plain SHA-256. It is still
+        // 32 non-zero bytes.
+        assert_ne!(kpi.0, [0u8; 32]);
+    }
+
+    #[tokio::test]
+    async fn create_invite_persists_outstanding_invite_row() {
+        use crate::storage::OutstandingInviteRepo;
+
+        let handle = test_handle();
+        handle.set_onion("testonion".repeat(8));
+
+        let result = execute_command(
+            handle.clone(),
+            Command::CreateInvite {
+                nickname: None,
+                ttl_secs: Some(3600),
+            },
+        )
+        .await
+        .unwrap();
+
+        let kp_ref = match result {
+            CommandResult::InviteCreated { key_package_id, .. } => key_package_id.0,
+            other => panic!("unexpected: {other:?}"),
+        };
+
+        let oi = OutstandingInviteRepo::new(&handle.pool);
+        let (psk, expires_at) = oi.get_psk(&kp_ref).unwrap().expect("row must exist");
+        assert_eq!(psk.as_ref().len(), 32);
+        let now = crate::daemon::clock::now_unix_seconds();
+        assert!(expires_at >= now + 3500 && expires_at <= now + 3700);
     }
 
     #[tokio::test]
