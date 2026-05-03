@@ -866,7 +866,8 @@ mod tests {
             bob_pubkey,
             &welcome_bytes,
         );
-        let returned_id = result.expect("dispatch_welcome must succeed");
+        assert!(result.is_some(), "dispatch_welcome must succeed");
+        let returned_id = result.unwrap();
         assert_eq!(
             returned_id.0,
             crate::delivery::peer::welcome_msg_id(&welcome_bytes).0
@@ -883,8 +884,14 @@ mod tests {
 
         // Alice's contact for Bob exists with group_id linked
         let cr = crate::storage::ContactRepo::new(&pool);
-        let stored = cr.get(&bob_pubkey).unwrap().expect("contact persisted");
-        let gid = cr.get_group_id(&bob_pubkey).unwrap().expect("gid set");
+        let stored = cr
+            .get(&bob_pubkey)
+            .unwrap()
+            .unwrap_or_else(|| panic!("contact must be persisted"));
+        let gid = cr
+            .get_group_id(&bob_pubkey)
+            .unwrap()
+            .unwrap_or_else(|| panic!("gid must be set"));
         assert_eq!(gid.len(), 32);
         assert_eq!(stored.identity, bob_pubkey);
     }

@@ -7,6 +7,10 @@
 
 use zeroize::Zeroizing;
 
+/// Tuple returned by `get_psk_and_kp_bytes`: PSK, inviter KP TLS bytes,
+/// optional MlsProvider snapshot, expires_at unix seconds.
+type OutstandingInviteRow = (Zeroizing<[u8; 32]>, Vec<u8>, Option<Vec<u8>>, i64);
+
 use super::StorageErrorKind;
 use crate::error::{CoreError, Result};
 use crate::storage::Pool;
@@ -46,7 +50,7 @@ impl<'p> OutstandingInviteRepo<'p> {
                  VALUES (?1, ?2, ?3, ?4, ?5)",
                 rusqlite::params![
                     &kp_hash[..],
-                    &psk.as_ref()[..],
+                    psk.as_ref(),
                     inviter_kp,
                     expires_at,
                     created_at,
@@ -75,7 +79,7 @@ impl<'p> OutstandingInviteRepo<'p> {
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 rusqlite::params![
                     &kp_hash[..],
-                    &psk.as_ref()[..],
+                    psk.as_ref(),
                     inviter_kp,
                     provider_snapshot,
                     expires_at,
@@ -149,7 +153,7 @@ impl<'p> OutstandingInviteRepo<'p> {
     pub fn get_psk_and_kp_bytes(
         &self,
         kp_ref: &[u8; 32],
-    ) -> Result<Option<(Zeroizing<[u8; 32]>, Vec<u8>, Option<Vec<u8>>, i64)>> {
+    ) -> Result<Option<OutstandingInviteRow>> {
         self.pool.with(|c| {
             let result = c.query_row(
                 "SELECT psk, inviter_kp, provider_snapshot, expires_at \

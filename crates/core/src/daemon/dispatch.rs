@@ -314,7 +314,7 @@ where
     // ACK here — UI responsiveness comes first, and a failed delivery
     // surfaces via Event::DeliveryStatusChanged through the hub's
     // existing failure path.
-    let _ = handle
+    handle
         .hub
         .send_welcome(link.body.identity, welcome)
         .await
