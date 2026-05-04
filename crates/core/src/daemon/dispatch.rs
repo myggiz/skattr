@@ -155,6 +155,12 @@ where
             None => None,
         };
 
+        let peer_mailboxes: Vec<String> = c
+            .card
+            .as_ref()
+            .map(|card| card.body.mailboxes.clone())
+            .unwrap_or_default();
+
         summaries.push(ContactSummary {
             pubkey: c.identity,
             nickname: c.display_name,
@@ -166,6 +172,8 @@ where
             last_ts_recv,
             group_state,
             last_read_row_id,
+            muted: c.muted,
+            peer_mailboxes,
         });
     }
 
@@ -311,6 +319,7 @@ where
         display_name: None,
         added_at: now,
         card: None,
+        muted: false,
     };
     contact_repo.upsert(&contact).map_err(map_err)?;
     contact_repo
@@ -345,6 +354,8 @@ where
         last_ts_recv: None,
         group_state: None,
         last_read_row_id: None,
+        muted: false,
+        peer_mailboxes: Vec::new(),
     }))
 }
 
@@ -1470,6 +1481,7 @@ mod tests {
                 display_name: Some("alice".into()),
                 added_at: 1_700_000_000,
                 card: None,
+                muted: false,
             })
             .unwrap();
             repo.upsert(&Contact {
@@ -1477,6 +1489,7 @@ mod tests {
                 display_name: None,
                 added_at: 1_700_000_100,
                 card: None,
+                muted: false,
             })
             .unwrap();
         }
@@ -1498,6 +1511,60 @@ mod tests {
                         assert_eq!(s.card_version, 0);
                     }
                 }
+            }
+            other => panic!("expected Contacts, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn list_contacts_projects_muted_and_peer_mailboxes() {
+        use crate::contact::card::{ContactCard, ContactCardBody};
+        use crate::identity::Signature;
+        use crate::storage::ContactRepo;
+
+        let handle = test_handle();
+        let peer = PublicKey([0x42; 32]);
+
+        {
+            let repo = ContactRepo::new(&handle.pool);
+            // Seed a muted contact.
+            repo.upsert(&Contact {
+                identity: peer,
+                display_name: Some("muted-peer".into()),
+                added_at: 1_700_000_000,
+                card: None,
+                muted: false,
+            })
+            .unwrap();
+            repo.set_muted(&peer, true).unwrap();
+
+            // Seed a ContactCard with two mailboxes.
+            let card = ContactCard {
+                body: ContactCardBody {
+                    identity: peer,
+                    onion: "xyzxyz.onion".into(),
+                    mailboxes: vec!["mailbox1.onion".into(), "mailbox2.onion".into()],
+                    version: 1,
+                    expires_at: 9_999_999_999,
+                },
+                // Signature not verified by put_card; zeroed bytes suffice.
+                signature: Signature([0u8; 64]),
+            };
+            repo.put_card(&card).unwrap();
+        }
+
+        let result = execute_command(handle, Command::ListContacts)
+            .await
+            .unwrap();
+        match result {
+            CommandResult::Contacts(summaries) => {
+                assert_eq!(summaries.len(), 1);
+                let s = &summaries[0];
+                assert!(s.muted, "muted should be true");
+                assert_eq!(
+                    s.peer_mailboxes,
+                    vec!["mailbox1.onion".to_string(), "mailbox2.onion".to_string()]
+                );
             }
             other => panic!("expected Contacts, got {other:?}"),
         }
@@ -1537,6 +1604,7 @@ mod tests {
             display_name: None,
             added_at: 0,
             card: None,
+            muted: false,
         })
         .unwrap();
 
@@ -1598,6 +1666,7 @@ mod tests {
             display_name: None,
             added_at: 0,
             card: None,
+            muted: false,
         })
         .unwrap();
         cr.set_group_id(&peer, &gid).unwrap();
@@ -1663,6 +1732,7 @@ mod tests {
             display_name: None,
             added_at: 0,
             card: None,
+            muted: false,
         })
         .unwrap();
         cr.set_group_id(&peer, &gid).unwrap();
@@ -1822,6 +1892,7 @@ mod tests {
             display_name: None,
             added_at: 0,
             card: None,
+            muted: false,
         })
         .unwrap();
         cr.set_group_id(&alice, &gid).unwrap();
@@ -1921,6 +1992,7 @@ mod tests {
             display_name: None,
             added_at: 0,
             card: None,
+            muted: false,
         })
         .unwrap();
         cr.set_group_id(&alice, &gid).unwrap();
@@ -1995,6 +2067,7 @@ mod tests {
             display_name: None,
             added_at: 0,
             card: None,
+            muted: false,
         })
         .unwrap();
         cr.set_group_id(&alice, &gid).unwrap();
@@ -2048,6 +2121,7 @@ mod tests {
             display_name: None,
             added_at: 0,
             card: None,
+            muted: false,
         })
         .unwrap();
         cr.set_group_id(&alice, &gid).unwrap();
@@ -2173,6 +2247,7 @@ mod tests {
             display_name: None,
             added_at: 0,
             card: None,
+            muted: false,
         })
         .unwrap();
         cr.set_group_id(&alice, &gid).unwrap();
@@ -2296,6 +2371,7 @@ mod tests {
             display_name: None,
             added_at: 0,
             card: None,
+            muted: false,
         })
         .unwrap();
         cr.set_group_id(&peer, &gid).unwrap();
@@ -2768,6 +2844,7 @@ mod tests {
             display_name: Some("alice".into()),
             added_at: 100,
             card: None,
+            muted: false,
         })
         .unwrap();
         repo.upsert(&crate::contact::Contact {
@@ -2775,6 +2852,7 @@ mod tests {
             display_name: Some("bob".into()),
             added_at: 200,
             card: None,
+            muted: false,
         })
         .unwrap();
         repo.set_group_id(&pk_a, &group_a).unwrap();
@@ -2830,6 +2908,7 @@ mod tests {
                 display_name: None,
                 added_at: 0,
                 card: None,
+                muted: false,
             })
             .unwrap();
         crate::storage::ContactRepo::new(&h.pool)
@@ -3127,6 +3206,7 @@ mod tests {
                 display_name: Some(nickname.into()),
                 added_at: 0,
                 card: None,
+                muted: false,
             })
             .unwrap();
         contact_repo.set_group_id(&peer_pk, &gid).unwrap();
@@ -3244,6 +3324,7 @@ mod tests {
             display_name: None,
             added_at: 0,
             card: None,
+            muted: false,
         })
         .unwrap();
 
@@ -3305,6 +3386,7 @@ mod tests {
                 display_name: None,
                 added_at: 0,
                 card: None,
+                muted: false,
             })
             .unwrap();
 
@@ -3337,6 +3419,7 @@ mod tests {
                 display_name: Some("Bob".into()),
                 added_at: 0,
                 card: None,
+                muted: false,
             })
             .unwrap();
 
@@ -3399,6 +3482,7 @@ mod tests {
             display_name: None,
             added_at: 0,
             card: None,
+            muted: false,
         })
         .unwrap();
         repo.set_group_id(&bob_pk, &gid).unwrap();
@@ -3441,6 +3525,7 @@ mod tests {
             display_name: Some("Visible".into()),
             added_at: 0,
             card: None,
+            muted: false,
         })
         .unwrap();
         repo.upsert(&crate::contact::Contact {
@@ -3448,6 +3533,7 @@ mod tests {
             display_name: Some("Archived".into()),
             added_at: 0,
             card: None,
+            muted: false,
         })
         .unwrap();
         repo.set_hidden(&archived, true).unwrap();

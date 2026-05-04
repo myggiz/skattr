@@ -50,14 +50,16 @@ impl<'p> ContactRepo<'p> {
     pub fn get(&self, identity: &PublicKey) -> Result<Option<Contact>> {
         let base = self.pool.with(|c| {
             let result = c.query_row(
-                "SELECT display_name, added_at FROM contacts WHERE identity_pubkey = ?1",
+                "SELECT display_name, added_at, muted FROM contacts WHERE identity_pubkey = ?1",
                 rusqlite::params![&identity.0[..]],
                 |r| {
+                    let muted_val: i64 = r.get(2).unwrap_or(0);
                     Ok(Contact {
                         identity: *identity,
                         display_name: r.get(0)?,
                         added_at: r.get(1)?,
                         card: None,
+                        muted: muted_val != 0,
                     })
                 },
             );
@@ -83,7 +85,7 @@ impl<'p> ContactRepo<'p> {
         let mut contacts: Vec<Contact> = self.pool.with(|c| {
             let mut stmt = c
                 .prepare(
-                    "SELECT identity_pubkey, display_name, added_at FROM contacts \
+                    "SELECT identity_pubkey, display_name, added_at, muted FROM contacts \
                      WHERE hidden = 0 \
                      ORDER BY display_name IS NULL, display_name COLLATE NOCASE",
                 )
@@ -99,11 +101,13 @@ impl<'p> ContactRepo<'p> {
                     if pub_bytes.len() == 32 {
                         arr.copy_from_slice(&pub_bytes);
                     }
+                    let muted_val: i64 = r.get(3).unwrap_or(0);
                     Ok(Contact {
                         identity: PublicKey(arr),
                         display_name: r.get(1)?,
                         added_at: r.get(2)?,
                         card: None,
+                        muted: muted_val != 0,
                     })
                 })
                 .map_err(|e| {
@@ -428,7 +432,7 @@ impl<'p> ContactRepo<'p> {
         let mut contacts: Vec<Contact> = self.pool.with(|c| {
             let mut stmt = c
                 .prepare(
-                    "SELECT identity_pubkey, display_name, added_at FROM contacts \
+                    "SELECT identity_pubkey, display_name, added_at, muted FROM contacts \
                      ORDER BY display_name IS NULL, display_name COLLATE NOCASE",
                 )
                 .map_err(|e| {
@@ -441,11 +445,13 @@ impl<'p> ContactRepo<'p> {
                     if pub_bytes.len() == 32 {
                         arr.copy_from_slice(&pub_bytes);
                     }
+                    let muted_val: i64 = r.get(3).unwrap_or(0);
                     Ok(Contact {
                         identity: PublicKey(arr),
                         display_name: r.get(1)?,
                         added_at: r.get(2)?,
                         card: None,
+                        muted: muted_val != 0,
                     })
                 })
                 .map_err(|e| {
@@ -549,6 +555,7 @@ mod tests {
             display_name: Some(format!("Alice-{seed}")),
             added_at: 1_700_000_000 + i64::from(seed),
             card: None,
+            muted: false,
         }
     }
 
@@ -898,6 +905,7 @@ mod tests {
             display_name: None,
             added_at: 0,
             card: None,
+            muted: false,
         })
         .unwrap();
         repo.set_group_id(&peer, &gid).unwrap();

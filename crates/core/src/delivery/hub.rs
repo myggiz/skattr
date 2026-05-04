@@ -636,6 +636,7 @@ mod tests {
                 display_name: None,
                 added_at: 0,
                 card: None,
+                muted: false,
             })
             .unwrap();
         contacts
@@ -818,6 +819,7 @@ mod tests {
                 display_name: None,
                 added_at: 0,
                 card: None,
+                muted: false,
             })
             .unwrap();
         seed_direct_outbox_row(&pool, &peer, &mid, &ct);

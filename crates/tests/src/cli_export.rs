@@ -93,6 +93,7 @@ async fn export_history_paginates_2500_rows_oldest_first() {
         display_name: None,
         added_at: 0,
         card: None,
+        muted: false,
     })
     .unwrap();
     cr.set_group_id(&alice, &gid).unwrap();

@@ -92,6 +92,7 @@ fn install_contact_with_card(
             display_name: Some("peer".into()),
             added_at: 0,
             card: None,
+            muted: false,
         })
         .unwrap();
     contacts.set_group_id(&peer.public(), group_id).unwrap();

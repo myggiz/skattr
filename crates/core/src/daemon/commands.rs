@@ -385,6 +385,15 @@ pub struct ContactSummary {
     /// `None` for fresh contacts with no cursor yet.
     #[serde(default)]
     pub last_read_row_id: Option<i64>,
+    /// Per-contact desktop-notification + unread-badge mute. New in
+    /// 2.F. `false` for clients that don't yet honour the field.
+    #[serde(default)]
+    pub muted: bool,
+    /// Onions advertised by the latest verified `ContactCard.body.mailboxes`
+    /// for this contact. New in 2.F. Empty for contacts whose card has
+    /// no mailboxes or whose card is missing.
+    #[serde(default)]
+    pub peer_mailboxes: Vec<String>,
 }
 
 /// Wire-safe projection of a persisted message row.
@@ -671,6 +680,8 @@ mod tests {
                 last_ts_recv: None,
                 group_state: None,
                 last_read_row_id: None,
+                muted: false,
+                peer_mailboxes: Vec::new(),
             }]),
             CommandResult::Messages(vec![MessageRecord {
                 row_id: 0, // row_id irrelevant in this test
@@ -764,6 +775,8 @@ mod tests {
             last_ts_recv: Some(1_700_000_500),
             group_state: None,
             last_read_row_id: None,
+            muted: false,
+            peer_mailboxes: Vec::new(),
         };
         let mut buf = Vec::new();
         ciborium::ser::into_writer(&s, &mut buf).unwrap();
@@ -786,6 +799,8 @@ mod tests {
             last_ts_recv: Some(1_700_000_500),
             group_state: Some(MlsGroupStateLabel::Active),
             last_read_row_id: Some(42),
+            muted: false,
+            peer_mailboxes: Vec::new(),
         };
         let back: ContactSummary = roundtrip(&s);
         assert_eq!(back.pubkey.0, [7; 32]);
