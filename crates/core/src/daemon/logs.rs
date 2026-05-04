@@ -272,4 +272,54 @@ mod tests {
         let out = r.redact("id=abc123"); // not 64 chars
         assert!(out.contains("abc123"));
     }
+
+    #[test]
+    fn ring_buffer_layer_redacts_pubkeys_at_info() {
+        use tracing_subscriber::layer::SubscriberExt;
+        let sink = LogSink::new();
+        let layer = RingBufferLayer::new(sink.clone());
+        let subscriber = tracing_subscriber::registry().with(layer);
+        let _g = tracing::subscriber::set_default(subscriber);
+
+        let pubkey = "0".repeat(64);
+        tracing::info!(peer = %pubkey, "received message");
+
+        let (records, _) = sink.snapshot(None, 100);
+        #[allow(clippy::expect_used)]
+        let info_record = records
+            .iter()
+            .find(|r| matches!(r.level, LogLevel::Info))
+            .expect("at least one Info record");
+        assert!(
+            !info_record.message.contains(&pubkey),
+            "info-level pubkey must be redacted, got: {}",
+            info_record.message
+        );
+        assert!(info_record.message.contains("[REDACTED-PUBKEY]"));
+    }
+
+    #[test]
+    fn debug_record_keeps_pubkey_intact() {
+        use tracing_subscriber::layer::SubscriberExt;
+        let sink = LogSink::new();
+        let layer = RingBufferLayer::new(sink.clone());
+        let filter = tracing_subscriber::EnvFilter::new("trace");
+        let subscriber = tracing_subscriber::registry().with(filter).with(layer);
+        let _g = tracing::subscriber::set_default(subscriber);
+
+        let pubkey = "a".repeat(64);
+        tracing::debug!(peer = %pubkey, "fine-grained");
+
+        let (records, _) = sink.snapshot(None, 100);
+        #[allow(clippy::expect_used)]
+        let debug_record = records
+            .iter()
+            .find(|r| matches!(r.level, LogLevel::Debug))
+            .expect("at least one Debug record");
+        assert!(
+            debug_record.message.contains(&pubkey),
+            "debug-level pubkey must NOT be redacted, got: {}",
+            debug_record.message
+        );
+    }
 }
