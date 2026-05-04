@@ -1,4 +1,5 @@
 [toolchain]
 channel = "stable"
+version = "1.95.0"
 components = ["rustfmt", "clippy"]
 profile = "minimal"
