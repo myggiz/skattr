@@ -225,6 +225,37 @@ pub async fn run_smoke(cfg: SmokeConfig) -> Result<SmokeReport, SmokeError> {
 mod tests {
     use super::*;
 
+    /// Returns a tempdir anchored under `$HOME/.cache/skattr-smoke-test/`
+    /// rather than `/tmp`. Arti's `fs-mistrust` rejects any state_dir
+    /// whose parent chain contains a world-writable directory; `/tmp`
+    /// is `1777` (world-writable + sticky) on Linux, so anchoring under
+    /// `~/.cache/` avoids that failure mode on dev hosts. CI runners
+    /// use `$RUNNER_TEMP` (never under `/tmp`), so this helper
+    /// is only needed by smoke tests that allocate their own dir.
+    ///
+    /// **Note:** on some machines `fs-mistrust` may still reject the
+    /// directory due to stricter local permission-check policies (e.g.
+    /// group-trust configuration). If the test fails with a
+    /// "problem with filesystem permissions" error even after this
+    /// fix, set `ARTI_FS_DISABLE_PERMISSION_CHECKS=true` in the
+    /// environment before running the test:
+    ///
+    /// ```text
+    /// ARTI_FS_DISABLE_PERMISSION_CHECKS=true \
+    ///   cargo test -p skattr-core --features test-harness --release \
+    ///     -- --ignored daemon::smoke::tests::run_smoke_real_tor
+    /// ```
+    fn safe_tempdir() -> tempfile::TempDir {
+        let cache_root = std::env::var_os("HOME")
+            .map(|h| std::path::PathBuf::from(h).join(".cache").join("skattr-smoke-test"))
+            .unwrap_or_else(|| std::path::PathBuf::from("/tmp/skattr-smoke-test-no-home"));
+        std::fs::create_dir_all(&cache_root).expect("cache_root mkdir");
+        tempfile::Builder::new()
+            .prefix("smoke-")
+            .tempdir_in(&cache_root)
+            .expect("tempdir_in cache")
+    }
+
     #[test]
     fn smoke_error_displays_data_dir_not_empty() {
         let e = SmokeError::DataDirNotEmpty {
@@ -300,12 +331,23 @@ mod tests {
     }
 
     /// `#[ignore]`-gated: spawns real Arti. Run with:
+    ///
+    /// ```text
+    /// ARTI_FS_DISABLE_PERMISSION_CHECKS=true \
     ///   cargo test -p skattr-core --features test-harness --release \
-    ///       -- --ignored daemon::smoke::tests::run_smoke_real_tor
+    ///     -- --ignored daemon::smoke::tests::run_smoke_real_tor
+    /// ```
+    ///
+    /// The `ARTI_FS_DISABLE_PERMISSION_CHECKS` env var bypasses
+    /// `fs-mistrust`'s parent-directory permission checks. It is required
+    /// on dev machines where the home-directory ancestor chain does not
+    /// satisfy Arti's default permission policy. CI uses `$RUNNER_TEMP`
+    /// which is already outside `/tmp` and has the right ownership, so
+    /// the env var is not needed there.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    #[ignore = "spawns real Arti"]
+    #[ignore = "spawns real Arti; set ARTI_FS_DISABLE_PERMISSION_CHECKS=true if fs-mistrust rejects the state dir"]
     async fn run_smoke_real_tor() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = safe_tempdir();
         let cfg = SmokeConfig {
             data_dir: tmp.path().to_path_buf(),
             tor_ready_timeout: Duration::from_secs(240),
@@ -324,7 +366,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_smoke_rejects_existing_vault() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = safe_tempdir();
         std::fs::write(tmp.path().join("identity.vault"), b"x").unwrap();
         let cfg = SmokeConfig {
             data_dir: tmp.path().to_path_buf(),
@@ -343,7 +385,7 @@ mod tests {
     /// the smoke layer routed the failure correctly.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn run_smoke_short_timeout_fails_fast() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = safe_tempdir();
         let cfg = SmokeConfig {
             data_dir: tmp.path().to_path_buf(),
             tor_ready_timeout: Duration::from_millis(50),
