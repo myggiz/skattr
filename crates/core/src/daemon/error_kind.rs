@@ -47,6 +47,15 @@ pub enum DaemonErrorKind {
         /// Human-readable description of the argument error.
         message: String,
     },
+    /// Authentication failed (e.g. ChangePassphrase wrong-old).
+    Unauthorized,
+    /// Passphrase prompted at recovery doesn't decrypt either the OLD or
+    /// NEW state. User should retry.
+    WrongPassphrase,
+    /// On-disk passphrase state is in a logically-impossible
+    /// configuration; manual intervention required (see
+    /// docs/operations/passphrase-recovery.md).
+    InconsistentState,
 }
 
 #[cfg(test)]
