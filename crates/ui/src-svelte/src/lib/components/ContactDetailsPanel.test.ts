@@ -17,21 +17,27 @@ vi.mock("$lib/stores/toast", () => ({
   toast: { show: vi.fn(), clear: vi.fn() },
 }));
 
+vi.mock("$lib/stores/config", () => ({
+  setContactMuted: vi.fn().mockResolvedValue(undefined),
+}));
+
 import { rename, archive } from "$lib/stores/contacts";
 import { toast } from "$lib/stores/toast";
 
-function fakeSummary(overrides: Partial<{ nickname: string | null }> = {}) {
+function fakeSummary(overrides: Partial<{ nickname: string | null }> = {}): import("$lib/ipc/types").ContactSummary {
   return {
     pubkey: FAKE_PK,
     nickname: "Bob",
     onion: FAKE_ONION,
-    card_version: 1,
-    added_at: 0,
-    unread_count: 0,
+    card_version: 1n,
+    added_at: 0n,
+    unread_count: 0n,
     last_message_preview: null,
     last_ts_recv: null,
     group_state: "active",
     last_read_row_id: null,
+    muted: false,
+    peer_mailboxes: [],
     ...overrides,
   };
 }

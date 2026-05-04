@@ -286,6 +286,8 @@ describe("openConversationFromSummary", () => {
       last_ts_recv: null,
       group_state: "active",
       last_read_row_id: 12n,
+      muted: false,
+      peer_mailboxes: [],
     };
     await openConversationFromSummary(summary);
     expect(get(conversation).unreadAnchorRowId).toBe(12n);
@@ -312,14 +314,14 @@ describe("openConversationFromSummary", () => {
       last_ts_recv: null,
       group_state: null,
       last_read_row_id: null,
+      muted: false,
+      peer_mailboxes: [],
     };
     await openConversationFromSummary(summary);
     expect(get(conversation).unreadAnchorRowId).toBeNull();
     expect(get(conversation).readCursor).toBe(0n);
   });
 });
-
-import { ipcClient } from "$lib/ipc/tauri";
 
 describe("send status mapping", () => {
   test("inline delivered SendStatus → Delivered DeliveryStatus", async () => {

@@ -31,6 +31,9 @@
   <button class="row" class:active onclick={onclick}>
     <div class="title">
       {summary.nickname ?? shortHash(summary.pubkey)}
+      {#if summary.muted}
+        <span class="mute-icon" title="Muted" aria-label="Muted">🔕</span>
+      {/if}
     </div>
     <div class="meta">
       <span class="preview">{summary.last_message_preview ?? ""}</span>
@@ -72,7 +75,8 @@
     flex: 1;
   }
   .row:hover, .row.active { background: var(--bg-elevated); }
-  .title { font-weight: 500; }
+  .title { font-weight: 500; display: flex; align-items: center; gap: 4px; }
+  .mute-icon { color: var(--text-muted, #888); font-size: 0.85em; }
   .meta { display: flex; justify-content: space-between; color: var(--text-muted); font: var(--t-ui); }
   .preview { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 200px; }
   .badge {
