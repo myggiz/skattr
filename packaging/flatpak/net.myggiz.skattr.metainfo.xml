@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>net.myggiz.skattr</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>Skattr</name>
+  <summary>Metadata-resistant P2P encrypted messenger</summary>
+  <description>
+    <p>
+      Skattr is a desktop-first, metadata-resistant P2P encrypted
+      messenger. All traffic flows over Tor v3 onion services
+      (via Arti); message encryption uses MLS (RFC 9420). Identity
+      is derived from a BIP39 seed phrase you control.
+    </p>
+    <p>
+      No central server. Mailboxes exist for offline message
+      delivery and are semi-trusted: they can see when ciphertext
+      moves but never the contents.
+    </p>
+  </description>
+  <launchable type="desktop-id">net.myggiz.skattr.desktop</launchable>
+  <provides>
+    <binary>skattr-ui</binary>
+    <mediatype>x-scheme-handler/skattr</mediatype>
+  </provides>
+  <url type="homepage">https://skattr.org</url>
+  <url type="bugtracker">https://github.com/myggiz/skattr/issues</url>
+  <url type="vcs-browser">https://github.com/myggiz/skattr</url>
+  <developer_name>Myggiz AB</developer_name>
+  <categories>
+    <category>Network</category>
+    <category>InstantMessaging</category>
+  </categories>
+  <content_rating type="oars-1.1">
+    <content_attribute id="social-chat">intense</content_attribute>
+  </content_rating>
+  <releases>
+    <release version="0.0.1" date="2026-05-04">
+      <description>
+        <p>Phase 2.G: first packaged release. Linux + macOS bundles.</p>
+      </description>
+    </release>
+  </releases>
+</component>

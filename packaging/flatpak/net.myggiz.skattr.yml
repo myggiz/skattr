@@ -1,0 +1,45 @@
+# Phase 2.G in-repo Flatpak manifest. Builds skattr from a local
+# checkout (source: type: dir, path: ../..). Flathub publication is
+# deferred — the Flathub manifest variant is documented in
+# docs/build/flatpak.md and would substitute a tag-based source.
+app-id: net.myggiz.skattr
+runtime: org.freedesktop.Platform
+runtime-version: '23.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+  - org.freedesktop.Sdk.Extension.node20
+command: skattr-ui
+finish-args:
+  - --share=network          # Tor connectivity
+  - --socket=fallback-x11
+  - --socket=wayland
+  - --share=ipc
+  - --device=dri
+  - --socket=session-bus     # tray + notifications via D-Bus
+  - --filesystem=xdg-data/skattr:create
+  - --filesystem=xdg-config/skattr:create
+modules:
+  - name: skattr
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/node20/bin
+      env:
+        CARGO_HOME: /run/build/skattr/cargo
+        PNPM_HOME: /run/build/skattr/pnpm
+    sources:
+      - type: dir
+        path: ../..
+    build-commands:
+      - cargo install tauri-cli --version =2.11.0 --root /app
+      - corepack enable
+      - corepack prepare pnpm@10 --activate
+      - cd crates/ui/src-svelte && pnpm install --frozen-lockfile
+      - /app/bin/cargo-tauri build --no-bundle --release
+      # Install the binary, .desktop, icons, AppStream metadata.
+      - install -D target/release/skattr-ui /app/bin/skattr-ui
+      - install -D crates/ui/icons/128x128.png /app/share/icons/hicolor/128x128/apps/net.myggiz.skattr.png
+      - install -D crates/ui/icons/256x256.png /app/share/icons/hicolor/256x256/apps/net.myggiz.skattr.png
+      - install -D crates/ui/icons/512x512.png /app/share/icons/hicolor/512x512/apps/net.myggiz.skattr.png
+      - install -D packaging/flatpak/net.myggiz.skattr.metainfo.xml /app/share/metainfo/net.myggiz.skattr.metainfo.xml
+      - install -D packaging/flatpak/net.myggiz.skattr.desktop /app/share/applications/net.myggiz.skattr.desktop
