@@ -88,9 +88,8 @@ pub(crate) fn check_data_dir_clean(data_dir: &std::path::Path) -> Result<(), Smo
     if !data_dir.exists() {
         return Ok(());
     }
-    let entries = std::fs::read_dir(data_dir).map_err(|e| {
-        SmokeError::Other(format!("read_dir {}: {e}", data_dir.display()))
-    })?;
+    let entries = std::fs::read_dir(data_dir)
+        .map_err(|e| SmokeError::Other(format!("read_dir {}: {e}", data_dir.display())))?;
     for entry in entries {
         let entry = entry.map_err(|e| SmokeError::Other(format!("dir entry: {e}")))?;
         let name = entry.file_name();
@@ -140,9 +139,8 @@ pub async fn run_smoke(cfg: SmokeConfig) -> Result<SmokeReport, SmokeError> {
 
     // Step 1: refuse to clobber existing user state.
     check_data_dir_clean(&cfg.data_dir)?;
-    std::fs::create_dir_all(&cfg.data_dir).map_err(|e| {
-        SmokeError::Other(format!("mkdir {}: {e}", cfg.data_dir.display()))
-    })?;
+    std::fs::create_dir_all(&cfg.data_dir)
+        .map_err(|e| SmokeError::Other(format!("mkdir {}: {e}", cfg.data_dir.display())))?;
 
     // Step 2: create a throwaway vault.
     let passphrase = make_throwaway_passphrase();
@@ -247,7 +245,11 @@ mod tests {
     /// ```
     fn safe_tempdir() -> tempfile::TempDir {
         let cache_root = std::env::var_os("HOME")
-            .map(|h| std::path::PathBuf::from(h).join(".cache").join("skattr-smoke-test"))
+            .map(|h| {
+                std::path::PathBuf::from(h)
+                    .join(".cache")
+                    .join("skattr-smoke-test")
+            })
             .unwrap_or_else(|| std::path::PathBuf::from("/tmp/skattr-smoke-test-no-home"));
         std::fs::create_dir_all(&cache_root).expect("cache_root mkdir");
         tempfile::Builder::new()

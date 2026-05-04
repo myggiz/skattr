@@ -564,10 +564,7 @@ async fn restore_backup(
 /// tempdir under `$HOME/.cache/skattr-smoke-test/` so Arti's
 /// fs-mistrust accepts the parent chain (avoiding world-writable
 /// `/tmp`).
-async fn cli_smoke(
-    data_dir_override: Option<&std::path::Path>,
-    timeout_secs: u64,
-) -> Result<()> {
+async fn cli_smoke(data_dir_override: Option<&std::path::Path>, timeout_secs: u64) -> Result<()> {
     use skattr_core::daemon::smoke::{run_smoke, SmokeConfig};
 
     let data_dir = match data_dir_override {

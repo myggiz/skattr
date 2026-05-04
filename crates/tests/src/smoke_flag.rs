@@ -29,7 +29,11 @@ use std::time::{Duration, Instant};
 /// fs-mistrust on Linux).
 fn safe_tempdir() -> tempfile::TempDir {
     let cache_root = std::env::var_os("HOME")
-        .map(|h| std::path::PathBuf::from(h).join(".cache").join("skattr-smoke-test"))
+        .map(|h| {
+            std::path::PathBuf::from(h)
+                .join(".cache")
+                .join("skattr-smoke-test")
+        })
         .unwrap_or_else(|| std::path::PathBuf::from("/tmp/skattr-smoke-test-no-home"));
     std::fs::create_dir_all(&cache_root).expect("cache_root mkdir");
     tempfile::Builder::new()
@@ -99,7 +103,10 @@ fn skattr_ui_smoke_test_exits_zero() {
         elapsed <= Duration::from_secs(260),
         "smoke took {elapsed:?}; should complete within ~240s + slack"
     );
-    assert!(stdout.contains("smoke OK"), "stdout missing 'smoke OK': {stdout}");
+    assert!(
+        stdout.contains("smoke OK"),
+        "stdout missing 'smoke OK': {stdout}"
+    );
 
     // Vault should have been created.
     assert!(
