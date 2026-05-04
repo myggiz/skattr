@@ -71,7 +71,36 @@ pub enum SmokeError {
     Other(String),
 }
 
+/// Verify the data_dir is safe to use for a smoke run.
+///
+/// Accepts a non-existent directory or a directory whose only
+/// entries are hidden (dotfile-prefixed). Rejects any directory
+/// containing visible files / subdirectories — particularly an
+/// existing `identity.vault`.
+pub(crate) fn check_data_dir_clean(data_dir: &std::path::Path) -> Result<(), SmokeError> {
+    if !data_dir.exists() {
+        return Ok(());
+    }
+    let entries = std::fs::read_dir(data_dir).map_err(|e| {
+        SmokeError::Other(format!("read_dir {}: {e}", data_dir.display()))
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|e| SmokeError::Other(format!("dir entry: {e}")))?;
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        // Skip hidden / dotfile entries (editor + macOS metadata).
+        if name_str.starts_with('.') {
+            continue;
+        }
+        return Err(SmokeError::DataDirNotEmpty {
+            found: name_str.into_owned(),
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -99,5 +128,53 @@ mod tests {
         let c = SmokeConfig::default();
         assert_eq!(c.tor_ready_timeout, Duration::from_secs(240));
         assert_eq!(c.seed_bytes, [0u8; 32]);
+    }
+
+    #[test]
+    fn data_dir_check_passes_for_nonexistent_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("does-not-exist");
+        let result = check_data_dir_clean(&missing);
+        assert!(result.is_ok(), "non-existent dir must be acceptable");
+    }
+
+    #[test]
+    fn data_dir_check_passes_for_empty_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = check_data_dir_clean(tmp.path());
+        assert!(result.is_ok(), "empty dir must be acceptable");
+    }
+
+    #[test]
+    fn data_dir_check_rejects_existing_vault() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("identity.vault"), b"x").unwrap();
+        let err = check_data_dir_clean(tmp.path()).unwrap_err();
+        match err {
+            SmokeError::DataDirNotEmpty { found } => {
+                assert!(found.contains("identity.vault"));
+            }
+            other => panic!("expected DataDirNotEmpty, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn data_dir_check_ignores_hidden_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Hidden / dotfiles created by editors or VCS shouldn't trip the gate.
+        std::fs::write(tmp.path().join(".DS_Store"), b"x").unwrap();
+        let result = check_data_dir_clean(tmp.path());
+        assert!(
+            result.is_ok(),
+            "hidden file must not block smoke; got {result:?}"
+        );
+    }
+
+    #[test]
+    fn data_dir_check_rejects_arbitrary_user_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("notes.txt"), b"important").unwrap();
+        let err = check_data_dir_clean(tmp.path()).unwrap_err();
+        assert!(matches!(err, SmokeError::DataDirNotEmpty { .. }));
     }
 }
