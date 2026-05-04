@@ -29,10 +29,9 @@ fn main() {
         .with(RingBufferLayer::new(log_sink.clone()))
         .init();
 
-    let app_state = {
-        let mut s = daemon::AppState::default();
-        s.log_sink = log_sink;
-        s
+    let app_state = daemon::AppState {
+        log_sink,
+        ..daemon::AppState::default()
     };
 
     let result = tauri::Builder::default()

@@ -86,7 +86,7 @@ where
         }
         Command::TailLogs { since_seq, limit } => tail_logs(&handle, since_seq, limit).await,
         Command::GetPassphraseAuditLatest => get_passphrase_audit_latest(&handle).await,
-        Command::WipeAllData => Err(IpcError::UnknownCommand),
+        Command::WipeAllData => wipe_all_data(handle).await,
     }
 }
 
@@ -1403,6 +1403,47 @@ where
         .map_err(map_err)?;
 
     Ok(CommandResult::PassphraseChanged)
+}
+
+// ---------------------------------------------------------------------------
+// WipeAllData handler
+// ---------------------------------------------------------------------------
+
+async fn wipe_all_data<S>(
+    handle: Arc<DaemonHandle<S>>,
+) -> std::result::Result<CommandResult, IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    // Resolve data_dir from the live config (same pattern as change_passphrase).
+    // Read-lock dropped before the spawn so nothing holds the lock during teardown.
+    let data_dir = handle.config.read().await.data_dir.clone();
+
+    // Spawn the teardown so we can return Ok BEFORE the IPC layer tears down.
+    // This is the ONE handler that intentionally outlives its caller.
+    tokio::spawn(async move {
+        // Allow ~150ms for the reply to flush back over the IPC stream.
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        // Best-effort: drop the handle so background tasks (retention sweep,
+        // log tap, mailbox poller) get a chance to wind down.
+        std::mem::drop(handle);
+
+        // Brief settle to let in-flight tasks finish their current ticks.
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        // Wipe the data directory.
+        if let Err(e) = tokio::fs::remove_dir_all(&data_dir).await {
+            tracing::error!(
+                error = %e,
+                dir = ?data_dir,
+                "wipe_all_data: remove_dir_all failed; exiting anyway"
+            );
+        }
+        std::process::exit(0);
+    });
+
+    Ok(CommandResult::Ok)
 }
 
 #[cfg(test)]

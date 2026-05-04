@@ -59,6 +59,8 @@ mod ui_first_run;
 mod ui_send_roundtrip;
 #[cfg(test)]
 mod welcome_propagation;
+#[cfg(test)]
+mod wipe_data;
 
 use std::time::Duration;
 
