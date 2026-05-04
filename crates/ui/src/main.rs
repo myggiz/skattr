@@ -14,15 +14,29 @@ mod ipc_bridge;
 use tauri::Manager;
 
 fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
+    use skattr_core::daemon::logs::{LogSink, RingBufferLayer};
+    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+    // Create the log sink before building the subscriber so both the
+    // tracing layer and the daemon share the same ring buffer allocation.
+    let log_sink = LogSink::new();
+    tracing_subscriber::registry()
+        .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,skattr=debug")),
         )
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+        .with(RingBufferLayer::new(log_sink.clone()))
         .init();
 
+    let app_state = {
+        let mut s = daemon::AppState::default();
+        s.log_sink = log_sink;
+        s
+    };
+
     let result = tauri::Builder::default()
-        .manage(daemon::AppState::default())
+        .manage(app_state)
         .invoke_handler(tauri::generate_handler![
             bootstrap::vault_exists,
             bootstrap::identity_init,

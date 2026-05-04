@@ -15,6 +15,7 @@ use crate::daemon::config::Config;
 use crate::daemon::events::{Event, TorStatus};
 use crate::daemon::ipc::server::CommandExecutor;
 use crate::daemon::ipc::wire::IpcError;
+use crate::daemon::logs::LogSink;
 use crate::delivery::hub::DeliveryHub;
 use crate::identity::IdentityKey;
 use crate::storage::Pool;
@@ -63,6 +64,12 @@ where
     /// Path of the config file on disk. Used by SetConfig's
     /// `save_to_disk` call.
     pub config_path: std::path::PathBuf,
+    /// In-memory log ring buffer + live broadcast. Populated by the
+    /// `RingBufferLayer` installed in the subscriber stack. The log-tap
+    /// task in `Daemon::run` re-emits records onto the event bus so
+    /// `EventFilter::Logs` subscribers receive live tail. `TailLogs`
+    /// handlers call `snapshot()` directly for paginated snapshots.
+    pub log_sink: LogSink,
 }
 
 impl<S> DaemonHandle<S>
@@ -98,6 +105,7 @@ where
             latest_tor_status: Arc::new(RwLock::new(None)),
             config: Arc::new(tokio::sync::RwLock::new(config)),
             config_path: std::path::PathBuf::from("/dev/null"),
+            log_sink: LogSink::default(),
         }
     }
 
@@ -124,6 +132,7 @@ where
             latest_tor_status: Arc::new(RwLock::new(None)),
             config: Arc::new(tokio::sync::RwLock::new(config)),
             config_path,
+            log_sink: LogSink::default(),
         }
     }
 
@@ -157,7 +166,15 @@ where
             latest_tor_status: Arc::new(RwLock::new(None)),
             config: Arc::new(tokio::sync::RwLock::new(config)),
             config_path: std::path::PathBuf::from("/dev/null"),
+            log_sink: LogSink::default(),
         }
+    }
+
+    /// Replace the `LogSink`. Called by `Daemon::run` after the subscriber
+    /// stack is fully initialised so the `RingBufferLayer`'s sink and the
+    /// handle's sink are the same allocation.
+    pub fn set_log_sink(&mut self, sink: LogSink) {
+        self.log_sink = sink;
     }
 
     /// Replace the config `Arc` and config path. Used by `Daemon::run`
@@ -240,6 +257,7 @@ where
             latest_tor_status: self.latest_tor_status.clone(),
             config: self.config.clone(),
             config_path: self.config_path.clone(),
+            log_sink: self.log_sink.clone(),
         }
     }
 }

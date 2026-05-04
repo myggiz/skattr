@@ -276,11 +276,20 @@ fn exit_on_ipc_error(err: skattr_core::daemon::IpcClientError) -> ! {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
+    use skattr_core::daemon::logs::{LogSink, RingBufferLayer};
+    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+    // Build a LogSink that is shared between the tracing layer and the
+    // daemon handle. The RingBufferLayer funnels tracing events into the
+    // ring buffer; the daemon log-tap task re-emits them onto the event bus.
+    let log_sink = LogSink::new();
+    tracing_subscriber::registry()
+        .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "skattr_cli=info,skattr_core=info,warn".into()),
         )
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+        .with(RingBufferLayer::new(log_sink.clone()))
         .init();
 
     let cli = Cli::parse();
@@ -295,7 +304,7 @@ async fn main() -> Result<()> {
             restore_backup(&seed, &file, cli.data_dir.as_deref()).await
         }
         Command::Daemon { detach } => {
-            daemon(detach, cli.data_dir.as_deref(), passphrase_file).await
+            daemon(detach, cli.data_dir.as_deref(), passphrase_file, log_sink).await
         }
         Command::Invite { qr } => invite(qr, socket.as_deref(), json).await,
         Command::Add { link } => add(&link, socket.as_deref(), json).await,
@@ -535,6 +544,7 @@ async fn daemon(
     detach: bool,
     data_dir_override: Option<&std::path::Path>,
     passphrase_file: Option<PathBuf>,
+    log_sink: skattr_core::daemon::logs::LogSink,
 ) -> Result<()> {
     use skattr_core::daemon::config::resolve_config_path;
     use skattr_core::daemon::{Config, Daemon};
@@ -572,17 +582,18 @@ async fn daemon(
     let config_path = resolve_config_path(None);
 
     // Move the Zeroizing<String> passphrase and config by value into the
-    // spawned task — they drop (and wipe) when Daemon::run returns.
+    // spawned task — they drop (and wipe) when Daemon::run_with_sink returns.
     let data_dir_owned = config.data_dir.clone();
     let config_owned = config.clone();
     let daemon_fut = tokio::spawn(async move {
-        Daemon::run(
+        Daemon::run_with_sink(
             &data_dir_owned,
             &pw,
             config_owned,
             config_path,
             ready_tx,
             shutdown_fut,
+            Some(log_sink),
         )
         .await
     });

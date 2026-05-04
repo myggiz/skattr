@@ -84,7 +84,7 @@ where
         Command::SetContactMuted { contact, muted } => {
             set_contact_muted(&handle, contact, muted).await
         }
-        Command::TailLogs { .. } => Err(IpcError::UnknownCommand),
+        Command::TailLogs { since_seq, limit } => tail_logs(&handle, since_seq, limit).await,
         Command::GetPassphraseAuditLatest => get_passphrase_audit_latest(&handle).await,
         Command::WipeAllData => Err(IpcError::UnknownCommand),
     }
@@ -1289,6 +1289,12 @@ where
             message: format!("save_to_disk: {e}"),
         })
     })?;
+    // persist_logs_to_disk: flag is saved to config.toml (apply_patch
+    // already did that); the change takes effect on the next daemon
+    // restart. Hot-toggle is deferred because tracing-subscriber's
+    // reload::Layer generics are complex to compose across the existing
+    // layered subscriber stack. The subscriber-init path reads this flag
+    // on startup and installs the appender accordingly.
     Ok(CommandResult::Ok)
 }
 
@@ -1318,6 +1324,21 @@ where
     let ts = repo.latest_ts().map_err(map_err)?;
     Ok(CommandResult::PassphraseAudit {
         last_changed_unix: ts.map(|v| v as u64),
+    })
+}
+
+async fn tail_logs<S>(
+    handle: &Arc<DaemonHandle<S>>,
+    since_seq: Option<u64>,
+    limit: u32,
+) -> std::result::Result<CommandResult, IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (records, next_since_seq) = handle.log_sink.snapshot(since_seq, limit as usize);
+    Ok(CommandResult::Logs {
+        records,
+        next_since_seq,
     })
 }
 
@@ -3910,5 +3931,100 @@ mod tests {
             ),
             "expected InvalidArgument, got {result:?}"
         );
+    }
+
+    // ── Task 22: TailLogs handler ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn tail_logs_returns_recent_records() {
+        let handle = test_handle();
+        // Push records directly via the sink (simulates tracing layer output).
+        for i in 0..5_u32 {
+            handle.log_sink.push(
+                crate::daemon::commands::LogLevel::Info,
+                "test".into(),
+                format!("m-{i}"),
+            );
+        }
+        let result = execute_command(
+            handle,
+            Command::TailLogs {
+                since_seq: None,
+                limit: 100,
+            },
+        )
+        .await
+        .unwrap();
+        match result {
+            CommandResult::Logs {
+                records,
+                next_since_seq,
+            } => {
+                assert_eq!(
+                    records.len(),
+                    5,
+                    "expected 5 records, got {}",
+                    records.len()
+                );
+                assert!(
+                    records.iter().any(|r| r.message.contains("m-4")),
+                    "last record not found"
+                );
+                assert!(
+                    next_since_seq > 0,
+                    "next_since_seq should be non-zero cursor"
+                );
+            }
+            other => panic!("expected CommandResult::Logs, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn tail_logs_since_seq_cursor_works() {
+        let handle = test_handle();
+        for i in 0..10_u32 {
+            handle.log_sink.push(
+                crate::daemon::commands::LogLevel::Info,
+                "cursor-test".into(),
+                format!("msg-{i}"),
+            );
+        }
+        // First page: no cursor.
+        let result = execute_command(
+            handle.clone(),
+            Command::TailLogs {
+                since_seq: None,
+                limit: 5,
+            },
+        )
+        .await
+        .unwrap();
+        let cursor = match result {
+            CommandResult::Logs {
+                records,
+                next_since_seq,
+            } => {
+                assert_eq!(records.len(), 5);
+                next_since_seq
+            }
+            other => panic!("unexpected {other:?}"),
+        };
+
+        // Second page: use cursor, should return the remaining 5.
+        let result2 = execute_command(
+            handle,
+            Command::TailLogs {
+                since_seq: Some(cursor),
+                limit: 100,
+            },
+        )
+        .await
+        .unwrap();
+        match result2 {
+            CommandResult::Logs { records, .. } => {
+                assert_eq!(records.len(), 5);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 }

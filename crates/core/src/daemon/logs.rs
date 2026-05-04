@@ -37,6 +37,7 @@ struct LogSinkInner {
 }
 
 impl LogSink {
+    /// Create a new `LogSink` with an empty ring buffer.
     pub fn new() -> Self {
         let (tx, _rx) = broadcast::channel(STREAM_CAP);
         Self {
@@ -111,6 +112,7 @@ pub struct RingBufferLayer {
 }
 
 impl RingBufferLayer {
+    /// Create a new `RingBufferLayer` that funnels tracing events into `sink`.
     pub fn new(sink: LogSink) -> Self {
         Self {
             sink,
