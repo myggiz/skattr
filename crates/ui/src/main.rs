@@ -10,6 +10,7 @@ mod bootstrap;
 mod daemon;
 mod events;
 mod ipc_bridge;
+pub mod tray;
 
 use tauri::Manager;
 
@@ -57,6 +58,7 @@ fn main() {
             std::fs::create_dir_all(&data_dir).ok();
             let state: tauri::State<daemon::AppState> = app.state();
             *state.data_dir.write() = Some(data_dir);
+            crate::tray::install(app.handle())?;
             Ok(())
         })
         .on_window_event(|window, event| {
