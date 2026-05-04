@@ -80,7 +80,7 @@ where
         Command::DaemonInfo => handle_daemon_info(handle).await,
         Command::GetConfig => get_config(&handle).await,
         Command::SetConfig { patch } => set_config(&handle, patch).await,
-        Command::ChangePassphrase { .. } => Err(IpcError::UnknownCommand),
+        Command::ChangePassphrase { old, new } => change_passphrase(&handle, old, new).await,
         Command::SetContactMuted { contact, muted } => {
             set_contact_muted(&handle, contact, muted).await
         }
@@ -1321,6 +1321,69 @@ where
     })
 }
 
+async fn change_passphrase<S>(
+    handle: &Arc<DaemonHandle<S>>,
+    old: String,
+    new: String,
+) -> std::result::Result<CommandResult, IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    use crate::daemon::error_kind::DaemonErrorKind;
+    use crate::storage::{AuditOutcome, PassphraseAuditRepo};
+    use zeroize::Zeroizing;
+
+    let old = Zeroizing::new(old);
+    let new = Zeroizing::new(new);
+
+    if new.len() < 8 {
+        return Err(IpcError::Daemon(DaemonErrorKind::InvalidArgument {
+            message: "new passphrase must be at least 8 characters".into(),
+        }));
+    }
+    let entropy = zxcvbn::zxcvbn(new.as_str(), &[]);
+    if entropy.score() < zxcvbn::Score::Three {
+        return Err(IpcError::Daemon(DaemonErrorKind::InvalidArgument {
+            message: "new passphrase too weak (zxcvbn score < 3)".into(),
+        }));
+    }
+    if *old == *new {
+        return Err(IpcError::Daemon(DaemonErrorKind::InvalidArgument {
+            message: "new passphrase must differ from current".into(),
+        }));
+    }
+
+    // Resolve the vault path under the live data_dir.
+    let data_dir = handle.config.read().await.data_dir.clone();
+    let vault_path = data_dir.join("identity.vault");
+
+    // Open the vault under the OLD passphrase first — failure here means
+    // the user gave us the wrong current passphrase.
+    let (mut vault, _identity) = crate::identity::Vault::open(&vault_path, old.as_str())
+        .map_err(|_| IpcError::Daemon(DaemonErrorKind::Unauthorized))?;
+
+    // Vault::change_passphrase is atomic on its own (sidecar + rename).
+    // The storage age key is derived from the BIP39 seed via HKDF and is
+    // independent of the user passphrase, so this single rewrite is the
+    // entire rekey surface.
+    vault
+        .change_passphrase(old.as_str(), new.as_str())
+        .map_err(map_err)?;
+
+    // Append the audit row. Best-effort: a failure here doesn't
+    // unwind the rekey (already on disk), but does surface an error
+    // to the caller so the UI can warn.
+    let audit = PassphraseAuditRepo::new(&handle.pool);
+    audit
+        .append(
+            crate::daemon::clock::now_unix_seconds(),
+            AuditOutcome::Changed,
+        )
+        .map_err(map_err)?;
+
+    Ok(CommandResult::PassphraseChanged)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1350,6 +1413,60 @@ mod tests {
         let handle = test_handle();
         let result = execute_command(handle, Command::Shutdown).await;
         assert!(matches!(result, Ok(CommandResult::Ok)));
+    }
+
+    #[tokio::test]
+    async fn change_passphrase_rejects_too_short_new() {
+        let handle = test_handle();
+        let err = execute_command(
+            handle,
+            Command::ChangePassphrase {
+                old: "anything-old".into(),
+                new: "short".into(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            IpcError::Daemon(crate::daemon::error_kind::DaemonErrorKind::InvalidArgument { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn change_passphrase_rejects_equal_old_and_new() {
+        let handle = test_handle();
+        let err = execute_command(
+            handle,
+            Command::ChangePassphrase {
+                old: "samepassphrase".into(),
+                new: "samepassphrase".into(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            IpcError::Daemon(crate::daemon::error_kind::DaemonErrorKind::InvalidArgument { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn change_passphrase_rejects_weak_new() {
+        let handle = test_handle();
+        let err = execute_command(
+            handle,
+            Command::ChangePassphrase {
+                old: "current-passphrase".into(),
+                new: "abcdefgh".into(), // 8 chars but extremely weak per zxcvbn
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            IpcError::Daemon(crate::daemon::error_kind::DaemonErrorKind::InvalidArgument { .. })
+        ));
     }
 
     #[tokio::test]
