@@ -9,9 +9,16 @@
 //! to verify the bundled binary actually starts on each platform.
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use thiserror::Error;
+use tokio::sync::oneshot;
+use zeroize::Zeroizing;
+
+use crate::daemon::config::Config;
+use crate::daemon::state::Daemon;
+use crate::identity::vault::Vault;
+use crate::identity::{IdentityKey, Seed};
 
 /// Configuration for [`run_smoke`].
 #[derive(Debug, Clone)]
@@ -99,6 +106,120 @@ pub(crate) fn check_data_dir_clean(data_dir: &std::path::Path) -> Result<(), Smo
     Ok(())
 }
 
+/// Random throwaway passphrase for a smoke vault.
+fn make_throwaway_passphrase() -> Zeroizing<String> {
+    use rand::RngCore;
+    let mut bytes = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    Zeroizing::new(hex)
+}
+
+/// Build a `Seed` from optional fixed entropy. `[0u8; 32]` falls back
+/// to `Seed::generate()` (OS CSPRNG).
+///
+/// We round-trip through `bip39::Mnemonic` so we go through the
+/// canonical entropy path (`Seed::from_mnemonic`) rather than
+/// constructing a `Seed` directly from raw bytes — that path's
+/// constructor is private to the `identity` module.
+fn make_seed(seed_bytes: [u8; 32]) -> Result<Seed, SmokeError> {
+    if seed_bytes == [0u8; 32] {
+        return Seed::generate().map_err(|e| SmokeError::VaultCreate(e.to_string()));
+    }
+    let mnemonic = bip39::Mnemonic::from_entropy_in(bip39::Language::English, &seed_bytes)
+        .map_err(|e| SmokeError::VaultCreate(format!("seed: {e}")))?;
+    let words = mnemonic.to_string();
+    let mn = crate::identity::Mnemonic::parse(&words);
+    Seed::from_mnemonic(&mn).map_err(|e| SmokeError::VaultCreate(format!("from_mnemonic: {e}")))
+}
+
+/// Run a one-shot smoke test: init throwaway vault, boot daemon,
+/// wait for `TorStatus::Ready`, then trigger graceful shutdown.
+pub async fn run_smoke(cfg: SmokeConfig) -> Result<SmokeReport, SmokeError> {
+    let started = Instant::now();
+
+    // Step 1: refuse to clobber existing user state.
+    check_data_dir_clean(&cfg.data_dir)?;
+    std::fs::create_dir_all(&cfg.data_dir).map_err(|e| {
+        SmokeError::Other(format!("mkdir {}: {e}", cfg.data_dir.display()))
+    })?;
+
+    // Step 2: create a throwaway vault.
+    let passphrase = make_throwaway_passphrase();
+    let seed = make_seed(cfg.seed_bytes)?;
+    let identity =
+        IdentityKey::from_seed(&seed).map_err(|e| SmokeError::VaultCreate(e.to_string()))?;
+    let vault_path = cfg.data_dir.join("identity.vault");
+    Vault::create(&vault_path, identity, passphrase.as_str())
+        .map_err(|e| SmokeError::VaultCreate(e.to_string()))?;
+
+    // Step 3: build a daemon Config that points at our smoke data_dir
+    // and a smoke-local IPC socket (avoid colliding with a real daemon).
+    let mut config = Config::defaults().map_err(|e| SmokeError::Other(e.to_string()))?;
+    config.data_dir = cfg.data_dir.clone();
+    config.ipc_socket = Some(cfg.data_dir.join("smoke.sock"));
+
+    // Step 4: spawn the daemon with a shutdown trigger we control.
+    let (ready_tx, ready_rx) = oneshot::channel();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let shutdown_fut = async move {
+        let _ = shutdown_rx.await;
+    };
+
+    let data_dir_owned = cfg.data_dir.clone();
+    let pp_owned = passphrase.clone();
+    let cfg_owned = config.clone();
+    let daemon_task = tokio::spawn(async move {
+        Daemon::run(
+            &data_dir_owned,
+            &pp_owned,
+            cfg_owned,
+            // Smoke runs don't persist config changes — point the
+            // SetConfig writer at a throwaway path inside data_dir.
+            data_dir_owned.join("config.toml"),
+            ready_tx,
+            shutdown_fut,
+        )
+        .await
+    });
+
+    // Step 5: wait for Ready or time out.
+    let ready = match tokio::time::timeout(cfg.tor_ready_timeout, ready_rx).await {
+        Ok(Ok(r)) => r,
+        Ok(Err(_recv_err)) => {
+            // Daemon dropped ready_tx — usually because Daemon::run errored.
+            let join_result = daemon_task.await;
+            let err_msg = match join_result {
+                Ok(Err(e)) => e.to_string(),
+                Ok(Ok(())) => "daemon exited cleanly without sending Ready".to_string(),
+                Err(join) => format!("daemon task panic: {join}"),
+            };
+            return Err(SmokeError::DaemonStart(err_msg));
+        }
+        Err(_timeout) => {
+            let _ = shutdown_tx.send(());
+            // Best-effort drain of the daemon task; ignore its result.
+            let _ = daemon_task.await;
+            return Err(SmokeError::TorTimeout {
+                waited: started.elapsed(),
+            });
+        }
+    };
+
+    // Step 6: graceful shutdown.
+    let _ = shutdown_tx.send(());
+    match daemon_task.await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => return Err(SmokeError::Other(format!("daemon shutdown: {e}"))),
+        Err(join) => return Err(SmokeError::Other(format!("daemon task panic: {join}"))),
+    }
+
+    Ok(SmokeReport {
+        onion: ready.onion,
+        duration: started.elapsed(),
+    })
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -176,5 +297,65 @@ mod tests {
         std::fs::write(tmp.path().join("notes.txt"), b"important").unwrap();
         let err = check_data_dir_clean(tmp.path()).unwrap_err();
         assert!(matches!(err, SmokeError::DataDirNotEmpty { .. }));
+    }
+
+    /// `#[ignore]`-gated: spawns real Arti. Run with:
+    ///   cargo test -p skattr-core --features test-harness --release \
+    ///       -- --ignored daemon::smoke::tests::run_smoke_real_tor
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "spawns real Arti"]
+    async fn run_smoke_real_tor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = SmokeConfig {
+            data_dir: tmp.path().to_path_buf(),
+            tor_ready_timeout: Duration::from_secs(240),
+            ..SmokeConfig::default()
+        };
+        let report = run_smoke(cfg).await.unwrap();
+        assert!(
+            report.onion.ends_with(".onion"),
+            "got onion {}",
+            report.onion
+        );
+        assert!(report.duration <= Duration::from_secs(240));
+        // Vault must have been created.
+        assert!(tmp.path().join("identity.vault").exists());
+    }
+
+    #[tokio::test]
+    async fn run_smoke_rejects_existing_vault() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("identity.vault"), b"x").unwrap();
+        let cfg = SmokeConfig {
+            data_dir: tmp.path().to_path_buf(),
+            tor_ready_timeout: Duration::from_secs(1),
+            ..SmokeConfig::default()
+        };
+        let err = run_smoke(cfg).await.unwrap_err();
+        assert!(matches!(err, SmokeError::DataDirNotEmpty { .. }));
+    }
+
+    /// Verifies the smoke surface fails fast (rather than hanging)
+    /// when given a timeout that's too short for any real
+    /// `TorStatus::Ready` arrival. Either `TorTimeout` (timer wins)
+    /// or `DaemonStart` (daemon errors first — e.g. Arti
+    /// rejects state-dir permissions) is acceptable evidence that
+    /// the smoke layer routed the failure correctly.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn run_smoke_short_timeout_fails_fast() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = SmokeConfig {
+            data_dir: tmp.path().to_path_buf(),
+            tor_ready_timeout: Duration::from_millis(50),
+            ..SmokeConfig::default()
+        };
+        let err = run_smoke(cfg).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                SmokeError::TorTimeout { .. } | SmokeError::DaemonStart(_)
+            ),
+            "expected TorTimeout or DaemonStart, got {err:?}"
+        );
     }
 }
