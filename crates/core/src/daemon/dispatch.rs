@@ -81,7 +81,9 @@ where
         Command::GetConfig => get_config(&handle).await,
         Command::SetConfig { patch } => set_config(&handle, patch).await,
         Command::ChangePassphrase { .. } => Err(IpcError::UnknownCommand),
-        Command::SetContactMuted { .. } => Err(IpcError::UnknownCommand),
+        Command::SetContactMuted { contact, muted } => {
+            set_contact_muted(&handle, contact, muted).await
+        }
         Command::TailLogs { .. } => Err(IpcError::UnknownCommand),
         Command::GetPassphraseAuditLatest => Err(IpcError::UnknownCommand),
         Command::WipeAllData => Err(IpcError::UnknownCommand),
@@ -1230,6 +1232,30 @@ where
 
     let repo = ContactRepo::new(&handle.pool);
     repo.set_hidden(&contact, true).map_err(map_err)?;
+    let _ = handle.events_tx.send(Event::ContactUpdated(contact));
+    Ok(CommandResult::Ok)
+}
+
+async fn set_contact_muted<S>(
+    handle: &Arc<DaemonHandle<S>>,
+    contact: crate::identity::PublicKey,
+    muted: bool,
+) -> std::result::Result<CommandResult, IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    use crate::daemon::events::Event;
+    use crate::storage::ContactRepo;
+
+    let repo = ContactRepo::new(&handle.pool);
+    // Check existence first — must fail with ContactNotFound, not silently no-op.
+    if repo.get(&contact).map_err(map_err)?.is_none() {
+        use crate::daemon::error_kind::DaemonErrorKind;
+        return Err(IpcError::Daemon(DaemonErrorKind::ContactNotFound));
+    }
+    repo.set_muted(&contact, muted).map_err(map_err)?;
+
+    // Emit ContactUpdated so live UIs re-fetch the contact summary.
     let _ = handle.events_tx.send(Event::ContactUpdated(contact));
     Ok(CommandResult::Ok)
 }
@@ -3542,6 +3568,85 @@ mod tests {
             blob_before, blob_after,
             "RemoveContact must not touch MLS state"
         );
+    }
+
+    // ── Task 13: set_contact_muted dispatcher ──────────────────────────────────
+
+    #[tokio::test]
+    async fn set_contact_muted_toggles_and_emits_event() {
+        let handle = test_handle();
+        let pk = PublicKey([0xAA; 32]);
+        crate::storage::ContactRepo::new(&handle.pool)
+            .upsert(&crate::contact::Contact {
+                identity: pk,
+                display_name: None,
+                added_at: 0,
+                card: None,
+                muted: false,
+            })
+            .unwrap();
+
+        let mut sub = handle.events_tx.subscribe();
+        let result = execute_command(
+            handle.clone(),
+            Command::SetContactMuted {
+                contact: pk,
+                muted: true,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(result, CommandResult::Ok));
+
+        // Event should be emitted
+        match tokio::time::timeout(std::time::Duration::from_secs(1), sub.recv()).await {
+            Ok(Ok(Event::ContactUpdated(p))) => assert_eq!(p, pk),
+            other => panic!("expected ContactUpdated, got {other:?}"),
+        }
+
+        // Persisted in storage
+        let repo = crate::storage::ContactRepo::new(&handle.pool);
+        assert!(repo.is_muted(&pk).unwrap());
+
+        // Toggle back
+        let mut sub = handle.events_tx.subscribe();
+        let _ = execute_command(
+            handle.clone(),
+            Command::SetContactMuted {
+                contact: pk,
+                muted: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Event should be emitted again
+        match tokio::time::timeout(std::time::Duration::from_secs(1), sub.recv()).await {
+            Ok(Ok(Event::ContactUpdated(p))) => assert_eq!(p, pk),
+            other => panic!("expected ContactUpdated, got {other:?}"),
+        }
+
+        // Persisted
+        assert!(!repo.is_muted(&pk).unwrap());
+    }
+
+    #[tokio::test]
+    async fn set_contact_muted_returns_contact_not_found() {
+        let handle = test_handle();
+        let pk = PublicKey([0xFF; 32]);
+        let err = execute_command(
+            handle,
+            Command::SetContactMuted {
+                contact: pk,
+                muted: true,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            IpcError::Daemon(crate::daemon::error_kind::DaemonErrorKind::ContactNotFound)
+        ));
     }
 
     // ── Task 10: list_contacts_with_filter ────────────────────────────────────
