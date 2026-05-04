@@ -10,6 +10,7 @@ mod bootstrap;
 mod daemon;
 mod events;
 mod ipc_bridge;
+mod notifications;
 pub mod tray;
 
 use tauri::Manager;
@@ -45,6 +46,8 @@ fn main() {
             ipc_bridge::render_invite_qr,
             events::ipc_subscribe,
             daemon::start_in_process_cmd,
+            notifications::notify,
+            notifications::focus_window_and_open_conversation,
         ])
         .setup(|app| {
             // Resolve data_dir once and stash it. `app_data_dir` only fails

@@ -28,6 +28,7 @@ serde_json = "1"
 zeroize.workspace = true
 parking_lot.workspace = true
 anyhow = "1"
+notify-rust = { version = "4", default-features = false, features = ["dbus"] }
 thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
