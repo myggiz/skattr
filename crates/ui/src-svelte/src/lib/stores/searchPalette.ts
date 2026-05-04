@@ -33,3 +33,15 @@ export function setResults(results: SearchHitRecord[]): void {
 export function setLoading(loading: boolean): void {
   _state.update((s) => ({ ...s, loading }));
 }
+
+/**
+ * focusedRowId: set by SearchPalette when the user picks a result.
+ * VirtualMessageList watches this and scrolls the row into view,
+ * then clears it after the highlight animation (1200 ms).
+ * Stored as bigint | null to match MessageRecord.row_id's type.
+ */
+export const focusedRowId = writable<bigint | null>(null);
+
+export function setFocusedRowId(id: bigint | null): void {
+  focusedRowId.set(id);
+}
