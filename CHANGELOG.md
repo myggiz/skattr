@@ -4,6 +4,41 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.1.0] — 2026-05-04
+
+### Added
+
+- Phase 2.G: first packaged release.
+- New `core::daemon::smoke` module: `run_smoke(SmokeConfig)` initialises a throwaway vault, boots the daemon, waits for `TorStatus::Ready`, and exits 0/1 — used by CI release smoke.
+- `skattr-ui --smoke-test --data-dir <tmp> [--timeout-secs N]` argv-level branch (no webview opened).
+- `skattr daemon --smoke-test` developer escape hatch on the CLI.
+- Linux `.deb` + AppImage bundles via `cargo tauri build`.
+- macOS `.dmg` bundle (Apple Silicon only for v0.1).
+- In-repo Flatpak manifest at `packaging/flatpak/net.myggiz.skattr.yml` (Flathub publication deferred).
+- AppStream metainfo at `packaging/flatpak/net.myggiz.skattr.metainfo.xml`.
+- `skattr://` URL scheme handler — invite paste becomes invite click. Wired via `tauri-plugin-deep-link` + `tauri-plugin-single-instance`.
+- `.github/workflows/release.yml`: matrix-build (Linux + macOS), per-platform smoke gate, `SHA256SUMS` + `SHA256SUMS.minisig` (minisign), GitHub Release auto-creation on `v*` tag.
+- `docs/install/{README,linux,macos}.md` — verification + install + first-run.
+- `docs/build/{reproducible,flatpak}.md` — pinned-version recipe + Flatpak notes.
+- Six PNG icon sizes (16/32/64/128/256/512) generated from a new `crates/ui/icons/icon.svg` source.
+
+### Changed
+
+- `tauri = "2"` → `tauri = "=2.11.0"` (Phase 2.G locked decision 3).
+- `tauri-build = "2"` → `tauri-build = "=2.6.0"` (matched to current published version).
+- `rust-toolchain.toml` gains an explicit `version = "1.95.0"` line.
+- Tauri updater plugin explicitly disabled in `tauri.conf.json` (Phase 5 will enable).
+- `crates/cli`: `tempfile` moved from `[dev-dependencies]` to `[dependencies]` for the `--smoke-test` escape hatch.
+
+### Deferred to Phase 2.H
+
+- Windows IPC port (Named Pipes + DACL peer auth) and `.msi` bundle.
+- macOS Intel (`x86_64`) bundle.
+
+### Wire format
+
+No changes. Phase 2.G is wire-format-NEUTRAL by design; the `wire_format_append_only` snapshot test is unchanged.
+
 ## Unreleased
 
 ### Added (Phase 2.F — settings & history)
