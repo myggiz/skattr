@@ -81,6 +81,15 @@ enum Command {
         /// Detach to a background process after startup.
         #[arg(long)]
         detach: bool,
+        /// Run a one-shot smoke test (init throwaway vault, boot,
+        /// wait for Tor::Ready, exit 0). For CI release smoke; not
+        /// for real use.
+        #[arg(long)]
+        smoke_test: bool,
+        /// Smoke-only: timeout for Tor::Ready. Ignored without
+        /// `--smoke-test`.
+        #[arg(long, value_name = "SECS", default_value_t = 240)]
+        smoke_timeout_secs: u64,
     },
     /// Generate a single-use invite link.
     Invite {
@@ -303,8 +312,16 @@ async fn main() -> Result<()> {
         Command::RestoreBackup { seed, file } => {
             restore_backup(&seed, &file, cli.data_dir.as_deref()).await
         }
-        Command::Daemon { detach } => {
-            daemon(detach, cli.data_dir.as_deref(), passphrase_file, log_sink).await
+        Command::Daemon {
+            detach,
+            smoke_test,
+            smoke_timeout_secs,
+        } => {
+            if smoke_test {
+                cli_smoke(cli.data_dir.as_deref(), smoke_timeout_secs).await
+            } else {
+                daemon(detach, cli.data_dir.as_deref(), passphrase_file, log_sink).await
+            }
         }
         Command::Invite { qr } => invite(qr, socket.as_deref(), json).await,
         Command::Add { link } => add(&link, socket.as_deref(), json).await,
@@ -538,6 +555,60 @@ async fn restore_backup(
     println!("Data at: {}", data_dir.display());
     println!("Run `skattr daemon` to bring the identity online.");
     Ok(())
+}
+
+/// Invoke the same smoke entry point the UI uses, from the CLI.
+///
+/// `data_dir_override`: if `Some(path)`, use that data_dir (caller is
+/// responsible for ensuring it's empty). If `None`, allocate a fresh
+/// tempdir under `$HOME/.cache/skattr-smoke-test/` so Arti's
+/// fs-mistrust accepts the parent chain (avoiding world-writable
+/// `/tmp`).
+async fn cli_smoke(
+    data_dir_override: Option<&std::path::Path>,
+    timeout_secs: u64,
+) -> Result<()> {
+    use skattr_core::daemon::smoke::{run_smoke, SmokeConfig};
+
+    let data_dir = match data_dir_override {
+        Some(d) => d.to_path_buf(),
+        None => {
+            // No override -> create a fresh tempdir anchored at
+            // ~/.cache/ (NOT /tmp, because Arti's fs-mistrust rejects
+            // world-writable parent dirs). The dev-only escape hatch
+            // never runs over real user state.
+            let cache_root = std::env::var_os("HOME")
+                .map(|h| {
+                    std::path::PathBuf::from(h)
+                        .join(".cache")
+                        .join("skattr-smoke-test")
+                })
+                .ok_or_else(|| anyhow::anyhow!("$HOME not set"))?;
+            std::fs::create_dir_all(&cache_root)?;
+            let tmpdir = tempfile::Builder::new()
+                .prefix("cli-smoke-")
+                .tempdir_in(&cache_root)?;
+            tmpdir.keep()
+        }
+    };
+    let cfg = SmokeConfig {
+        data_dir,
+        tor_ready_timeout: std::time::Duration::from_secs(timeout_secs),
+        ..Default::default()
+    };
+    match run_smoke(cfg).await {
+        Ok(report) => {
+            println!(
+                "smoke OK: onion={} duration={:?}",
+                report.onion, report.duration
+            );
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("smoke FAIL: {e}");
+            std::process::exit(1);
+        }
+    }
 }
 
 async fn daemon(
