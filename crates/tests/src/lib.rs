@@ -56,6 +56,8 @@ mod rotate_onion_during_offline;
 #[cfg(test)]
 mod settings_roundtrip;
 #[cfg(test)]
+mod smoke_flag;
+#[cfg(test)]
 mod ui_first_run;
 #[cfg(test)]
 mod ui_send_roundtrip;
