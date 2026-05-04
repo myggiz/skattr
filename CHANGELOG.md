@@ -6,6 +6,106 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## Unreleased
 
+### Added (Phase 2.F — settings & history)
+- Settings panel with five sidebar-nav sections (Identity / Mailboxes /
+  History / Notifications / Advanced) under `/settings/<section>/`.
+- New `Command` variants: `GetConfig`, `SetConfig { patch }`,
+  `ChangePassphrase { old, new }`, `SetContactMuted { contact, muted }`,
+  `TailLogs { since_seq, limit }`, `GetPassphraseAuditLatest`,
+  `WipeAllData` and supporting types (`ConfigSnapshot`, `ConfigPatch`,
+  `NotificationMode`, `LogLevel`, `LogRecord`).
+- New `Event::LogRecord` + `EventFilter::Logs` for live log tail.
+- New additive fields on `ContactSummary`: `muted: bool`,
+  `peer_mailboxes: Vec<String>`.
+- `Vault::change_passphrase` wired through dispatch as a thin handler
+  with zxcvbn ≥ 3 + length ≥ 8 + ≠-current validation. Crash-safe via
+  the existing sidecar + atomic rename in `core::identity::vault`.
+  (Original spec assumed a two-file rekey across an additional age-key
+  file; the actual storage layout derives the SQLite age key from the
+  BIP39 seed via HKDF, so only the identity vault needs rewriting.)
+- Per-contact mute persisted in a new `contacts.muted` column
+  (migration `0013`).
+- Append-only `passphrase_audit` table (migration `0014`) surfacing
+  "Last changed" in Settings → Identity.
+- In-memory ring-buffer logs subsystem (`core::daemon::logs`) with a
+  `tracing-subscriber` layer that strips 64-char hex pubkeys and
+  `*.onion` addresses above the DEBUG level. `RingBufferLayer`
+  installed in both CLI and UI subscriber stacks.
+- Tauri 2 built-in tray (Show / Tor status / Unread / Quit). Click on
+  tray icon toggles window visibility.
+- Close button hides to tray when `ui.close_to_tray = true` (default);
+  fall back to "quit on close" when tray init fails (Wayland).
+  `ui.start_minimised` honoured at startup (effective on next launch
+  after a SetConfig change).
+- `notify-rust` desktop notifications via two new Tauri commands
+  (`notify`, `focus_window_and_open_conversation`). SvelteKit-side
+  dispatcher (`shouldNotify` + `buildNotification`) is focus-aware
+  and respects per-contact mute.
+- Cmd/Ctrl-K `SearchPalette` over 1.G's `SearchMessages`. Same
+  component reused inline in Settings → History (placeholder copy
+  for the inline mount in this release).
+- Conversation view honours `?focus_row_id` (transient highlight via
+  the searchPalette store; mark-read remains gated on bottom-of-list
+  intersection — 2.D semantics preserved).
+- "Delete all data and quit" Danger Zone in Settings → Advanced
+  (two-step confirm; daemon shuts down + removes data_dir + exits 0).
+
+### Changed (Phase 2.F)
+- Daemon retention sweep re-reads `Config` on every tick so retention
+  changes hot-apply without restart.
+- `DaemonHandle` gains `config: Arc<RwLock<Config>>` and `config_path:
+  PathBuf` (set via `set_config_arc` from `Daemon::run`).
+
+### Docs (Phase 2.F)
+- `docs/operations/2f-notification-smoke.md` — per-OS smoke checklist
+  (notifications + tray + logs + wipe).
+- `docs/operations/passphrase-recovery.md` — crash-safety explanation
+  of the actual single-file rekey + lost-passphrase BIP39 fallback.
+- `docs/superpowers/specs/2026-05-04-phase-2f-settings-history-design.md`.
+- `docs/superpowers/plans/2026-05-04-phase-2f-settings-history.md`.
+
+### Notes (Phase 2.F)
+- The original plan's "stage-then-rename two-file ChangePassphrase
+  with six kill-point integration tests" collapsed to a thin wrapper
+  over `Vault::change_passphrase` after a brainstorm-vs-codebase
+  reconciliation. The vault's existing atomicity coverage handles
+  the same guarantees with a much smaller surface.
+- `persist_logs_to_disk` toggle currently requires daemon restart
+  to take effect (the `tracing_subscriber::reload` plumbing was
+  thorny to wire across the layered subscriber; tracked as a
+  follow-up).
+- macOS / Windows click-to-focus from notifications uses a separate
+  `notify-rust` API not wired in 2.F's first cut. Linux gets it via
+  the XDG `conversation_id` hint.
+
+### Added (Phase 2.E — invite & contact UX)
+- Invite-generate dialog (QR + copy-link) and add-contact dialog (paste
+  invite URL) accessible from the contact list.
+- Inline `ContactDetailsPanel` with rename + archive (soft-delete via
+  `contacts.hidden`).
+- Daemon-side Welcome propagation fix: `Frame::MlsWelcome` (codec slot
+  0x03, reserved since 1.A) is now load-bearing. `DeliveryHub::send_welcome`
+  + a new peer-actor send/read arm + `InboundDispatch::dispatch_welcome`
+  turn Bob's `AddContact` Welcome into Alice's `Group::join_from_welcome`,
+  so Alice's group transitions `PendingJoin → Active`.
+- Migration `0010`: `outstanding_invites` table for inviter-side PSK
+  persistence.
+- Migration `0011`: `contacts.hidden` for soft-delete.
+- Migration `0012`: `outstanding_invites.provider_snapshot` so the
+  MlsProvider's KP init key survives the create_invite → dispatch_welcome
+  boundary.
+- Three new `Command` variants: `RenameContact`, `RemoveContact`,
+  `ListContactsWithFilter` (no new `CommandResult` or `Event` variants;
+  rename / archive reuse `ContactUpdated`).
+- `key_package_id` in `CommandResult::InviteCreated` is now the
+  canonical MLS `KeyPackageRef` (was plain SHA-256 in 1.D — same shape
+  on the wire).
+
+### Deferred (Phase 2.E)
+- **Task 2.E.5**: mailbox fallback for Welcome propagation — direct-only
+  Welcome ships in 2.E; mailbox fallback deferred to avoid touching the
+  2.B mailbox protocol freeze (ADR 0006).
+
 ### Added (Phase 2.D — conversation view)
 - Composer (`crates/ui/src-svelte/src/lib/components/Composer.svelte`):
   Enter to send, Shift+Enter for newline, IME-safe (`event.isComposing`
