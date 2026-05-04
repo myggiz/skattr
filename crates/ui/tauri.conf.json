@@ -27,9 +27,43 @@
   },
   "bundle": {
     "active": true,
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/icon.ico", "icons/icon.icns"],
-    "category": "SocialNetworking",
+    "publisher": "Myggiz AB",
+    "copyright": "© 2026 Myggiz AB",
+    "license": "GPL-3.0-or-later",
+    "licenseFile": "../../LICENSE-GPL3",
     "shortDescription": "Metadata-resistant P2P encrypted messenger.",
-    "longDescription": "Skattr is a desktop-first, metadata-resistant P2P encrypted messenger. All traffic over Tor v3 onion services. MLS for message encryption."
+    "longDescription": "Skattr is a desktop-first, metadata-resistant P2P encrypted messenger. All traffic over Tor v3 onion services. MLS for message encryption.",
+    "category": "SocialNetworking",
+    "icon": [
+      "icons/16x16.png",
+      "icons/32x32.png",
+      "icons/64x64.png",
+      "icons/128x128.png",
+      "icons/256x256.png",
+      "icons/512x512.png",
+      "icons/icon.ico",
+      "icons/icon.icns"
+    ],
+    "linux": {
+      "deb": {
+        "depends": [
+          "libwebkit2gtk-4.1-0",
+          "libayatana-appindicator3-1"
+        ],
+        "section": "net",
+        "priority": "optional"
+      },
+      "appimage": {
+        "bundleMediaFramework": false
+      }
+    },
+    "macOS": {
+      "minimumSystemVersion": "12.0"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "active": false
+    }
   }
 }
