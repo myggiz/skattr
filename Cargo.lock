@@ -6034,10 +6034,12 @@ dependencies = [
  "openmls_basic_credential",
  "openmls_rust_crypto",
  "openmls_traits",
+ "parking_lot",
  "proptest",
  "qrcode",
  "rand 0.8.5",
  "rand_core 0.6.4",
+ "regex",
  "rusqlite",
  "safelog",
  "serde",
@@ -6060,6 +6062,7 @@ dependencies = [
  "tor-llcrypto",
  "tor-rtcompat",
  "tracing",
+ "tracing-appender",
  "tracing-subscriber",
  "ts-rs",
  "x25519-dalek",
@@ -6428,6 +6431,12 @@ dependencies = [
  "serde",
  "serde_json",
 ]
+
+[[package]]
+name = "symlink"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7973cce6668464ea31f176d85b13c7ab3bba2cb3b77a2ed26abd7801688010a"
 
 [[package]]
 name = "syn"
@@ -8293,6 +8302,19 @@ dependencies = [
  "pin-project-lite",
  "tracing-attributes",
  "tracing-core",
+]
+
+[[package]]
+name = "tracing-appender"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "050686193eb999b4bb3bc2acfa891a13da00f79734704c4b8b4ef1a10b368a3c"
+dependencies = [
+ "crossbeam-channel",
+ "symlink",
+ "thiserror 2.0.18",
+ "time",
+ "tracing-subscriber",
 ]
 
 [[package]]

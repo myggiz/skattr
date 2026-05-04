@@ -69,6 +69,10 @@ tls_codec = { workspace = true }
 # Error / logging / misc
 thiserror = { workspace = true }
 tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "registry"] }
+tracing-appender = "0.2"
+regex = { version = "1", default-features = false, features = ["std"] }
+parking_lot = { workspace = true }
 directories = { workspace = true }
 
 # TypeScript codegen
