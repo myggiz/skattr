@@ -75,6 +75,7 @@ async fn spawn_real_daemon(
             &data_dir_owned,
             &pw_owned,
             config_owned,
+            std::path::PathBuf::from("/dev/null"),
             ready_tx,
             shutdown_fut,
         )

@@ -78,8 +78,8 @@ where
         Command::RemoveMailbox { id } => handle_remove_mailbox(handle, id).await,
         Command::ListMailboxes => handle_list_mailboxes(handle).await,
         Command::DaemonInfo => handle_daemon_info(handle).await,
-        Command::GetConfig => Err(IpcError::UnknownCommand),
-        Command::SetConfig { .. } => Err(IpcError::UnknownCommand),
+        Command::GetConfig => get_config(&handle).await,
+        Command::SetConfig { patch } => set_config(&handle, patch).await,
         Command::ChangePassphrase { .. } => Err(IpcError::UnknownCommand),
         Command::SetContactMuted { .. } => Err(IpcError::UnknownCommand),
         Command::TailLogs { .. } => Err(IpcError::UnknownCommand),
@@ -1231,6 +1231,38 @@ where
     let repo = ContactRepo::new(&handle.pool);
     repo.set_hidden(&contact, true).map_err(map_err)?;
     let _ = handle.events_tx.send(Event::ContactUpdated(contact));
+    Ok(CommandResult::Ok)
+}
+
+async fn get_config<S>(
+    handle: &Arc<DaemonHandle<S>>,
+) -> std::result::Result<CommandResult, IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let cfg = handle.config.read().await;
+    Ok(CommandResult::Config(cfg.snapshot()))
+}
+
+async fn set_config<S>(
+    handle: &Arc<DaemonHandle<S>>,
+    patch: crate::daemon::commands::ConfigPatch,
+) -> std::result::Result<CommandResult, IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    use crate::daemon::error_kind::DaemonErrorKind;
+    let mut cfg = handle.config.write().await;
+    cfg.apply_patch(&patch).map_err(|e| {
+        IpcError::Daemon(DaemonErrorKind::InvalidArgument {
+            message: e.to_string(),
+        })
+    })?;
+    cfg.save_to_disk(&handle.config_path).map_err(|e| {
+        IpcError::Daemon(DaemonErrorKind::InvalidArgument {
+            message: format!("save_to_disk: {e}"),
+        })
+    })?;
     Ok(CommandResult::Ok)
 }
 
@@ -3563,5 +3595,84 @@ mod tests {
             CommandResult::Contacts(v) => assert_eq!(v.len(), 2),
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    // ── Task 12: GetConfig / SetConfig ────────────────────────────────────────
+
+    fn test_handle_with_config(
+        tmp: &tempfile::TempDir,
+    ) -> Arc<DaemonHandle<tokio::io::DuplexStream>> {
+        let seed = Seed::generate().unwrap();
+        let identity = IdentityKey::from_seed(&seed).unwrap();
+        let pool = Arc::new(Pool::in_memory());
+        let hub: Arc<DeliveryHub<tokio::io::DuplexStream>> =
+            Arc::new(DeliveryHub::new(pool.clone()));
+        let (events_tx, _) = broadcast::channel::<Event>(16);
+        let mut config = crate::daemon::config::Config::defaults()
+            .unwrap_or_else(|_| crate::daemon::config::Config::fallback_for_tests());
+        config.history.retention_days = 0;
+        let config_path = tmp.path().join("config.toml");
+        Arc::new(DaemonHandle::new_with_config(
+            pool,
+            hub,
+            identity,
+            events_tx,
+            config,
+            config_path,
+        ))
+    }
+
+    #[tokio::test]
+    async fn get_config_returns_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = test_handle_with_config(&tmp);
+        let result = execute_command(handle.clone(), Command::GetConfig)
+            .await
+            .unwrap();
+        match result {
+            CommandResult::Config(snap) => {
+                assert_eq!(snap.history_retention_days, 0);
+                assert_eq!(snap.direct_timeout_secs, 30);
+            }
+            other => panic!("expected Config, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn set_config_persists_and_round_trips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = test_handle_with_config(&tmp);
+        let patch = crate::daemon::commands::ConfigPatch {
+            history_retention_days: Some(7),
+            ..Default::default()
+        };
+        execute_command(handle.clone(), Command::SetConfig { patch })
+            .await
+            .unwrap();
+        let result = execute_command(handle, Command::GetConfig).await.unwrap();
+        match result {
+            CommandResult::Config(snap) => assert_eq!(snap.history_retention_days, 7),
+            other => panic!("expected Config, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn set_config_invalid_direct_timeout_returns_daemon_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = test_handle_with_config(&tmp);
+        let patch = crate::daemon::commands::ConfigPatch {
+            direct_timeout_secs: Some(0), // out of range 1..=600
+            ..Default::default()
+        };
+        let result = execute_command(handle, Command::SetConfig { patch }).await;
+        assert!(
+            matches!(
+                result,
+                Err(IpcError::Daemon(
+                    crate::daemon::error_kind::DaemonErrorKind::InvalidArgument { .. }
+                ))
+            ),
+            "expected InvalidArgument, got {result:?}"
+        );
     }
 }

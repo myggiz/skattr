@@ -210,6 +210,13 @@ impl Config {
         }
     }
 
+    /// A fallback that never fails — used only inside `DaemonHandle::new`
+    /// when `Config::defaults()` fails (no home dir in tests). Not part
+    /// of the public API.
+    pub(crate) fn fallback_for_tests() -> Self {
+        Self::fallback()
+    }
+
     /// Apply a `ConfigPatch`, mutating `self` in place. Returns
     /// `Err(CoreError::Config(...))` if any field fails validation.
     /// Validation rules:
@@ -303,6 +310,24 @@ impl Config {
         }
         Ok(())
     }
+}
+
+/// Resolve the config-file path that `load_with_precedence` would use,
+/// given an optional explicit `--config` flag value.
+///
+/// If `file_flag` is `Some`, that path is returned as-is. Otherwise
+/// the function returns the first XDG candidate path (it may not exist
+/// yet — the caller is responsible for creating the directory before
+/// calling `save_to_disk`).
+pub fn resolve_config_path(file_flag: Option<&std::path::Path>) -> std::path::PathBuf {
+    if let Some(p) = file_flag {
+        return p.to_path_buf();
+    }
+    let candidates = xdg_config_candidates();
+    candidates
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| std::path::PathBuf::from("./config.toml"))
 }
 
 fn xdg_config_candidates() -> Vec<std::path::PathBuf> {

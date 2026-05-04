@@ -81,6 +81,7 @@ impl Daemon {
         data_dir: &Path,
         passphrase: &zeroize::Zeroizing<String>,
         config: Config,
+        config_path: std::path::PathBuf,
         ready: oneshot::Sender<Ready>,
         shutdown: impl std::future::Future<Output = ()> + Send + 'static,
     ) -> Result<()> {
@@ -130,11 +131,15 @@ impl Daemon {
             tracing::info!(rows = n, "backfilled envelope_id for pre-1.H rows");
         }
 
+        // Wrap config in Arc<RwLock> for live mutation (GetConfig/SetConfig) and
+        // sweep re-reads.
+        let config_arc = std::sync::Arc::new(tokio::sync::RwLock::new(config.clone()));
+
         // Phase 1.G: hourly retention sweep.
         let (sweep_shutdown_tx, sweep_shutdown_rx) = tokio::sync::watch::channel(false);
         let sweep_handle = crate::daemon::retention::spawn_sweep(
             pool.clone(),
-            config.history.retention_days,
+            config_arc.clone(),
             std::time::Duration::from_secs(3600),
             sweep_shutdown_rx,
         );
@@ -187,8 +192,9 @@ impl Daemon {
         );
         let poller_ctrl = scheduler.ctrl();
 
-        // Step 6: DaemonHandle.
-        let handle = DaemonHandle::<arti_client::DataStream>::new_with_mailbox(
+        // Step 6: DaemonHandle — inject the shared config_arc so that
+        // SetConfig writes propagate to the retention sweep on the next tick.
+        let mut handle = DaemonHandle::<arti_client::DataStream>::new_with_mailbox(
             pool,
             hub,
             identity,
@@ -196,6 +202,7 @@ impl Daemon {
             mailbox_factory,
             poller_ctrl,
         );
+        handle.set_config_arc(config_arc, config_path);
         handle.set_onion(onion.clone());
 
         // TorStatus tap: subscribe to the broadcast channel and copy
@@ -354,7 +361,15 @@ mod tests {
         // Move `data_dir` and `pw` into the spawned future so the borrows
         // are within the `'static` async block.
         let daemon_task = tokio::spawn(async move {
-            Daemon::run(&data_dir, &pw, config, ready_tx, shutdown_fut).await
+            Daemon::run(
+                &data_dir,
+                &pw,
+                config,
+                std::path::PathBuf::from("/dev/null"),
+                ready_tx,
+                shutdown_fut,
+            )
+            .await
         });
 
         let ready = tokio::time::timeout(std::time::Duration::from_secs(180), ready_rx)

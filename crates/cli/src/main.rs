@@ -532,6 +532,7 @@ async fn daemon(
     data_dir_override: Option<&std::path::Path>,
     passphrase_file: Option<PathBuf>,
 ) -> Result<()> {
+    use skattr_core::daemon::config::resolve_config_path;
     use skattr_core::daemon::{Config, Daemon};
 
     if detach {
@@ -563,12 +564,23 @@ async fn daemon(
         let _ = tokio::signal::ctrl_c().await;
     };
 
+    // Resolve config-file path so SetConfig can persist changes atomically.
+    let config_path = resolve_config_path(None);
+
     // Move the Zeroizing<String> passphrase and config by value into the
     // spawned task — they drop (and wipe) when Daemon::run returns.
     let data_dir_owned = config.data_dir.clone();
     let config_owned = config.clone();
     let daemon_fut = tokio::spawn(async move {
-        Daemon::run(&data_dir_owned, &pw, config_owned, ready_tx, shutdown_fut).await
+        Daemon::run(
+            &data_dir_owned,
+            &pw,
+            config_owned,
+            config_path,
+            ready_tx,
+            shutdown_fut,
+        )
+        .await
     });
 
     // Wait for the daemon to signal readiness.

@@ -22,6 +22,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use skattr_core::daemon::Config;
 use skattr_core::envelope::{Envelope, Kind, MessageId};
 use skattr_core::test_exports::{now_unix_seconds, spawn_sweep, InsertParams, MessageRepo, Pool};
 
@@ -55,12 +56,10 @@ async fn sweep_deletes_only_rows_older_than_cutoff_and_cascades_fts() {
     }
 
     let (tx, rx) = tokio::sync::watch::channel(false);
-    let h = spawn_sweep(
-        pool.clone(),
-        1, /* day */
-        Duration::from_millis(50),
-        rx,
-    );
+    let mut cfg = Config::defaults().expect("defaults");
+    cfg.history.retention_days = 1; /* day */
+    let config_arc = Arc::new(tokio::sync::RwLock::new(cfg));
+    let h = spawn_sweep(pool.clone(), config_arc, Duration::from_millis(50), rx);
 
     // Wait long enough for at least one tick (~2-4 ticks at 50 ms).
     tokio::time::sleep(Duration::from_millis(200)).await;

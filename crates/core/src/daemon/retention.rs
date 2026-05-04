@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::daemon::clock::now_unix_seconds;
+use crate::daemon::config::Config;
 use crate::storage::messages::MessageRepo;
 use crate::storage::Pool;
 use crate::storage::StorageErrorKind;
@@ -22,9 +23,12 @@ use crate::storage::StorageErrorKind;
 /// `tick` is exposed for tests; production callers use
 /// `Duration::from_secs(3600)`. The task exits when `shutdown` flips
 /// to `true`.
+///
+/// `config` is re-read on every tick so that `SetConfig` changes to
+/// `retention_days` take effect without restarting the daemon.
 pub fn spawn_sweep(
     pool: Arc<Pool>,
-    retention_days: u32,
+    config: Arc<tokio::sync::RwLock<Config>>,
     tick: Duration,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> tokio::task::JoinHandle<()> {
@@ -32,6 +36,9 @@ pub fn spawn_sweep(
         loop {
             tokio::select! {
                 _ = tokio::time::sleep(tick) => {
+                    // Re-read config on every tick so live changes apply.
+                    let retention_days = config.read().await.history.retention_days;
+
                     // Message-pruning step (gated on retention_days).
                     if retention_days != 0 {
                         let cutoff = now_unix_seconds()
@@ -73,6 +80,7 @@ pub fn spawn_sweep(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::daemon::config::Config;
     use crate::envelope::{Envelope, Kind, MessageId};
     use crate::storage::messages::InsertParams;
 
@@ -84,6 +92,12 @@ mod tests {
             reply_to: None,
             kind: Kind::Text { body: body.into() },
         }
+    }
+
+    fn config_with_retention(retention_days: u32) -> Arc<tokio::sync::RwLock<Config>> {
+        let mut cfg = Config::defaults().unwrap_or_else(|_| Config::fallback_for_tests());
+        cfg.history.retention_days = retention_days;
+        Arc::new(tokio::sync::RwLock::new(cfg))
     }
 
     #[tokio::test]
@@ -100,7 +114,12 @@ mod tests {
             .unwrap();
 
         let (tx, rx) = tokio::sync::watch::channel(false);
-        let h = spawn_sweep(pool.clone(), 0, Duration::from_millis(20), rx);
+        let h = spawn_sweep(
+            pool.clone(),
+            config_with_retention(0),
+            Duration::from_millis(20),
+            rx,
+        );
         tokio::time::sleep(Duration::from_millis(80)).await;
         let _ = tx.send(true);
         let _ = h.await;
@@ -138,7 +157,7 @@ mod tests {
         let (tx, rx) = tokio::sync::watch::channel(false);
         let h = spawn_sweep(
             pool.clone(),
-            1, /* day */
+            config_with_retention(1), /* 1 day */
             Duration::from_millis(20),
             rx,
         );
@@ -187,7 +206,12 @@ mod tests {
         .unwrap();
 
         let (tx, rx) = tokio::sync::watch::channel(false);
-        let h = spawn_sweep(pool.clone(), 0, Duration::from_millis(20), rx);
+        let h = spawn_sweep(
+            pool.clone(),
+            config_with_retention(0),
+            Duration::from_millis(20),
+            rx,
+        );
         tokio::time::sleep(Duration::from_millis(80)).await;
         let _ = tx.send(true);
         let _ = h.await;

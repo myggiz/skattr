@@ -60,8 +60,10 @@ pub async fn start_in_process_cmd(state: tauri::State<'_, AppState>) -> Result<R
 
     let pass = passphrase.clone();
     let dd = data_dir.clone();
-    let task =
-        tokio::spawn(async move { Daemon::run(&dd, &pass, config, ready_tx, shutdown_fut).await });
+    let config_path = skattr_core::daemon::config::resolve_config_path(None);
+    let task = tokio::spawn(async move {
+        Daemon::run(&dd, &pass, config, config_path, ready_tx, shutdown_fut).await
+    });
 
     let ready = tokio::time::timeout(std::time::Duration::from_secs(180), ready_rx)
         .await
