@@ -536,6 +536,24 @@ pub enum CommandResult {
         /// Latest applied storage migration version.
         schema_version: u32,
     },
+    /// Reply for `Command::GetConfig`.
+    Config(ConfigSnapshot),
+    /// Reply for `Command::ChangePassphrase` (success).
+    PassphraseChanged,
+    /// Reply for `Command::TailLogs`.
+    Logs {
+        /// Log records, most-recent first.
+        records: Vec<LogRecord>,
+        /// Cursor for the next tail batch; UI uses this as `since_seq` on
+        /// the next `TailLogs` call.
+        next_since_seq: u64,
+    },
+    /// Reply for `Command::GetPassphraseAuditLatest`.
+    PassphraseAudit {
+        /// Unix seconds when the passphrase was last changed. `None` if
+        /// never changed (i.e., still the original passphrase from init).
+        last_changed_unix: Option<u64>,
+    },
 }
 
 /// Wire-safe projection of a `mailboxes` row for CLI / UI display.

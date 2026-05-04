@@ -1005,6 +1005,11 @@ async fn tail_follow(
                     .collect();
                 eprintln!("contact card updated: {short} v{version}");
             }
+            Event::LogRecord(record) => {
+                // Log records are only emitted when explicitly subscribed
+                // via EventFilter::Logs (Settings → Advanced → Logs).
+                eprintln!("{} [{:?}] {}: {}", record.ts_unix_ms, record.level, record.target, record.message);
+            }
         }
     }
     Ok(())

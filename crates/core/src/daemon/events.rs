@@ -89,6 +89,9 @@ pub enum Event {
         /// previously-stored card's version, per `ContactRepo::put_card`).
         version: u64,
     },
+    /// One redacted log record. Streamed only when the subscriber's
+    /// filter includes `EventFilter::Logs`.
+    LogRecord(crate::daemon::commands::LogRecord),
 }
 
 #[cfg(test)]

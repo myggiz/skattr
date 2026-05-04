@@ -334,6 +334,8 @@ fn event_matches(event: &Event, filter: Option<&EventFilter>) -> bool {
         (EventFilter::Mailboxes, _) => false,
         (EventFilter::Delivery, Event::DeliveryStatusChanged { .. }) => true,
         (EventFilter::Delivery, _) => false,
+        (EventFilter::Logs, Event::LogRecord(_)) => true,
+        (EventFilter::Logs, _) => false,
         _ => false,
     }
 }

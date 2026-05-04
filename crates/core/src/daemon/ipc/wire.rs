@@ -40,6 +40,9 @@ pub enum EventFilter {
     Mailboxes,
     /// Only delivery-progress events: `DeliveryStatusChanged`.
     Delivery,
+    /// Only `LogRecord` events. UI subscribes when Settings → Advanced →
+    /// Logs is mounted; unsubscribes when the panel closes.
+    Logs,
 }
 
 /// Request frame sent from CLI to daemon.
