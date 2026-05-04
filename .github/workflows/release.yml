@@ -1,0 +1,297 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Build + smoke only; skip the GitHub Release step'
+        required: false
+        default: 'true'
+        type: choice
+        options: ['true', 'false']
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+  RUST_BACKTRACE: 1
+
+jobs:
+  build:
+    name: build (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # Phase 2.G ships Linux + macOS only.
+        # Windows is carved out to Phase 2.H (see spec).
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute SOURCE_DATE_EPOCH from the tag commit
+        id: sde
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDE=$(git log -1 --format=%ct)
+          echo "epoch=$SDE" >> "$GITHUB_OUTPUT"
+          echo "SOURCE_DATE_EPOCH=$SDE" >> "$GITHUB_ENV"
+
+      - name: Install Tauri 2 Linux deps
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libxdo-dev \
+            libssl-dev \
+            build-essential \
+            pkg-config
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.os }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Activate pnpm via corepack
+        run: |
+          corepack enable
+          corepack prepare pnpm@10 --activate
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/pnpm/store
+          key: pnpm-${{ runner.os }}-${{ hashFiles('crates/ui/src-svelte/pnpm-lock.yaml') }}
+          restore-keys: |
+            pnpm-${{ runner.os }}-
+
+      - name: Generate ts-rs bindings
+        run: cargo test -p skattr-core --features test-harness
+
+      - name: Install frontend deps
+        working-directory: crates/ui/src-svelte
+        run: pnpm install --frozen-lockfile
+
+      - name: Build frontend
+        working-directory: crates/ui/src-svelte
+        run: pnpm build
+
+      - name: Install tauri-cli
+        run: cargo install tauri-cli --version '=2.11.0' --locked
+
+      - name: Build bundle
+        run: cargo tauri build
+        env:
+          CI: true
+
+      - name: Stage bundles
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p stage
+          if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
+            cp target/release/bundle/deb/*.deb stage/
+            cp target/release/bundle/appimage/*.AppImage stage/
+          else
+            cp target/release/bundle/dmg/*.dmg stage/
+          fi
+          ls -la stage
+
+      - name: Upload bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundles-${{ matrix.os }}
+          path: stage/*
+          if-no-files-found: error
+          retention-days: 7
+
+  smoke:
+    name: smoke (${{ matrix.os }})
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Download bundles
+        uses: actions/download-artifact@v4
+        with:
+          name: bundles-${{ matrix.os }}
+          path: bundles
+
+      - name: List bundles
+        shell: bash
+        run: ls -la bundles
+
+      - name: Install bundle (Linux .deb)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-0 libayatana-appindicator3-1
+          sudo dpkg -i bundles/*.deb || sudo apt-get -f install -y
+          which skattr-ui
+
+      - name: Install bundle (macOS .dmg)
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          DMG=$(ls bundles/*.dmg | head -1)
+          hdiutil attach "$DMG" -nobrowse -mountpoint /Volumes/skattr-mount
+          cp -R /Volumes/skattr-mount/Skattr.app /tmp/Skattr.app
+          hdiutil detach /Volumes/skattr-mount
+          ls /tmp/Skattr.app/Contents/MacOS/
+
+      - name: Run smoke (Linux .deb)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/smoke"
+          /usr/bin/skattr-ui --smoke-test \
+              --data-dir "$RUNNER_TEMP/smoke" \
+              --timeout-secs 240
+          echo "smoke OK on ubuntu-latest" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Run smoke (macOS)
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/smoke"
+          /tmp/Skattr.app/Contents/MacOS/skattr-ui --smoke-test \
+              --data-dir "$RUNNER_TEMP/smoke" \
+              --timeout-secs 240
+          echo "smoke OK on macos-latest" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Run smoke (Linux AppImage)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          APPIMG=$(ls bundles/*.AppImage | head -1)
+          chmod +x "$APPIMG"
+          mkdir -p "$RUNNER_TEMP/smoke-appimage"
+          "$APPIMG" --appimage-extract-and-run \
+              --smoke-test \
+              --data-dir "$RUNNER_TEMP/smoke-appimage" \
+              --timeout-secs 240
+          echo "AppImage smoke OK on ubuntu-latest" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload smoke logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-failure-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/smoke/**
+            ${{ runner.temp }}/smoke-appimage/**
+          if-no-files-found: ignore
+          retention-days: 14
+
+  release:
+    name: release
+    needs: smoke
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all bundle artefacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bundles-*
+          path: dist
+          merge-multiple: true
+
+      - name: List bundles
+        shell: bash
+        run: ls -la dist
+
+      - name: Compute SHA256SUMS
+        shell: bash
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          sha256sum *.deb *.AppImage *.dmg | sort > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Install minisign
+        run: sudo apt-get update && sudo apt-get install -y minisign
+
+      - name: Sign SHA256SUMS
+        shell: bash
+        working-directory: dist
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+        run: |
+          set -eu
+          # Disable command echo so the password never leaks.
+          set +x
+          KEY_FILE=$(mktemp -p "$RUNNER_TEMP")
+          printf '%s' "$MINISIGN_SECRET_KEY" | base64 -d > "$KEY_FILE"
+          # minisign reads passphrase from stdin when -W is not set.
+          printf '%s\n' "$MINISIGN_PASSWORD" | minisign -Sm SHA256SUMS -s "$KEY_FILE"
+          shred -u "$KEY_FILE"
+          ls -la SHA256SUMS SHA256SUMS.minisig
+
+      - name: Verify the signature (sanity-check)
+        shell: bash
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          minisign -Vm SHA256SUMS -P "$(cat ../docs/install/minisign.pub | tail -1)"
+
+      - name: Extract release notes from CHANGELOG
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF#refs/tags/}"
+          # Extract the section for the current tag from CHANGELOG.md.
+          # Convention: each release header is "## [TAG] — DATE" (em dash) or
+          # "## [TAG] - DATE" (hyphen). Stop at the next "## [" header.
+          awk -v tag="$TAG" '
+            $0 ~ "^## \\[" tag "\\]" { in_section = 1; print; next }
+            in_section && $0 ~ "^## \\[" { exit }
+            in_section { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "## $TAG" > release-notes.md
+            echo "" >> release-notes.md
+            echo "(release notes not found in CHANGELOG.md)" >> release-notes.md
+          fi
+          cat release-notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.deb
+            dist/*.AppImage
+            dist/*.dmg
+            dist/SHA256SUMS
+            dist/SHA256SUMS.minisig
+          body_path: release-notes.md
+          draft: false
+          prerelease: false
