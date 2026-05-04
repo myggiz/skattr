@@ -92,6 +92,15 @@
       <button type="button" class="rail-btn" onclick={() => (addOpen = true)}>
         + Add
       </button>
+      <button
+        type="button"
+        class="rail-btn"
+        onclick={() => goto('/settings/identity')}
+        title="Settings"
+        aria-label="Open settings"
+      >
+        ⚙
+      </button>
     </div>
     {#each $contacts as c}
       <ContactRow
