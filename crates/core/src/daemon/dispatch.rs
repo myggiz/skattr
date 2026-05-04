@@ -85,7 +85,7 @@ where
             set_contact_muted(&handle, contact, muted).await
         }
         Command::TailLogs { .. } => Err(IpcError::UnknownCommand),
-        Command::GetPassphraseAuditLatest => Err(IpcError::UnknownCommand),
+        Command::GetPassphraseAuditLatest => get_passphrase_audit_latest(&handle).await,
         Command::WipeAllData => Err(IpcError::UnknownCommand),
     }
 }
@@ -1305,6 +1305,20 @@ pub(crate) fn map_err(err: CoreError) -> IpcError {
         tracing::warn!(?err, "ipc: internal error");
         IpcError::Internal(truncated)
     }
+}
+
+async fn get_passphrase_audit_latest<S>(
+    handle: &Arc<DaemonHandle<S>>,
+) -> std::result::Result<CommandResult, IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    use crate::storage::PassphraseAuditRepo;
+    let repo = PassphraseAuditRepo::new(&handle.pool);
+    let ts = repo.latest_ts().map_err(map_err)?;
+    Ok(CommandResult::PassphraseAudit {
+        last_changed_unix: ts.map(|v| v as u64),
+    })
 }
 
 #[cfg(test)]
