@@ -262,14 +262,6 @@ fn exit_on_ipc_error(err: skattr_core::daemon::IpcClientError) -> ! {
                 eprintln!("error: authentication failed");
                 std::process::exit(1);
             }
-            DaemonErrorKind::WrongPassphrase => {
-                eprintln!("error: wrong passphrase — please retry");
-                std::process::exit(1);
-            }
-            DaemonErrorKind::InconsistentState => {
-                eprintln!("error: on-disk state is inconsistent; see docs/operations/passphrase-recovery.md");
-                std::process::exit(1);
-            }
         },
         IpcClientError::Server(other) => {
             eprintln!("ipc: server error: {other:?}");
