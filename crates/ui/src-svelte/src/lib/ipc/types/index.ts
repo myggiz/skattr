@@ -8,6 +8,8 @@
 
 export * from "./Command";
 export * from "./CommandResult";
+export * from "./ConfigPatch";
+export * from "./ConfigSnapshot";
 export * from "./ContactErrorKind";
 export * from "./ContactSummary";
 export * from "./DaemonErrorKind";
@@ -24,11 +26,15 @@ export * from "./IpcError";
 export * from "./IpcRequest";
 export * from "./IpcResponse";
 export * from "./Kind";
+export * from "./LogLevel";
+export * from "./LogRecord";
 export * from "./MailboxStatus";
 export * from "./MailboxSummary";
 export * from "./MessageId";
 export * from "./MessageRecord";
 export * from "./MlsErrorKind";
+export * from "./MlsGroupStateLabel";
+export * from "./NotificationMode";
 export * from "./PublicKey";
 export * from "./SearchHitRecord";
 export * from "./SendStatus";
