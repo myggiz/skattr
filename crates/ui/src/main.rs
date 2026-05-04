@@ -158,6 +158,18 @@ fn main() {
 
     let result = tauri::Builder::default()
         .manage(app_state)
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            // Forward subsequent skattr:// invocations into the
+            // existing process. The deep-link plugin will fire its
+            // own event for any URL in argv; we just need the
+            // window to come back into focus.
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+            tracing::debug!(?argv, "single-instance: forwarded launch");
+        }))
+        .plugin(tauri_plugin_deep_link::init())
         .invoke_handler(tauri::generate_handler![
             bootstrap::vault_exists,
             bootstrap::identity_init,
@@ -210,6 +222,33 @@ fn main() {
                 if let Some(w) = app.get_webview_window("main") {
                     let _ = w.hide();
                 }
+            }
+
+            // Forward incoming skattr:// deep-link events into the
+            // SvelteKit shell as a CustomEvent the Add-Contact dialog
+            // listens for via the `deepLinkInviteUrl` store.
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                let app_for_links = app.handle().clone();
+                app.deep_link().on_open_url(move |event| {
+                    let urls: Vec<String> =
+                        event.urls().into_iter().map(|u| u.to_string()).collect();
+                    if urls.is_empty() {
+                        return;
+                    }
+                    if let Some(wv) = app_for_links.get_webview_window("main") {
+                        let _ = wv.show();
+                        let _ = wv.set_focus();
+                        let payload = match serde_json::to_string(&urls[0]) {
+                            Ok(s) => s,
+                            Err(_) => "\"\"".to_string(),
+                        };
+                        let js = format!(
+                            "window.dispatchEvent(new CustomEvent('skattr:deep-link', {{ detail: {payload} }}));"
+                        );
+                        let _ = wv.eval(&js);
+                    }
+                });
             }
 
             Ok(())

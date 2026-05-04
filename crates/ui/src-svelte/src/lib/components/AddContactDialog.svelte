@@ -8,14 +8,16 @@
 
   interface Props {
     onClose: () => void;
+    /** Pre-fill the paste tab with this URL (used by deep-link handler). */
+    initialUrl?: string;
   }
-  let { onClose }: Props = $props();
+  let { onClose, initialUrl = "" }: Props = $props();
 
   type Tab = "paste" | "scan";
   let tab = $state<Tab>("paste");
 
   // Paste tab state
-  let url = $state("");
+  let url = $state(initialUrl);
   let error = $state<string | null>(null);
   let busy = $state(false);
 

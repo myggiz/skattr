@@ -22,6 +22,8 @@ tauri-build = { version = "=2.6.0", features = [] }
 [dependencies]
 skattr-core = { path = "../core" }
 tauri = { version = "=2.11.0", features = ["tray-icon"] }
+tauri-plugin-deep-link = "2"
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 tokio = { workspace = true }
 serde.workspace = true
 serde_json = "1"

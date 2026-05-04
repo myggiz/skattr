@@ -17,11 +17,14 @@
   import { conversation, openConversationFromSummary, appendMessage } from "$lib/stores/conversation";
   import { torStatus } from "$lib/stores/tor_status";
   import { recordDeliveryStatus, hex16ToString } from "$lib/stores/delivery";
+  import { deepLinkInviteUrl } from "$lib/stores/deepLink";
   import { ipcClient } from "$lib/ipc/tauri";
   import type { ContactSummary, PublicKey } from "$lib/ipc/types";
 
   let inviteOpen = $state(false);
   let addOpen = $state(false);
+  // URL pre-filled when the dialog is opened via a skattr:// deep-link.
+  let addInitialUrl = $state("");
 
   onMount(async () => {
     // If no vault exists yet, go to first-run to initialise identity.
@@ -61,6 +64,20 @@
             ? "Setting up conversation…"
             : undefined,
   );
+
+  // Subscribe to the deep-link store; open the Add-Contact dialog with the
+  // URL pre-filled whenever a skattr://invite/v1#… deep-link arrives.
+  onMount(() => {
+    const unsubDeepLink = deepLinkInviteUrl.subscribe((url) => {
+      if (url !== null) {
+        addInitialUrl = url;
+        addOpen = true;
+        // Clear the store so a second deep-link can re-trigger the dialog.
+        deepLinkInviteUrl.set(null);
+      }
+    });
+    return unsubDeepLink;
+  });
 
   // Subscribe to events on mount; update stores.
   onMount(() => {
@@ -136,7 +153,10 @@
   <InviteGenerateDialog onClose={() => (inviteOpen = false)} />
 {/if}
 {#if addOpen}
-  <AddContactDialog onClose={() => (addOpen = false)} />
+  <AddContactDialog
+    onClose={() => { addOpen = false; addInitialUrl = ""; }}
+    initialUrl={addInitialUrl}
+  />
 {/if}
 
 <Toast />

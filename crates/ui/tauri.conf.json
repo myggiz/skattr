@@ -64,6 +64,11 @@
   "plugins": {
     "updater": {
       "active": false
+    },
+    "deep-link": {
+      "desktop": {
+        "schemes": ["skattr"]
+      }
     }
   }
 }
