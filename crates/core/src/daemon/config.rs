@@ -18,6 +18,63 @@ pub struct HistoryConfig {
     pub retention_days: u32,
 }
 
+/// Delivery-policy settings.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeliveryConfig {
+    /// How long the hub tries direct connection before falling back to
+    /// mailbox deposit. Default 30s (locked in 2.B).
+    #[serde(default = "default_direct_timeout_secs")]
+    pub direct_timeout_secs: u32,
+}
+
+impl Default for DeliveryConfig {
+    fn default() -> Self {
+        Self {
+            direct_timeout_secs: default_direct_timeout_secs(),
+        }
+    }
+}
+
+fn default_direct_timeout_secs() -> u32 {
+    30
+}
+
+/// Notification settings.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct NotificationsConfig {
+    /// Notification display mode (Full, Minimal, or Silent).
+    #[serde(default)]
+    pub mode: crate::daemon::commands::NotificationMode,
+}
+
+/// UI / shell settings (close-to-tray, start-minimised, log persistence).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UiConfig {
+    /// If true, closing the window hides to tray instead of exiting.
+    #[serde(default = "default_close_to_tray")]
+    pub close_to_tray: bool,
+    /// If true, the app starts minimised to tray.
+    #[serde(default)]
+    pub start_minimised: bool,
+    /// If true, daemon logs are persisted to disk.
+    #[serde(default)]
+    pub persist_logs_to_disk: bool,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            close_to_tray: default_close_to_tray(),
+            start_minimised: false,
+            persist_logs_to_disk: false,
+        }
+    }
+}
+
+fn default_close_to_tray() -> bool {
+    true
+}
+
 /// Top-level daemon config.
 ///
 /// Loaded from `~/.config/skattr/config.toml` by default; the CLI may
@@ -35,6 +92,15 @@ pub struct Config {
     /// Retention + history settings. Drives the retention sweep.
     #[serde(default)]
     pub history: HistoryConfig,
+    /// Delivery policy. New in 2.F.
+    #[serde(default)]
+    pub delivery: DeliveryConfig,
+    /// Notification settings. New in 2.F.
+    #[serde(default)]
+    pub notifications: NotificationsConfig,
+    /// UI / shell settings. New in 2.F.
+    #[serde(default)]
+    pub ui: UiConfig,
 }
 
 fn default_log_filter() -> String {
@@ -58,6 +124,9 @@ impl Config {
             ipc_socket: None,
             log_filter: default_log_filter(),
             history: HistoryConfig::default(),
+            delivery: DeliveryConfig::default(),
+            notifications: NotificationsConfig::default(),
+            ui: UiConfig::default(),
         })
     }
 
@@ -135,6 +204,9 @@ impl Config {
             ipc_socket: None,
             log_filter: default_log_filter(),
             history: HistoryConfig::default(),
+            delivery: DeliveryConfig::default(),
+            notifications: NotificationsConfig::default(),
+            ui: UiConfig::default(),
         }
     }
 }
@@ -232,5 +304,48 @@ mod tests {
         "#;
         let cfg: Config = toml::from_str(toml).unwrap();
         assert_eq!(cfg.history.retention_days, 90);
+    }
+
+    #[test]
+    fn old_config_without_2f_sections_still_parses() {
+        let toml = r#"
+            data_dir = "/tmp/skattr"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.delivery.direct_timeout_secs, 30);
+        assert!(matches!(
+            cfg.notifications.mode,
+            crate::daemon::commands::NotificationMode::Full
+        ));
+        assert!(cfg.ui.close_to_tray);
+        assert!(!cfg.ui.start_minimised);
+        assert!(!cfg.ui.persist_logs_to_disk);
+    }
+
+    #[test]
+    fn explicit_2f_sections_parse() {
+        let toml = r#"
+            data_dir = "/tmp/skattr"
+
+            [delivery]
+            direct_timeout_secs = 45
+
+            [notifications]
+            mode = "minimal"
+
+            [ui]
+            close_to_tray = false
+            start_minimised = true
+            persist_logs_to_disk = true
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.delivery.direct_timeout_secs, 45);
+        assert!(matches!(
+            cfg.notifications.mode,
+            crate::daemon::commands::NotificationMode::Minimal
+        ));
+        assert!(!cfg.ui.close_to_tray);
+        assert!(cfg.ui.start_minimised);
+        assert!(cfg.ui.persist_logs_to_disk);
     }
 }
