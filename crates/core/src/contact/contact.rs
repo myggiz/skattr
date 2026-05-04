@@ -19,4 +19,7 @@ pub struct Contact {
     pub added_at: i64,
     /// Most recent verified card from this contact (onion + mailboxes + version).
     pub card: Option<ContactCard>,
+    /// Desktop-notification mute. Added in 2.F; defaults to `false`.
+    #[serde(default)]
+    pub muted: bool,
 }

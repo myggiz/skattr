@@ -15,9 +15,9 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
 use skattr_core::daemon::ipc::IpcClient;
+use skattr_core::daemon::logs::LogSink;
 use skattr_core::daemon::{Config, Daemon, Ready};
 
-#[derive(Default)]
 pub struct AppState {
     /// Resolved data directory; set in `tauri::Builder::setup`.
     pub data_dir: RwLock<Option<PathBuf>>,
@@ -34,6 +34,23 @@ pub struct AppState {
     pub task: Mutex<Option<JoinHandle<skattr_core::error::Result<()>>>>,
     /// Sender for graceful daemon shutdown.
     pub shutdown_tx: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    /// Log sink wired to the tracing subscriber. Passed to `Daemon::run`
+    /// so tracing events flow into the ring buffer and onto the event bus.
+    pub log_sink: LogSink,
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self {
+            data_dir: RwLock::new(None),
+            pending_passphrase: RwLock::new(None),
+            ipc: Mutex::new(None),
+            ready: RwLock::new(None),
+            task: Mutex::new(None),
+            shutdown_tx: Mutex::new(None),
+            log_sink: LogSink::new(),
+        }
+    }
 }
 
 #[tauri::command]
@@ -60,8 +77,20 @@ pub async fn start_in_process_cmd(state: tauri::State<'_, AppState>) -> Result<R
 
     let pass = passphrase.clone();
     let dd = data_dir.clone();
-    let task =
-        tokio::spawn(async move { Daemon::run(&dd, &pass, config, ready_tx, shutdown_fut).await });
+    let config_path = skattr_core::daemon::config::resolve_config_path(None);
+    let log_sink = state.log_sink.clone();
+    let task = tokio::spawn(async move {
+        Daemon::run_with_sink(
+            &dd,
+            &pass,
+            config,
+            config_path,
+            ready_tx,
+            shutdown_fut,
+            Some(log_sink),
+        )
+        .await
+    });
 
     let ready = tokio::time::timeout(std::time::Duration::from_secs(180), ready_rx)
         .await

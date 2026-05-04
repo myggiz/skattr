@@ -50,14 +50,16 @@ impl<'p> ContactRepo<'p> {
     pub fn get(&self, identity: &PublicKey) -> Result<Option<Contact>> {
         let base = self.pool.with(|c| {
             let result = c.query_row(
-                "SELECT display_name, added_at FROM contacts WHERE identity_pubkey = ?1",
+                "SELECT display_name, added_at, muted FROM contacts WHERE identity_pubkey = ?1",
                 rusqlite::params![&identity.0[..]],
                 |r| {
+                    let muted_val: i64 = r.get(2).unwrap_or(0);
                     Ok(Contact {
                         identity: *identity,
                         display_name: r.get(0)?,
                         added_at: r.get(1)?,
                         card: None,
+                        muted: muted_val != 0,
                     })
                 },
             );
@@ -83,7 +85,7 @@ impl<'p> ContactRepo<'p> {
         let mut contacts: Vec<Contact> = self.pool.with(|c| {
             let mut stmt = c
                 .prepare(
-                    "SELECT identity_pubkey, display_name, added_at FROM contacts \
+                    "SELECT identity_pubkey, display_name, added_at, muted FROM contacts \
                      WHERE hidden = 0 \
                      ORDER BY display_name IS NULL, display_name COLLATE NOCASE",
                 )
@@ -99,11 +101,13 @@ impl<'p> ContactRepo<'p> {
                     if pub_bytes.len() == 32 {
                         arr.copy_from_slice(&pub_bytes);
                     }
+                    let muted_val: i64 = r.get(3).unwrap_or(0);
                     Ok(Contact {
                         identity: PublicKey(arr),
                         display_name: r.get(1)?,
                         added_at: r.get(2)?,
                         card: None,
+                        muted: muted_val != 0,
                     })
                 })
                 .map_err(|e| {
@@ -388,13 +392,47 @@ impl<'p> ContactRepo<'p> {
         })
     }
 
+    /// Toggle the per-contact mute flag. No-op (returns `Ok(())`) if
+    /// the contact does not exist — caller is responsible for the
+    /// existence check (typically a `lookup_by_pubkey` first). Matches
+    /// the semantics of `set_display_name` / `set_hidden`.
+    pub fn set_muted(&self, identity: &PublicKey, muted: bool) -> Result<()> {
+        self.pool.with_mut(|c| {
+            c.execute(
+                "UPDATE contacts SET muted = ?1 WHERE identity_pubkey = ?2",
+                rusqlite::params![if muted { 1i64 } else { 0i64 }, &identity.0[..]],
+            )
+            .map_err(|e| CoreError::Storage(StorageErrorKind::Other(format!("set_muted: {e}"))))?;
+            Ok(())
+        })
+    }
+
+    /// Read the current mute flag. Returns `Ok(false)` if the contact
+    /// does not exist.
+    pub fn is_muted(&self, identity: &PublicKey) -> Result<bool> {
+        use rusqlite::OptionalExtension;
+        self.pool.with(|c| {
+            let muted: Option<i64> = c
+                .query_row(
+                    "SELECT muted FROM contacts WHERE identity_pubkey = ?1",
+                    rusqlite::params![&identity.0[..]],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!("is_muted: {e}")))
+                })?;
+            Ok(matches!(muted, Some(v) if v != 0))
+        })
+    }
+
     /// Like `list()` but does NOT filter `hidden = 0`. Used by
     /// `Command::ListContactsWithFilter { include_hidden: true }`.
     pub(crate) fn list_all(&self) -> Result<Vec<Contact>> {
         let mut contacts: Vec<Contact> = self.pool.with(|c| {
             let mut stmt = c
                 .prepare(
-                    "SELECT identity_pubkey, display_name, added_at FROM contacts \
+                    "SELECT identity_pubkey, display_name, added_at, muted FROM contacts \
                      ORDER BY display_name IS NULL, display_name COLLATE NOCASE",
                 )
                 .map_err(|e| {
@@ -407,11 +445,13 @@ impl<'p> ContactRepo<'p> {
                     if pub_bytes.len() == 32 {
                         arr.copy_from_slice(&pub_bytes);
                     }
+                    let muted_val: i64 = r.get(3).unwrap_or(0);
                     Ok(Contact {
                         identity: PublicKey(arr),
                         display_name: r.get(1)?,
                         added_at: r.get(2)?,
                         card: None,
+                        muted: muted_val != 0,
                     })
                 })
                 .map_err(|e| {
@@ -515,6 +555,7 @@ mod tests {
             display_name: Some(format!("Alice-{seed}")),
             added_at: 1_700_000_000 + i64::from(seed),
             card: None,
+            muted: false,
         }
     }
 
@@ -864,6 +905,7 @@ mod tests {
             display_name: None,
             added_at: 0,
             card: None,
+            muted: false,
         })
         .unwrap();
         repo.set_group_id(&peer, &gid).unwrap();
@@ -945,5 +987,26 @@ mod tests {
         repo.set_hidden(&alice.identity, true).unwrap();
         repo.set_hidden(&alice.identity, true).unwrap();
         assert_eq!(repo.list().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn set_muted_toggles_and_persists() {
+        let pool = Pool::in_memory();
+        let repo = ContactRepo::new(&pool);
+        let alice = sample_contact(0x80);
+        repo.upsert(&alice).unwrap();
+
+        assert!(!repo.is_muted(&alice.identity).unwrap());
+        repo.set_muted(&alice.identity, true).unwrap();
+        assert!(repo.is_muted(&alice.identity).unwrap());
+        repo.set_muted(&alice.identity, false).unwrap();
+        assert!(!repo.is_muted(&alice.identity).unwrap());
+    }
+
+    #[test]
+    fn is_muted_returns_false_for_missing_contact() {
+        let pool = Pool::in_memory();
+        let repo = ContactRepo::new(&pool);
+        assert!(!repo.is_muted(&PublicKey([0xBB; 32])).unwrap());
     }
 }

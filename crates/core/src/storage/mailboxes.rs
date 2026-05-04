@@ -569,6 +569,7 @@ mod tests {
                 display_name: None,
                 added_at: 0,
                 card: None,
+                muted: false,
             })
             .unwrap();
         contacts
@@ -606,6 +607,7 @@ mod tests {
                 display_name: None,
                 added_at: 0,
                 card: None,
+                muted: false,
             })
             .unwrap();
         let mailboxes = MailboxRepo::new(&pool).list_for_contact(&id).unwrap();

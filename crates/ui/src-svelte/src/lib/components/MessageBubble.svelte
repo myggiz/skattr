@@ -6,7 +6,10 @@
   import DeliveryIcon from "./DeliveryIcon.svelte";
   import { delivery, deliveryToIconStatus, hex16ToString } from "$lib/stores/delivery";
 
-  let { record }: { record: MessageRecord | OptimisticMessage } = $props();
+  let {
+    record,
+    highlighted = false,
+  }: { record: MessageRecord | OptimisticMessage; highlighted?: boolean } = $props();
 
   let body = $derived(
     record.kind && record.kind.kind === "text" ? record.kind.body : "",
@@ -35,7 +38,7 @@
   });
 </script>
 
-<div class="bubble" class:outgoing={isOutgoing}>
+<div class="bubble" class:outgoing={isOutgoing} class:focus-highlight={highlighted} data-row-id={record.row_id}>
   <p class="body">{body}</p>
   <div class="meta">
     <time class="ts">{new Date(tsMs).toLocaleTimeString()}</time>
@@ -65,4 +68,8 @@
   }
   .ts { color: var(--text-muted); font: var(--t-ui); }
   .bubble.outgoing .ts { color: rgba(255, 255, 255, 0.7); }
+  .focus-highlight {
+    outline: 2px solid var(--accent, #6c6);
+    transition: outline 0.6s;
+  }
 </style>

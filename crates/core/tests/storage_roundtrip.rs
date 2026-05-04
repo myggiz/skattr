@@ -26,6 +26,7 @@ fn pool_close_reopen_preserves_contacts_and_messages() {
         display_name: Some("alice".into()),
         added_at: 1700000000,
         card: None,
+        muted: false,
     };
     ContactRepo::new(&pool).upsert(&alice).unwrap();
 

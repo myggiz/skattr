@@ -47,6 +47,9 @@ pub enum DaemonErrorKind {
         /// Human-readable description of the argument error.
         message: String,
     },
+    /// Authentication failed (e.g. `Command::ChangePassphrase` with
+    /// wrong current passphrase).
+    Unauthorized,
 }
 
 #[cfg(test)]

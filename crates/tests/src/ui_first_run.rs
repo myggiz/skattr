@@ -53,6 +53,7 @@ async fn ui_first_run_daemon_info_and_subscribe_replay() {
             &data_dir_owned,
             &pw_for_run,
             config_owned,
+            std::path::PathBuf::from("/dev/null"),
             ready_tx,
             shutdown_fut,
         )

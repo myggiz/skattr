@@ -20,6 +20,7 @@
   import MessageBubble from "./MessageBubble.svelte";
   import UnreadSeparator from "./UnreadSeparator.svelte";
   import SkeletonBubble from "./SkeletonBubble.svelte";
+  import { focusedRowId, setFocusedRowId } from "$lib/stores/searchPalette";
 
   let { items }: { items: (MessageRecord | OptimisticMessage)[] } = $props();
   let scrollEl = $state<HTMLDivElement | undefined>(undefined);
@@ -70,6 +71,9 @@
       : null,
   );
 
+  // Track which row is currently highlighted for the focus-jump animation.
+  let highlightRowId = $state<bigint | null>(null);
+
   let virtualItems = $derived($virtualizer?.getVirtualItems() ?? []);
   let totalHeight = $derived($virtualizer?.getTotalSize() ?? 0);
 
@@ -95,6 +99,9 @@
         for (let i = items.length - 1; i >= 0; i--) {
           const r = items[i];
           if (typeof r.row_id === "bigint" && r.row_id > 0n) {
+            // mark-read is gated exclusively on this bottom-sentinel intersection;
+            // a search-jump scrolls to the focused row (never the bottom), so
+            // this observer does NOT fire on a deep-link, preserving 2.D semantics.
             markReadIfAtBottom(r.row_id);
             return;
           }
@@ -104,6 +111,33 @@
     );
     obs.observe(bottomSentinel);
     return () => obs.disconnect();
+  });
+
+  // Scroll-to-row effect for search-palette deep links.
+  // Watches focusedRowId (set by SearchPalette.pick()); scrolls the matching
+  // DOM element into view (block: center) and briefly highlights it (1200 ms).
+  // Does NOT advance the read cursor — mark-read remains gated on the bottom
+  // sentinel above.
+  // Limitation (MVP): if the focused row isn't in the loaded set yet, this
+  // silently does nothing; a paged "jump-to-row" loader is tracked as follow-up.
+  $effect(() => {
+    const id = $focusedRowId;
+    if (id === null) return;
+    // Clear the store immediately so re-firing only happens on a fresh pick.
+    setFocusedRowId(null);
+    // Use rAF so the virtualizer has had a chance to render.
+    requestAnimationFrame(() => {
+      const el = document.querySelector(`[data-row-id="${id}"]`) as HTMLElement | null;
+      if (el) {
+        el.scrollIntoView({ block: "center", behavior: "smooth" });
+        highlightRowId = id;
+        setTimeout(() => {
+          highlightRowId = null;
+        }, 1200);
+      } else {
+        console.warn("focus_row_id", id, "not in loaded set — scroll skipped (MVP)");
+      }
+    });
   });
 </script>
 
@@ -116,7 +150,10 @@
       >
         {#if rows[row.index]}
           {#if rows[row.index].kind === "message"}
-            <MessageBubble record={(rows[row.index] as { kind: "message"; key: string; record: MessageRecord | OptimisticMessage }).record} />
+            <MessageBubble
+              record={(rows[row.index] as { kind: "message"; key: string; record: MessageRecord | OptimisticMessage }).record}
+              highlighted={highlightRowId !== null && (rows[row.index] as { kind: "message"; key: string; record: MessageRecord | OptimisticMessage }).record.row_id === highlightRowId}
+            />
           {:else if rows[row.index].kind === "separator"}
             <UnreadSeparator />
           {:else if rows[row.index].kind === "skeleton"}

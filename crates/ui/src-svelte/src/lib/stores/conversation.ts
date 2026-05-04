@@ -264,7 +264,7 @@ export function markReadIfAtBottom(rowId: bigint): void {
     pendingContact = null;
     markReadTimer = null;
     const cur = get(conversation);
-    if (cur.contact !== scheduledContact) return;
+    if (cur.contact === null || cur.contact !== scheduledContact) return;
     if (target <= cur.readCursor) return;
     try {
       await ipcClient.request({

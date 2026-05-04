@@ -11,6 +11,7 @@ use tokio::sync::{broadcast, oneshot};
 use crate::daemon::commands::{Command, CommandResult};
 use crate::daemon::config::Config;
 use crate::daemon::events::Event;
+use crate::daemon::logs::LogSink;
 use crate::error::Result;
 use crate::identity::derive::derive_storage_seed;
 use crate::identity::vault::Vault;
@@ -81,8 +82,33 @@ impl Daemon {
         data_dir: &Path,
         passphrase: &zeroize::Zeroizing<String>,
         config: Config,
+        config_path: std::path::PathBuf,
         ready: oneshot::Sender<Ready>,
         shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+    ) -> Result<()> {
+        Self::run_with_sink(
+            data_dir,
+            passphrase,
+            config,
+            config_path,
+            ready,
+            shutdown,
+            None,
+        )
+        .await
+    }
+
+    /// Like [`Daemon::run`] but accepts a pre-constructed `LogSink` that is
+    /// already installed in the subscriber stack (via `RingBufferLayer`). If
+    /// `None`, a standalone sink is created (no tracing events flow into it).
+    pub async fn run_with_sink(
+        data_dir: &Path,
+        passphrase: &zeroize::Zeroizing<String>,
+        config: Config,
+        config_path: std::path::PathBuf,
+        ready: oneshot::Sender<Ready>,
+        shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+        log_sink: Option<LogSink>,
     ) -> Result<()> {
         use crate::daemon::handle::DaemonHandle;
         use crate::daemon::inbound::DaemonInbound;
@@ -130,11 +156,15 @@ impl Daemon {
             tracing::info!(rows = n, "backfilled envelope_id for pre-1.H rows");
         }
 
+        // Wrap config in Arc<RwLock> for live mutation (GetConfig/SetConfig) and
+        // sweep re-reads.
+        let config_arc = std::sync::Arc::new(tokio::sync::RwLock::new(config.clone()));
+
         // Phase 1.G: hourly retention sweep.
         let (sweep_shutdown_tx, sweep_shutdown_rx) = tokio::sync::watch::channel(false);
         let sweep_handle = crate::daemon::retention::spawn_sweep(
             pool.clone(),
-            config.history.retention_days,
+            config_arc.clone(),
             std::time::Duration::from_secs(3600),
             sweep_shutdown_rx,
         );
@@ -187,8 +217,9 @@ impl Daemon {
         );
         let poller_ctrl = scheduler.ctrl();
 
-        // Step 6: DaemonHandle.
-        let handle = DaemonHandle::<arti_client::DataStream>::new_with_mailbox(
+        // Step 6: DaemonHandle — inject the shared config_arc so that
+        // SetConfig writes propagate to the retention sweep on the next tick.
+        let mut handle = DaemonHandle::<arti_client::DataStream>::new_with_mailbox(
             pool,
             hub,
             identity,
@@ -196,7 +227,34 @@ impl Daemon {
             mailbox_factory,
             poller_ctrl,
         );
+        handle.set_config_arc(config_arc, config_path);
         handle.set_onion(onion.clone());
+
+        // Install the LogSink (from caller-provided subscriber layer, or a
+        // standalone one if the caller didn't wire a RingBufferLayer).
+        let resolved_sink = log_sink.unwrap_or_default();
+        handle.set_log_sink(resolved_sink.clone());
+
+        // Log tap: forward every record from the ring buffer's broadcast
+        // channel onto the daemon event bus so `EventFilter::Logs`
+        // subscribers receive live tail. This task terminates when the
+        // broadcast sender is dropped (process exit).
+        {
+            let mut log_rx = resolved_sink.subscribe();
+            let log_events_tx = events_tx.clone();
+            tokio::spawn(async move {
+                loop {
+                    match log_rx.recv().await {
+                        Ok(record) => {
+                            let _ =
+                                log_events_tx.send(crate::daemon::events::Event::LogRecord(record));
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            });
+        }
 
         // TorStatus tap: subscribe to the broadcast channel and copy
         // every TorStatusChanged into the same Arc<RwLock<…>> the
@@ -354,7 +412,15 @@ mod tests {
         // Move `data_dir` and `pw` into the spawned future so the borrows
         // are within the `'static` async block.
         let daemon_task = tokio::spawn(async move {
-            Daemon::run(&data_dir, &pw, config, ready_tx, shutdown_fut).await
+            Daemon::run(
+                &data_dir,
+                &pw,
+                config,
+                std::path::PathBuf::from("/dev/null"),
+                ready_tx,
+                shutdown_fut,
+            )
+            .await
         });
 
         let ready = tokio::time::timeout(std::time::Duration::from_secs(180), ready_rx)

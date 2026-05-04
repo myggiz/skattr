@@ -78,6 +78,15 @@ where
         Command::RemoveMailbox { id } => handle_remove_mailbox(handle, id).await,
         Command::ListMailboxes => handle_list_mailboxes(handle).await,
         Command::DaemonInfo => handle_daemon_info(handle).await,
+        Command::GetConfig => get_config(&handle).await,
+        Command::SetConfig { patch } => set_config(&handle, patch).await,
+        Command::ChangePassphrase { old, new } => change_passphrase(&handle, old, new).await,
+        Command::SetContactMuted { contact, muted } => {
+            set_contact_muted(&handle, contact, muted).await
+        }
+        Command::TailLogs { since_seq, limit } => tail_logs(&handle, since_seq, limit).await,
+        Command::GetPassphraseAuditLatest => get_passphrase_audit_latest(&handle).await,
+        Command::WipeAllData => wipe_all_data(handle).await,
     }
 }
 
@@ -148,6 +157,12 @@ where
             None => None,
         };
 
+        let peer_mailboxes: Vec<String> = c
+            .card
+            .as_ref()
+            .map(|card| card.body.mailboxes.clone())
+            .unwrap_or_default();
+
         summaries.push(ContactSummary {
             pubkey: c.identity,
             nickname: c.display_name,
@@ -159,6 +174,8 @@ where
             last_ts_recv,
             group_state,
             last_read_row_id,
+            muted: c.muted,
+            peer_mailboxes,
         });
     }
 
@@ -304,6 +321,7 @@ where
         display_name: None,
         added_at: now,
         card: None,
+        muted: false,
     };
     contact_repo.upsert(&contact).map_err(map_err)?;
     contact_repo
@@ -338,6 +356,8 @@ where
         last_ts_recv: None,
         group_state: None,
         last_read_row_id: None,
+        muted: false,
+        peer_mailboxes: Vec::new(),
     }))
 }
 
@@ -1216,6 +1236,68 @@ where
     Ok(CommandResult::Ok)
 }
 
+async fn set_contact_muted<S>(
+    handle: &Arc<DaemonHandle<S>>,
+    contact: crate::identity::PublicKey,
+    muted: bool,
+) -> std::result::Result<CommandResult, IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    use crate::daemon::events::Event;
+    use crate::storage::ContactRepo;
+
+    let repo = ContactRepo::new(&handle.pool);
+    // Check existence first — must fail with ContactNotFound, not silently no-op.
+    if repo.get(&contact).map_err(map_err)?.is_none() {
+        use crate::daemon::error_kind::DaemonErrorKind;
+        return Err(IpcError::Daemon(DaemonErrorKind::ContactNotFound));
+    }
+    repo.set_muted(&contact, muted).map_err(map_err)?;
+
+    // Emit ContactUpdated so live UIs re-fetch the contact summary.
+    let _ = handle.events_tx.send(Event::ContactUpdated(contact));
+    Ok(CommandResult::Ok)
+}
+
+async fn get_config<S>(
+    handle: &Arc<DaemonHandle<S>>,
+) -> std::result::Result<CommandResult, IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let cfg = handle.config.read().await;
+    Ok(CommandResult::Config(cfg.snapshot()))
+}
+
+async fn set_config<S>(
+    handle: &Arc<DaemonHandle<S>>,
+    patch: crate::daemon::commands::ConfigPatch,
+) -> std::result::Result<CommandResult, IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    use crate::daemon::error_kind::DaemonErrorKind;
+    let mut cfg = handle.config.write().await;
+    cfg.apply_patch(&patch).map_err(|e| {
+        IpcError::Daemon(DaemonErrorKind::InvalidArgument {
+            message: e.to_string(),
+        })
+    })?;
+    cfg.save_to_disk(&handle.config_path).map_err(|e| {
+        IpcError::Daemon(DaemonErrorKind::InvalidArgument {
+            message: format!("save_to_disk: {e}"),
+        })
+    })?;
+    // persist_logs_to_disk: flag is saved to config.toml (apply_patch
+    // already did that); the change takes effect on the next daemon
+    // restart. Hot-toggle is deferred because tracing-subscriber's
+    // reload::Layer generics are complex to compose across the existing
+    // layered subscriber stack. The subscriber-init path reads this flag
+    // on startup and installs the appender accordingly.
+    Ok(CommandResult::Ok)
+}
+
 /// Map any `CoreError` to an `IpcError`. Projects via `CoreError::kind`
 /// into `DaemonErrorKind`; otherwise `Internal(...)` with a truncated
 /// display. Logs the full error server-side.
@@ -1229,6 +1311,139 @@ pub(crate) fn map_err(err: CoreError) -> IpcError {
         tracing::warn!(?err, "ipc: internal error");
         IpcError::Internal(truncated)
     }
+}
+
+async fn get_passphrase_audit_latest<S>(
+    handle: &Arc<DaemonHandle<S>>,
+) -> std::result::Result<CommandResult, IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    use crate::storage::PassphraseAuditRepo;
+    let repo = PassphraseAuditRepo::new(&handle.pool);
+    let ts = repo.latest_ts().map_err(map_err)?;
+    Ok(CommandResult::PassphraseAudit {
+        last_changed_unix: ts.map(|v| v as u64),
+    })
+}
+
+async fn tail_logs<S>(
+    handle: &Arc<DaemonHandle<S>>,
+    since_seq: Option<u64>,
+    limit: u32,
+) -> std::result::Result<CommandResult, IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (records, next_since_seq) = handle.log_sink.snapshot(since_seq, limit as usize);
+    Ok(CommandResult::Logs {
+        records,
+        next_since_seq,
+    })
+}
+
+async fn change_passphrase<S>(
+    handle: &Arc<DaemonHandle<S>>,
+    old: String,
+    new: String,
+) -> std::result::Result<CommandResult, IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    use crate::daemon::error_kind::DaemonErrorKind;
+    use crate::storage::{AuditOutcome, PassphraseAuditRepo};
+    use zeroize::Zeroizing;
+
+    let old = Zeroizing::new(old);
+    let new = Zeroizing::new(new);
+
+    if new.len() < 8 {
+        return Err(IpcError::Daemon(DaemonErrorKind::InvalidArgument {
+            message: "new passphrase must be at least 8 characters".into(),
+        }));
+    }
+    let entropy = zxcvbn::zxcvbn(new.as_str(), &[]);
+    if entropy.score() < zxcvbn::Score::Three {
+        return Err(IpcError::Daemon(DaemonErrorKind::InvalidArgument {
+            message: "new passphrase too weak (zxcvbn score < 3)".into(),
+        }));
+    }
+    if *old == *new {
+        return Err(IpcError::Daemon(DaemonErrorKind::InvalidArgument {
+            message: "new passphrase must differ from current".into(),
+        }));
+    }
+
+    // Resolve the vault path under the live data_dir.
+    let data_dir = handle.config.read().await.data_dir.clone();
+    let vault_path = data_dir.join("identity.vault");
+
+    // Open the vault under the OLD passphrase first — failure here means
+    // the user gave us the wrong current passphrase.
+    let (mut vault, _identity) = crate::identity::Vault::open(&vault_path, old.as_str())
+        .map_err(|_| IpcError::Daemon(DaemonErrorKind::Unauthorized))?;
+
+    // Vault::change_passphrase is atomic on its own (sidecar + rename).
+    // The storage age key is derived from the BIP39 seed via HKDF and is
+    // independent of the user passphrase, so this single rewrite is the
+    // entire rekey surface.
+    vault
+        .change_passphrase(old.as_str(), new.as_str())
+        .map_err(map_err)?;
+
+    // Append the audit row. Best-effort: a failure here doesn't
+    // unwind the rekey (already on disk), but does surface an error
+    // to the caller so the UI can warn.
+    let audit = PassphraseAuditRepo::new(&handle.pool);
+    audit
+        .append(
+            crate::daemon::clock::now_unix_seconds(),
+            AuditOutcome::Changed,
+        )
+        .map_err(map_err)?;
+
+    Ok(CommandResult::PassphraseChanged)
+}
+
+// ---------------------------------------------------------------------------
+// WipeAllData handler
+// ---------------------------------------------------------------------------
+
+async fn wipe_all_data<S>(
+    handle: Arc<DaemonHandle<S>>,
+) -> std::result::Result<CommandResult, IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    // Resolve data_dir from the live config (same pattern as change_passphrase).
+    // Read-lock dropped before the spawn so nothing holds the lock during teardown.
+    let data_dir = handle.config.read().await.data_dir.clone();
+
+    // Spawn the teardown so we can return Ok BEFORE the IPC layer tears down.
+    // This is the ONE handler that intentionally outlives its caller.
+    tokio::spawn(async move {
+        // Allow ~150ms for the reply to flush back over the IPC stream.
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        // Best-effort: drop the handle so background tasks (retention sweep,
+        // log tap, mailbox poller) get a chance to wind down.
+        std::mem::drop(handle);
+
+        // Brief settle to let in-flight tasks finish their current ticks.
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        // Wipe the data directory.
+        if let Err(e) = tokio::fs::remove_dir_all(&data_dir).await {
+            tracing::error!(
+                error = %e,
+                dir = ?data_dir,
+                "wipe_all_data: remove_dir_all failed; exiting anyway"
+            );
+        }
+        std::process::exit(0);
+    });
+
+    Ok(CommandResult::Ok)
 }
 
 #[cfg(test)]
@@ -1260,6 +1475,60 @@ mod tests {
         let handle = test_handle();
         let result = execute_command(handle, Command::Shutdown).await;
         assert!(matches!(result, Ok(CommandResult::Ok)));
+    }
+
+    #[tokio::test]
+    async fn change_passphrase_rejects_too_short_new() {
+        let handle = test_handle();
+        let err = execute_command(
+            handle,
+            Command::ChangePassphrase {
+                old: "anything-old".into(),
+                new: "short".into(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            IpcError::Daemon(crate::daemon::error_kind::DaemonErrorKind::InvalidArgument { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn change_passphrase_rejects_equal_old_and_new() {
+        let handle = test_handle();
+        let err = execute_command(
+            handle,
+            Command::ChangePassphrase {
+                old: "samepassphrase".into(),
+                new: "samepassphrase".into(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            IpcError::Daemon(crate::daemon::error_kind::DaemonErrorKind::InvalidArgument { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn change_passphrase_rejects_weak_new() {
+        let handle = test_handle();
+        let err = execute_command(
+            handle,
+            Command::ChangePassphrase {
+                old: "current-passphrase".into(),
+                new: "abcdefgh".into(), // 8 chars but extremely weak per zxcvbn
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            IpcError::Daemon(crate::daemon::error_kind::DaemonErrorKind::InvalidArgument { .. })
+        ));
     }
 
     #[tokio::test]
@@ -1463,6 +1732,7 @@ mod tests {
                 display_name: Some("alice".into()),
                 added_at: 1_700_000_000,
                 card: None,
+                muted: false,
             })
             .unwrap();
             repo.upsert(&Contact {
@@ -1470,6 +1740,7 @@ mod tests {
                 display_name: None,
                 added_at: 1_700_000_100,
                 card: None,
+                muted: false,
             })
             .unwrap();
         }
@@ -1491,6 +1762,60 @@ mod tests {
                         assert_eq!(s.card_version, 0);
                     }
                 }
+            }
+            other => panic!("expected Contacts, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn list_contacts_projects_muted_and_peer_mailboxes() {
+        use crate::contact::card::{ContactCard, ContactCardBody};
+        use crate::identity::Signature;
+        use crate::storage::ContactRepo;
+
+        let handle = test_handle();
+        let peer = PublicKey([0x42; 32]);
+
+        {
+            let repo = ContactRepo::new(&handle.pool);
+            // Seed a muted contact.
+            repo.upsert(&Contact {
+                identity: peer,
+                display_name: Some("muted-peer".into()),
+                added_at: 1_700_000_000,
+                card: None,
+                muted: false,
+            })
+            .unwrap();
+            repo.set_muted(&peer, true).unwrap();
+
+            // Seed a ContactCard with two mailboxes.
+            let card = ContactCard {
+                body: ContactCardBody {
+                    identity: peer,
+                    onion: "xyzxyz.onion".into(),
+                    mailboxes: vec!["mailbox1.onion".into(), "mailbox2.onion".into()],
+                    version: 1,
+                    expires_at: 9_999_999_999,
+                },
+                // Signature not verified by put_card; zeroed bytes suffice.
+                signature: Signature([0u8; 64]),
+            };
+            repo.put_card(&card).unwrap();
+        }
+
+        let result = execute_command(handle, Command::ListContacts)
+            .await
+            .unwrap();
+        match result {
+            CommandResult::Contacts(summaries) => {
+                assert_eq!(summaries.len(), 1);
+                let s = &summaries[0];
+                assert!(s.muted, "muted should be true");
+                assert_eq!(
+                    s.peer_mailboxes,
+                    vec!["mailbox1.onion".to_string(), "mailbox2.onion".to_string()]
+                );
             }
             other => panic!("expected Contacts, got {other:?}"),
         }
@@ -1530,6 +1855,7 @@ mod tests {
             display_name: None,
             added_at: 0,
             card: None,
+            muted: false,
         })
         .unwrap();
 
@@ -1591,6 +1917,7 @@ mod tests {
             display_name: None,
             added_at: 0,
             card: None,
+            muted: false,
         })
         .unwrap();
         cr.set_group_id(&peer, &gid).unwrap();
@@ -1656,6 +1983,7 @@ mod tests {
             display_name: None,
             added_at: 0,
             card: None,
+            muted: false,
         })
         .unwrap();
         cr.set_group_id(&peer, &gid).unwrap();
@@ -1815,6 +2143,7 @@ mod tests {
             display_name: None,
             added_at: 0,
             card: None,
+            muted: false,
         })
         .unwrap();
         cr.set_group_id(&alice, &gid).unwrap();
@@ -1914,6 +2243,7 @@ mod tests {
             display_name: None,
             added_at: 0,
             card: None,
+            muted: false,
         })
         .unwrap();
         cr.set_group_id(&alice, &gid).unwrap();
@@ -1988,6 +2318,7 @@ mod tests {
             display_name: None,
             added_at: 0,
             card: None,
+            muted: false,
         })
         .unwrap();
         cr.set_group_id(&alice, &gid).unwrap();
@@ -2041,6 +2372,7 @@ mod tests {
             display_name: None,
             added_at: 0,
             card: None,
+            muted: false,
         })
         .unwrap();
         cr.set_group_id(&alice, &gid).unwrap();
@@ -2166,6 +2498,7 @@ mod tests {
             display_name: None,
             added_at: 0,
             card: None,
+            muted: false,
         })
         .unwrap();
         cr.set_group_id(&alice, &gid).unwrap();
@@ -2289,6 +2622,7 @@ mod tests {
             display_name: None,
             added_at: 0,
             card: None,
+            muted: false,
         })
         .unwrap();
         cr.set_group_id(&peer, &gid).unwrap();
@@ -2761,6 +3095,7 @@ mod tests {
             display_name: Some("alice".into()),
             added_at: 100,
             card: None,
+            muted: false,
         })
         .unwrap();
         repo.upsert(&crate::contact::Contact {
@@ -2768,6 +3103,7 @@ mod tests {
             display_name: Some("bob".into()),
             added_at: 200,
             card: None,
+            muted: false,
         })
         .unwrap();
         repo.set_group_id(&pk_a, &group_a).unwrap();
@@ -2823,6 +3159,7 @@ mod tests {
                 display_name: None,
                 added_at: 0,
                 card: None,
+                muted: false,
             })
             .unwrap();
         crate::storage::ContactRepo::new(&h.pool)
@@ -3120,6 +3457,7 @@ mod tests {
                 display_name: Some(nickname.into()),
                 added_at: 0,
                 card: None,
+                muted: false,
             })
             .unwrap();
         contact_repo.set_group_id(&peer_pk, &gid).unwrap();
@@ -3237,6 +3575,7 @@ mod tests {
             display_name: None,
             added_at: 0,
             card: None,
+            muted: false,
         })
         .unwrap();
 
@@ -3298,6 +3637,7 @@ mod tests {
                 display_name: None,
                 added_at: 0,
                 card: None,
+                muted: false,
             })
             .unwrap();
 
@@ -3330,6 +3670,7 @@ mod tests {
                 display_name: Some("Bob".into()),
                 added_at: 0,
                 card: None,
+                muted: false,
             })
             .unwrap();
 
@@ -3392,6 +3733,7 @@ mod tests {
             display_name: None,
             added_at: 0,
             card: None,
+            muted: false,
         })
         .unwrap();
         repo.set_group_id(&bob_pk, &gid).unwrap();
@@ -3421,6 +3763,85 @@ mod tests {
         );
     }
 
+    // ── Task 13: set_contact_muted dispatcher ──────────────────────────────────
+
+    #[tokio::test]
+    async fn set_contact_muted_toggles_and_emits_event() {
+        let handle = test_handle();
+        let pk = PublicKey([0xAA; 32]);
+        crate::storage::ContactRepo::new(&handle.pool)
+            .upsert(&crate::contact::Contact {
+                identity: pk,
+                display_name: None,
+                added_at: 0,
+                card: None,
+                muted: false,
+            })
+            .unwrap();
+
+        let mut sub = handle.events_tx.subscribe();
+        let result = execute_command(
+            handle.clone(),
+            Command::SetContactMuted {
+                contact: pk,
+                muted: true,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(result, CommandResult::Ok));
+
+        // Event should be emitted
+        match tokio::time::timeout(std::time::Duration::from_secs(1), sub.recv()).await {
+            Ok(Ok(Event::ContactUpdated(p))) => assert_eq!(p, pk),
+            other => panic!("expected ContactUpdated, got {other:?}"),
+        }
+
+        // Persisted in storage
+        let repo = crate::storage::ContactRepo::new(&handle.pool);
+        assert!(repo.is_muted(&pk).unwrap());
+
+        // Toggle back
+        let mut sub = handle.events_tx.subscribe();
+        let _ = execute_command(
+            handle.clone(),
+            Command::SetContactMuted {
+                contact: pk,
+                muted: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Event should be emitted again
+        match tokio::time::timeout(std::time::Duration::from_secs(1), sub.recv()).await {
+            Ok(Ok(Event::ContactUpdated(p))) => assert_eq!(p, pk),
+            other => panic!("expected ContactUpdated, got {other:?}"),
+        }
+
+        // Persisted
+        assert!(!repo.is_muted(&pk).unwrap());
+    }
+
+    #[tokio::test]
+    async fn set_contact_muted_returns_contact_not_found() {
+        let handle = test_handle();
+        let pk = PublicKey([0xFF; 32]);
+        let err = execute_command(
+            handle,
+            Command::SetContactMuted {
+                contact: pk,
+                muted: true,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            IpcError::Daemon(crate::daemon::error_kind::DaemonErrorKind::ContactNotFound)
+        ));
+    }
+
     // ── Task 10: list_contacts_with_filter ────────────────────────────────────
 
     #[tokio::test]
@@ -3434,6 +3855,7 @@ mod tests {
             display_name: Some("Visible".into()),
             added_at: 0,
             card: None,
+            muted: false,
         })
         .unwrap();
         repo.upsert(&crate::contact::Contact {
@@ -3441,6 +3863,7 @@ mod tests {
             display_name: Some("Archived".into()),
             added_at: 0,
             card: None,
+            muted: false,
         })
         .unwrap();
         repo.set_hidden(&archived, true).unwrap();
@@ -3469,6 +3892,180 @@ mod tests {
         match r {
             CommandResult::Contacts(v) => assert_eq!(v.len(), 2),
             other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    // ── Task 12: GetConfig / SetConfig ────────────────────────────────────────
+
+    fn test_handle_with_config(
+        tmp: &tempfile::TempDir,
+    ) -> Arc<DaemonHandle<tokio::io::DuplexStream>> {
+        let seed = Seed::generate().unwrap();
+        let identity = IdentityKey::from_seed(&seed).unwrap();
+        let pool = Arc::new(Pool::in_memory());
+        let hub: Arc<DeliveryHub<tokio::io::DuplexStream>> =
+            Arc::new(DeliveryHub::new(pool.clone()));
+        let (events_tx, _) = broadcast::channel::<Event>(16);
+        let mut config = crate::daemon::config::Config::defaults()
+            .unwrap_or_else(|_| crate::daemon::config::Config::fallback_for_tests());
+        config.history.retention_days = 0;
+        let config_path = tmp.path().join("config.toml");
+        Arc::new(DaemonHandle::new_with_config(
+            pool,
+            hub,
+            identity,
+            events_tx,
+            config,
+            config_path,
+        ))
+    }
+
+    #[tokio::test]
+    async fn get_config_returns_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = test_handle_with_config(&tmp);
+        let result = execute_command(handle.clone(), Command::GetConfig)
+            .await
+            .unwrap();
+        match result {
+            CommandResult::Config(snap) => {
+                assert_eq!(snap.history_retention_days, 0);
+                assert_eq!(snap.direct_timeout_secs, 30);
+            }
+            other => panic!("expected Config, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn set_config_persists_and_round_trips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = test_handle_with_config(&tmp);
+        let patch = crate::daemon::commands::ConfigPatch {
+            history_retention_days: Some(7),
+            ..Default::default()
+        };
+        execute_command(handle.clone(), Command::SetConfig { patch })
+            .await
+            .unwrap();
+        let result = execute_command(handle, Command::GetConfig).await.unwrap();
+        match result {
+            CommandResult::Config(snap) => assert_eq!(snap.history_retention_days, 7),
+            other => panic!("expected Config, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn set_config_invalid_direct_timeout_returns_daemon_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = test_handle_with_config(&tmp);
+        let patch = crate::daemon::commands::ConfigPatch {
+            direct_timeout_secs: Some(0), // out of range 1..=600
+            ..Default::default()
+        };
+        let result = execute_command(handle, Command::SetConfig { patch }).await;
+        assert!(
+            matches!(
+                result,
+                Err(IpcError::Daemon(
+                    crate::daemon::error_kind::DaemonErrorKind::InvalidArgument { .. }
+                ))
+            ),
+            "expected InvalidArgument, got {result:?}"
+        );
+    }
+
+    // ── Task 22: TailLogs handler ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn tail_logs_returns_recent_records() {
+        let handle = test_handle();
+        // Push records directly via the sink (simulates tracing layer output).
+        for i in 0..5_u32 {
+            handle.log_sink.push(
+                crate::daemon::commands::LogLevel::Info,
+                "test".into(),
+                format!("m-{i}"),
+            );
+        }
+        let result = execute_command(
+            handle,
+            Command::TailLogs {
+                since_seq: None,
+                limit: 100,
+            },
+        )
+        .await
+        .unwrap();
+        match result {
+            CommandResult::Logs {
+                records,
+                next_since_seq,
+            } => {
+                assert_eq!(
+                    records.len(),
+                    5,
+                    "expected 5 records, got {}",
+                    records.len()
+                );
+                assert!(
+                    records.iter().any(|r| r.message.contains("m-4")),
+                    "last record not found"
+                );
+                assert!(
+                    next_since_seq > 0,
+                    "next_since_seq should be non-zero cursor"
+                );
+            }
+            other => panic!("expected CommandResult::Logs, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn tail_logs_since_seq_cursor_works() {
+        let handle = test_handle();
+        for i in 0..10_u32 {
+            handle.log_sink.push(
+                crate::daemon::commands::LogLevel::Info,
+                "cursor-test".into(),
+                format!("msg-{i}"),
+            );
+        }
+        // First page: no cursor.
+        let result = execute_command(
+            handle.clone(),
+            Command::TailLogs {
+                since_seq: None,
+                limit: 5,
+            },
+        )
+        .await
+        .unwrap();
+        let cursor = match result {
+            CommandResult::Logs {
+                records,
+                next_since_seq,
+            } => {
+                assert_eq!(records.len(), 5);
+                next_since_seq
+            }
+            other => panic!("unexpected {other:?}"),
+        };
+
+        // Second page: use cursor, should return the remaining 5.
+        let result2 = execute_command(
+            handle,
+            Command::TailLogs {
+                since_seq: Some(cursor),
+                limit: 100,
+            },
+        )
+        .await
+        .unwrap();
+        match result2 {
+            CommandResult::Logs { records, .. } => {
+                assert_eq!(records.len(), 5);
+            }
+            other => panic!("unexpected {other:?}"),
         }
     }
 }

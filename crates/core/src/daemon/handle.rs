@@ -11,9 +11,11 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::broadcast;
 
 use crate::daemon::commands::{Command as IpcCommand, CommandResult as IpcCommandResult};
+use crate::daemon::config::Config;
 use crate::daemon::events::{Event, TorStatus};
 use crate::daemon::ipc::server::CommandExecutor;
 use crate::daemon::ipc::wire::IpcError;
+use crate::daemon::logs::LogSink;
 use crate::delivery::hub::DeliveryHub;
 use crate::identity::IdentityKey;
 use crate::storage::Pool;
@@ -56,6 +58,18 @@ where
     /// can paint the bootstrap pill on first connect without waiting
     /// for the next live event.
     pub(crate) latest_tor_status: Arc<RwLock<Option<TorStatus>>>,
+    /// Live config. Mutators take the write lock and atomic-save on
+    /// success. GetConfig readers take the read lock.
+    pub config: Arc<tokio::sync::RwLock<Config>>,
+    /// Path of the config file on disk. Used by SetConfig's
+    /// `save_to_disk` call.
+    pub config_path: std::path::PathBuf,
+    /// In-memory log ring buffer + live broadcast. Populated by the
+    /// `RingBufferLayer` installed in the subscriber stack. The log-tap
+    /// task in `Daemon::run` re-emits records onto the event bus so
+    /// `EventFilter::Logs` subscribers receive live tail. `TailLogs`
+    /// handlers call `snapshot()` directly for paginated snapshots.
+    pub log_sink: LogSink,
 }
 
 impl<S> DaemonHandle<S>
@@ -68,12 +82,44 @@ where
     /// `None` — tests that don't exercise the mailbox path use this
     /// constructor; production callers should prefer
     /// [`DaemonHandle::new_with_mailbox`].
+    ///
+    /// Config defaults to `Config::defaults()` and the config path
+    /// defaults to a non-existent path (tests that call `SetConfig`
+    /// should use `new_with_config`).
     #[must_use]
     pub fn new(
         pool: Arc<Pool>,
         hub: Arc<DeliveryHub<S>>,
         identity: IdentityKey,
         events_tx: broadcast::Sender<Event>,
+    ) -> Self {
+        let config = Config::defaults().unwrap_or_else(|_| Config::fallback_for_tests());
+        Self {
+            pool,
+            hub,
+            identity: Arc::new(identity),
+            events_tx,
+            onion: Arc::new(RwLock::new(None)),
+            mailbox_factory: None,
+            poller_ctrl: None,
+            latest_tor_status: Arc::new(RwLock::new(None)),
+            config: Arc::new(tokio::sync::RwLock::new(config)),
+            config_path: std::path::PathBuf::from("/dev/null"),
+            log_sink: LogSink::default(),
+        }
+    }
+
+    /// Construct a handle with an explicit config and config path.
+    /// Used by tests that exercise `GetConfig` / `SetConfig`, and by
+    /// `Daemon::run` (via `new_with_mailbox_and_config`).
+    #[must_use]
+    pub fn new_with_config(
+        pool: Arc<Pool>,
+        hub: Arc<DeliveryHub<S>>,
+        identity: IdentityKey,
+        events_tx: broadcast::Sender<Event>,
+        config: Config,
+        config_path: std::path::PathBuf,
     ) -> Self {
         Self {
             pool,
@@ -84,6 +130,9 @@ where
             mailbox_factory: None,
             poller_ctrl: None,
             latest_tor_status: Arc::new(RwLock::new(None)),
+            config: Arc::new(tokio::sync::RwLock::new(config)),
+            config_path,
+            log_sink: LogSink::default(),
         }
     }
 
@@ -105,6 +154,7 @@ where
         mailbox_factory: Arc<dyn crate::mailbox::poll::MailboxConnectFactory>,
         poller_ctrl: tokio::sync::mpsc::Sender<crate::mailbox::poll::PollerCtrl>,
     ) -> Self {
+        let config = Config::defaults().unwrap_or_else(|_| Config::fallback_for_tests());
         Self {
             pool,
             hub,
@@ -114,7 +164,30 @@ where
             mailbox_factory: Some(mailbox_factory),
             poller_ctrl: Some(poller_ctrl),
             latest_tor_status: Arc::new(RwLock::new(None)),
+            config: Arc::new(tokio::sync::RwLock::new(config)),
+            config_path: std::path::PathBuf::from("/dev/null"),
+            log_sink: LogSink::default(),
         }
+    }
+
+    /// Replace the `LogSink`. Called by `Daemon::run` after the subscriber
+    /// stack is fully initialised so the `RingBufferLayer`'s sink and the
+    /// handle's sink are the same allocation.
+    pub fn set_log_sink(&mut self, sink: LogSink) {
+        self.log_sink = sink;
+    }
+
+    /// Replace the config `Arc` and config path. Used by `Daemon::run`
+    /// to inject the shared `Arc<RwLock<Config>>` that is also held by
+    /// the retention sweep, ensuring `SetConfig` writes propagate to the
+    /// sweep on the next tick. Call immediately after `new_with_mailbox`.
+    pub(crate) fn set_config_arc(
+        &mut self,
+        config: Arc<tokio::sync::RwLock<Config>>,
+        config_path: std::path::PathBuf,
+    ) {
+        self.config = config;
+        self.config_path = config_path;
     }
 
     /// Snapshot the latest cached `TorStatus`. Non-blocking RwLock read.
@@ -182,6 +255,9 @@ where
             mailbox_factory: self.mailbox_factory.clone(),
             poller_ctrl: self.poller_ctrl.clone(),
             latest_tor_status: self.latest_tor_status.clone(),
+            config: self.config.clone(),
+            config_path: self.config_path.clone(),
+            log_sink: self.log_sink.clone(),
         }
     }
 }

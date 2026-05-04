@@ -10,7 +10,8 @@ ContactCard rotation) is complete (merged 2026-05-01); Phase 2.C
 (UI bootstrap, read-only conversation MVP) is complete (merged
 2026-05-02); Phase 2.D (conversation view) is complete (merged
 2026-05-02); Phase 2.E (invite & contact UX) is complete (merged
-2026-05-03).** Phase 0 shipped all five workstreams (0.A scaffold,
+2026-05-03); Phase 2.F (settings & history) is complete (merged
+2026-05-04).** Phase 0 shipped all five workstreams (0.A scaffold,
 0.B identity & crypto, 0.C Arti integration, 0.D storage layer, 0.E
 documentation baseline). Phase 1.A added `transport::frame::FrameCodec`.
 Phase 1.B added `transport::noise::handshake_{initiator,responder}`
@@ -217,12 +218,38 @@ mailbox fallback for Welcome propagation — direct-only Welcome ships
 in 2.E; mailbox fallback is deferred because it would touch the 2.B
 mailbox protocol freeze (ADR 0006).
 
+Phase 2.F (settings & history) merged at the head of
+`phase-2f-settings-history`. Migrations `0013` (`contacts.muted`) and
+`0014` (`passphrase_audit`) land alongside seven new `Command`
+variants (`GetConfig`, `SetConfig`, `ChangePassphrase`,
+`SetContactMuted`, `TailLogs`, `GetPassphraseAuditLatest`,
+`WipeAllData`), four new `CommandResult` variants (`Config`,
+`PassphraseChanged`, `Logs`, `PassphraseAudit`), `Event::LogRecord`
++ `EventFilter::Logs`, and two additive fields on `ContactSummary`
+(`muted`, `peer_mailboxes`). `ChangePassphrase` wraps the existing
+`Vault::change_passphrase` (single-file atomic rewrite via
+sidecar + rename) — the spec's original "stage-then-rename two-file
+journal" design was simplified after discovering that the SQLite
+age key is derived from the BIP39 seed via HKDF and isn't re-keyed
+by passphrase changes. New core modules: `core::daemon::logs`
+(in-memory ring buffer + redacting tracing layer + IPC tail) and
+`core::storage::passphrase_audit`. UI side: settings sidebar
+layout under `routes/settings/<section>/`, ChangePassphraseDialog,
+LogsViewer, SearchPalette (Cmd/Ctrl-K modal + inline reuse),
+contact mute toggle + peer_mailboxes rendering, Tauri 2 tray,
+focus-aware `notify-rust` notifications, close-to-tray hide,
+"Delete all data and quit" Danger Zone. The persist-logs-to-disk
+toggle currently requires a daemon restart to take effect (the
+`tracing_subscriber::reload` plumbing across the layered
+subscriber is tracked as a follow-up). Closes Phase 2's user-facing
+chrome; the next workstream is Phase 2.G (packaging).
+
 Phase 1 is complete (1.H merged 2026-04-24); Phase 2.A (mailbox
 server) merged at the head of `phase-2a-mailbox-server`; Phase 2.B
 is complete (merged 2026-05-01); Phase 2.C is complete (merged
 2026-05-02); Phase 2.D is complete (merged 2026-05-02); Phase 2.E
-is complete (merged 2026-05-03). The next workstream is Phase 2.F
-(settings & history; depends on 2.E) — see
+is complete (merged 2026-05-03); Phase 2.F is complete (merged
+2026-05-04). The next workstream is Phase 2.G (packaging) — see
 `docs/superpowers/specs/2026-04-26-phase-2-ui-decomposition.md`
 for the Phase 2 decomposition,
 `docs/superpowers/specs/2026-05-02-phase-2d-conversation-view-design.md`

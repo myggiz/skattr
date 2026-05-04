@@ -64,6 +64,7 @@ fn seed_contact(handle: &DuplexHandle, pubkey: PublicKey, group_id: &[u8]) {
         display_name: None,
         added_at: 0,
         card: None,
+        muted: false,
     })
     .unwrap();
     cr.set_group_id(&pubkey, group_id).unwrap();

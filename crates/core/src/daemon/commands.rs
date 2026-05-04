@@ -15,6 +15,104 @@ use crate::envelope::Kind;
 use crate::identity::PublicKey;
 use crate::invite::InviteLink;
 
+/// Mode controlling what notification body is rendered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, ts_rs::TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export, export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/")]
+pub enum NotificationMode {
+    /// Sender nickname + body preview ("Alice: hey, can you...")
+    #[default]
+    Full,
+    /// Sender only ("Alice").
+    Minimal,
+    /// Placeholder only ("New message").
+    Generic,
+    /// No notifications at all.
+    Off,
+}
+
+/// Tracing log level, projected onto the wire so the UI logs viewer can
+/// colour-code records. Mirrors `tracing::Level` but is `Serialize`able.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export, export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/")]
+pub enum LogLevel {
+    /// Trace level.
+    Trace,
+    /// Debug level.
+    Debug,
+    /// Info level.
+    Info,
+    /// Warn level.
+    Warn,
+    /// Error level.
+    Error,
+}
+
+/// One redacted log record streamed from the daemon ring buffer.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/")]
+pub struct LogRecord {
+    /// Monotonic per-buffer sequence number; UI uses this as the
+    /// `since_seq` cursor for incremental tail.
+    pub seq: u64,
+    /// Wall-clock at the time the record was emitted.
+    pub ts_unix_ms: u64,
+    /// Log level of this record.
+    pub level: LogLevel,
+    /// e.g. "skattr_core::delivery::hub"
+    pub target: String,
+    /// Already-redacted message body (no pubkeys / onions / message
+    /// contents above the `debug` level).
+    pub message: String,
+}
+
+/// Snapshot of all UI-relevant config knobs. Sensitive paths
+/// (`data_dir`, `ipc_socket`) are intentionally NOT projected — the UI
+/// reads them via `Command::DaemonInfo`.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/")]
+pub struct ConfigSnapshot {
+    /// Message history retention in days.
+    pub history_retention_days: u32,
+    /// Direct peer timeout in seconds.
+    pub direct_timeout_secs: u32,
+    /// Notification display mode.
+    pub notification_mode: NotificationMode,
+    /// Whether to minimize to tray on close.
+    pub close_to_tray: bool,
+    /// Whether to start the app minimised.
+    pub start_minimised: bool,
+    /// Whether to persist logs to disk.
+    pub persist_logs_to_disk: bool,
+}
+
+/// Patch sent by `Command::SetConfig`. Each field is `Option<T>`; the
+/// daemon applies only `Some(_)` fields, validates each, then atomically
+/// rewrites `config.toml`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/")]
+pub struct ConfigPatch {
+    /// If `Some`, update message history retention in days.
+    #[serde(default)]
+    pub history_retention_days: Option<u32>,
+    /// If `Some`, update direct peer timeout in seconds.
+    #[serde(default)]
+    pub direct_timeout_secs: Option<u32>,
+    /// If `Some`, update notification display mode.
+    #[serde(default)]
+    pub notification_mode: Option<NotificationMode>,
+    /// If `Some`, update whether to minimize to tray on close.
+    #[serde(default)]
+    pub close_to_tray: Option<bool>,
+    /// If `Some`, update whether to start the app minimised.
+    #[serde(default)]
+    pub start_minimised: Option<bool>,
+    /// If `Some`, update whether to persist logs to disk.
+    #[serde(default)]
+    pub persist_logs_to_disk: Option<bool>,
+}
+
 /// Request sent into the daemon.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
@@ -160,6 +258,55 @@ pub enum Command {
         /// If true, include hidden contacts.
         include_hidden: bool,
     },
+    /// Read the current config snapshot.
+    GetConfig,
+
+    /// Apply a partial config patch. Daemon validates each field, then
+    /// atomically rewrites config.toml. UI consumers debounce ~500ms so
+    /// rapid edits don't thrash the disk.
+    SetConfig {
+        /// Partial config patch to apply.
+        patch: ConfigPatch,
+    },
+
+    /// Re-encrypt the identity vault and storage age key under a new
+    /// passphrase. Stage-then-rename atomicity; recovery on boot is
+    /// deterministic. See `core::daemon::passphrase`.
+    ChangePassphrase {
+        /// Current passphrase. Wrapped in `Zeroizing<String>` server-side
+        /// as soon as decoded.
+        old: String,
+        /// New passphrase. Wrapped in `Zeroizing<String>` server-side as
+        /// soon as decoded.
+        new: String,
+    },
+
+    /// Toggle desktop-notification + unread-badge suppression for a
+    /// single contact. Persisted in `contacts.muted`.
+    SetContactMuted {
+        /// Peer identity pubkey.
+        contact: PublicKey,
+        /// If true, suppress notifications for this contact.
+        muted: bool,
+    },
+
+    /// Stream the most recent log records from the in-memory ring
+    /// buffer. UI consumes this on Settings → Advanced → Logs open;
+    /// live-tail uses `EventFilter::Logs`.
+    TailLogs {
+        /// `None` = "from the oldest record currently in the buffer".
+        #[serde(default)]
+        since_seq: Option<u64>,
+        /// Hard cap; daemon clamps to ≤ 1000.
+        limit: u32,
+    },
+
+    /// Read the most recent `passphrase_audit` row's `ts_unix`.
+    GetPassphraseAuditLatest,
+
+    /// Stop accepting IPC, drop the storage Pool, remove `data_dir`,
+    /// then `process::exit(0)`. Reply is sent BEFORE the teardown.
+    WipeAllData,
 }
 
 /// Outcome of a `SendMessage` command after the inline-delivery wait.
@@ -238,6 +385,15 @@ pub struct ContactSummary {
     /// `None` for fresh contacts with no cursor yet.
     #[serde(default)]
     pub last_read_row_id: Option<i64>,
+    /// Per-contact desktop-notification + unread-badge mute. New in
+    /// 2.F. `false` for clients that don't yet honour the field.
+    #[serde(default)]
+    pub muted: bool,
+    /// Onions advertised by the latest verified `ContactCard.body.mailboxes`
+    /// for this contact. New in 2.F. Empty for contacts whose card has
+    /// no mailboxes or whose card is missing.
+    #[serde(default)]
+    pub peer_mailboxes: Vec<String>,
 }
 
 /// Wire-safe projection of a persisted message row.
@@ -389,6 +545,24 @@ pub enum CommandResult {
         /// Latest applied storage migration version.
         schema_version: u32,
     },
+    /// Reply for `Command::GetConfig`.
+    Config(ConfigSnapshot),
+    /// Reply for `Command::ChangePassphrase` (success).
+    PassphraseChanged,
+    /// Reply for `Command::TailLogs`.
+    Logs {
+        /// Log records, most-recent first.
+        records: Vec<LogRecord>,
+        /// Cursor for the next tail batch; UI uses this as `since_seq` on
+        /// the next `TailLogs` call.
+        next_since_seq: u64,
+    },
+    /// Reply for `Command::GetPassphraseAuditLatest`.
+    PassphraseAudit {
+        /// Unix seconds when the passphrase was last changed. `None` if
+        /// never changed (i.e., still the original passphrase from init).
+        last_changed_unix: Option<u64>,
+    },
 }
 
 /// Wire-safe projection of a `mailboxes` row for CLI / UI display.
@@ -506,6 +680,8 @@ mod tests {
                 last_ts_recv: None,
                 group_state: None,
                 last_read_row_id: None,
+                muted: false,
+                peer_mailboxes: Vec::new(),
             }]),
             CommandResult::Messages(vec![MessageRecord {
                 row_id: 0, // row_id irrelevant in this test
@@ -599,6 +775,8 @@ mod tests {
             last_ts_recv: Some(1_700_000_500),
             group_state: None,
             last_read_row_id: None,
+            muted: false,
+            peer_mailboxes: Vec::new(),
         };
         let mut buf = Vec::new();
         ciborium::ser::into_writer(&s, &mut buf).unwrap();
@@ -621,6 +799,8 @@ mod tests {
             last_ts_recv: Some(1_700_000_500),
             group_state: Some(MlsGroupStateLabel::Active),
             last_read_row_id: Some(42),
+            muted: false,
+            peer_mailboxes: Vec::new(),
         };
         let back: ContactSummary = roundtrip(&s);
         assert_eq!(back.pubkey.0, [7; 32]);
@@ -983,5 +1163,38 @@ mod phase_1g_wire_tests {
             } => {}
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn config_patch_default_is_all_none() {
+        let p = ConfigPatch::default();
+        assert!(p.history_retention_days.is_none());
+        assert!(p.notification_mode.is_none());
+        assert!(p.close_to_tray.is_none());
+    }
+
+    #[test]
+    fn config_patch_serde_roundtrip() {
+        let p = ConfigPatch {
+            history_retention_days: Some(30),
+            notification_mode: Some(NotificationMode::Minimal),
+            ..Default::default()
+        };
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&p, &mut bytes).unwrap();
+        let back: ConfigPatch = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        assert_eq!(back.history_retention_days, Some(30));
+        assert!(matches!(
+            back.notification_mode,
+            Some(NotificationMode::Minimal)
+        ));
+        assert!(back.close_to_tray.is_none());
+    }
+
+    #[test]
+    fn notification_mode_serde_lowercase_kebab() {
+        let m = NotificationMode::Generic;
+        let s = serde_json::to_string(&m).unwrap();
+        assert_eq!(s, "\"generic\"");
     }
 }

@@ -604,6 +604,7 @@ mod tests {
                 display_name: Some("Bob".into()),
                 added_at: 0,
                 card: None,
+                muted: false,
             })
             .unwrap();
 
@@ -741,6 +742,7 @@ mod tests {
                     display_name: Some(name.into()),
                     added_at: 0,
                     card: None,
+                    muted: false,
                 })
                 .unwrap();
         }

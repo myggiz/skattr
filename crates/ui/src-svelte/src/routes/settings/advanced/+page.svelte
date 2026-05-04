@@ -1,0 +1,289 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright (C) 2026 Myggiz AB -->
+<script lang="ts">
+  import { onMount } from "svelte";
+  import { config, fetchConfig, patchConfig, wipeAllData } from "$lib/stores/config";
+  import { ipcClient } from "$lib/ipc/tauri";
+  import { unwrapOk } from "$lib/ipc/client";
+  import LogsViewer from "$lib/components/LogsViewer.svelte";
+  import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
+  import { toast } from "$lib/stores/toast";
+
+  let showLogs = $state(false);
+  let confirmStage1 = $state(false);
+  let confirmStage2 = $state(false);
+
+  // daemon_info fields.
+  let pubkey = $state<string | null>(null);
+  let onion = $state<string | null>(null);
+  let daemonVersion = $state<string | null>(null);
+  let schemaVersion = $state<number | null>(null);
+
+  onMount(async () => {
+    await fetchConfig();
+    try {
+      const resp = await ipcClient.request({ cmd: "daemon_info" });
+      const result = unwrapOk(resp);
+      if (result.result !== "daemon_info") {
+        throw new Error(`unexpected reply: ${result.result}`);
+      }
+      pubkey = result.data.local_pubkey;
+      onion = result.data.current_onion;
+      daemonVersion = result.data.daemon_version;
+      schemaVersion = result.data.schema_version;
+    } catch (e) {
+      toast.show(`Failed to load daemon info: ${e}`);
+    }
+  });
+
+  let snapshot = $derived($config.snapshot);
+
+  /** Build a full ConfigPatch with only one field set; others null. */
+  function singlePatch(field: string, value: unknown): Parameters<typeof patchConfig>[0] {
+    return {
+      history_retention_days: null,
+      direct_timeout_secs: null,
+      notification_mode: null,
+      close_to_tray: null,
+      start_minimised: null,
+      persist_logs_to_disk: null,
+      [field]: value,
+    } as Parameters<typeof patchConfig>[0];
+  }
+
+  async function toggleCloseToTray(e: Event) {
+    const v = (e.target as HTMLInputElement).checked;
+    try {
+      await patchConfig(singlePatch("close_to_tray", v));
+      toast.show("Close-to-tray updated");
+    } catch (err) {
+      toast.show(`Failed: ${err}`);
+    }
+  }
+
+  async function toggleStartMinimised(e: Event) {
+    const v = (e.target as HTMLInputElement).checked;
+    try {
+      await patchConfig(singlePatch("start_minimised", v));
+      toast.show("Start-minimised updated (effective on next launch)");
+    } catch (err) {
+      toast.show(`Failed: ${err}`);
+    }
+  }
+
+  async function togglePersistLogs(e: Event) {
+    const v = (e.target as HTMLInputElement).checked;
+    try {
+      await patchConfig(singlePatch("persist_logs_to_disk", v));
+      toast.show(
+        v
+          ? "Logs will persist to disk on next daemon restart"
+          : "Disk persistence off (existing files retained)",
+      );
+    } catch (err) {
+      toast.show(`Failed: ${err}`);
+    }
+  }
+
+  async function wipe() {
+    confirmStage2 = false;
+    try {
+      await wipeAllData();
+    } catch {
+      // Connection close is expected after wipe; suppress.
+    }
+    toast.show("Skattr is wiping data and shutting down.");
+  }
+
+  async function copy(s: string) {
+    try {
+      await navigator.clipboard.writeText(s);
+      toast.show("Copied");
+    } catch (e) {
+      toast.show(`Copy failed: ${e}`);
+    }
+  }
+</script>
+
+<h1>Advanced</h1>
+
+<section>
+  <h2>Behaviour</h2>
+  <label class="toggle">
+    <input
+      type="checkbox"
+      checked={snapshot?.close_to_tray ?? true}
+      onchange={toggleCloseToTray}
+    />
+    Close button hides to tray
+  </label>
+  <label class="toggle">
+    <input
+      type="checkbox"
+      checked={snapshot?.start_minimised ?? false}
+      onchange={toggleStartMinimised}
+    />
+    Start minimised to tray (effective on next launch)
+  </label>
+</section>
+
+<section>
+  <h2>Logs</h2>
+  <label class="toggle">
+    <input
+      type="checkbox"
+      checked={snapshot?.persist_logs_to_disk ?? false}
+      onchange={togglePersistLogs}
+    />
+    Persist logs to disk — rotated daily; effective on next daemon restart
+  </label>
+  <div class="logs-actions">
+    <button type="button" onclick={() => (showLogs = !showLogs)}>
+      {showLogs ? "Close" : "Open"} logs viewer
+    </button>
+  </div>
+  {#if showLogs}
+    <LogsViewer />
+  {/if}
+</section>
+
+<section>
+  <h2>Debug info</h2>
+  <dl>
+    <dt>Daemon version</dt>
+    <dd>{daemonVersion ?? "(loading)"}</dd>
+    <dt>Schema version</dt>
+    <dd>{schemaVersion !== null ? String(schemaVersion) : "(loading)"}</dd>
+    <dt>Public key</dt>
+    <dd>
+      {#if pubkey}
+        <code>{pubkey.slice(0, 16)}…</code>
+        <button type="button" onclick={() => copy(pubkey!)}>Copy</button>
+      {:else}
+        <span class="muted">(loading)</span>
+      {/if}
+    </dd>
+    <dt>Onion</dt>
+    <dd>
+      {#if onion}
+        <code>{onion.slice(0, 16)}…</code>
+        <button type="button" onclick={() => copy(onion!)}>Copy</button>
+      {:else}
+        <span class="muted">(loading)</span>
+      {/if}
+    </dd>
+  </dl>
+</section>
+
+<section class="danger-zone">
+  <h2>Danger zone</h2>
+  <p>Permanently removes all contacts, messages, mailboxes, identity, and the database.</p>
+  <button type="button" class="danger-btn" onclick={() => (confirmStage1 = true)}>
+    Delete all data and quit
+  </button>
+</section>
+
+{#if confirmStage1}
+  <ConfirmDialog
+    title="Delete all Skattr data?"
+    body="This permanently removes contacts, messages, mailboxes, identity, and the database. This cannot be undone."
+    confirmLabel="I understand, continue"
+    danger
+    onConfirm={() => {
+      confirmStage1 = false;
+      confirmStage2 = true;
+    }}
+    onCancel={() => (confirmStage1 = false)}
+  />
+{/if}
+
+{#if confirmStage2}
+  <ConfirmDialog
+    title="Are you absolutely sure?"
+    body="This is final. Skattr will wipe its data directory and exit immediately. All messages and identity will be gone forever."
+    confirmLabel="Wipe everything"
+    danger
+    onConfirm={wipe}
+    onCancel={() => (confirmStage2 = false)}
+  />
+{/if}
+
+<style>
+  h1 {
+    font: var(--t-display);
+    margin: 0 0 var(--s-3);
+  }
+  section {
+    margin-bottom: var(--s-3);
+  }
+  section h2 {
+    font-size: 1.1em;
+    margin: 0 0 var(--s-2);
+    color: var(--text);
+  }
+  .toggle {
+    display: flex;
+    align-items: center;
+    gap: var(--s-2);
+    padding: var(--s-1) 0;
+    cursor: pointer;
+    font: var(--t-body);
+  }
+  .logs-actions {
+    margin-top: var(--s-2);
+  }
+  dl {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: var(--s-1) var(--s-3);
+    margin: 0;
+  }
+  dt {
+    color: var(--text-muted);
+    font: var(--t-ui);
+    align-self: center;
+  }
+  dd {
+    margin: 0;
+    display: flex;
+    align-items: center;
+    gap: var(--s-2);
+  }
+  code {
+    font-family: monospace;
+    background: var(--bg);
+    padding: 2px 6px;
+    border-radius: 3px;
+  }
+  .muted {
+    color: var(--text-muted);
+  }
+  .danger-zone {
+    border: 1px solid var(--danger);
+    border-radius: 6px;
+    padding: var(--s-2) var(--s-3);
+  }
+  .danger-zone h2 {
+    color: var(--danger);
+  }
+  .danger-zone p {
+    font: var(--t-body);
+    color: var(--text-muted);
+    margin: 0 0 var(--s-2);
+  }
+  .danger-btn {
+    background: var(--danger);
+    color: white;
+    border: none;
+    padding: 8px 16px;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .danger-btn:hover {
+    filter: brightness(1.15);
+  }
+  button {
+    padding: 6px 12px;
+    cursor: pointer;
+  }
+</style>

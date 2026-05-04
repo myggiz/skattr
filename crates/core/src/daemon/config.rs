@@ -18,6 +18,63 @@ pub struct HistoryConfig {
     pub retention_days: u32,
 }
 
+/// Delivery-policy settings.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeliveryConfig {
+    /// How long the hub tries direct connection before falling back to
+    /// mailbox deposit. Default 30s (locked in 2.B).
+    #[serde(default = "default_direct_timeout_secs")]
+    pub direct_timeout_secs: u32,
+}
+
+impl Default for DeliveryConfig {
+    fn default() -> Self {
+        Self {
+            direct_timeout_secs: default_direct_timeout_secs(),
+        }
+    }
+}
+
+fn default_direct_timeout_secs() -> u32 {
+    30
+}
+
+/// Notification settings.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct NotificationsConfig {
+    /// Notification display mode (Full, Minimal, or Silent).
+    #[serde(default)]
+    pub mode: crate::daemon::commands::NotificationMode,
+}
+
+/// UI / shell settings (close-to-tray, start-minimised, log persistence).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UiConfig {
+    /// If true, closing the window hides to tray instead of exiting.
+    #[serde(default = "default_close_to_tray")]
+    pub close_to_tray: bool,
+    /// If true, the app starts minimised to tray.
+    #[serde(default)]
+    pub start_minimised: bool,
+    /// If true, daemon logs are persisted to disk.
+    #[serde(default)]
+    pub persist_logs_to_disk: bool,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            close_to_tray: default_close_to_tray(),
+            start_minimised: false,
+            persist_logs_to_disk: false,
+        }
+    }
+}
+
+fn default_close_to_tray() -> bool {
+    true
+}
+
 /// Top-level daemon config.
 ///
 /// Loaded from `~/.config/skattr/config.toml` by default; the CLI may
@@ -35,6 +92,15 @@ pub struct Config {
     /// Retention + history settings. Drives the retention sweep.
     #[serde(default)]
     pub history: HistoryConfig,
+    /// Delivery policy. New in 2.F.
+    #[serde(default)]
+    pub delivery: DeliveryConfig,
+    /// Notification settings. New in 2.F.
+    #[serde(default)]
+    pub notifications: NotificationsConfig,
+    /// UI / shell settings. New in 2.F.
+    #[serde(default)]
+    pub ui: UiConfig,
 }
 
 fn default_log_filter() -> String {
@@ -58,6 +124,9 @@ impl Config {
             ipc_socket: None,
             log_filter: default_log_filter(),
             history: HistoryConfig::default(),
+            delivery: DeliveryConfig::default(),
+            notifications: NotificationsConfig::default(),
+            ui: UiConfig::default(),
         })
     }
 
@@ -135,8 +204,130 @@ impl Config {
             ipc_socket: None,
             log_filter: default_log_filter(),
             history: HistoryConfig::default(),
+            delivery: DeliveryConfig::default(),
+            notifications: NotificationsConfig::default(),
+            ui: UiConfig::default(),
         }
     }
+
+    /// A fallback that never fails — used only inside `DaemonHandle::new`
+    /// when `Config::defaults()` fails (no home dir in tests). Not part
+    /// of the public API.
+    pub(crate) fn fallback_for_tests() -> Self {
+        Self::fallback()
+    }
+
+    /// Apply a `ConfigPatch`, mutating `self` in place. Returns
+    /// `Err(CoreError::Config(...))` if any field fails validation.
+    /// Validation rules:
+    ///   - `direct_timeout_secs`: 1..=600
+    ///   - `history_retention_days`: any u32 (0 = infinite)
+    ///   - bool fields: trivially valid
+    ///   - `notification_mode`: enum-bounded
+    pub fn apply_patch(&mut self, patch: &crate::daemon::commands::ConfigPatch) -> Result<()> {
+        if let Some(d) = patch.history_retention_days {
+            self.history.retention_days = d;
+        }
+        if let Some(t) = patch.direct_timeout_secs {
+            if !(1..=600).contains(&t) {
+                return Err(CoreError::Config(format!(
+                    "direct_timeout_secs out of range 1..=600 (got {t})"
+                )));
+            }
+            self.delivery.direct_timeout_secs = t;
+        }
+        if let Some(m) = patch.notification_mode {
+            self.notifications.mode = m;
+        }
+        if let Some(b) = patch.close_to_tray {
+            self.ui.close_to_tray = b;
+        }
+        if let Some(b) = patch.start_minimised {
+            self.ui.start_minimised = b;
+        }
+        if let Some(b) = patch.persist_logs_to_disk {
+            self.ui.persist_logs_to_disk = b;
+        }
+        Ok(())
+    }
+
+    /// Project onto the wire `ConfigSnapshot` (UI-relevant fields only).
+    pub fn snapshot(&self) -> crate::daemon::commands::ConfigSnapshot {
+        crate::daemon::commands::ConfigSnapshot {
+            history_retention_days: self.history.retention_days,
+            direct_timeout_secs: self.delivery.direct_timeout_secs,
+            notification_mode: self.notifications.mode,
+            close_to_tray: self.ui.close_to_tray,
+            start_minimised: self.ui.start_minimised,
+            persist_logs_to_disk: self.ui.persist_logs_to_disk,
+        }
+    }
+
+    /// Atomically write `self` to a TOML file at `path`. Writes to
+    /// `<path>.tmp`, fsyncs, renames, then fsyncs the parent dir. Mode
+    /// 0600 on Unix.
+    pub fn save_to_disk(&self, path: &Path) -> Result<()> {
+        use std::io::Write;
+        let serialised = toml::to_string_pretty(self)
+            .map_err(|e| CoreError::Config(format!("serialise: {e}")))?;
+
+        let tmp = path.with_extension("toml.tmp");
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .open(&tmp)
+                .map_err(|e| CoreError::Config(format!("create {}: {e}", tmp.display())))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perm = f
+                    .metadata()
+                    .map_err(|e| CoreError::Config(format!("stat: {e}")))?
+                    .permissions();
+                perm.set_mode(0o600);
+                f.set_permissions(perm)
+                    .map_err(|e| CoreError::Config(format!("chmod: {e}")))?;
+            }
+            f.write_all(serialised.as_bytes())
+                .map_err(|e| CoreError::Config(format!("write: {e}")))?;
+            f.sync_all()
+                .map_err(|e| CoreError::Config(format!("fsync: {e}")))?;
+        }
+        std::fs::rename(&tmp, path).map_err(|e| {
+            CoreError::Config(format!(
+                "rename {} → {}: {e}",
+                tmp.display(),
+                path.display()
+            ))
+        })?;
+        if let Some(parent) = path.parent() {
+            // Best-effort directory fsync.
+            if let Ok(dir) = std::fs::File::open(parent) {
+                let _ = dir.sync_all();
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Resolve the config-file path that `load_with_precedence` would use,
+/// given an optional explicit `--config` flag value.
+///
+/// If `file_flag` is `Some`, that path is returned as-is. Otherwise
+/// the function returns the first XDG candidate path (it may not exist
+/// yet — the caller is responsible for creating the directory before
+/// calling `save_to_disk`).
+pub fn resolve_config_path(file_flag: Option<&std::path::Path>) -> std::path::PathBuf {
+    if let Some(p) = file_flag {
+        return p.to_path_buf();
+    }
+    let candidates = xdg_config_candidates();
+    candidates
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| std::path::PathBuf::from("./config.toml"))
 }
 
 fn xdg_config_candidates() -> Vec<std::path::PathBuf> {
@@ -232,5 +423,102 @@ mod tests {
         "#;
         let cfg: Config = toml::from_str(toml).unwrap();
         assert_eq!(cfg.history.retention_days, 90);
+    }
+
+    #[test]
+    fn old_config_without_2f_sections_still_parses() {
+        let toml = r#"
+            data_dir = "/tmp/skattr"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.delivery.direct_timeout_secs, 30);
+        assert!(matches!(
+            cfg.notifications.mode,
+            crate::daemon::commands::NotificationMode::Full
+        ));
+        assert!(cfg.ui.close_to_tray);
+        assert!(!cfg.ui.start_minimised);
+        assert!(!cfg.ui.persist_logs_to_disk);
+    }
+
+    #[test]
+    fn explicit_2f_sections_parse() {
+        let toml = r#"
+            data_dir = "/tmp/skattr"
+
+            [delivery]
+            direct_timeout_secs = 45
+
+            [notifications]
+            mode = "minimal"
+
+            [ui]
+            close_to_tray = false
+            start_minimised = true
+            persist_logs_to_disk = true
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.delivery.direct_timeout_secs, 45);
+        assert!(matches!(
+            cfg.notifications.mode,
+            crate::daemon::commands::NotificationMode::Minimal
+        ));
+        assert!(!cfg.ui.close_to_tray);
+        assert!(cfg.ui.start_minimised);
+        assert!(cfg.ui.persist_logs_to_disk);
+    }
+
+    #[test]
+    fn apply_patch_partial_only_touches_specified_fields() {
+        let mut cfg = Config::defaults().unwrap();
+        cfg.history.retention_days = 7;
+        let patch = crate::daemon::commands::ConfigPatch {
+            notification_mode: Some(crate::daemon::commands::NotificationMode::Off),
+            ..Default::default()
+        };
+        cfg.apply_patch(&patch).unwrap();
+        assert_eq!(cfg.history.retention_days, 7);
+        assert!(matches!(
+            cfg.notifications.mode,
+            crate::daemon::commands::NotificationMode::Off
+        ));
+    }
+
+    #[test]
+    fn apply_patch_rejects_out_of_range_timeout() {
+        let mut cfg = Config::defaults().unwrap();
+        let patch = crate::daemon::commands::ConfigPatch {
+            direct_timeout_secs: Some(0),
+            ..Default::default()
+        };
+        assert!(cfg.apply_patch(&patch).is_err());
+
+        let patch = crate::daemon::commands::ConfigPatch {
+            direct_timeout_secs: Some(601),
+            ..Default::default()
+        };
+        assert!(cfg.apply_patch(&patch).is_err());
+    }
+
+    #[test]
+    fn save_to_disk_then_load_round_trips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        let mut cfg = Config::defaults().unwrap();
+        cfg.delivery.direct_timeout_secs = 45;
+        cfg.save_to_disk(&path).unwrap();
+        let loaded = Config::load(&path).unwrap();
+        assert_eq!(loaded.delivery.direct_timeout_secs, 45);
+    }
+
+    #[test]
+    fn snapshot_projects_all_fields() {
+        let cfg = Config::defaults().unwrap();
+        let snap = cfg.snapshot();
+        assert_eq!(snap.history_retention_days, 0);
+        assert_eq!(snap.direct_timeout_secs, 30);
+        assert!(snap.close_to_tray);
+        assert!(!snap.start_minimised);
+        assert!(!snap.persist_logs_to_disk);
     }
 }

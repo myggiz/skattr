@@ -23,10 +23,13 @@ fn command_variant_tag(c: &Command) -> &'static str {
     match c {
         Command::AddContact { .. } => "add_contact",
         Command::AddMailbox { .. } => "add_mailbox",
+        Command::ChangePassphrase { .. } => "change_passphrase",
         Command::CreateGroup { .. } => "create_group",
         Command::CreateInvite { .. } => "create_invite",
         Command::DaemonInfo => "daemon_info",
         Command::ExportHistory { .. } => "export_history",
+        Command::GetConfig => "get_config",
+        Command::GetPassphraseAuditLatest => "get_passphrase_audit_latest",
         Command::ListContacts => "list_contacts",
         Command::ListContactsWithFilter { .. } => "list_contacts_with_filter",
         Command::ListMailboxes => "list_mailboxes",
@@ -39,7 +42,11 @@ fn command_variant_tag(c: &Command) -> &'static str {
         Command::RotateOnion => "rotate_onion",
         Command::SearchMessages { .. } => "search_messages",
         Command::SendMessage { .. } => "send_message",
+        Command::SetConfig { .. } => "set_config",
+        Command::SetContactMuted { .. } => "set_contact_muted",
         Command::Shutdown => "shutdown",
+        Command::TailLogs { .. } => "tail_logs",
+        Command::WipeAllData => "wipe_all_data",
     }
 }
 
@@ -48,17 +55,21 @@ fn command_variant_tag(c: &Command) -> &'static str {
 /// a compile error.
 fn command_result_variant_tag(r: &CommandResult) -> &'static str {
     match r {
+        CommandResult::Config(_) => "config",
         CommandResult::ContactAdded(_) => "contact_added",
         CommandResult::Contacts(_) => "contacts",
         CommandResult::DaemonInfo { .. } => "daemon_info",
         CommandResult::ExportPage { .. } => "export_page",
         CommandResult::InviteCreated { .. } => "invite_created",
+        CommandResult::Logs { .. } => "logs",
         CommandResult::Mailboxes(_) => "mailboxes",
         CommandResult::MarkedRead { .. } => "marked_read",
         CommandResult::MessageSent { .. } => "message_sent",
         CommandResult::Messages(_) => "messages",
         CommandResult::MessagesPage { .. } => "messages_page",
         CommandResult::Ok => "ok",
+        CommandResult::PassphraseAudit { .. } => "passphrase_audit",
+        CommandResult::PassphraseChanged => "passphrase_changed",
         CommandResult::Pruned { .. } => "pruned",
         CommandResult::SearchResults(_) => "search_results",
         CommandResult::Subscribed => "subscribed",
@@ -99,17 +110,21 @@ fn expected_command_variant_set() -> Vec<&'static str> {
 /// rule as `expected_command_variant_set`.
 fn expected_command_result_variant_set() -> Vec<&'static str> {
     let mut v = vec![
+        "config",
         "contact_added",
         "contacts",
         "daemon_info",
         "export_page",
         "invite_created",
+        "logs",
         "mailboxes",
         "marked_read",
         "message_sent",
         "messages",
         "messages_page",
         "ok",
+        "passphrase_audit",
+        "passphrase_changed",
         "pruned",
         "search_results",
         "subscribed",
