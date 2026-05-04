@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: GPL-3.0-or-later
+  Phase 2.G placeholder icon. Designed for replacement before
+  v0.1.0 ships. Geometry: 512x512 viewbox, rounded 80px corners,
+  centred "S" monogram.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1f2937"/>
+      <stop offset="100%" stop-color="#0f172a"/>
+    </linearGradient>
+  </defs>
+  <rect x="16" y="16" width="480" height="480" rx="96" ry="96" fill="url(#bg)"/>
+  <text
+    x="256" y="376"
+    font-family="-apple-system, system-ui, 'Segoe UI', Inter, sans-serif"
+    font-size="360"
+    font-weight="700"
+    fill="#e2e8f0"
+    text-anchor="middle">S</text>
+</svg>
