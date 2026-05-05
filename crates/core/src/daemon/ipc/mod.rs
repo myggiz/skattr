@@ -2,6 +2,11 @@
 // Copyright (C) 2026 Myggiz AB
 
 //! CLI ↔ daemon IPC transport.
+//!
+//! Cross-platform aliases:
+//!   - `IpcStream`       — the client-side stream type for IPC connections.
+//!   - `PeerId`          — opaque "this user" identity for peer auth.
+//!   - `ENDPOINT_FILENAME` — relative file under `data_dir` the daemon binds (Unix) or writes the pipe name to (Windows).
 
 pub mod client;
 pub mod codec;
@@ -9,3 +14,24 @@ pub mod server;
 pub mod wire;
 
 pub use client::{IpcClient, IpcClientError};
+
+/// Filename (relative to `data_dir`) of the daemon's IPC endpoint.
+/// On Unix this is the AF_UNIX socket file; on Windows it is the
+/// discovery file containing the named-pipe name.
+#[cfg(unix)]
+pub const ENDPOINT_FILENAME: &str = "ipc.sock";
+#[cfg(target_os = "windows")]
+pub const ENDPOINT_FILENAME: &str = "ipc.endpoint";
+
+/// Client-side IPC stream type. Selected at compile time per platform.
+#[cfg(unix)]
+pub type IpcStream = tokio::net::UnixStream;
+#[cfg(target_os = "windows")]
+pub type IpcStream = tokio::net::windows::named_pipe::NamedPipeClient;
+
+/// Opaque "this user" identity for the daemon's peer-auth allow-list.
+/// Unix: numeric uid. Windows: raw SID bytes (variable length).
+#[cfg(unix)]
+pub type PeerId = u32;
+#[cfg(target_os = "windows")]
+pub type PeerId = Vec<u8>;
