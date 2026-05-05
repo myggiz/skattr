@@ -20,6 +20,89 @@ use std::sync::{
 
 use tauri::Manager;
 
+/// Parsed `--smoke-test` arguments.
+#[derive(Debug)]
+struct SmokeArgs {
+    data_dir: std::path::PathBuf,
+    timeout_secs: u64,
+}
+
+/// Returns true if `--smoke-test` appears anywhere in argv.
+fn detect_smoke_test_flag(argv: &[String]) -> bool {
+    argv.iter().any(|a| a == "--smoke-test")
+}
+
+/// Parse `--smoke-test`-mode argv. Required: `--data-dir <PATH>`.
+/// Optional: `--timeout-secs <N>` (default 240).
+fn parse_smoke_argv(argv: &[String]) -> Result<SmokeArgs, String> {
+    let mut data_dir: Option<std::path::PathBuf> = None;
+    let mut timeout_secs: u64 = 240;
+    let mut i = 0;
+    while i < argv.len() {
+        match argv[i].as_str() {
+            "--data-dir" => {
+                let v = argv
+                    .get(i + 1)
+                    .ok_or_else(|| "--data-dir requires a value".to_string())?;
+                data_dir = Some(std::path::PathBuf::from(v));
+                i += 2;
+            }
+            "--timeout-secs" => {
+                let v = argv
+                    .get(i + 1)
+                    .ok_or_else(|| "--timeout-secs requires a value".to_string())?;
+                timeout_secs = v
+                    .parse::<u64>()
+                    .map_err(|e| format!("--timeout-secs not a number: {e}"))?;
+                i += 2;
+            }
+            _ => i += 1,
+        }
+    }
+    Ok(SmokeArgs {
+        data_dir: data_dir.ok_or_else(|| "--smoke-test requires --data-dir".to_string())?,
+        timeout_secs,
+    })
+}
+
+/// Argv branch invoked from `main()` when `--smoke-test` is present.
+/// Builds a `SmokeConfig`, runs `core::daemon::smoke::run_smoke` on a
+/// fresh Tokio runtime, prints the report (or error), and exits.
+fn run_smoke_and_exit(argv: Vec<String>) -> ! {
+    let parsed = match parse_smoke_argv(&argv) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("smoke: argv error: {e}");
+            std::process::exit(2);
+        }
+    };
+    let cfg = skattr_core::daemon::smoke::SmokeConfig {
+        data_dir: parsed.data_dir,
+        tor_ready_timeout: std::time::Duration::from_secs(parsed.timeout_secs),
+        ..Default::default()
+    };
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("smoke: tokio runtime build failed: {e}");
+            std::process::exit(1);
+        }
+    };
+    match runtime.block_on(skattr_core::daemon::smoke::run_smoke(cfg)) {
+        Ok(report) => {
+            println!(
+                "smoke OK: onion={} duration={:?}",
+                report.onion, report.duration
+            );
+            std::process::exit(0);
+        }
+        Err(e) => {
+            eprintln!("smoke FAIL: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
 /// Synchronous mirror of `Config.ui.close_to_tray`, kept on Tauri managed
 /// state so the synchronous `on_window_event` closure can read it without
 /// entering an async context.
@@ -48,6 +131,11 @@ fn set_close_to_tray(state: tauri::State<'_, CloseToTraySentinel>, enabled: bool
 }
 
 fn main() {
+    let argv: Vec<String> = std::env::args().collect();
+    if detect_smoke_test_flag(&argv) {
+        run_smoke_and_exit(argv);
+    }
+
     use skattr_core::daemon::logs::{LogSink, RingBufferLayer};
     use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -70,6 +158,18 @@ fn main() {
 
     let result = tauri::Builder::default()
         .manage(app_state)
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            // Forward subsequent skattr:// invocations into the
+            // existing process. The deep-link plugin will fire its
+            // own event for any URL in argv; we just need the
+            // window to come back into focus.
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+            tracing::debug!(?argv, "single-instance: forwarded launch");
+        }))
+        .plugin(tauri_plugin_deep_link::init())
         .invoke_handler(tauri::generate_handler![
             bootstrap::vault_exists,
             bootstrap::identity_init,
@@ -124,6 +224,33 @@ fn main() {
                 }
             }
 
+            // Forward incoming skattr:// deep-link events into the
+            // SvelteKit shell as a CustomEvent the Add-Contact dialog
+            // listens for via the `deepLinkInviteUrl` store.
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                let app_for_links = app.handle().clone();
+                app.deep_link().on_open_url(move |event| {
+                    let urls: Vec<String> =
+                        event.urls().into_iter().map(|u| u.to_string()).collect();
+                    if urls.is_empty() {
+                        return;
+                    }
+                    if let Some(wv) = app_for_links.get_webview_window("main") {
+                        let _ = wv.show();
+                        let _ = wv.set_focus();
+                        let payload = match serde_json::to_string(&urls[0]) {
+                            Ok(s) => s,
+                            Err(_) => "\"\"".to_string(),
+                        };
+                        let js = format!(
+                            "window.dispatchEvent(new CustomEvent('skattr:deep-link', {{ detail: {payload} }}));"
+                        );
+                        let _ = wv.eval(&js);
+                    }
+                });
+            }
+
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -172,5 +299,59 @@ fn main() {
     if let Err(e) = result {
         tracing::error!(error = %e, "Tauri runtime exited with error");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod smoke_argv_tests {
+    use super::*;
+
+    #[test]
+    fn smoke_argv_detects_flag() {
+        let argv = vec![
+            "skattr-ui".to_string(),
+            "--smoke-test".to_string(),
+            "--data-dir".to_string(),
+            "/tmp/foo".to_string(),
+        ];
+        let parsed = parse_smoke_argv(&argv).expect("parses cleanly");
+        assert_eq!(parsed.data_dir.to_str(), Some("/tmp/foo"));
+        assert_eq!(parsed.timeout_secs, 240);
+    }
+
+    #[test]
+    fn smoke_argv_accepts_timeout_override() {
+        let argv = vec![
+            "skattr-ui".to_string(),
+            "--smoke-test".to_string(),
+            "--data-dir".to_string(),
+            "/tmp/foo".to_string(),
+            "--timeout-secs".to_string(),
+            "60".to_string(),
+        ];
+        let parsed = parse_smoke_argv(&argv).unwrap();
+        assert_eq!(parsed.timeout_secs, 60);
+    }
+
+    #[test]
+    fn smoke_argv_rejects_missing_data_dir() {
+        let argv = vec!["skattr-ui".to_string(), "--smoke-test".to_string()];
+        let err = parse_smoke_argv(&argv).unwrap_err();
+        assert!(err.contains("--data-dir"));
+    }
+
+    #[test]
+    fn smoke_argv_returns_none_when_flag_absent() {
+        let argv = vec!["skattr-ui".to_string()];
+        let result = detect_smoke_test_flag(&argv);
+        assert!(!result, "no flag => false");
+    }
+
+    #[test]
+    fn smoke_argv_returns_true_when_flag_present() {
+        let argv = vec!["skattr-ui".to_string(), "--smoke-test".to_string()];
+        let result = detect_smoke_test_flag(&argv);
+        assert!(result, "flag present => true");
     }
 }

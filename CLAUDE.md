@@ -11,7 +11,10 @@ ContactCard rotation) is complete (merged 2026-05-01); Phase 2.C
 2026-05-02); Phase 2.D (conversation view) is complete (merged
 2026-05-02); Phase 2.E (invite & contact UX) is complete (merged
 2026-05-03); Phase 2.F (settings & history) is complete (merged
-2026-05-04).** Phase 0 shipped all five workstreams (0.A scaffold,
+2026-05-04); Phase 2.G (packaging & distribution) is complete
+(merged 2026-05-04) on Linux + macOS; Phase 2.H (Windows
+port) is the remaining Phase 2 sub-project before the umbrella
+exit criteria are fully met.** Phase 0 shipped all five workstreams (0.A scaffold,
 0.B identity & crypto, 0.C Arti integration, 0.D storage layer, 0.E
 documentation baseline). Phase 1.A added `transport::frame::FrameCodec`.
 Phase 1.B added `transport::noise::handshake_{initiator,responder}`
@@ -243,6 +246,35 @@ toggle currently requires a daemon restart to take effect (the
 `tracing_subscriber::reload` plumbing across the layered
 subscriber is tracked as a follow-up). Closes Phase 2's user-facing
 chrome; the next workstream is Phase 2.G (packaging).
+
+Phase 2.G (packaging & distribution) merged at the head of
+`phase-2g-packaging`. New `core::daemon::smoke` module (run_smoke
++ SmokeConfig + SmokeError); `skattr-ui --smoke-test` argv branch
+that boots the daemon without opening Tauri's webview; CLI escape
+hatch on `skattr daemon --smoke-test`. CI release flow at
+`.github/workflows/release.yml` triggered on `v*` tags: matrix
+build on ubuntu-latest + macos-latest → per-platform smoke
+(`/usr/bin/skattr-ui --smoke-test` after `dpkg -i`; AppImage
+extract-and-run; `.app` from mounted `.dmg`) → `SHA256SUMS` +
+`SHA256SUMS.minisig` (minisign secret in repo secrets) → GitHub
+Release. Bundle metadata locked: `net.myggiz.skattr` identifier,
+six PNG icon sizes, `skattr://` URL scheme via
+`tauri-plugin-deep-link` + `tauri-plugin-single-instance`, Tauri
+updater explicitly disabled. Linux `.deb` + AppImage + Flatpak
+(build-from-source); macOS `.dmg` (ARM64 only). Install docs at
+`docs/install/{README,linux,macos}.md`; reproducible-build recipe
+at `docs/build/reproducible.md`. Tauri Rust pinned to `=2.11.0`;
+`@tauri-apps/api` matched at `2.0.0`; `rust-toolchain.toml` gains
+explicit `version = "1.95.0"`. Wire-format-NEUTRAL by design — no
+new `Command` / `CommandResult` / `Event` variants. **Windows is
+carved out to Phase 2.H** (Named Pipes + DACL port of
+`core::daemon::ipc`; `.msi` bundle); 2.H lands before any "v0.2"
+tag. Maintainer prerequisite before tagging v0.1.0:
+generate the real minisign keypair (placeholder at
+`docs/install/minisign.pub` until then) and set GitHub Actions
+secrets `MINISIGN_SECRET_KEY` + `MINISIGN_PASSWORD`; the
+maintainer-only procedure is documented at
+`docs/install/README-MAINTAINER-MINISIGN.md`.
 
 Phase 1 is complete (1.H merged 2026-04-24); Phase 2.A (mailbox
 server) merged at the head of `phase-2a-mailbox-server`; Phase 2.B

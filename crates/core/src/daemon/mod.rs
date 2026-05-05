@@ -22,6 +22,7 @@ pub(crate) mod inbound;
 pub mod ipc;
 pub mod logs;
 pub(crate) mod retention;
+pub mod smoke;
 pub mod state;
 
 pub use commands::{Command, CommandResult};
