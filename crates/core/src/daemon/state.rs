@@ -113,6 +113,7 @@ impl Daemon {
         use crate::daemon::handle::DaemonHandle;
         use crate::daemon::inbound::DaemonInbound;
         use crate::daemon::ipc::server::{current_uid, serve, Server};
+        use crate::daemon::ipc::PeerId;
         use crate::delivery::hub::DeliveryHub;
         use crate::delivery::peer::InboundDispatch;
         use crate::storage::Pool;
@@ -281,8 +282,8 @@ impl Daemon {
 
         // Step 7: IPC server.
         let sock_path = config.ipc_socket_or_default()?;
-        let allowed_uid = current_uid();
-        let ipc_server = Server::bind(&sock_path, allowed_uid)?;
+        let allowed: PeerId = current_uid();
+        let ipc_server = Server::bind(&sock_path, allowed)?;
         let sock_path_copy = sock_path.clone();
 
         let (ipc_shutdown_tx, ipc_shutdown_rx) = tokio::sync::oneshot::channel::<()>();

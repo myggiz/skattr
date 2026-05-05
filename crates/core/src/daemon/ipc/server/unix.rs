@@ -14,21 +14,22 @@ use std::path::{Path, PathBuf};
 use tokio::net::UnixListener;
 
 use crate::daemon::ipc::wire::IpcError;
+use crate::daemon::ipc::PeerId;
 use crate::error::{CoreError, Result};
 
 /// Server bound to a local Unix socket.
 pub struct Server {
     listener: UnixListener,
     path: PathBuf,
-    allowed_uid: u32,
+    allowed: PeerId,
 }
 
 impl Server {
     /// Bind a `Server` at `path`. Creates parents with mode `0700`,
     /// unlinks any stale file at `path`, then binds and chmods the
-    /// socket to mode `0600`. `allowed_uid` is the UID that every
+    /// socket to mode `0600`. `allowed` is the peer ID that every
     /// accepted connection's peer-cred must match.
-    pub fn bind(path: &Path, allowed_uid: u32) -> Result<Self> {
+    pub fn bind(path: &Path, allowed: PeerId) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(CoreError::Io)?;
             let mut perms = std::fs::metadata(parent)
@@ -53,7 +54,7 @@ impl Server {
         Ok(Self {
             listener,
             path: path.to_path_buf(),
-            allowed_uid,
+            allowed,
         })
     }
 
@@ -64,7 +65,7 @@ impl Server {
     }
 
     /// Wait for the next incoming connection. Returns the accepted
-    /// stream only if its peer-cred UID matches `allowed_uid`; else
+    /// stream only if its peer-cred UID matches `allowed`; else
     /// closes immediately and returns `Err(IpcError::AuthDenied)`.
     pub async fn accept_one(&self) -> std::result::Result<tokio::net::UnixStream, IpcError> {
         let (stream, _) = self
@@ -75,7 +76,7 @@ impl Server {
         let cred = stream
             .peer_cred()
             .map_err(|e| IpcError::Internal(format!("peer_cred: {e}")))?;
-        check_peer_uid(Some(cred.uid()), self.allowed_uid).map_err(|_| IpcError::AuthDenied)?;
+        check_peer_uid(Some(cred.uid()), self.allowed).map_err(|_| IpcError::AuthDenied)?;
         Ok(stream)
     }
 }
@@ -93,7 +94,7 @@ impl Drop for Server {
 /// On Linux we stat `/proc/self`; on other platforms we fall back to
 /// the `$UID` environment variable then `0` (suitable for tests).
 #[cfg(unix)]
-pub(crate) fn current_uid() -> u32 {
+pub(crate) fn current_uid() -> PeerId {
     use std::os::unix::fs::MetadataExt;
     std::fs::metadata("/proc/self")
         .map(|m| m.uid())
