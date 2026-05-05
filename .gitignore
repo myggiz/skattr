@@ -23,3 +23,6 @@ identity.vault
 # proptest auto-generated regression seeds (we don't check these in)
 proptest-regressions/
 *.proptest-regressions
+
+# Git worktrees managed by superpowers:using-git-worktrees
+/.worktrees/
