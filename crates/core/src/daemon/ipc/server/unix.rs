@@ -92,6 +92,7 @@ impl Drop for Server {
 ///
 /// On Linux we stat `/proc/self`; on other platforms we fall back to
 /// the `$UID` environment variable then `0` (suitable for tests).
+#[cfg(unix)]
 pub(crate) fn current_uid() -> u32 {
     use std::os::unix::fs::MetadataExt;
     std::fs::metadata("/proc/self")
