@@ -3,20 +3,23 @@
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::panic))]
 
-//! IPC client half. Used by the CLI to connect, send one `Command`,
-//! collect the result, and optionally stream `Event`s.
+//! IPC client. The platform-specific `connect` impl is in the
+//! active child module; the rest is generic over the stream type.
 
 use std::io;
-use std::path::Path;
-
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, BufReader};
-use tokio::net::UnixStream;
 
 use crate::daemon::commands::{Command, CommandResult};
 use crate::daemon::events::Event;
 use crate::daemon::ipc::codec::{read_frame, write_frame, CodecError};
 use crate::daemon::ipc::wire::{EventFilter, IpcError, IpcRequest, IpcResponse};
+
+#[cfg(unix)]
+pub mod unix;
+
+#[cfg(target_os = "windows")]
+mod windows;
 
 /// Client-side error surface. Distinct from the wire-level
 /// [`IpcError`] so a "socket missing" is not conflated with a typed
@@ -58,25 +61,6 @@ where
 {
     stream: BufReader<S>,
     subscribed: bool,
-}
-
-impl IpcClient<UnixStream> {
-    /// Connect to the daemon at `path`. Maps a missing socket file or
-    /// connection-refused to [`IpcClientError::DaemonNotRunning`].
-    pub async fn connect(path: &Path) -> std::result::Result<Self, IpcClientError> {
-        match UnixStream::connect(path).await {
-            Ok(stream) => Ok(Self::from_stream(stream)),
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
-                ) =>
-            {
-                Err(IpcClientError::DaemonNotRunning)
-            }
-            Err(e) => Err(IpcClientError::Io(e)),
-        }
-    }
 }
 
 impl<S> IpcClient<S>
@@ -172,17 +156,6 @@ mod tests {
         let mut client = IpcClient::from_stream(client_io);
         let got = client.execute(Command::ListContacts).await.unwrap();
         assert!(matches!(got, CommandResult::Ok));
-    }
-
-    #[tokio::test]
-    async fn connect_missing_socket_returns_daemon_not_running() {
-        let tmp = tempfile::tempdir().unwrap();
-        let missing = tmp.path().join("no-such-socket");
-        let err = IpcClient::connect(&missing).await.unwrap_err();
-        assert!(
-            matches!(err, IpcClientError::DaemonNotRunning),
-            "got {err:?}"
-        );
     }
 
     #[tokio::test]
