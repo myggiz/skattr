@@ -16,7 +16,7 @@ use crate::daemon::ipc::codec::{read_frame, write_frame, CodecError};
 use crate::daemon::ipc::wire::{EventFilter, IpcError, IpcRequest, IpcResponse};
 
 #[cfg(unix)]
-pub mod unix;
+mod unix;
 
 #[cfg(target_os = "windows")]
 mod windows;
