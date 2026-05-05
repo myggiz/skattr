@@ -6379,6 +6379,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "ts-rs",
+ "windows-sys 0.59.0",
  "x25519-dalek",
  "zeroize",
  "zxcvbn",
