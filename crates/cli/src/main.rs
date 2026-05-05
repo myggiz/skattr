@@ -197,7 +197,7 @@ fn resolve_socket_path(flag: Option<&std::path::Path>) -> PathBuf {
 /// live `IpcClient` on success.
 async fn connect_or_exit(
     sock_flag: Option<&std::path::Path>,
-) -> Result<skattr_core::daemon::IpcClient<tokio::net::UnixStream>> {
+) -> Result<skattr_core::daemon::IpcClient<skattr_core::daemon::ipc::IpcStream>> {
     let path = resolve_socket_path(sock_flag);
     match skattr_core::daemon::IpcClient::connect(&path).await {
         Ok(c) => Ok(c),

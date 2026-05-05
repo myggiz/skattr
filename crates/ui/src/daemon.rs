@@ -67,7 +67,7 @@ pub async fn start_in_process_cmd(state: tauri::State<'_, AppState>) -> Result<R
     let mut config = Config::defaults().map_err(|e| format!("config: {e}"))?;
     config.data_dir = data_dir.clone();
     // Pin IPC socket to the well-known path so the CLI keeps working.
-    config.ipc_socket = Some(data_dir.join("ipc.sock"));
+    config.ipc_socket = Some(data_dir.join(skattr_core::daemon::ipc::ENDPOINT_FILENAME));
 
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<Ready>();
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
