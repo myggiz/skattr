@@ -167,10 +167,10 @@ impl Server {
         let hex: String = entropy.iter().map(|b| format!("{b:02x}")).collect();
         let pipe_name = format!(r"\\.\pipe\skattr-{hex}");
 
-        // Build a SECURITY_ATTRIBUTES with an owner-only DACL.
-        let mut sa = OwnerOnlySa::new(&allowed).map_err(|e| {
-            crate::error::CoreError::Io(io::Error::other(format!("OwnerOnlySa::new: {e}")))
-        })?;
+        // Build a SECURITY_ATTRIBUTES with an owner-only DACL. Pass the
+        // inner io::Error through directly so its ErrorKind survives the
+        // wrap (e.g. `InvalidInput` for an empty SID).
+        let mut sa = OwnerOnlySa::new(&allowed).map_err(crate::error::CoreError::Io)?;
 
         // SAFETY: `sa.as_raw()` returns a pointer into `sa`, which lives on
         // this stack frame and therefore outlives the `create_with_security_attributes_raw`
@@ -231,44 +231,64 @@ impl Server {
     pub async fn accept_one(&self) -> std::result::Result<NamedPipeServer, IpcError> {
         use std::os::windows::io::AsRawHandle;
 
-        // Take the current listener out of the slot; refill afterwards.
+        // Pre-build the next listener BEFORE consuming the current one. If
+        // refill construction fails, the slot stays populated and the next
+        // accept call can retry — keeping the daemon alive across transient
+        // resource failures.
+        let next = self
+            .next_listener()
+            .map_err(|e| IpcError::Internal(format!("next_listener: {e}")))?;
+
+        // Take the current listener out of the slot. The slot is empty only
+        // for the duration of `connect().await` plus the SID check; the
+        // `next` instance refills it before this function returns on any
+        // path below.
         let listener = {
-            let mut guard = self
-                .listener
-                .lock()
-                .map_err(|e| IpcError::Internal(format!("listener lock poisoned: {e}")))?;
-            guard
-                .take()
-                .ok_or_else(|| IpcError::Internal("accept_one called concurrently".into()))?
+            // The Mutex can only become poisoned if a previous critical
+            // section panicked. None of our critical sections (`take`,
+            // `*guard = Some(_)`) can panic, so this branch is unreachable
+            // in practice; we still surface a typed Internal error rather
+            // than panicking, to keep the daemon's `serve()` loop alive.
+            let mut guard = self.listener.lock().map_err(|e| {
+                IpcError::Internal(format!("listener Mutex unexpectedly poisoned: {e}"))
+            })?;
+            match guard.take() {
+                Some(l) => l,
+                None => {
+                    // The slot can only be empty if a prior accept_one is
+                    // still running on another task. The current shape of
+                    // serve() drives accept_one serially, so this is
+                    // unreachable in practice.
+                    *guard = Some(next);
+                    return Err(IpcError::Internal(
+                        "accept_one is not re-entrant: previous call still in flight".into(),
+                    ));
+                }
+            }
         };
 
-        listener
-            .connect()
-            .await
-            .map_err(|e| IpcError::Internal(format!("connect: {e}")))?;
+        // Wait for a client. Refill the slot regardless of how connect()
+        // resolves so a connect failure doesn't strand the slot.
+        let connect_result = listener.connect().await;
+        {
+            // The Mutex can only become poisoned if a previous critical
+            // section panicked. None of our critical sections (`take`,
+            // `*guard = Some(_)`) can panic, so this branch is unreachable
+            // in practice; we still surface a typed Internal error rather
+            // than panicking, to keep the daemon's `serve()` loop alive.
+            let mut guard = self.listener.lock().map_err(|e| {
+                IpcError::Internal(format!("listener Mutex unexpectedly poisoned: {e}"))
+            })?;
+            *guard = Some(next);
+        }
+        connect_result.map_err(|e| IpcError::Internal(format!("connect: {e}")))?;
 
         // Capture the SID of the connecting client.
         // SAFETY: `as_raw_handle` returns a valid pipe handle for the
         // lifetime of `listener`. `peer_sid_for` does not close it.
         let raw = AsRawHandle::as_raw_handle(&listener) as windows_sys::Win32::Foundation::HANDLE;
-        let peer_sid_result = unsafe { peer_sid_for(raw) };
-
-        // Whether the SID check succeeds or fails, refill the listener so
-        // the next accept can proceed. Build the new instance BEFORE
-        // returning the AuthDenied error in the failure path.
-        let new = self
-            .next_listener()
-            .map_err(|e| IpcError::Internal(format!("next_listener: {e}")))?;
-        {
-            let mut guard = self
-                .listener
-                .lock()
-                .map_err(|e| IpcError::Internal(format!("listener lock poisoned: {e}")))?;
-            *guard = Some(new);
-        }
-
-        // Now decide success / fail based on the SID check.
-        let peer = peer_sid_result.map_err(|e| IpcError::Internal(format!("peer_sid_for: {e}")))?;
+        let peer = unsafe { peer_sid_for(raw) }
+            .map_err(|e| IpcError::Internal(format!("peer_sid_for: {e}")))?;
         if check_peer_sid(&peer, &self.allowed).is_err() {
             return Err(IpcError::AuthDenied);
         }
