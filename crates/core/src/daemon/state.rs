@@ -112,8 +112,7 @@ impl Daemon {
     ) -> Result<()> {
         use crate::daemon::handle::DaemonHandle;
         use crate::daemon::inbound::DaemonInbound;
-        use crate::daemon::ipc::server::{current_uid, serve, Server};
-        use crate::daemon::ipc::PeerId;
+        use crate::daemon::ipc::server::{serve, Server};
         use crate::delivery::hub::DeliveryHub;
         use crate::delivery::peer::InboundDispatch;
         use crate::storage::Pool;
@@ -282,7 +281,7 @@ impl Daemon {
 
         // Step 7: IPC server.
         let sock_path = config.ipc_socket_or_default()?;
-        let allowed: PeerId = current_uid();
+        let allowed = crate::daemon::ipc::current_peer_id();
         let ipc_server = Server::bind(&sock_path, allowed)?;
         let sock_path_copy = sock_path.clone();
 

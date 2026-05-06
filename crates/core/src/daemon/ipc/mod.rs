@@ -35,3 +35,14 @@ pub type IpcStream = tokio::net::windows::named_pipe::NamedPipeClient;
 pub type PeerId = u32;
 #[cfg(target_os = "windows")]
 pub type PeerId = Vec<u8>;
+
+/// Return the daemon's own `PeerId`. Platform-conditional: Unix returns
+/// the process's effective uid; Windows returns the user SID bytes.
+#[cfg(unix)]
+pub fn current_peer_id() -> PeerId {
+    server::current_uid()
+}
+#[cfg(target_os = "windows")]
+pub fn current_peer_id() -> PeerId {
+    server::current_sid()
+}
