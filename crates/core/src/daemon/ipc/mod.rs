@@ -20,12 +20,14 @@ pub use client::{IpcClient, IpcClientError};
 /// discovery file containing the named-pipe name.
 #[cfg(unix)]
 pub const ENDPOINT_FILENAME: &str = "ipc.sock";
+/// Discovery filename used by the Windows IPC client.
 #[cfg(target_os = "windows")]
 pub const ENDPOINT_FILENAME: &str = "ipc.endpoint";
 
 /// Client-side IPC stream type. Selected at compile time per platform.
 #[cfg(unix)]
 pub type IpcStream = tokio::net::UnixStream;
+/// Windows pipe-client stream type.
 #[cfg(target_os = "windows")]
 pub type IpcStream = tokio::net::windows::named_pipe::NamedPipeClient;
 
@@ -33,6 +35,7 @@ pub type IpcStream = tokio::net::windows::named_pipe::NamedPipeClient;
 /// Unix: numeric uid. Windows: raw SID bytes (variable length).
 #[cfg(unix)]
 pub type PeerId = u32;
+/// Windows SID bytes of the daemon's user.
 #[cfg(target_os = "windows")]
 pub type PeerId = Vec<u8>;
 
@@ -42,6 +45,7 @@ pub type PeerId = Vec<u8>;
 pub fn current_peer_id() -> PeerId {
     server::current_uid()
 }
+/// Return the daemon's own user SID on Windows.
 #[cfg(target_os = "windows")]
 pub fn current_peer_id() -> PeerId {
     server::current_sid()

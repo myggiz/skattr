@@ -144,6 +144,7 @@ impl OwnerOnlySa {
     }
 }
 
+/// Server bound to a Windows named pipe with an owner-SID-only DACL.
 pub struct Server {
     listener: std::sync::Mutex<Option<NamedPipeServer>>,
     discovery_path: PathBuf,
@@ -152,6 +153,8 @@ pub struct Server {
 }
 
 impl Server {
+    /// Bind a server to a fresh random named pipe, write its name to
+    /// `discovery_path`, and gate accept-time access with the owner SID `allowed`.
     pub fn bind(discovery_path: &Path, allowed: PeerId) -> Result<Self> {
         use rand::RngCore as _;
 
@@ -202,6 +205,7 @@ impl Server {
         })
     }
 
+    /// Path the discovery file is written to.
     pub fn path(&self) -> &Path {
         &self.discovery_path
     }
@@ -228,6 +232,8 @@ impl Server {
         Ok(listener)
     }
 
+    /// Accept a single client. Validates the connecting process's user SID against
+    /// the bind-time `allowed` value; rebuilds the listener for the next accept.
     pub async fn accept_one(&self) -> std::result::Result<NamedPipeServer, IpcError> {
         use std::os::windows::io::AsRawHandle;
 

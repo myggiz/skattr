@@ -18,6 +18,7 @@ use windows_sys::Win32::System::Pipes::WaitNamedPipeW;
 use super::{IpcClient, IpcClientError};
 
 impl IpcClient<NamedPipeClient> {
+    /// Connect to the daemon by reading the named-pipe name from the discovery file at `path`.
     pub async fn connect(path: &Path) -> std::result::Result<Self, IpcClientError> {
         // Step 1: read discovery file.
         let pipe_name = match std::fs::read_to_string(path) {
