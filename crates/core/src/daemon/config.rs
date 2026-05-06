@@ -130,9 +130,13 @@ impl Config {
         })
     }
 
-    /// Return the configured `ipc_socket` or a best-effort default
-    /// under `$XDG_RUNTIME_DIR/skattr/daemon.sock`, falling back to
-    /// `$TMPDIR/skattr/daemon.sock`, then `/tmp/skattr/daemon.sock`.
+    /// Return the configured `ipc_socket` or a platform-appropriate default.
+    ///
+    /// Unix: `$XDG_RUNTIME_DIR/skattr/ipc.sock`, falling back to
+    /// `$TMPDIR/skattr/ipc.sock`, then `/tmp/skattr/ipc.sock`.
+    /// Windows: `%APPDATA%\myggiz\skattr\ipc.endpoint` via
+    /// `directories::ProjectDirs`.
+    #[cfg(unix)]
     pub fn ipc_socket_or_default(&self) -> Result<std::path::PathBuf> {
         if let Some(p) = &self.ipc_socket {
             return Ok(p.clone());
@@ -141,7 +145,31 @@ impl Config {
             .map(std::path::PathBuf::from)
             .or_else(|| std::env::var_os("TMPDIR").map(std::path::PathBuf::from))
             .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
-        Ok(base.join("skattr").join("daemon.sock"))
+        Ok(base
+            .join("skattr")
+            .join(crate::daemon::ipc::ENDPOINT_FILENAME))
+    }
+
+    /// Return the configured `ipc_socket` or a platform-appropriate default.
+    ///
+    /// Unix: `$XDG_RUNTIME_DIR/skattr/ipc.sock`, falling back to
+    /// `$TMPDIR/skattr/ipc.sock`, then `/tmp/skattr/ipc.sock`.
+    /// Windows: `%APPDATA%\myggiz\skattr\ipc.endpoint` via
+    /// `directories::ProjectDirs`.
+    #[cfg(windows)]
+    pub fn ipc_socket_or_default(&self) -> Result<std::path::PathBuf> {
+        if let Some(p) = &self.ipc_socket {
+            return Ok(p.clone());
+        }
+        let dir = directories::ProjectDirs::from("net", "myggiz", "skattr")
+            .map(|p| p.data_dir().to_path_buf())
+            .ok_or_else(|| {
+                CoreError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "directories::ProjectDirs::from failed (no APPDATA?)",
+                ))
+            })?;
+        Ok(dir.join(crate::daemon::ipc::ENDPOINT_FILENAME))
     }
 
     /// Load a config with the standard precedence:
