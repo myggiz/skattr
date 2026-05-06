@@ -44,8 +44,10 @@ struct Cli {
     #[arg(long, value_name = "FILE", global = true)]
     passphrase_file: Option<PathBuf>,
 
-    /// Path to the daemon's IPC socket. Overrides $SKATTR_SOCKET and
-    /// the XDG default.
+    /// Path to the daemon's IPC endpoint. On Unix this is the AF_UNIX
+    /// socket file; on Windows this is the daemon's discovery file
+    /// (which contains the named-pipe name). Overrides $SKATTR_SOCKET
+    /// and the platform default.
     #[arg(long, global = true, value_name = "PATH")]
     socket: Option<PathBuf>,
 
@@ -178,7 +180,11 @@ enum Command {
     },
 }
 
-/// Resolve the IPC socket path with precedence flag > env > XDG default.
+/// Resolve the IPC endpoint path with precedence flag > env > default.
+///
+/// On Unix the path is the AF_UNIX socket file; on Windows it is the
+/// daemon's discovery file (containing the named-pipe name).
+#[cfg(unix)]
 fn resolve_socket_path(flag: Option<&std::path::Path>) -> PathBuf {
     if let Some(p) = flag {
         return p.to_path_buf();
@@ -190,7 +196,21 @@ fn resolve_socket_path(flag: Option<&std::path::Path>) -> PathBuf {
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("TMPDIR").map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("/tmp"));
-    base.join("skattr").join("daemon.sock")
+    base.join("skattr")
+        .join(skattr_core::daemon::ipc::ENDPOINT_FILENAME)
+}
+
+#[cfg(windows)]
+fn resolve_socket_path(flag: Option<&std::path::Path>) -> PathBuf {
+    if let Some(p) = flag {
+        return p.to_path_buf();
+    }
+    if let Some(env) = std::env::var_os("SKATTR_SOCKET") {
+        return PathBuf::from(env);
+    }
+    directories::ProjectDirs::from("net", "myggiz", "skattr")
+        .map(|p| p.data_dir().join(skattr_core::daemon::ipc::ENDPOINT_FILENAME))
+        .unwrap_or_else(|| PathBuf::from(skattr_core::daemon::ipc::ENDPOINT_FILENAME))
 }
 
 /// Connect or print a helpful error and exit with code 3. Returns a
@@ -965,7 +985,7 @@ async fn tail(
 }
 
 async fn resolve_optional_contact(
-    client: &mut skattr_core::daemon::IpcClient<tokio::net::UnixStream>,
+    client: &mut skattr_core::daemon::IpcClient<skattr_core::daemon::ipc::IpcStream>,
     prefix: Option<&str>,
 ) -> Result<Option<skattr_core::identity::PublicKey>> {
     use skattr_core::daemon::{Command as CoreCommand, CommandResult};
@@ -1319,7 +1339,6 @@ async fn export(
     use skattr_core::daemon::commands::CommandResult;
     use skattr_core::daemon::Command as CoreCommand;
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
 
     // Validate format.
     if format != "json" && format != "text" {
@@ -1346,10 +1365,21 @@ async fn export(
     };
 
     // Open output with O_CREAT|O_EXCL to refuse clobbering.
+    // On Unix, also set permissions to 0o600 (owner read+write only).
+    #[cfg(unix)]
+    let mut file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&output)
+            .map_err(|e| anyhow::anyhow!("open {}: {e}", output.display()))?
+    };
+    #[cfg(not(unix))]
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .mode(0o600)
         .open(&output)
         .map_err(|e| anyhow::anyhow!("open {}: {e}", output.display()))?;
 
@@ -1496,6 +1526,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     #[serial_test::serial(resolve_socket_path_env)]
     fn resolve_socket_path_prefers_flag_over_env() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1508,6 +1539,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     #[serial_test::serial(resolve_socket_path_env)]
     fn resolve_socket_path_env_fallback() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1522,6 +1554,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     #[serial_test::serial(resolve_socket_path_env)]
     fn resolve_socket_path_xdg_fallback() {
         std::env::remove_var("SKATTR_SOCKET");
@@ -1529,7 +1562,8 @@ mod tests {
         let got = resolve_socket_path(None);
         assert_eq!(
             got,
-            std::path::PathBuf::from("/custom/run/1000/skattr/daemon.sock")
+            std::path::PathBuf::from("/custom/run/1000/skattr")
+                .join(skattr_core::daemon::ipc::ENDPOINT_FILENAME)
         );
         std::env::remove_var("XDG_RUNTIME_DIR");
     }
