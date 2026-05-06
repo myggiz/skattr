@@ -32,6 +32,9 @@ pub enum MailboxError {
     /// I/O or runtime error not otherwise classified.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    /// Feature not available on this platform (cross-compile stub).
+    #[error("not supported on this platform: {0}")]
+    Unsupported(String),
 }
 
 /// Stable subsystem tag for log filters and metrics.
@@ -49,6 +52,8 @@ pub enum MailboxErrorKind {
     Config,
     /// [`MailboxError::Io`].
     Io,
+    /// [`MailboxError::Unsupported`].
+    Unsupported,
 }
 
 impl MailboxError {
@@ -62,6 +67,7 @@ impl MailboxError {
             MailboxError::Transport(_) => MailboxErrorKind::Transport,
             MailboxError::Config(_) => MailboxErrorKind::Config,
             MailboxError::Io(_) => MailboxErrorKind::Io,
+            MailboxError::Unsupported(_) => MailboxErrorKind::Unsupported,
         }
     }
 

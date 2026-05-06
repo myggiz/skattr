@@ -22,11 +22,12 @@ use tracing_subscriber::EnvFilter;
 use skattr_mailbox::{
     arti::{run_onion, DEFAULT_HS_NICKNAME},
     background::{spawn_challenge_sweep, spawn_expire_sweep, spawn_metrics_tick},
-    health,
     server::MailboxServer,
     store::Store,
     MailboxConfig,
 };
+#[cfg(unix)]
+use skattr_mailbox::health;
 
 /// Command-line arguments.
 #[derive(Debug, Parser)]
@@ -69,6 +70,7 @@ async fn main() -> Result<()> {
     let _chal = spawn_challenge_sweep(server.challenges(), cancel.clone());
     let _metrics = spawn_metrics_tick(store.clone(), cancel.clone());
 
+    #[cfg(unix)]
     let _health = health::spawn(
         cfg.server.resolved_health_socket(),
         store.clone(),
@@ -86,11 +88,14 @@ async fn main() -> Result<()> {
     .context("arti")?;
 
     // Notify systemd we're up (best-effort; ignore on non-systemd hosts).
+    // sd-notify uses Unix domain sockets; only available on Unix platforms.
+    #[cfg(unix)]
     let _ = sd_notify::notify(false, &[sd_notify::NotifyState::Ready]);
 
     tokio::signal::ctrl_c().await.ok();
     tracing::info!("shutdown signal received");
     cancel.cancel();
+    #[cfg(unix)]
     let _ = sd_notify::notify(false, &[sd_notify::NotifyState::Stopping]);
     Ok(())
 }

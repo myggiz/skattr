@@ -53,6 +53,9 @@ tor-cell = { workspace = true, optional = true }
 safelog = { workspace = true, optional = true }
 
 # sd-notify for the binary's systemd integration.
+# Unix-only: sd-notify uses unix socket / SOCK_DGRAM; it does not
+# compile on Windows and the mailbox server is Linux-only at runtime.
+[target.'cfg(unix)'.dependencies]
 sd-notify = { workspace = true, optional = true }
 
 [dev-dependencies]
@@ -63,8 +66,12 @@ rand_chacha = "0.3"
 
 [features]
 default = ["bin"]
-# Enabled by the binary; pulls Arti + sd-notify. Lib-only consumers
-# (tests, fuzz, soak) skip these and stay fast to compile.
+# Enabled by the binary; pulls Arti. Lib-only consumers (tests, fuzz,
+# soak) skip these and stay fast to compile.
+# sd-notify is Unix-only and activated separately via
+# [target.'cfg(unix)'.dependencies]; the bin feature wires it in on
+# Unix only via the dep:sd-notify reference below — Cargo silently
+# ignores feature deps that are not available for the current target.
 bin = ["dep:arti-client", "dep:tor-hsservice", "dep:tor-rtcompat", "dep:tor-cell", "dep:safelog", "dep:sd-notify"]
 
 [lints]

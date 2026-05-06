@@ -24,7 +24,34 @@ pub mod codec;
 pub mod config;
 pub mod dispatch;
 pub mod error;
+#[cfg(unix)]
 pub mod health;
+
+/// Health-check stub on non-Unix platforms.
+///
+/// The mailbox server is Linux/macOS-only at runtime; this module
+/// exists so the workspace cross-compiles cleanly to Windows targets.
+#[cfg(not(unix))]
+pub mod health {
+    use crate::error::MailboxError;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
+
+    /// Stub: real implementation lives behind `cfg(unix)` only.
+    ///
+    /// Always returns [`MailboxError::Unsupported`] because the Unix
+    /// domain socket health endpoint is not available on this platform.
+    pub async fn spawn(
+        _socket_path: PathBuf,
+        _store: Arc<crate::store::Store>,
+        _cancel: CancellationToken,
+    ) -> Result<tokio::task::JoinHandle<()>, MailboxError> {
+        Err(MailboxError::Unsupported(
+            "health socket requires a Unix platform".into(),
+        ))
+    }
+}
 pub(crate) mod migrations;
 pub mod policy;
 pub mod server;
