@@ -20,16 +20,131 @@ use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 // --- Win32 FFI ---
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
 use windows_sys::Win32::Security::{
-    CopySid, EqualSid, GetLengthSid, GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER,
+    AddAccessAllowedAce, CopySid, EqualSid, GetLengthSid, GetTokenInformation,
+    InitializeAcl, InitializeSecurityDescriptor, IsValidSecurityDescriptor,
+    SetSecurityDescriptorDacl, TokenUser, ACL, ACL_REVISION, SECURITY_ATTRIBUTES,
+    SECURITY_DESCRIPTOR, TOKEN_QUERY, TOKEN_USER,
 };
+use windows_sys::Win32::Storage::FileSystem::{FILE_GENERIC_READ, FILE_GENERIC_WRITE};
 use windows_sys::Win32::System::Pipes::GetNamedPipeClientProcessId;
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 
+/// Windows SDK constant: the only defined SECURITY_DESCRIPTOR revision.
+/// Lives in Win32_System_SystemServices (not an enabled feature); define here.
+const SECURITY_DESCRIPTOR_REVISION: u32 = 1;
+
 use crate::daemon::ipc::wire::IpcError;
 use crate::daemon::ipc::PeerId;
 use crate::error::Result;
+
+// ---------------------------------------------------------------------------
+// Owner-only security descriptor builder
+// ---------------------------------------------------------------------------
+
+/// Holds a `SECURITY_DESCRIPTOR` + DACL buffer + `SECURITY_ATTRIBUTES` alive
+/// together as a single heap-allocated unit.
+///
+/// Invariant: `sa.lpSecurityDescriptor` points at `sd`; `sd`'s DACL pointer
+/// points into `dacl_buf`. Neither field must be mutated after construction.
+/// `as_raw()` re-anchors `lpSecurityDescriptor` before returning so that
+/// moving `OwnerOnlySa` on the stack does not stale the pointer.
+struct OwnerOnlySa {
+    sd: Box<SECURITY_DESCRIPTOR>,
+    dacl_buf: Vec<u8>,
+    sa: SECURITY_ATTRIBUTES,
+}
+
+impl OwnerOnlySa {
+    /// Build a `SECURITY_ATTRIBUTES` that grants
+    /// `FILE_GENERIC_READ | FILE_GENERIC_WRITE` to `allowed_sid` and
+    /// nothing else (no NULL DACL, no default DACL, no inheritance).
+    fn new(allowed_sid: &[u8]) -> io::Result<Self> {
+        if allowed_sid.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "allowed_sid must not be empty",
+            ));
+        }
+
+        // ACL buffer layout (all sizes in bytes):
+        //   ACL header                         8
+        //   ACCESS_ALLOWED_ACE header          4
+        //   AccessMask (u32)                   4
+        //   SID (full byte slice)              sid_len
+        //   -------
+        //   sub-total                          16 + sid_len
+        // Round up to DWORD boundary.
+        let dacl_size = (16 + allowed_sid.len() + 3) & !3usize;
+        let mut dacl_buf = vec![0u8; dacl_size];
+
+        // SAFETY: `dacl_buf` is sized by the formula above; we never write
+        // past `dacl_size`. `sd` comes from a `Box`, so its heap address is
+        // stable and will not move even if `OwnerOnlySa` is moved.
+        unsafe {
+            let dacl_ptr = dacl_buf.as_mut_ptr() as *mut ACL;
+            if InitializeAcl(dacl_ptr, dacl_size as u32, ACL_REVISION) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let access = FILE_GENERIC_READ | FILE_GENERIC_WRITE;
+            if AddAccessAllowedAce(
+                dacl_ptr,
+                ACL_REVISION,
+                access,
+                allowed_sid.as_ptr() as *mut _,
+            ) == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+
+            let mut sd: Box<SECURITY_DESCRIPTOR> = Box::new(std::mem::zeroed());
+            if InitializeSecurityDescriptor(
+                (&mut *sd) as *mut SECURITY_DESCRIPTOR as *mut _,
+                SECURITY_DESCRIPTOR_REVISION,
+            ) == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            // Attach the DACL: present=TRUE, dacl=dacl_ptr, defaulted=FALSE.
+            if SetSecurityDescriptorDacl(
+                (&mut *sd) as *mut SECURITY_DESCRIPTOR as *mut _,
+                1,
+                dacl_ptr,
+                0,
+            ) == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            if IsValidSecurityDescriptor((&mut *sd) as *mut SECURITY_DESCRIPTOR as *mut _) == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "IsValidSecurityDescriptor returned FALSE",
+                ));
+            }
+
+            let sa = SECURITY_ATTRIBUTES {
+                nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+                lpSecurityDescriptor: (&mut *sd) as *mut SECURITY_DESCRIPTOR as *mut _,
+                bInheritHandle: 0,
+            };
+
+            Ok(Self { sd, dacl_buf, sa })
+        }
+    }
+
+    /// Return a raw pointer to the `SECURITY_ATTRIBUTES`.
+    ///
+    /// Re-anchors `lpSecurityDescriptor` each time so that the pointer
+    /// remains valid even if `self` has been moved since construction.
+    ///
+    /// SAFETY: the returned pointer is valid for as long as `self` lives.
+    fn as_raw(&mut self) -> *mut std::ffi::c_void {
+        self.sa.lpSecurityDescriptor =
+            (&mut *self.sd) as *mut SECURITY_DESCRIPTOR as *mut _;
+        &mut self.sa as *mut SECURITY_ATTRIBUTES as *mut _
+    }
+}
 
 pub struct Server {
     listener: NamedPipeServer,
@@ -39,8 +154,56 @@ pub struct Server {
 }
 
 impl Server {
-    pub fn bind(_discovery_path: &Path, _allowed: PeerId) -> Result<Self> {
-        todo!("Phase 2.H Task 10: Windows pipe bind")
+    pub fn bind(discovery_path: &Path, allowed: PeerId) -> Result<Self> {
+        use rand::RngCore as _;
+
+        if let Some(parent) = discovery_path.parent() {
+            std::fs::create_dir_all(parent).map_err(crate::error::CoreError::Io)?;
+        }
+        // Best-effort: remove any stale discovery file from a previous run.
+        let _ = std::fs::remove_file(discovery_path);
+
+        // 12 random bytes → 24 hex-char suffix, e.g. `\\.\pipe\skattr-a3f8…`
+        let mut entropy = [0u8; 12];
+        rand::rngs::OsRng.fill_bytes(&mut entropy);
+        let hex: String = entropy.iter().map(|b| format!("{b:02x}")).collect();
+        let pipe_name = format!(r"\\.\pipe\skattr-{hex}");
+
+        // Build a SECURITY_ATTRIBUTES with an owner-only DACL.
+        let mut sa = OwnerOnlySa::new(&allowed).map_err(|e| {
+            crate::error::CoreError::Io(io::Error::new(
+                io::ErrorKind::Other,
+                format!("OwnerOnlySa::new: {e}"),
+            ))
+        })?;
+
+        // SAFETY: `sa.as_raw()` returns a pointer into `sa`, which lives on
+        // this stack frame and therefore outlives the `create_with_security_attributes_raw`
+        // call. `pipe_name` is a valid Win32 named-pipe path.
+        let listener = unsafe {
+            ServerOptions::new()
+                .first_pipe_instance(true)
+                .reject_remote_clients(true)
+                .create_with_security_attributes_raw(&pipe_name, sa.as_raw())
+        }
+        .map_err(crate::error::CoreError::Io)?;
+
+        // Atomic write: write to a sibling `.tmp` file then rename into place.
+        // `OsString::push` appends without replacing any extension component.
+        let mut tmp_os = discovery_path.as_os_str().to_os_string();
+        tmp_os.push(".tmp");
+        let tmp: PathBuf = tmp_os.into();
+        std::fs::write(&tmp, format!("{pipe_name}\n"))
+            .map_err(crate::error::CoreError::Io)?;
+        std::fs::rename(&tmp, discovery_path)
+            .map_err(crate::error::CoreError::Io)?;
+
+        Ok(Self {
+            listener,
+            discovery_path: discovery_path.to_path_buf(),
+            pipe_name,
+            allowed,
+        })
     }
 
     pub fn path(&self) -> &Path {
@@ -254,5 +417,39 @@ mod tests {
     fn check_peer_sid_rejects_empty_peer() {
         let me = current_sid();
         assert!(check_peer_sid(&[], &me).is_err());
+    }
+
+    #[tokio::test]
+    async fn bind_writes_discovery_file_with_pipe_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let endpoint = tmp.path().join("ipc.endpoint");
+        let allowed = current_sid();
+        let server = Server::bind(&endpoint, allowed).unwrap();
+        let written = std::fs::read_to_string(&endpoint).unwrap();
+        let trimmed = written.trim();
+        assert!(
+            trimmed.starts_with(r"\\.\pipe\skattr-"),
+            "unexpected pipe name: {trimmed}"
+        );
+        // Suffix is exactly 24 hex chars after the prefix.
+        let suffix = trimmed.trim_start_matches(r"\\.\pipe\skattr-");
+        assert_eq!(suffix.len(), 24, "suffix must be 24 hex chars");
+        assert!(
+            suffix.chars().all(|c| c.is_ascii_hexdigit()),
+            "suffix must be hex"
+        );
+        drop(server);
+        assert!(!endpoint.exists(), "discovery file removed on drop");
+    }
+
+    #[tokio::test]
+    async fn bind_unlinks_stale_discovery_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let endpoint = tmp.path().join("ipc.endpoint");
+        std::fs::write(&endpoint, r"\\.\pipe\skattr-stale").unwrap();
+        let server = Server::bind(&endpoint, current_sid()).unwrap();
+        let written = std::fs::read_to_string(&endpoint).unwrap();
+        assert!(!written.contains("stale"));
+        drop(server);
     }
 }
