@@ -20,9 +20,12 @@ use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 // --- Win32 FFI ---
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
 use windows_sys::Win32::Security::{
-    CopySid, GetLengthSid, GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER,
+    CopySid, EqualSid, GetLengthSid, GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER,
 };
-use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+use windows_sys::Win32::System::Pipes::GetNamedPipeClientProcessId;
+use windows_sys::Win32::System::Threading::{
+    GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+};
 
 use crate::daemon::ipc::wire::IpcError;
 use crate::daemon::ipc::PeerId;
@@ -118,8 +121,94 @@ pub(crate) fn current_sid() -> PeerId {
     }
 }
 
-pub(crate) fn check_peer_sid(_peer: &[u8], _expected: &[u8]) -> io::Result<()> {
-    todo!("Phase 2.H Task 9: EqualSid")
+pub(crate) fn check_peer_sid(peer: &[u8], expected: &[u8]) -> io::Result<()> {
+    if peer.is_empty() || expected.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "empty SID",
+        ));
+    }
+    // SAFETY: EqualSid takes two PSIDs (raw byte pointers). Both inputs
+    // are non-empty Vec<u8> slices owned by the caller; their pointers
+    // are valid for the call.
+    let eq = unsafe {
+        EqualSid(
+            peer.as_ptr() as *mut _,
+            expected.as_ptr() as *mut _,
+        )
+    };
+    if eq != 0 {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "peer SID != expected",
+        ))
+    }
+}
+
+/// Extract the SID of the process on the other end of `pipe_handle`.
+/// `pipe_handle` must be a connected NamedPipeServer raw handle.
+///
+/// SAFETY: caller must ensure `pipe_handle` is a live, connected named
+/// pipe server handle. The function does not close it.
+pub(crate) unsafe fn peer_sid_for(pipe_handle: HANDLE) -> io::Result<Vec<u8>> {
+    let mut pid = 0u32;
+    if GetNamedPipeClientProcessId(pipe_handle, &mut pid) == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+    if process.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+
+    let mut token: HANDLE = std::ptr::null_mut();
+    if OpenProcessToken(process, TOKEN_QUERY, &mut token) == 0 {
+        let err = io::Error::last_os_error();
+        CloseHandle(process);
+        return Err(err);
+    }
+
+    let mut len = 0u32;
+    GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut len);
+    if len == 0 {
+        CloseHandle(token);
+        CloseHandle(process);
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            "TOKEN_USER probe failed",
+        ));
+    }
+    let mut buf = vec![0u8; len as usize];
+    if GetTokenInformation(token, TokenUser, buf.as_mut_ptr() as *mut _, len, &mut len) == 0 {
+        let err = io::Error::last_os_error();
+        CloseHandle(token);
+        CloseHandle(process);
+        return Err(err);
+    }
+
+    let token_user = buf.as_ptr() as *const TOKEN_USER;
+    let sid_ptr = (*token_user).User.Sid;
+    if sid_ptr.is_null() {
+        CloseHandle(token);
+        CloseHandle(process);
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            "TOKEN_USER.Sid is null",
+        ));
+    }
+    let sid_len = GetLengthSid(sid_ptr);
+    let mut sid_bytes = vec![0u8; sid_len as usize];
+    if CopySid(sid_len, sid_bytes.as_mut_ptr() as *mut _, sid_ptr) == 0 {
+        let err = io::Error::last_os_error();
+        CloseHandle(token);
+        CloseHandle(process);
+        return Err(err);
+    }
+
+    CloseHandle(token);
+    CloseHandle(process);
+    Ok(sid_bytes)
 }
 
 #[cfg(test)]
@@ -142,5 +231,28 @@ mod tests {
             8 + 4 * sub_authority_count,
             "SID length must equal 8 + 4 * sub_authority_count"
         );
+    }
+
+    #[test]
+    fn check_peer_sid_accepts_matching_sid() {
+        let sid = current_sid();
+        assert!(!sid.is_empty());
+        assert!(check_peer_sid(&sid, &sid).is_ok());
+    }
+
+    #[test]
+    fn check_peer_sid_rejects_mismatched_sid() {
+        let a = current_sid();
+        let mut b = a.clone();
+        // Flip the last sub-authority byte to invalidate the SID match.
+        let last = b.len() - 1;
+        b[last] = b[last].wrapping_add(1);
+        assert!(check_peer_sid(&a, &b).is_err());
+    }
+
+    #[test]
+    fn check_peer_sid_rejects_empty_peer() {
+        let me = current_sid();
+        assert!(check_peer_sid(&[], &me).is_err());
     }
 }
