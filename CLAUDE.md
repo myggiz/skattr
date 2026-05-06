@@ -13,8 +13,7 @@ ContactCard rotation) is complete (merged 2026-05-01); Phase 2.C
 2026-05-03); Phase 2.F (settings & history) is complete (merged
 2026-05-04); Phase 2.G (packaging & distribution) is complete
 (merged 2026-05-04) on Linux + macOS; Phase 2.H (Windows
-port) is the remaining Phase 2 sub-project before the umbrella
-exit criteria are fully met.** Phase 0 shipped all five workstreams (0.A scaffold,
+port) is complete (merged 2026-05-06); Phase 2 is fully closed.** Phase 0 shipped all five workstreams (0.A scaffold,
 0.B identity & crypto, 0.C Arti integration, 0.D storage layer, 0.E
 documentation baseline). Phase 1.A added `transport::frame::FrameCodec`.
 Phase 1.B added `transport::noise::handshake_{initiator,responder}`
@@ -276,12 +275,35 @@ secrets `MINISIGN_SECRET_KEY` + `MINISIGN_PASSWORD`; the
 maintainer-only procedure is documented at
 `docs/install/README-MAINTAINER-MINISIGN.md`.
 
+Phase 2.H (Windows port) merged at the head of `phase-2h-windows-port`.
+`crates/core/src/daemon/ipc/{server,client}` now have per-platform
+submodules: `unix.rs` (AF_UNIX, unchanged) and `windows.rs` (Tokio
+Named Pipes + owner-SID DACL + post-accept SID equality check).
+New cross-platform aliases in `core::daemon::ipc::mod.rs`:
+`IpcStream` (UnixStream / NamedPipeClient), `PeerId` (u32 / Vec<u8>
+SID), `ENDPOINT_FILENAME` (`ipc.sock` / `ipc.endpoint`). Discovery
+file at `<data_dir>\ipc.endpoint` carries the random per-daemon
+pipe name `\\.\pipe\skattr-<24-hex>`. CI's `windows-latest` matrix
+entry is now non-optional: `cargo test --workspace --exclude
+skattr-ui --features test-harness` and `cargo clippy --workspace
+--exclude skattr-ui --all-targets --all-features` both run on
+`windows-latest`. The `release.yml` matrix produces a `.msi`
+artifact via Tauri's WiX template; the smoke step installs via
+`msiexec /qn` and runs `skattr-ui --smoke-test`. New install doc
+at `docs/install/windows.md`. Workspace `unsafe_code = "deny"`
+(was `"forbid"`) so the single Windows-FFI module
+(`crates/core/src/daemon/ipc/server/windows.rs`) can opt in with
+`#![allow(unsafe_code)]`. Wire-format-NEUTRAL — no `Command` /
+`CommandResult` / `Event` variant additions. Phase 2 is now fully
+closed; v0.2 can drop the "Windows deferred" disclaimer.
+
 Phase 1 is complete (1.H merged 2026-04-24); Phase 2.A (mailbox
 server) merged at the head of `phase-2a-mailbox-server`; Phase 2.B
 is complete (merged 2026-05-01); Phase 2.C is complete (merged
 2026-05-02); Phase 2.D is complete (merged 2026-05-02); Phase 2.E
 is complete (merged 2026-05-03); Phase 2.F is complete (merged
-2026-05-04). The next workstream is Phase 2.G (packaging) — see
+2026-05-04); Phase 2.G is complete (merged 2026-05-04); Phase 2.H
+is complete (merged 2026-05-06); Phase 2 is fully closed. See
 `docs/superpowers/specs/2026-04-26-phase-2-ui-decomposition.md`
 for the Phase 2 decomposition,
 `docs/superpowers/specs/2026-05-02-phase-2d-conversation-view-design.md`
@@ -396,12 +418,10 @@ cargo run -p cli -- add <link>
 cargo run -p cli -- send <contact> <text>
 ```
 
-CI runs fmt + clippy + test on `ubuntu-latest` and `macos-latest`, plus
-a dedicated `ui` job on `ubuntu-latest` for the Tauri 2 + SvelteKit
-crate. Windows is not in the matrix today: the daemon IPC stack is
-hard-coded to AF_UNIX (UnixListener, peer_cred, mode bits) and would
-need a Named-Pipes + DACL port before it can compile, let alone run,
-on Windows. Revisit when Windows becomes a supported runtime target.
+CI runs fmt + clippy + test on `ubuntu-latest`, `macos-latest`, and
+`windows-latest`, plus a dedicated `ui` job on `ubuntu-latest` for
+the Tauri 2 + SvelteKit crate. macOS x86_64 is still deferred —
+`macos-latest` is Apple Silicon only.
 
 ## When extending the design
 

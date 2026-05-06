@@ -4,6 +4,47 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] - Phase 2.H (Windows port)
+
+### Added
+- Windows support for the daemon IPC layer via Tokio Named Pipes.
+- Per-platform submodules under `core::daemon::ipc::server` and
+  `core::daemon::ipc::client`.
+- `IpcStream`, `PeerId`, and `ENDPOINT_FILENAME` cross-platform
+  aliases in `core::daemon::ipc::mod.rs`.
+- `current_peer_id()` public helper that resolves to `current_uid`
+  (Unix) or `current_sid` (Windows).
+- Owner-SID-only DACL on the Windows Named Pipe + post-accept SID
+  equality check (mirrors Unix's 0600 mode + peer_cred pattern).
+- `windows-sys = "0.59"` dependency for raw Win32 SID and
+  SECURITY_DESCRIPTOR FFI.
+- `windows-latest` runner in both `ci.yml` (test + clippy) and
+  `release.yml` (build + smoke).
+- `.msi` bundle production via Tauri WiX template; `msiexec /qn`
+  smoke install in CI.
+- `docs/install/windows.md` with download → verify → install →
+  first-run + SmartScreen walkthrough.
+
+### Changed
+- `Server::bind`'s `allowed_uid: u32` → `allowed: PeerId`.
+- CLI `--socket` flag and `$SKATTR_SOCKET` env var docs note that
+  on Windows the path points to the daemon's discovery file.
+- CLI's default IPC endpoint filename changes from `daemon.sock`
+  to the platform-specific `ENDPOINT_FILENAME` (`ipc.sock` on Unix,
+  `ipc.endpoint` on Windows). Users with `--socket=/run/user/1000/skattr/daemon.sock`
+  hard-coded must update.
+- Workspace `unsafe_code` lint downgraded from `"forbid"` to
+  `"deny"` so the single Windows-FFI module can carry an explicit
+  `#![allow(unsafe_code)]`. All other crates and modules still
+  reject unsafe code at compile time.
+- `crates/mailbox/src/health.rs` is `cfg(unix)`-gated; the mailbox
+  is not shipped on Windows.
+
+### Deferred to Phase 5
+- Authenticode code-signing (and macOS Developer ID + notarisation).
+- Tauri auto-updater enablement.
+- macOS Intel matrix entry.
+
 ## [v0.1.0] — 2026-05-04
 
 ### Added
