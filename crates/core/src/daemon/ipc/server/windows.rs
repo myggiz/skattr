@@ -20,10 +20,9 @@ use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 // --- Win32 FFI ---
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
 use windows_sys::Win32::Security::{
-    AddAccessAllowedAce, CopySid, EqualSid, GetLengthSid, GetTokenInformation,
-    InitializeAcl, InitializeSecurityDescriptor, IsValidSecurityDescriptor,
-    SetSecurityDescriptorDacl, TokenUser, ACL, ACL_REVISION, SECURITY_ATTRIBUTES,
-    SECURITY_DESCRIPTOR, TOKEN_QUERY, TOKEN_USER,
+    AddAccessAllowedAce, CopySid, EqualSid, GetLengthSid, GetTokenInformation, InitializeAcl,
+    InitializeSecurityDescriptor, IsValidSecurityDescriptor, SetSecurityDescriptorDacl, TokenUser,
+    ACL, ACL_REVISION, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR, TOKEN_QUERY, TOKEN_USER,
 };
 use windows_sys::Win32::Storage::FileSystem::{FILE_GENERIC_READ, FILE_GENERIC_WRITE};
 use windows_sys::Win32::System::Pipes::GetNamedPipeClientProcessId;
@@ -140,8 +139,7 @@ impl OwnerOnlySa {
     ///
     /// SAFETY: the returned pointer is valid for as long as `self` lives.
     fn as_raw(&mut self) -> *mut std::ffi::c_void {
-        self.sa.lpSecurityDescriptor =
-            (&mut *self.sd) as *mut SECURITY_DESCRIPTOR as *mut _;
+        self.sa.lpSecurityDescriptor = (&mut *self.sd) as *mut SECURITY_DESCRIPTOR as *mut _;
         &mut self.sa as *mut SECURITY_ATTRIBUTES as *mut _
     }
 }
@@ -193,10 +191,8 @@ impl Server {
         let mut tmp_os = discovery_path.as_os_str().to_os_string();
         tmp_os.push(".tmp");
         let tmp: PathBuf = tmp_os.into();
-        std::fs::write(&tmp, format!("{pipe_name}\n"))
-            .map_err(crate::error::CoreError::Io)?;
-        std::fs::rename(&tmp, discovery_path)
-            .map_err(crate::error::CoreError::Io)?;
+        std::fs::write(&tmp, format!("{pipe_name}\n")).map_err(crate::error::CoreError::Io)?;
+        std::fs::rename(&tmp, discovery_path).map_err(crate::error::CoreError::Io)?;
 
         Ok(Self {
             listener: std::sync::Mutex::new(Some(listener)),
@@ -254,8 +250,7 @@ impl Server {
         // Capture the SID of the connecting client.
         // SAFETY: `as_raw_handle` returns a valid pipe handle for the
         // lifetime of `listener`. `peer_sid_for` does not close it.
-        let raw =
-            AsRawHandle::as_raw_handle(&listener) as windows_sys::Win32::Foundation::HANDLE;
+        let raw = AsRawHandle::as_raw_handle(&listener) as windows_sys::Win32::Foundation::HANDLE;
         let peer_sid_result = unsafe { peer_sid_for(raw) };
 
         // Whether the SID check succeeds or fails, refill the listener so
@@ -273,8 +268,7 @@ impl Server {
         }
 
         // Now decide success / fail based on the SID check.
-        let peer =
-            peer_sid_result.map_err(|e| IpcError::Internal(format!("peer_sid_for: {e}")))?;
+        let peer = peer_sid_result.map_err(|e| IpcError::Internal(format!("peer_sid_for: {e}")))?;
         if check_peer_sid(&peer, &self.allowed).is_err() {
             return Err(IpcError::AuthDenied);
         }
@@ -316,19 +310,9 @@ pub(crate) fn current_sid() -> PeerId {
         }
 
         let mut buf = vec![0u8; len as usize];
-        if GetTokenInformation(
-            token,
-            TokenUser,
-            buf.as_mut_ptr() as *mut _,
-            len,
-            &mut len,
-        ) == 0
-        {
+        if GetTokenInformation(token, TokenUser, buf.as_mut_ptr() as *mut _, len, &mut len) == 0 {
             CloseHandle(token);
-            tracing::error!(
-                "GetTokenInformation failed: {}",
-                io::Error::last_os_error()
-            );
+            tracing::error!("GetTokenInformation failed: {}", io::Error::last_os_error());
             return Vec::new();
         }
 
@@ -354,20 +338,12 @@ pub(crate) fn current_sid() -> PeerId {
 
 pub(crate) fn check_peer_sid(peer: &[u8], expected: &[u8]) -> io::Result<()> {
     if peer.is_empty() || expected.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "empty SID",
-        ));
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "empty SID"));
     }
     // SAFETY: EqualSid takes two PSIDs (raw byte pointers). Both inputs
     // are non-empty Vec<u8> slices owned by the caller; their pointers
     // are valid for the call.
-    let eq = unsafe {
-        EqualSid(
-            peer.as_ptr() as *mut _,
-            expected.as_ptr() as *mut _,
-        )
-    };
+    let eq = unsafe { EqualSid(peer.as_ptr() as *mut _, expected.as_ptr() as *mut _) };
     if eq != 0 {
         Ok(())
     } else {
@@ -453,7 +429,11 @@ mod tests {
         // SID layout: revision (1) + sub_authority_count (1) + identifier_authority (6) +
         // sub_authorities (4 * count). Minimum well-formed length is 8 + 4 = 12 bytes
         // for a single-sub-authority SID.
-        assert!(sid.len() >= 12, "current_sid too short: {} bytes", sid.len());
+        assert!(
+            sid.len() >= 12,
+            "current_sid too short: {} bytes",
+            sid.len()
+        );
         // Revision byte must be 1 (Microsoft's only defined value).
         assert_eq!(sid[0], 1, "SID revision must be 1");
         let sub_authority_count = sid[1] as usize;

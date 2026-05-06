@@ -209,7 +209,10 @@ fn resolve_socket_path(flag: Option<&std::path::Path>) -> PathBuf {
         return PathBuf::from(env);
     }
     directories::ProjectDirs::from("net", "myggiz", "skattr")
-        .map(|p| p.data_dir().join(skattr_core::daemon::ipc::ENDPOINT_FILENAME))
+        .map(|p| {
+            p.data_dir()
+                .join(skattr_core::daemon::ipc::ENDPOINT_FILENAME)
+        })
         .unwrap_or_else(|| PathBuf::from(skattr_core::daemon::ipc::ENDPOINT_FILENAME))
 }
 

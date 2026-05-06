@@ -74,7 +74,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let missing = tmp.path().join("no-such-endpoint");
         let err = IpcClient::connect(&missing).await.unwrap_err();
-        assert!(matches!(err, IpcClientError::DaemonNotRunning), "got {err:?}");
+        assert!(
+            matches!(err, IpcClientError::DaemonNotRunning),
+            "got {err:?}"
+        );
     }
 
     #[tokio::test]
@@ -83,6 +86,9 @@ mod tests {
         let endpoint = tmp.path().join("ipc.endpoint");
         std::fs::write(&endpoint, "\\\\.\\pipe\\skattr-not-actually-bound\n").unwrap();
         let err = IpcClient::connect(&endpoint).await.unwrap_err();
-        assert!(matches!(err, IpcClientError::DaemonNotRunning), "got {err:?}");
+        assert!(
+            matches!(err, IpcClientError::DaemonNotRunning),
+            "got {err:?}"
+        );
     }
 }

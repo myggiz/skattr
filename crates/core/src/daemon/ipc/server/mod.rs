@@ -20,16 +20,16 @@ use crate::daemon::ipc::wire::{EventFilter, IpcError, IpcRequest, IpcResponse};
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
-pub use unix::Server;
-#[cfg(unix)]
 pub(crate) use unix::current_uid;
+#[cfg(unix)]
+pub use unix::Server;
 
 #[cfg(target_os = "windows")]
 mod windows;
 #[cfg(target_os = "windows")]
-pub use windows::Server;
-#[cfg(target_os = "windows")]
 pub(crate) use windows::current_sid;
+#[cfg(target_os = "windows")]
+pub use windows::Server;
 
 /// Execute one `Command` and return its `CommandResult` or a typed
 /// `IpcError`. Decouples the per-connection handler from the concrete

@@ -19,6 +19,8 @@ use clap::Parser;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
+#[cfg(unix)]
+use skattr_mailbox::health;
 use skattr_mailbox::{
     arti::{run_onion, DEFAULT_HS_NICKNAME},
     background::{spawn_challenge_sweep, spawn_expire_sweep, spawn_metrics_tick},
@@ -26,8 +28,6 @@ use skattr_mailbox::{
     store::Store,
     MailboxConfig,
 };
-#[cfg(unix)]
-use skattr_mailbox::health;
 
 /// Command-line arguments.
 #[derive(Debug, Parser)]
