@@ -164,8 +164,7 @@ impl Config {
         let dir = directories::ProjectDirs::from("net", "myggiz", "skattr")
             .map(|p| p.data_dir().to_path_buf())
             .ok_or_else(|| {
-                CoreError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
+                CoreError::Io(std::io::Error::other(
                     "directories::ProjectDirs::from failed (no APPDATA?)",
                 ))
             })?;

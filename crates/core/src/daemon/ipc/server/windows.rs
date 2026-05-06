@@ -116,10 +116,7 @@ impl OwnerOnlySa {
                 return Err(io::Error::last_os_error());
             }
             if IsValidSecurityDescriptor((&mut *sd) as *mut SECURITY_DESCRIPTOR as *mut _) == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    "IsValidSecurityDescriptor returned FALSE",
-                ));
+                return Err(io::Error::other("IsValidSecurityDescriptor returned FALSE"));
             }
 
             let sa = SECURITY_ATTRIBUTES {
@@ -172,10 +169,7 @@ impl Server {
 
         // Build a SECURITY_ATTRIBUTES with an owner-only DACL.
         let mut sa = OwnerOnlySa::new(&allowed).map_err(|e| {
-            crate::error::CoreError::Io(io::Error::new(
-                io::ErrorKind::Other,
-                format!("OwnerOnlySa::new: {e}"),
-            ))
+            crate::error::CoreError::Io(io::Error::other(format!("OwnerOnlySa::new: {e}")))
         })?;
 
         // SAFETY: `sa.as_raw()` returns a pointer into `sa`, which lives on
@@ -219,7 +213,7 @@ impl Server {
     /// `ERROR_ACCESS_DENIED`.
     fn next_listener(&self) -> io::Result<NamedPipeServer> {
         let mut sa = OwnerOnlySa::new(&self.allowed)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("OwnerOnlySa: {e}")))?;
+            .map_err(|e| io::Error::other(format!("OwnerOnlySa: {e}")))?;
         // SAFETY: `pipe_name` is stable for the lifetime of `Server`;
         // `sa.as_raw()` returns a pointer into `sa` which lives until the
         // end of this function (after `create_with_security_attributes_raw`
@@ -387,10 +381,7 @@ pub(crate) unsafe fn peer_sid_for(pipe_handle: HANDLE) -> io::Result<Vec<u8>> {
     if len == 0 {
         CloseHandle(token);
         CloseHandle(process);
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            "TOKEN_USER probe failed",
-        ));
+        return Err(io::Error::other("TOKEN_USER probe failed"));
     }
     let mut buf = vec![0u8; len as usize];
     if GetTokenInformation(token, TokenUser, buf.as_mut_ptr() as *mut _, len, &mut len) == 0 {
@@ -405,10 +396,7 @@ pub(crate) unsafe fn peer_sid_for(pipe_handle: HANDLE) -> io::Result<Vec<u8>> {
     if sid_ptr.is_null() {
         CloseHandle(token);
         CloseHandle(process);
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            "TOKEN_USER.Sid is null",
-        ));
+        return Err(io::Error::other("TOKEN_USER.Sid is null"));
     }
     let sid_len = GetLengthSid(sid_ptr);
     let mut sid_bytes = vec![0u8; sid_len as usize];
@@ -532,9 +520,14 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let endpoint = tmp.path().join("ipc.endpoint");
-        // Build a "wrong" expected SID: zeroed bytes, same length as our real SID.
+        // Build a "wrong" SID by mutating the last sub-authority byte
+        // of the real SID. This keeps the SID structurally valid (so
+        // AddAccessAllowedAce accepts it at bind time) but makes
+        // EqualSid reject it at the post-accept check — exercising
+        // the exact mismatch path we want to test.
         let mut wrong = current_sid();
-        wrong.iter_mut().for_each(|b| *b = 0);
+        let last = wrong.len() - 1;
+        wrong[last] = wrong[last].wrapping_add(1);
         let server = std::sync::Arc::new(Server::bind(&endpoint, wrong).unwrap());
         let pipe_name = server.pipe_name.clone();
         let server_for_accept = std::sync::Arc::clone(&server);
