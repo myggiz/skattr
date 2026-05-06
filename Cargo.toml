@@ -18,7 +18,12 @@ repository = "https://github.com/myggiz/skattr"
 homepage = "https://skattr.org"
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+# Unsafe code is forbidden across the workspace. The sole exception is
+# `crates/core/src/daemon/ipc/server/windows.rs`, which must call Win32 FFI
+# to retrieve the process user SID. That module carries `#![allow(unsafe_code)]`
+# to make the exception explicit. We use "deny" here (not "forbid") so that
+# the one Windows-FFI module can locally opt in with `#![allow(unsafe_code)]`.
+unsafe_code = "deny"
 missing_docs = "warn"
 # Phase 0 scaffolding: most module implementations are `todo!()` stubs, so
 # `pub(crate)` items and re-exports are legitimately "dead" until Phase 1

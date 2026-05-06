@@ -26,7 +26,9 @@
 //! else is `pub(crate)` to keep the surface small and auditable. See
 //! `ARCHITECTURE.md` at the workspace root for the full rationale.
 
-#![forbid(unsafe_code)]
+// unsafe_code is denied workspace-wide; the one exception is the
+// Windows IPC module, which carries its own `#![allow(unsafe_code)]`.
+#![deny(unsafe_code)]
 #![warn(missing_docs)]
 #![warn(rust_2018_idioms)]
 
