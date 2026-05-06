@@ -147,7 +147,7 @@ impl OwnerOnlySa {
 }
 
 pub struct Server {
-    listener: NamedPipeServer,
+    listener: std::sync::Mutex<Option<NamedPipeServer>>,
     discovery_path: PathBuf,
     pipe_name: String,
     allowed: PeerId,
@@ -199,7 +199,7 @@ impl Server {
             .map_err(crate::error::CoreError::Io)?;
 
         Ok(Self {
-            listener,
+            listener: std::sync::Mutex::new(Some(listener)),
             discovery_path: discovery_path.to_path_buf(),
             pipe_name,
             allowed,
@@ -210,8 +210,76 @@ impl Server {
         &self.discovery_path
     }
 
+    /// Create a fresh `NamedPipeServer` for the same pipe name, ready to
+    /// accept the *next* client connection.
+    ///
+    /// Note: `.first_pipe_instance(true)` is intentionally omitted here —
+    /// that flag is only valid for the very first instance; setting it on
+    /// subsequent instances causes `CreateNamedPipeW` to return
+    /// `ERROR_ACCESS_DENIED`.
+    fn next_listener(&self) -> io::Result<NamedPipeServer> {
+        let mut sa = OwnerOnlySa::new(&self.allowed)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("OwnerOnlySa: {e}")))?;
+        // SAFETY: `pipe_name` is stable for the lifetime of `Server`;
+        // `sa.as_raw()` returns a pointer into `sa` which lives until the
+        // end of this function (after `create_with_security_attributes_raw`
+        // returns and the result is bound).
+        let listener = unsafe {
+            ServerOptions::new()
+                .reject_remote_clients(true)
+                .create_with_security_attributes_raw(&self.pipe_name, sa.as_raw() as *mut _)
+        }?;
+        Ok(listener)
+    }
+
     pub async fn accept_one(&self) -> std::result::Result<NamedPipeServer, IpcError> {
-        todo!("Phase 2.H Task 11: Windows accept + post-accept SID check")
+        use std::os::windows::io::AsRawHandle;
+
+        // Take the current listener out of the slot; refill afterwards.
+        let listener = {
+            let mut guard = self
+                .listener
+                .lock()
+                .map_err(|e| IpcError::Internal(format!("listener lock poisoned: {e}")))?;
+            guard
+                .take()
+                .ok_or_else(|| IpcError::Internal("accept_one called concurrently".into()))?
+        };
+
+        listener
+            .connect()
+            .await
+            .map_err(|e| IpcError::Internal(format!("connect: {e}")))?;
+
+        // Capture the SID of the connecting client.
+        // SAFETY: `as_raw_handle` returns a valid pipe handle for the
+        // lifetime of `listener`. `peer_sid_for` does not close it.
+        let raw =
+            AsRawHandle::as_raw_handle(&listener) as windows_sys::Win32::Foundation::HANDLE;
+        let peer_sid_result = unsafe { peer_sid_for(raw) };
+
+        // Whether the SID check succeeds or fails, refill the listener so
+        // the next accept can proceed. Build the new instance BEFORE
+        // returning the AuthDenied error in the failure path.
+        let new = self
+            .next_listener()
+            .map_err(|e| IpcError::Internal(format!("next_listener: {e}")))?;
+        {
+            let mut guard = self
+                .listener
+                .lock()
+                .map_err(|e| IpcError::Internal(format!("listener lock poisoned: {e}")))?;
+            *guard = Some(new);
+        }
+
+        // Now decide success / fail based on the SID check.
+        let peer =
+            peer_sid_result.map_err(|e| IpcError::Internal(format!("peer_sid_for: {e}")))?;
+        if check_peer_sid(&peer, &self.allowed).is_err() {
+            return Err(IpcError::AuthDenied);
+        }
+
+        Ok(listener)
     }
 }
 
@@ -451,5 +519,45 @@ mod tests {
         let written = std::fs::read_to_string(&endpoint).unwrap();
         assert!(!written.contains("stale"));
         drop(server);
+    }
+
+    #[tokio::test]
+    async fn accept_admits_matching_sid() {
+        use tokio::net::windows::named_pipe::ClientOptions;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let endpoint = tmp.path().join("ipc.endpoint");
+        let server = std::sync::Arc::new(Server::bind(&endpoint, current_sid()).unwrap());
+        let pipe_name = server.pipe_name.clone();
+        let server_for_accept = std::sync::Arc::clone(&server);
+        let accept = tokio::spawn(async move { server_for_accept.accept_one().await });
+
+        // Small spin to let the accept_one task register before connecting.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let _client = ClientOptions::new().open(&pipe_name).unwrap();
+
+        let res = accept.await.unwrap();
+        assert!(res.is_ok(), "expected Ok, got {res:?}");
+    }
+
+    #[tokio::test]
+    async fn accept_rejects_mismatched_sid() {
+        use tokio::net::windows::named_pipe::ClientOptions;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let endpoint = tmp.path().join("ipc.endpoint");
+        // Build a "wrong" expected SID: zeroed bytes, same length as our real SID.
+        let mut wrong = current_sid();
+        wrong.iter_mut().for_each(|b| *b = 0);
+        let server = std::sync::Arc::new(Server::bind(&endpoint, wrong).unwrap());
+        let pipe_name = server.pipe_name.clone();
+        let server_for_accept = std::sync::Arc::clone(&server);
+        let accept = tokio::spawn(async move { server_for_accept.accept_one().await });
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let _client = ClientOptions::new().open(&pipe_name).unwrap();
+
+        let res = accept.await.unwrap();
+        assert!(matches!(res, Err(IpcError::AuthDenied)), "got {res:?}");
     }
 }
