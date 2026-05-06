@@ -24,9 +24,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Phase 2.G ships Linux + macOS only.
-        # Windows is carved out to Phase 2.H (see spec).
-        os: [ubuntu-latest, macos-latest]
+        # Phase 2.H adds windows-latest (Named Pipes + WiX .msi).
+        os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -107,8 +106,10 @@ jobs:
           if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
             cp target/release/bundle/deb/*.deb stage/
             cp target/release/bundle/appimage/*.AppImage stage/
-          else
+          elif [[ "${{ matrix.os }}" == "macos-latest" ]]; then
             cp target/release/bundle/dmg/*.dmg stage/
+          else
+            cp target/release/bundle/msi/*.msi stage/
           fi
           ls -la stage
 
@@ -126,7 +127,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - name: Download bundles
@@ -182,6 +183,29 @@ jobs:
               --timeout-secs 240
           echo "smoke OK on macos-latest" >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Install bundle (Windows .msi)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $msi = Get-ChildItem -Path "bundles\*.msi" | Select-Object -First 1
+          if (-not $msi) { throw "MSI not found in bundles/" }
+          Write-Host "Installing $($msi.FullName)"
+          $proc = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @('/i', "$($msi.FullName)", '/qn')
+          if ($proc.ExitCode -ne 0) { throw "msiexec failed: $($proc.ExitCode)" }
+          Write-Host "MSI installed successfully"
+
+      - name: Run smoke (Windows .msi)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $exe = "C:\Program Files\Skattr\skattr-ui.exe"
+          if (-not (Test-Path $exe)) { throw "skattr-ui.exe not found at $exe" }
+          $smokeDir = Join-Path $env:RUNNER_TEMP "smoke"
+          New-Item -ItemType Directory -Force -Path $smokeDir | Out-Null
+          & $exe --smoke-test --data-dir $smokeDir --timeout-secs 240
+          if ($LASTEXITCODE -ne 0) { throw "smoke failed: $LASTEXITCODE" }
+          Write-Output "smoke OK on windows-latest" >> $env:GITHUB_STEP_SUMMARY
+
       - name: Run smoke (Linux AppImage)
         if: matrix.os == 'ubuntu-latest'
         shell: bash
@@ -233,7 +257,7 @@ jobs:
         working-directory: dist
         run: |
           set -euo pipefail
-          sha256sum *.deb *.AppImage *.dmg | sort > SHA256SUMS
+          sha256sum *.deb *.AppImage *.dmg *.msi | sort > SHA256SUMS
           cat SHA256SUMS
 
       - name: Install minisign
@@ -290,6 +314,7 @@ jobs:
             dist/*.deb
             dist/*.AppImage
             dist/*.dmg
+            dist/*.msi
             dist/SHA256SUMS
             dist/SHA256SUMS.minisig
           body_path: release-notes.md
