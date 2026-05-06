@@ -515,28 +515,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn accept_rejects_mismatched_sid() {
+    async fn bind_with_wrong_sid_denies_client_at_os_level() {
         use tokio::net::windows::named_pipe::ClientOptions;
 
+        // The DACL on the bound pipe grants connect rights only to
+        // `allowed`. Our test process runs under `current_sid()`, so
+        // when we bind with a different SID the kernel itself rejects
+        // the connect at `ClientOptions::open` — the post-accept SID
+        // check (defense-in-depth layer 2) never gets to run because
+        // the OS-level DACL gate (layer 1) fires first.
+        //
+        // This test verifies layer 1; layer 2 is exercised on the
+        // happy path by `accept_admits_matching_sid` and is unit-
+        // testable in isolation only via `check_peer_sid_*`.
         let tmp = tempfile::tempdir().unwrap();
         let endpoint = tmp.path().join("ipc.endpoint");
-        // Build a "wrong" SID by mutating the last sub-authority byte
-        // of the real SID. This keeps the SID structurally valid (so
-        // AddAccessAllowedAce accepts it at bind time) but makes
-        // EqualSid reject it at the post-accept check — exercising
-        // the exact mismatch path we want to test.
         let mut wrong = current_sid();
         let last = wrong.len() - 1;
         wrong[last] = wrong[last].wrapping_add(1);
-        let server = std::sync::Arc::new(Server::bind(&endpoint, wrong).unwrap());
-        let pipe_name = server.pipe_name.clone();
-        let server_for_accept = std::sync::Arc::clone(&server);
-        let accept = tokio::spawn(async move { server_for_accept.accept_one().await });
+        let _server = Server::bind(&endpoint, wrong).unwrap();
+        let pipe_name: String = std::fs::read_to_string(&endpoint).unwrap().trim().into();
 
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let _client = ClientOptions::new().open(&pipe_name).unwrap();
-
-        let res = accept.await.unwrap();
-        assert!(matches!(res, Err(IpcError::AuthDenied)), "got {res:?}");
+        let result = ClientOptions::new().open(&pipe_name);
+        assert!(
+            result.is_err(),
+            "expected ClientOptions::open to fail at the DACL gate; got Ok"
+        );
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "expected PermissionDenied; got {err:?}"
+        );
     }
 }
