@@ -22,8 +22,12 @@ jobs:
       - run: cargo fmt --all --check
 
   clippy:
-    name: clippy
-    runs-on: ubuntu-latest
+    name: clippy (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -37,19 +41,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Windows omitted: the daemon IPC stack (core::daemon::ipc::{server,client})
-        # is hard-coded to AF_UNIX (UnixListener, peer_cred, 0600 mode bits) and
-        # the CLI/UI hold IpcClient<UnixStream> concretely. A real Windows port
-        # needs Named Pipes + DACL-based peer auth; revisit when Windows is a
-        # supported runtime target.
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace --exclude skattr-ui --all-targets
-      - run: cargo test  --workspace --exclude skattr-ui --all-targets
+      - run: cargo test  --workspace --exclude skattr-ui --all-targets --features test-harness
 
   ui:
     name: ui (skattr-ui)
