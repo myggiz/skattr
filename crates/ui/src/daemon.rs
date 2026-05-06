@@ -27,7 +27,7 @@ pub struct AppState {
     pub pending_passphrase: RwLock<Option<zeroize::Zeroizing<String>>>,
     /// Async-mutex around the post-daemon IPC client. `Some` only
     /// after `start_in_process_cmd` succeeds.
-    pub ipc: Mutex<Option<IpcClient<tokio::net::UnixStream>>>,
+    pub ipc: Mutex<Option<IpcClient<skattr_core::daemon::ipc::IpcStream>>>,
     /// Cached `Ready` snapshot from `Daemon::run`.
     pub ready: RwLock<Option<Ready>>,
     /// Daemon task handle; held so shutdown can `abort` if needed.
