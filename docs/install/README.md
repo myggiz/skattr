@@ -59,9 +59,11 @@ binary.** Report the discrepancy.
 
 See the per-platform docs:
 
-- [Linux](linux.md) — `.deb`, AppImage, Flatpak (build-from-source).
-- [macOS](macos.md) — `.dmg`.
-- Windows — deferred to Phase 2.H (see project status in `CLAUDE.md`).
+| Platform | Bundle filename | Guide |
+|----------|-----------------|-------|
+| Linux (x64) | `skattr_<version>_amd64.deb` or `Skattr_<version>_amd64.AppImage` | [linux.md](linux.md) |
+| macOS (ARM64) | `Skattr_<version>_arm64.dmg` | [macos.md](macos.md) |
+| Windows (x64) | `Skattr_<version>_x64_en-US.msi` | [windows.md](windows.md) |
 
 ## Why minisign and not GPG?
 

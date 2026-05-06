@@ -67,3 +67,28 @@ Phase 4 will:
 - Publish a reproducer recipe alongside each release.
 
 For Phase 2.G, the recipe above is the contract.
+
+## Windows (`.msi`)
+
+The WiX `.msi` bundle is built on `windows-latest` via the
+`tauri-action` workflow. The toolchain is pinned via
+`rust-toolchain.toml` (`version = "1.95.0"`), and Tauri at
+`=2.11.0`. The bundle is **not byte-reproducible across runs** for
+v0.1 — Tauri 2.11's WiX template embeds timestamps and a build
+GUID. Phase 4 (byte-identical reproducible builds) addresses this;
+v0.1 ships `.msi` for verifiable distribution via SHA256 + minisign
+only.
+
+To rebuild locally on a Windows host:
+
+```powershell
+git clone https://github.com/myggiz/skattr
+cd skattr
+cargo tauri build
+```
+
+Output: `target\release\bundle\msi\Skattr_<v>_x64_en-US.msi`. Hash
+it with `Get-FileHash` to compare against the released
+`SHA256SUMS`. The hashes will **not** match across hosts — only
+within a single CI run on the same `windows-latest` runner image
+will reproducibility hold.
