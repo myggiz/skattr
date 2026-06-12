@@ -273,6 +273,12 @@ where
         let _ = ctrl_tx.send(PeerCtrl::ReplaceConn(Box::new(conn))).await;
     }
 
+    /// Whether a per-peer actor currently exists for `peer`. Used by the
+    /// accept-loop test to assert an unknown peer was NOT ingested.
+    pub(crate) async fn has_peer(&self, peer: &PublicKey) -> bool {
+        self.peers.lock().await.contains_key(peer)
+    }
+
     async fn ensure_actor(&self, peer: PublicKey) -> mpsc::Sender<DeliveryJob> {
         let mut peers = self.peers.lock().await;
         if let Some(ch) = peers.get(&peer) {

@@ -9,6 +9,7 @@
 //! interact with it by submitting [`Command`]s and subscribing to
 //! [`Event`]s — intentionally the same narrow interface for both.
 
+pub(crate) mod accept;
 pub mod backup;
 pub(crate) mod clock;
 pub mod commands;
