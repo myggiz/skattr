@@ -97,6 +97,10 @@ where
     /// `None` when the hub was constructed without fallback support — in
     /// which case `ensure_mailbox_fallback` is a logged no-op.
     fallback: Option<MailboxFallback>,
+    /// On-demand outbound dialer, injected so the per-peer actor can
+    /// resolve + dial a peer when it has no live connection. `None` for
+    /// outbound-only tests that pre-seed connections via `ingest`.
+    dialer: Option<Arc<dyn crate::delivery::dial::OutboundDial<S>>>,
 }
 
 impl<S> DeliveryHub<S>
@@ -109,7 +113,7 @@ where
     /// [`DeliveryHub::new_with_inbound`] or
     /// [`DeliveryHub::new_with_mailbox_fallback`] instead.
     pub fn new(pool: Arc<Pool>) -> Self {
-        Self::new_inner(pool, None, None)
+        Self::new_inner(pool, None, None, None)
     }
 
     /// Construct a hub that decrypts inbound `Frame::MlsApp` through
@@ -120,7 +124,30 @@ where
     /// No mailbox-fallback orchestrator: callers wanting fallback must
     /// use [`DeliveryHub::new_with_mailbox_fallback`].
     pub fn new_with_inbound(pool: Arc<Pool>, dispatch: Arc<dyn InboundDispatch>) -> Self {
-        Self::new_inner(pool, Some(dispatch), None)
+        Self::new_inner(pool, Some(dispatch), None, None)
+    }
+
+    /// Construct a hub that decrypts inbound `Frame::MlsApp` AND owns an
+    /// on-demand outbound `dialer`, so the per-peer actor can dial a peer
+    /// when it has no live connection instead of dropping the job. This
+    /// is the production direct-transport wiring (no mailbox fallback).
+    pub(crate) fn new_with_inbound_and_dialer(
+        pool: Arc<Pool>,
+        dispatch: Arc<dyn InboundDispatch>,
+        dialer: Arc<dyn crate::delivery::dial::OutboundDial<S>>,
+    ) -> Self {
+        Self::new_inner(pool, Some(dispatch), None, Some(dialer))
+    }
+
+    /// Test-only constructor: an on-demand `dialer` with no inbound-MLS
+    /// handling and no mailbox fallback. Used by the dial-on-demand unit
+    /// test where the responder reads the dialed frame directly.
+    #[cfg(test)]
+    pub(crate) fn new_with_dialer(
+        pool: Arc<Pool>,
+        dialer: Arc<dyn crate::delivery::dial::OutboundDial<S>>,
+    ) -> Self {
+        Self::new_inner(pool, None, None, Some(dialer))
     }
 
     /// Construct a hub that owns the direct → mailbox fallback
@@ -145,6 +172,7 @@ where
                 events,
                 identity,
             }),
+            None,
         )
     }
 
@@ -152,6 +180,7 @@ where
         pool: Arc<Pool>,
         inbound: Option<Arc<dyn InboundDispatch>>,
         fallback: Option<MailboxFallback>,
+        dialer: Option<Arc<dyn crate::delivery::dial::OutboundDial<S>>>,
     ) -> Self {
         let sweep_pool = pool.clone();
         let sweep = tokio::spawn(async move {
@@ -171,6 +200,7 @@ where
             inbound,
             sweep,
             fallback,
+            dialer,
         }
     }
 
@@ -193,6 +223,7 @@ where
             ctrl_rx,
             self.pool.clone(),
             self.inbound.clone(),
+            self.dialer.clone(),
         );
         let channels = PeerChannels {
             jobs: jobs_tx,
