@@ -98,6 +98,115 @@ pub mod test_exports {
     // two-daemon guardrail.
     pub use crate::daemon::state::run_loopback;
 
+    /// Phase 1B Task 10: seed two on-disk vaults as *already-established*
+    /// mutual contacts so the bidirectional-delivery guardrail can skip the
+    /// (deferred-to-1C) invite→add→Welcome handshake and exercise the
+    /// established-contact direct-delivery path.
+    ///
+    /// For each daemon this opens its `Pool` **exactly** the way
+    /// `run_with_sink` / `run_loopback` will (vault → `derive_storage_seed`
+    /// → `Pool::open`), so the rows written here are visible once the daemon
+    /// boots against the same data dir. After writing, every pool + vault
+    /// guard is dropped so the daemon can re-open them.
+    ///
+    /// What it establishes:
+    /// 1. A real shared 2-member MLS group (`A.create_solo` →
+    ///    `A.add_member(bob_kp)` → `B.join_from_welcome`), persisted on both
+    ///    sides via `MlsGroupRepo`.
+    /// 2. Mutual `contacts` rows linked to that group id
+    ///    (`ContactRepo::upsert` + `set_group_id`) — so each side's accept
+    ///    loop resolves the other via `find_by_noise_x25519`.
+    /// 3. A signed `ContactCard` for each peer carrying the *loopback onion*,
+    ///    persisted via `ContactRepo::put_card` so the dialer resolves the
+    ///    peer's onion through `latest_card(peer).body.onion`. This is the
+    ///    make-or-break detail: if `latest_card` returned `None`, the dial
+    ///    would fail.
+    #[allow(clippy::missing_panics_doc)]
+    pub fn seed_established_pair(
+        data_dir_a: &std::path::Path,
+        data_dir_b: &std::path::Path,
+        passphrase: &zeroize::Zeroizing<String>,
+        onion_a: &str,
+        onion_b: &str,
+    ) -> crate::error::Result<()> {
+        use crate::contact::{Contact, ContactCard};
+        use crate::identity::derive::derive_storage_seed;
+        use crate::identity::vault::Vault;
+        use crate::mls::{Group, KeyPackage, MlsProvider};
+        use crate::storage::{ContactRepo, KeyPackageRepo, MlsGroupRepo, Pool};
+
+        // --- Open each vault the same way the daemon does, derive seeds. ---
+        // `derive_storage_seed` consumes the identity, so open twice per side:
+        // once to derive the storage seed, once to keep an owned identity.
+        let vault_path_a = data_dir_a.join("identity.vault");
+        let vault_path_b = data_dir_b.join("identity.vault");
+
+        let (_va_seed, id_a_for_seed) = Vault::open(&vault_path_a, passphrase.as_str())?;
+        let seed_a = derive_storage_seed(id_a_for_seed)?;
+        let (_va, alice_id) = Vault::open(&vault_path_a, passphrase.as_str())?;
+
+        let (_vb_seed, id_b_for_seed) = Vault::open(&vault_path_b, passphrase.as_str())?;
+        let seed_b = derive_storage_seed(id_b_for_seed)?;
+        let (_vb, bob_id) = Vault::open(&vault_path_b, passphrase.as_str())?;
+
+        let alice_pub = alice_id.public();
+        let bob_pub = bob_id.public();
+
+        // --- Open both pools identically to the daemon boot path. ---
+        let pool_a = Pool::open(data_dir_a, &seed_a)?;
+        let pool_b = Pool::open(data_dir_b, &seed_b)?;
+
+        // --- Build the shared 2-member MLS group with the REAL identities. ---
+        let bob_provider = MlsProvider::new();
+        let bob_kp = KeyPackage::generate(&bob_id, &bob_provider, &KeyPackageRepo::new(&pool_b))?;
+
+        let mut alice_group = Group::create_solo(&alice_id, None, MlsProvider::new())?;
+        let (welcome, _commit) = alice_group.add_member(&bob_kp, None)?;
+        let gid = alice_group.id().0.clone();
+        let bob_group = Group::join_from_welcome(&bob_id, &welcome, None, bob_provider)?;
+
+        alice_group.save(&MlsGroupRepo::new(&pool_a))?;
+        bob_group.save(&MlsGroupRepo::new(&pool_b))?;
+
+        // --- Mutual contact rows + group_id link. ---
+        let now = crate::daemon::clock::now_unix_seconds();
+        let contacts_a = ContactRepo::new(&pool_a);
+        contacts_a.upsert(&Contact {
+            identity: bob_pub,
+            display_name: Some("Bob".to_string()),
+            added_at: now,
+            card: None,
+            muted: false,
+        })?;
+        contacts_a.set_group_id(&bob_pub, &gid)?;
+
+        let contacts_b = ContactRepo::new(&pool_b);
+        contacts_b.upsert(&Contact {
+            identity: alice_pub,
+            display_name: Some("Alice".to_string()),
+            added_at: now,
+            card: None,
+            muted: false,
+        })?;
+        contacts_b.set_group_id(&alice_pub, &gid)?;
+
+        // --- Signed ContactCards carrying the LOOPBACK onion so the dialer
+        // resolves each peer's onion via `latest_card(peer).body.onion`. ---
+        // Card for Bob is signed by Bob's identity (owner = bob), onion =
+        // onion_b; persisted into Alice's pool so Alice dials "bob.onion".
+        let bob_card = ContactCard::sign(&bob_id, onion_b.to_string(), Vec::new(), 1, 86_400, now)?;
+        contacts_a.put_card(&bob_card)?;
+
+        let alice_card =
+            ContactCard::sign(&alice_id, onion_a.to_string(), Vec::new(), 1, 86_400, now)?;
+        contacts_b.put_card(&alice_card)?;
+
+        // --- Drop pools + vault guards so the daemon can re-open them. ---
+        drop(pool_a);
+        drop(pool_b);
+        Ok(())
+    }
+
     // Phase 1.G additions:
     pub use crate::daemon::retention::spawn_sweep;
 

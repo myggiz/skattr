@@ -69,8 +69,7 @@ pub(crate) async fn run_accept_loop<S>(
                                     // then ingest under the derived, binding-
                                     // verified peer so subsequent app frames flow.
                                     let ack_id = crate::delivery::peer::welcome_msg_id(&bytes);
-                                    let _ =
-                                        conn.send(crate::transport::Frame::Ack(ack_id.0)).await;
+                                    let _ = conn.send(crate::transport::Frame::Ack(ack_id.0)).await;
                                     hub.ingest(peer, conn).await;
                                 }
                                 None => {
@@ -82,9 +81,7 @@ pub(crate) async fn run_accept_loop<S>(
                             }
                         }
                         _ => {
-                            tracing::warn!(
-                                "accept: rejected inbound connection from unknown peer"
-                            );
+                            tracing::warn!("accept: rejected inbound connection from unknown peer");
                             let _ = conn.close().await;
                         }
                     }

@@ -6,16 +6,29 @@
 //!
 //! Unlike `cli_two_daemons.rs` (which hand-wires two `DeliveryHub`s via
 //! `test_exports`), this test drives the *full* `run_with_transport`
-//! assembly — invite → add → bidirectional send — through
+//! assembly — outbound dialer + inbound accept loop + ingest — through
 //! `test_exports::run_loopback`, an exact twin of `Daemon::run_with_sink`
 //! that swaps Arti for an in-process `LoopbackTransport` (no Tor) and a
 //! no-op mailbox factory. Everything else (DaemonInbound MLS decrypt,
-//! the on-demand dialer, the accept loop, Welcome propagation, IPC) is
-//! the same code the real daemon runs.
+//! the on-demand dialer, the accept loop, IPC) is the same code the real
+//! daemon runs — no `test_exports` hand-wiring of the hub.
+//!
+//! ## Why seed *established* contacts instead of running invite→add
+//!
+//! Phase 1B delivers the direct-transport assembly. The full first-contact
+//! flow (invite → AddContact → Welcome propagation → first message) needs
+//! more first-contact plumbing — Welcome-arm dial-on-demand, inviter-onion
+//! bootstrapping, card exchange — that is deferred to **Phase 1C** (ADR
+//! 0007 is its down-payment). So this guardrail does NOT exercise the
+//! invite/Welcome path. Instead `seed_established_pair` writes two daemons'
+//! pools as ALREADY-ESTABLISHED contacts (a shared 2-member MLS group +
+//! each other's `ContactCard` carrying the loopback onion) before either
+//! daemon boots, then proves BIDIRECTIONAL DIRECT message delivery through
+//! the real `run_with_transport` assembly.
 //!
 //! The fast loopback test is NOT `#[ignore]` — it is CI's guardrail. A
-//! `#[ignore]` real-Tor twin runs the identical script via the public
-//! `Daemon::run`.
+//! `#[ignore]` real-Tor twin runs the identical seed-then-exchange script
+//! via the public `Daemon::run`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -28,7 +41,7 @@ use skattr_core::daemon::ipc::wire::EventFilter;
 use skattr_core::daemon::{Command, CommandResult, Config, Daemon, IpcClient, Ready};
 use skattr_core::envelope::Kind;
 use skattr_core::identity::PublicKey;
-use skattr_core::test_exports::{run_loopback, LoopbackNet};
+use skattr_core::test_exports::{run_loopback, seed_established_pair, LoopbackNet};
 use tokio::sync::oneshot;
 use zeroize::Zeroizing;
 
@@ -80,14 +93,15 @@ async fn wait_for_group_active(ipc_path: &Path, peer: PublicKey, timeout: Durati
     }
 }
 
-/// Subscribe on `ipc_path` and wait for a `MessageReceived` from `sender`
-/// whose body equals `expected_body`, or panic after `timeout`.
-async fn wait_for_message(
+/// Open a subscription on `ipc_path` for `MessageReceived` events from
+/// `sender`. Must be established **before** the message is sent so the event
+/// cannot fire before we are listening (the delivery path can complete inside
+/// the `SendMessage` call). The returned client is then drained by
+/// [`wait_for_message`].
+async fn subscribe_messages(
     ipc_path: &Path,
     sender: PublicKey,
-    expected_body: &str,
-    timeout: Duration,
-) {
+) -> IpcClient<skattr_core::daemon::ipc::IpcStream> {
     let mut sub = IpcClient::connect(ipc_path)
         .await
         .expect("connect for subscribe");
@@ -96,7 +110,18 @@ async fn wait_for_message(
     })
     .await
     .expect("subscribe to Messages");
+    sub
+}
 
+/// Drain a pre-established subscription until a `MessageReceived` from
+/// `sender` whose body equals `expected_body` arrives, or panic after
+/// `timeout`.
+async fn wait_for_message(
+    sub: &mut IpcClient<skattr_core::daemon::ipc::IpcStream>,
+    sender: PublicKey,
+    expected_body: &str,
+    timeout: Duration,
+) {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -122,9 +147,11 @@ async fn wait_for_message(
     }
 }
 
-/// Drive the full invite → add → bidirectional-send script against two
-/// already-running daemons (identified by their `Ready`). Shared by both
-/// the loopback and real-Tor twins.
+/// Drive a bidirectional send/receive between two already-running,
+/// already-ESTABLISHED daemons (identified by their `Ready`). Assumes
+/// `seed_established_pair` has already linked them as mutual contacts with a
+/// shared 2-member group and loopback-onion ContactCards. Shared by both the
+/// loopback and real-Tor twins.
 async fn run_exchange_script(ready_a: &Ready, ready_b: &Ready) {
     // Discover each side's pubkey.
     let mut info_a = IpcClient::connect(&ready_a.ipc_socket).await.unwrap();
@@ -138,46 +165,15 @@ async fn run_exchange_script(ready_a: &Ready, ready_b: &Ready) {
         other => panic!("expected DaemonInfo, got {other:?}"),
     };
 
-    // --- Alice creates an invite ---
-    let mut client_a = IpcClient::connect(&ready_a.ipc_socket).await.unwrap();
-    let invite_url = match client_a
-        .execute(Command::CreateInvite {
-            nickname: None,
-            ttl_secs: Some(3600),
-        })
-        .await
-        .unwrap()
-    {
-        CommandResult::InviteCreated { url, .. } => url,
-        other => panic!("expected InviteCreated, got {other:?}"),
-    };
-    assert!(
-        invite_url.starts_with("skattr://invite/v1#"),
-        "invite URL must use canonical scheme: {invite_url}"
-    );
-
-    // --- Bob adds Alice (Welcome propagates direct over the dialer) ---
-    let mut client_b = IpcClient::connect(&ready_b.ipc_socket).await.unwrap();
-    let summary = match tokio::time::timeout(
-        Duration::from_secs(60),
-        client_b.execute(Command::AddContact { invite_url }),
-    )
-    .await
-    .expect("AddContact must complete within 60 s")
-    .unwrap()
-    {
-        CommandResult::ContactAdded(s) => s,
-        other => panic!("expected ContactAdded, got {other:?}"),
-    };
-    assert_eq!(
-        summary.pubkey, alice_pubkey,
-        "summary pubkey must be Alice's"
-    );
-
-    // Alice's group must transition to Active via Welcome propagation.
-    wait_for_group_active(&ready_a.ipc_socket, bob_pubkey, Duration::from_secs(30)).await;
+    // Both groups are seeded Active. Sanity-check before driving messages so a
+    // seeding regression fails loudly here rather than as a delivery timeout.
+    wait_for_group_active(&ready_a.ipc_socket, bob_pubkey, Duration::from_secs(10)).await;
+    wait_for_group_active(&ready_b.ipc_socket, alice_pubkey, Duration::from_secs(10)).await;
 
     // --- Alice → Bob ---
+    // Subscribe BEFORE sending: the direct dial+deliver can complete inside the
+    // `SendMessage` call, so a post-send subscribe could miss the event.
+    let mut bob_sub = subscribe_messages(&ready_b.ipc_socket, alice_pubkey).await;
     let mut send_a = IpcClient::connect(&ready_a.ipc_socket).await.unwrap();
     match tokio::time::timeout(
         Duration::from_secs(30),
@@ -196,7 +192,7 @@ async fn run_exchange_script(ready_a: &Ready, ready_b: &Ready) {
         other => panic!("expected MessageSent, got {other:?}"),
     }
     wait_for_message(
-        &ready_b.ipc_socket,
+        &mut bob_sub,
         alice_pubkey,
         "hello-bob",
         Duration::from_secs(30),
@@ -204,6 +200,7 @@ async fn run_exchange_script(ready_a: &Ready, ready_b: &Ready) {
     .await;
 
     // --- Bob → Alice ---
+    let mut alice_sub = subscribe_messages(&ready_a.ipc_socket, bob_pubkey).await;
     let mut send_b = IpcClient::connect(&ready_b.ipc_socket).await.unwrap();
     match tokio::time::timeout(
         Duration::from_secs(30),
@@ -222,7 +219,7 @@ async fn run_exchange_script(ready_a: &Ready, ready_b: &Ready) {
         other => panic!("expected MessageSent, got {other:?}"),
     }
     wait_for_message(
-        &ready_a.ipc_socket,
+        &mut alice_sub,
         bob_pubkey,
         "hello-alice",
         Duration::from_secs(30),
@@ -234,49 +231,38 @@ async fn run_exchange_script(ready_a: &Ready, ready_b: &Ready) {
 // Fast loopback guardrail (NOT #[ignore])
 // ---------------------------------------------------------------------------
 
-/// Two real daemon assemblies over `LoopbackTransport` exchange messages in
-/// both directions, driving the production `run_with_transport` wiring with
-/// no Tor and no `test_exports` hand-wiring of the hub.
+/// Two real daemon assemblies over `LoopbackTransport`, seeded as
+/// already-established contacts, exchange messages in both directions —
+/// driving the production `run_with_transport` wiring (outbound dialer +
+/// inbound accept loop + ingest) with no Tor and no `test_exports`
+/// hand-wiring of the hub. This is Phase 1B's live CI guardrail against the
+/// audit's "dead transport" gap.
 ///
-/// # Currently `#[ignore]`: documents an unresolved direct-Welcome-propagation bug
-///
-/// This guardrail surfaced a real chicken-and-egg deadlock in direct
-/// (non-mailbox) Welcome propagation, reproducible end-to-end here with no
-/// Tor:
-///
-/// 1. Alice mints an invite (she does not yet know Bob's identity — the
-///    invite carries only her own KeyPackage + onion).
-/// 2. Bob runs `AddContact`, creates the 2-member group, and the hub's
-///    `send_welcome` tries to dial Alice to deliver the MLS Welcome.
-/// 3. Alice's inbound accept loop (`daemon::accept::run_accept_loop`)
-///    resolves every inbound peer via `ContactRepo::find_by_noise_x25519`
-///    and **rejects unknown peers**. Bob is not yet Alice's contact — the
-///    Welcome is precisely what would establish that relationship — so
-///    Alice closes the connection and the Welcome is dropped.
-/// 4. Alice's group never leaves `PendingJoin`; the assertion below
-///    (`wait_for_group_active`) times out.
-///
-/// Two necessary-but-insufficient prerequisites also surfaced and were left
-/// for the same fix: (a) the per-peer actor's Welcome-send arm does not dial
-/// on demand when cold (unlike the MlsApp arm), and (b) `AddContact` persists
-/// the inviter contact with no `ContactCard`, so the dialer cannot resolve
-/// the inviter's onion via `latest_card`. Both are subordinate to the
-/// accept-loop authorization gate, which is the true blocker.
-///
-/// Fixing the accept-loop gate is an authentication/authorization change
-/// (deliberately rejecting unknown peers is a hardening measure) and is out
-/// of Task 8's scope — per CLAUDE.md it needs a second reviewer and likely an
-/// ADR. The assertions below are intentionally preserved unweakened so this
-/// test flips to a passing guardrail the moment direct Welcome propagation is
-/// repaired; remove `#[ignore]` then. Tracked alongside Task 2.E.5 (mailbox
-/// fallback for Welcome propagation).
+/// `seed_established_pair` writes both pools as mutual contacts sharing a
+/// real 2-member MLS group, each carrying the other's loopback-onion
+/// `ContactCard`, BEFORE either daemon boots. The full first-contact
+/// invite → add → Welcome → first-message flow is deliberately NOT exercised
+/// here — it is deferred to Phase 1C (ADR 0007 is its down-payment).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "documents unresolved direct-Welcome-propagation deadlock: inviter's accept loop rejects the unknown invitee, so the Welcome never lands and the inviter's group stays PendingJoin (see fn doc)"]
 async fn two_daemons_exchange_messages_both_directions_over_loopback() {
     let tmp_a = tempfile::tempdir().unwrap();
     let tmp_b = tempfile::tempdir().unwrap();
     init_vault(tmp_a.path());
     init_vault(tmp_b.path());
+
+    // Seed BOTH daemons as established contacts BEFORE either opens its pool.
+    // `seed_established_pair` opens each pool the same way `run_loopback`
+    // will, writes the shared group + mutual contacts + loopback-onion cards,
+    // then drops the pools so the daemons can re-open them.
+    let pw_seed = Zeroizing::new(PASSPHRASE.to_string());
+    seed_established_pair(
+        tmp_a.path(),
+        tmp_b.path(),
+        &pw_seed,
+        "alice.onion",
+        "bob.onion",
+    )
+    .expect("seed established pair");
 
     // Shared in-process net; each daemon publishes a distinct onion. The
     // onion handed to `LoopbackTransport::new` is exactly what
@@ -365,7 +351,9 @@ async fn two_daemons_exchange_messages_both_directions_over_loopback() {
 // ---------------------------------------------------------------------------
 
 /// Spin up a real daemon at `data_dir` with Arti bootstrap (mirrors
-/// `cli_real_tor.rs`).
+/// `cli_real_tor.rs`). The vault must already exist (seeded by the caller
+/// via `init_vault` + `seed_established_pair` so the two daemons boot as
+/// established contacts).
 async fn spawn_real_daemon(
     data_dir: &Path,
 ) -> (
@@ -373,7 +361,6 @@ async fn spawn_real_daemon(
     oneshot::Sender<()>,
     tokio::task::JoinHandle<skattr_core::error::Result<()>>,
 ) {
-    init_vault(data_dir);
     let config = config_for(data_dir);
     let pw = Zeroizing::new(PASSPHRASE.to_string());
 
@@ -402,16 +389,38 @@ async fn spawn_real_daemon(
     (ready, shutdown_tx, task)
 }
 
-/// Same invite → add → bidirectional-send script as the loopback guardrail,
-/// but over two real Arti daemons via the public `Daemon::run`.
+/// Same seeded-established-contacts bidirectional-send script as the loopback
+/// guardrail, but over two real Arti daemons via the public `Daemon::run`.
+///
+/// Real onion addresses are derived from each daemon's HS key at publish
+/// time, so they are not known until `Ready`. The seeding therefore runs in
+/// two phases: the vaults are created, the daemons boot to learn their real
+/// onions, and `seed_established_pair` then writes the shared group + mutual
+/// contacts + real-onion ContactCards. Live pickup of contacts written while
+/// the daemon already holds the pool is itself first-contact plumbing
+/// deferred to Phase 1C, which is why this twin stays `#[ignore]`-gated.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Tor; run with: cargo test -p skattr-tests --release -- --ignored two_daemons_exchange_messages_over_real_tor"]
 async fn two_daemons_exchange_messages_over_real_tor() {
     let tmp_a = tempfile::tempdir().unwrap();
     let tmp_b = tempfile::tempdir().unwrap();
 
+    // Phase 1: create vaults, boot both daemons to learn their real onions.
+    init_vault(tmp_a.path());
+    init_vault(tmp_b.path());
     let (ready_a, shutdown_a, task_a) = spawn_real_daemon(tmp_a.path()).await;
     let (ready_b, shutdown_b, task_b) = spawn_real_daemon(tmp_b.path()).await;
+
+    // Phase 2: seed established contacts with the real published onions.
+    let pw_seed = Zeroizing::new(PASSPHRASE.to_string());
+    seed_established_pair(
+        tmp_a.path(),
+        tmp_b.path(),
+        &pw_seed,
+        &ready_a.onion,
+        &ready_b.onion,
+    )
+    .expect("seed established pair");
 
     run_exchange_script(&ready_a, &ready_b).await;
 

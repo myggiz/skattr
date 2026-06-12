@@ -439,9 +439,7 @@ impl InboundDispatch for DaemonInbound {
                 if derived != peer {
                     // `peer` is an Ed25519 pubkey — not logged (warn is >= info;
                     // CLAUDE.md forbids pubkeys at info+). Static text only.
-                    tracing::warn!(
-                        "inbound: welcome derived identity differs from connected peer"
-                    );
+                    tracing::warn!("inbound: welcome derived identity differs from connected peer");
                 }
                 Some(crate::delivery::peer::welcome_msg_id(welcome))
             }
@@ -1103,7 +1101,10 @@ mod tests {
 
         // Invite consumed; contact + group_id persisted under Bob.
         let oi = crate::storage::OutstandingInviteRepo::new(&pool);
-        assert!(oi.get_psk(&alice_kp_ref).unwrap().is_none(), "invite consumed");
+        assert!(
+            oi.get_psk(&alice_kp_ref).unwrap().is_none(),
+            "invite consumed"
+        );
         let cr = crate::storage::ContactRepo::new(&pool);
         assert!(cr.get(&bob_pubkey).unwrap().is_some(), "contact persisted");
         let gid = cr.get_group_id(&bob_pubkey).unwrap();
