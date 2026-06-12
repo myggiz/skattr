@@ -6,11 +6,16 @@
 //! rejected before ingest.
 
 use crate::delivery::hub::DeliveryHub;
+use crate::delivery::peer::InboundDispatch;
 use crate::identity::IdentityKey;
 use crate::storage::{ContactRepo, Pool};
 use crate::transport::{handshake_responder, InboundStreams};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
+
+/// Bound on how long an unknown peer has to present its single first-contact
+/// frame before we reject the connection (ADR 0007 carve-out).
+const WELCOME_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Drive the inbound stream source until it closes. Each accepted stream is
 /// handshaked + resolved on its own task so a slow handshake can't stall the
@@ -20,6 +25,7 @@ pub(crate) async fn run_accept_loop<S>(
     identity: Arc<IdentityKey>,
     pool: Arc<Pool>,
     hub: Arc<DeliveryHub<S>>,
+    inbound_dispatch: Arc<dyn InboundDispatch>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -27,6 +33,7 @@ pub(crate) async fn run_accept_loop<S>(
         let identity = identity.clone();
         let pool = pool.clone();
         let hub = hub.clone();
+        let inbound_dispatch = inbound_dispatch.clone();
         // TODO(phase-2 transport hardening): each inbound stream spawns a
         // detached handshake task. It's onion-gated and 30s-timeout-bounded, but
         // an attacker who knows the onion could open many connections at once.
@@ -34,7 +41,7 @@ pub(crate) async fn run_accept_loop<S>(
         // track tasks (JoinSet) so shutdown can drain them. Mirrors the mailbox
         // server's per-conn/global token buckets (Phase 2.A).
         tokio::spawn(async move {
-            let (conn, outcome) = match handshake_responder(stream, &identity, None).await {
+            let (mut conn, outcome) = match handshake_responder(stream, &identity, None).await {
                 Ok(v) => v,
                 Err(e) => {
                     // `e` is a `TransportErrorKind`-backed `CoreError`. The
@@ -48,8 +55,39 @@ pub(crate) async fn run_accept_loop<S>(
             match ContactRepo::new(&pool).find_by_noise_x25519(&outcome.peer_x25519) {
                 Ok(Some(peer)) => hub.ingest(peer, conn).await,
                 Ok(None) => {
-                    tracing::warn!("accept: rejected inbound connection from unknown peer");
-                    let _ = conn.close().await;
+                    // Unknown peer: ADR 0007 carve-out. Allow EXACTLY ONE frame
+                    // under a bounded timeout. If it is a first-contact Welcome,
+                    // authenticate + bind + join it; otherwise reject. Nothing
+                    // else from an unknown peer reaches the MLS app pipeline.
+                    match tokio::time::timeout(WELCOME_READ_TIMEOUT, conn.recv()).await {
+                        Ok(Ok(Some(crate::transport::Frame::MlsWelcome(bytes)))) => {
+                            match inbound_dispatch
+                                .dispatch_welcome_bootstrap(&bytes, &outcome.peer_x25519)
+                            {
+                                Some(peer) => {
+                                    // ACK so the inviter-side WelcomeJob resolves,
+                                    // then ingest under the derived, binding-
+                                    // verified peer so subsequent app frames flow.
+                                    let ack_id = crate::delivery::peer::welcome_msg_id(&bytes);
+                                    let _ =
+                                        conn.send(crate::transport::Frame::Ack(ack_id.0)).await;
+                                    hub.ingest(peer, conn).await;
+                                }
+                                None => {
+                                    tracing::warn!(
+                                        "accept: rejected first-contact welcome (invalid or unbound)"
+                                    );
+                                    let _ = conn.close().await;
+                                }
+                            }
+                        }
+                        _ => {
+                            tracing::warn!(
+                                "accept: rejected inbound connection from unknown peer"
+                            );
+                            let _ = conn.close().await;
+                        }
+                    }
                 }
                 Err(e) => {
                     // Storage error Display: static SQL/`StorageErrorKind` text,
@@ -67,8 +105,19 @@ pub(crate) async fn run_accept_loop<S>(
 mod tests {
     use super::*;
     use crate::contact::Contact;
+    use crate::envelope::MessageId;
+    use crate::identity::PublicKey;
     use crate::transport::handshake_initiator;
     use tokio::sync::mpsc;
+
+    /// Trivial no-op dispatch: never bootstraps a Welcome, never decrypts.
+    /// Keeps the accept-loop unit tests independent of MLS/storage.
+    struct NoopDispatch;
+    impl InboundDispatch for NoopDispatch {
+        fn dispatch(&self, _peer: PublicKey, _ciphertext: &[u8]) -> Option<MessageId> {
+            None
+        }
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn accept_rejects_unknown_peer() {
@@ -83,6 +132,7 @@ mod tests {
             me.clone(),
             pool.clone(),
             hub.clone(),
+            Arc::new(NoopDispatch) as Arc<dyn InboundDispatch>,
         ));
 
         // The initiator must address the responder by ITS noise static pub.
@@ -91,7 +141,11 @@ mod tests {
         tx.send(srv).await.unwrap();
         let stranger = IdentityKey::generate().unwrap();
         let stranger_pub = stranger.public();
-        // Initiator completes the handshake (responder runs inside the loop).
+        // Initiator completes the handshake (responder runs inside the loop),
+        // then DROPS the connection without sending any first frame. The
+        // carve-out's bounded read therefore sees the conn close promptly
+        // (Ok(None)/Err) rather than waiting out WELCOME_READ_TIMEOUT — the
+        // unknown peer is rejected fast.
         let _ = handshake_initiator(cli, &stranger, &me_x, None).await;
 
         // Let the spawned accept task run; assert the stranger got NO actor.
@@ -141,6 +195,7 @@ mod tests {
             me.clone(),
             pool.clone(),
             hub.clone(),
+            Arc::new(NoopDispatch) as Arc<dyn InboundDispatch>,
         ));
 
         let me_x = me.noise_static_public();

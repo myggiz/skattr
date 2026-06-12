@@ -324,6 +324,7 @@ where
         transport_identity.clone(),
         pool.clone(),
         hub.clone(),
+        inbound.clone(),
     ));
 
     // Step 5: PollScheduler. Held for the daemon's lifetime — its `Drop`

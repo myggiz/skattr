@@ -440,6 +440,41 @@ impl Group {
     pub fn state(&self) -> &GroupState {
         &self.state
     }
+
+    /// The Ed25519 identity of the OTHER member of this 2-member group, as a
+    /// [`PublicKey`]. The MLS signature key equals the Ed25519 identity under our
+    /// ciphersuite (`…_Ed25519`). Errors if the group is not exactly 2-member or
+    /// no distinct peer is found.
+    pub(crate) fn peer_identity(&self) -> Result<crate::identity::PublicKey> {
+        // Enforce the 2-member invariant: deriving an identity for an auth
+        // decision must not silently pick "the first non-self member" of a
+        // larger group.
+        if self.inner.members().count() != 2 {
+            return Err(CoreError::from(MlsErrorKind::Other(
+                "mls: peer_identity: group is not exactly 2-member".into(),
+            )));
+        }
+        let own_leaf = self.inner.own_leaf_node().ok_or_else(|| {
+            CoreError::from(MlsErrorKind::Other(
+                "mls: peer_identity: no own leaf".into(),
+            ))
+        })?;
+        let own = own_leaf.signature_key().as_slice();
+        for m in self.inner.members() {
+            let sk = m.signature_key.as_slice();
+            if sk != own {
+                let bytes: [u8; 32] = sk.try_into().map_err(|_| {
+                    CoreError::from(MlsErrorKind::Other(
+                        "mls: peer_identity: signature key not 32 bytes".into(),
+                    ))
+                })?;
+                return Ok(crate::identity::PublicKey(bytes));
+            }
+        }
+        Err(CoreError::from(MlsErrorKind::Other(
+            "mls: peer_identity: no distinct peer member".into(),
+        )))
+    }
 }
 
 /// Re-materialize the `SignatureKeyPair` stored in this provider by
@@ -589,6 +624,34 @@ mod tests {
         assert_eq!(bob.epoch(), 1);
         assert_eq!(bob.id(), alice.id(), "both sides see the same group id");
         assert!(matches!(bob.state(), GroupState::Active { epoch: 1 }));
+    }
+
+    #[test]
+    fn peer_identity_returns_other_members_identity() {
+        let pool = Pool::in_memory();
+        let kp_repo = crate::storage::KeyPackageRepo::new(&pool);
+
+        let alice_id = alice();
+        let bob_id = IdentityKey::generate().unwrap();
+        let bob_provider = MlsProvider::new();
+        let bob_kp = KeyPackage::generate(&bob_id, &bob_provider, &kp_repo).unwrap();
+
+        let mut alice = Group::create_solo(&alice_id, None, MlsProvider::new()).unwrap();
+        let (welcome, _commit) = alice.add_member(&bob_kp, None).unwrap();
+        let bob = Group::join_from_welcome(&bob_id, &welcome, None, bob_provider).unwrap();
+
+        // From alice's view, the distinct peer is bob.
+        assert_eq!(
+            alice.peer_identity().unwrap(),
+            bob_id.public(),
+            "alice.peer_identity must be bob"
+        );
+        // From bob's view, the distinct peer is alice.
+        assert_eq!(
+            bob.peer_identity().unwrap(),
+            alice_id.public(),
+            "bob.peer_identity must be alice"
+        );
     }
 
     fn pair_no_psk() -> (Group, Group) {
