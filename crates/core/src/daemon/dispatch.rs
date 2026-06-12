@@ -345,6 +345,14 @@ where
         .set_group_id(&link.body.card.body.identity, &group_id)
         .map_err(map_err)?;
 
+    // Verify the inviter's embedded card, then persist it so the dialer can
+    // resolve their onion via latest_card (ADR 0008). Verify is defense-in-depth:
+    // the outer link signature already authenticates the card bytes, but
+    // verifying the card's own signature + expiry keeps a self-inconsistent or
+    // stale card out of the store.
+    link.body.card.verify(now).map_err(map_err)?;
+    contact_repo.put_card(&link.body.card).map_err(map_err)?;
+
     // Mark the inviter's single-use KP as consumed.
     link.mark_consumed(&kp_repo).map_err(map_err)?;
 
@@ -1706,6 +1714,40 @@ mod tests {
             Ok(Ok(Event::ContactUpdated(pk))) => assert_eq!(pk, summary.pubkey),
             other => panic!("expected ContactUpdated event, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn add_contact_persists_inviter_card_for_dialer() {
+        // Alice (inviter) sets an onion so the embedded self-card carries it,
+        // and so the dialer's send_welcome succeeds.
+        let handle_a = test_handle();
+        handle_a.set_onion("alice.onion".to_string());
+        let alice_pub = handle_a.identity.public();
+
+        let CommandResult::InviteCreated { url, .. } = execute_command(
+            handle_a.clone(),
+            Command::CreateInvite {
+                nickname: None,
+                ttl_secs: Some(3600),
+            },
+        )
+        .await
+        .unwrap() else {
+            panic!("expected InviteCreated");
+        };
+
+        // Bob (dialer) consumes the invite.
+        let handle_b = test_handle();
+        execute_command(handle_b.clone(), Command::AddContact { invite_url: url })
+            .await
+            .unwrap();
+
+        // Bob can now resolve Alice's onion via her persisted card.
+        let card = ContactRepo::new(&handle_b.pool)
+            .latest_card(&alice_pub)
+            .unwrap()
+            .expect("inviter card must be persisted");
+        assert_eq!(card.body.onion, "alice.onion");
     }
 
     #[tokio::test]
