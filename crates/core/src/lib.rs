@@ -65,6 +65,7 @@ pub mod test_exports {
         handshake_initiator, handshake_responder, AuthenticatedConnection, HandshakeOutcome,
         HANDSHAKE_TIMEOUT,
     };
+    pub use crate::transport::{LoopbackNet, LoopbackTransport};
     // Phase 1.C additions:
     pub use crate::mls::{Group, GroupId, GroupState, KeyPackage, MlsProvider};
     pub use crate::storage::{KeyPackageRepo, MlsGroupRepo};

@@ -26,6 +26,11 @@ pub(crate) mod transport;
 
 pub(crate) use error_kind::TransportErrorKind;
 
+#[cfg(feature = "test-harness")]
+pub(crate) mod loopback;
+#[cfg(feature = "test-harness")]
+pub use loopback::{LoopbackNet, LoopbackTransport};
+
 #[cfg(not(feature = "test-harness"))]
 pub(crate) use connection::AuthenticatedConnection;
 #[cfg(feature = "test-harness")]
