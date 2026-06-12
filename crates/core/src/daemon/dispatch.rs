@@ -370,6 +370,23 @@ where
         .await
         .map_err(map_err)?;
 
+    // Send our own card to the new contact so they learn our onion for the
+    // reverse direction. Best-effort: rides the same peer-actor connection
+    // after the Welcome; if it fails, the inviter learns our onion on our next
+    // message instead.
+    let inviter = link.body.card.body.identity;
+    match build_self_card(handle) {
+        Ok(self_card) => {
+            send_card_to_contact(handle, &self_card, inviter).await;
+        }
+        // `IpcError` implements Debug (not Display); `?e` is correct here. It
+        // carries only DaemonErrorKind (counts / InvalidArgument message / unit
+        // variants) — no onion or pubkey.
+        Err(e) => {
+            tracing::warn!(?e, "add_contact: could not build self-card to send")
+        }
+    }
+
     Ok(CommandResult::ContactAdded(ContactSummary {
         pubkey: link.body.card.body.identity,
         nickname: None,
@@ -982,6 +999,121 @@ where
     Ok(CommandResult::Ok)
 }
 
+/// Build this daemon's current signed self-card (onion + reachable mailboxes).
+///
+/// Bumps the persisted self-card version via `build_next_self_card`, so even
+/// if no send follows, the next publish picks up from the new version.
+fn build_self_card<S>(
+    handle: &Arc<DaemonHandle<S>>,
+) -> std::result::Result<crate::contact::ContactCard, IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    use crate::daemon::error_kind::DaemonErrorKind;
+    let onion = handle
+        .onion()
+        .ok_or(IpcError::Daemon(DaemonErrorKind::TorNotReady))?;
+    let mailboxes: Vec<String> = crate::storage::MailboxRepo::new(&handle.pool)
+        .list_mine()
+        .map_err(map_err)?
+        .into_iter()
+        .filter(|r| r.status == crate::storage::MailboxStatus::Reachable)
+        .map(|r| r.onion)
+        .collect();
+    crate::contact::self_card::build_next_self_card(
+        &handle.pool,
+        &handle.identity,
+        onion,
+        mailboxes,
+        crate::contact::self_card::DEFAULT_TTL_SECS,
+        crate::daemon::clock::now_unix_seconds(),
+    )
+    .map_err(map_err)
+}
+
+/// Encrypt `card` as a `ContactCardUpdate` for `peer`'s group and hand it to
+/// the hub. Best-effort: a missing-but-expected group is skipped silently; an
+/// encrypt / save / Group::load failure is logged and skipped.
+async fn send_card_to_contact<S>(
+    handle: &Arc<DaemonHandle<S>>,
+    card: &crate::contact::ContactCard,
+    peer: crate::identity::PublicKey,
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    use crate::envelope::{Envelope, Kind, MessageId};
+    use crate::mls::group::{Group, GroupId};
+    use crate::storage::{ContactRepo, MlsGroupRepo};
+
+    // 2-member-group lookup: skip contacts not yet linked (a missing/empty
+    // group_id for a not-yet-linked contact is a normal, expected skip).
+    let group_id_bytes = match ContactRepo::new(&handle.pool).get_group_id(&peer) {
+        Ok(Some(gid)) if !gid.is_empty() => gid,
+        _ => return,
+    };
+    let group_repo = MlsGroupRepo::new(&handle.pool);
+    // A linked group_id whose group fails to load is an MLS-storage signal —
+    // surface it rather than skip silently ("MLS state is fragile").
+    let mut group = match Group::load(&GroupId(group_id_bytes), &group_repo) {
+        Ok(Some(g)) => g,
+        Ok(None) => {
+            tracing::warn!(
+                target: "skattr::daemon::dispatch",
+                "card-send: group_id present but Group::load missed; skipping"
+            );
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(
+                target: "skattr::daemon::dispatch",
+                err = %e,
+                "card-send: load group failed; skipping"
+            );
+            return;
+        }
+    };
+    let now_ms = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0),
+    )
+    .unwrap_or(0);
+    let msg_id = MessageId::generate();
+    let env = Envelope {
+        v: 1,
+        id: msg_id,
+        ts: now_ms,
+        reply_to: None,
+        kind: Kind::ContactCardUpdate {
+            card: Box::new(card.clone()),
+        },
+    };
+    let ciphertext = match group.encrypt(&env) {
+        Ok(ct) => ct,
+        Err(e) => {
+            tracing::warn!(
+                target: "skattr::daemon::dispatch",
+                err = %e,
+                "card-send: encrypt failed; skipping"
+            );
+            return;
+        }
+    };
+    // Persist the advanced ratchet before handing off to the hub — if save
+    // fails we MUST NOT send the ciphertext (the peer would accept it and we'd
+    // be one epoch behind on disk).
+    if let Err(e) = group.save(&group_repo) {
+        tracing::warn!(
+            target: "skattr::daemon::dispatch",
+            err = %e,
+            "card-send: save group failed; skipping"
+        );
+        return;
+    }
+    let _ = handle.hub.send(peer, msg_id, ciphertext).await;
+}
+
 /// Build a fresh self-card and fan it out to every contact via the MLS
 /// app-message channel + `DeliveryHub::send` (which itself owns the
 /// direct → mailbox-fallback path). Best-effort: any single contact's
@@ -996,104 +1128,13 @@ async fn publish_self_card_update<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    use crate::daemon::error_kind::DaemonErrorKind;
-    use crate::envelope::{Envelope, Kind, MessageId};
-    use crate::mls::group::{Group, GroupId};
-    use crate::storage::{ContactRepo, MailboxRepo, MailboxStatus, MlsGroupRepo};
+    use crate::storage::ContactRepo;
 
-    let now_secs = crate::daemon::clock::now_unix_seconds();
-    let onion = handle
-        .onion()
-        .ok_or(IpcError::Daemon(DaemonErrorKind::TorNotReady))?;
-    let mailboxes: Vec<String> = MailboxRepo::new(&handle.pool)
-        .list_mine()
-        .map_err(map_err)?
-        .into_iter()
-        .filter(|r| r.status == MailboxStatus::Reachable)
-        .map(|r| r.onion)
-        .collect();
-
-    let card = crate::contact::self_card::build_next_self_card(
-        &handle.pool,
-        &handle.identity,
-        onion,
-        mailboxes,
-        crate::contact::self_card::DEFAULT_TTL_SECS,
-        now_secs,
-    )
-    .map_err(map_err)?;
+    let card = build_self_card(&handle)?;
 
     let contacts = ContactRepo::new(&handle.pool).list().map_err(map_err)?;
-
     for contact in contacts {
-        // 2-member-group lookup: skip contacts not yet linked.
-        let group_id_bytes = match ContactRepo::new(&handle.pool).get_group_id(&contact.identity) {
-            Ok(Some(gid)) if !gid.is_empty() => gid,
-            _ => continue,
-        };
-
-        let group_repo = MlsGroupRepo::new(&handle.pool);
-        let group_id = GroupId(group_id_bytes.clone());
-        let mut group = match Group::load(&group_id, &group_repo) {
-            Ok(Some(g)) => g,
-            Ok(None) => {
-                tracing::warn!(
-                    target: "skattr::daemon::dispatch",
-                    "publish_card: group_id present but Group::load missed; skipping contact"
-                );
-                continue;
-            }
-            Err(e) => {
-                tracing::warn!(
-                    target: "skattr::daemon::dispatch",
-                    err = %e,
-                    "publish_card: load group failed; skipping contact"
-                );
-                continue;
-            }
-        };
-
-        let now_ms = i64::try_from(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis())
-                .unwrap_or(0),
-        )
-        .unwrap_or(0);
-        let msg_id = MessageId::generate();
-        let env = Envelope {
-            v: 1,
-            id: msg_id,
-            ts: now_ms,
-            reply_to: None,
-            kind: Kind::ContactCardUpdate {
-                card: Box::new(card.clone()),
-            },
-        };
-        let ciphertext = match group.encrypt(&env) {
-            Ok(ct) => ct,
-            Err(e) => {
-                tracing::warn!(
-                    target: "skattr::daemon::dispatch",
-                    err = %e,
-                    "publish_card: encrypt failed; skipping contact"
-                );
-                continue;
-            }
-        };
-
-        // Persist the advanced ratchet before handing off to the hub —
-        // if save fails we MUST NOT send the ciphertext (the peer would
-        // accept it and we'd be one epoch behind on disk).
-        if let Err(e) = group.save(&group_repo) {
-            tracing::warn!(
-                target: "skattr::daemon::dispatch",
-                err = %e,
-                "publish_card: save group failed; skipping contact"
-            );
-            continue;
-        }
-        let _ = handle.hub.send(contact.identity, msg_id, ciphertext).await;
+        send_card_to_contact(&handle, &card, contact.identity).await;
     }
     Ok(())
 }
