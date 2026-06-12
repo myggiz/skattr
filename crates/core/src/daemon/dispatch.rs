@@ -239,7 +239,24 @@ where
     OsRng.fill_bytes(&mut psk_raw);
     let psk = Zeroizing::new(psk_raw);
 
-    let link = InviteLink::generate(&handle.identity, onion, kp_bytes.clone(), psk_raw, ttl, now)
+    let mailboxes: Vec<String> = crate::storage::MailboxRepo::new(&handle.pool)
+        .list_mine()
+        .map_err(map_err)?
+        .into_iter()
+        .filter(|r| r.status == crate::storage::MailboxStatus::Reachable)
+        .map(|r| r.onion)
+        .collect();
+    let card = crate::contact::self_card::build_next_self_card(
+        &handle.pool,
+        &handle.identity,
+        onion,
+        mailboxes,
+        crate::contact::self_card::DEFAULT_TTL_SECS,
+        now,
+    )
+    .map_err(map_err)?;
+
+    let link = InviteLink::generate(&handle.identity, card, kp_bytes.clone(), psk_raw, ttl, now)
         .map_err(map_err)?;
     let url = link.to_url().map_err(map_err)?;
     let expires_at = u64::try_from(now + ttl as i64).unwrap_or(0);
@@ -317,7 +334,7 @@ where
     // Persist contact row + group_id link.
     let contact_repo = ContactRepo::new(&handle.pool);
     let contact = Contact {
-        identity: link.body.identity,
+        identity: link.body.card.body.identity,
         display_name: None,
         added_at: now,
         card: None,
@@ -325,7 +342,7 @@ where
     };
     contact_repo.upsert(&contact).map_err(map_err)?;
     contact_repo
-        .set_group_id(&link.body.identity, &group_id)
+        .set_group_id(&link.body.card.body.identity, &group_id)
         .map_err(map_err)?;
 
     // Mark the inviter's single-use KP as consumed.
@@ -333,7 +350,7 @@ where
 
     let _ = handle
         .events_tx
-        .send(Event::ContactUpdated(link.body.identity));
+        .send(Event::ContactUpdated(link.body.card.body.identity));
 
     // Submit Welcome to the inviter via the hub. We do not await the
     // ACK here — UI responsiveness comes first, and a failed delivery
@@ -341,14 +358,14 @@ where
     // existing failure path.
     handle
         .hub
-        .send_welcome(link.body.identity, welcome)
+        .send_welcome(link.body.card.body.identity, welcome)
         .await
         .map_err(map_err)?;
 
     Ok(CommandResult::ContactAdded(ContactSummary {
-        pubkey: link.body.identity,
+        pubkey: link.body.card.body.identity,
         nickname: None,
-        onion: link.body.onion.clone(),
+        onion: link.body.card.body.onion.clone(),
         card_version: 0,
         added_at: u64::try_from(now).unwrap_or(0),
         unread_count: 0,
@@ -1590,7 +1607,7 @@ mod tests {
 
         // The URL parses back cleanly.
         let parsed = crate::invite::InviteLink::from_url(&url, 1).unwrap();
-        assert_eq!(parsed.body.onion, "testonion".repeat(8));
+        assert_eq!(parsed.body.card.body.onion, "testonion".repeat(8));
 
         // key_package_id is now the canonical MLS KeyPackageRef (KeyPackageRef
         // computed by make_key_package_ref), not plain SHA-256. It is still

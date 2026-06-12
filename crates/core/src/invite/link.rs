@@ -6,8 +6,7 @@
 //! Wire layout (fragment-encoded, per design §1.4):
 //!
 //! ```text
-//! skattr://invite/v1#id=<base32(identity_pubkey)>
-//!                   &onion=<56-char onion address>
+//! skattr://invite/v1#card=<base64url(CBOR of inviter's signed ContactCard)>
 //!                   &kp=<base64url(MLS KeyPackage)>
 //!                   &psk=<base64url(32-byte one-time secret)>
 //!                   &exp=<unix timestamp>
@@ -21,23 +20,14 @@ use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::error::{CoreError, Result};
-use crate::identity::{IdentityKey, PublicKey, Signature};
+use crate::identity::{IdentityKey, Signature};
 use crate::invite::InviteErrorKind;
 use crate::storage::KeyPackageRepo;
 
-use base32::Alphabet;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 
 const URL_PREFIX: &str = "skattr://invite/v1#";
-
-fn encode_b32(bytes: &[u8]) -> String {
-    base32::encode(Alphabet::Rfc4648Lower { padding: false }, bytes)
-}
-
-fn decode_b32(s: &str) -> Option<Vec<u8>> {
-    base32::decode(Alphabet::Rfc4648Lower { padding: false }, s)
-}
 
 fn encode_b64url(bytes: &[u8]) -> String {
     URL_SAFE_NO_PAD.encode(bytes)
@@ -52,10 +42,9 @@ fn decode_b64url(s: &str) -> Option<Vec<u8>> {
 /// Content that the inviter signs. Deliberately excludes the signature.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct InviteLinkBody {
-    /// Inviter's long-term Ed25519 identity.
-    pub identity: PublicKey,
-    /// Onion service to dial for first contact.
-    pub onion: String,
+    /// Inviter's signed self-card (identity + onion + mailboxes + version).
+    /// Supersedes the bare identity+onion (ADR 0008).
+    pub card: crate::contact::ContactCard,
     /// Single-use MLS KeyPackage (binary, TLS-codec bytes from 1.C).
     #[serde(with = "serde_bytes")]
     pub key_package: Vec<u8>,
@@ -68,8 +57,8 @@ pub struct InviteLinkBody {
 impl std::fmt::Debug for InviteLinkBody {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InviteLinkBody")
-            .field("identity", &self.identity)
-            .field("onion", &self.onion)
+            .field("identity", &self.card.body.identity)
+            .field("onion", &self.card.body.onion)
             .field(
                 "key_package",
                 &format_args!("<{} bytes>", self.key_package.len()),
@@ -109,12 +98,17 @@ impl InviteLink {
     /// Build + sign a new invite.
     pub fn generate(
         inviter: &IdentityKey,
-        onion: String,
+        card: crate::contact::ContactCard,
         key_package: Vec<u8>,
         psk: [u8; 32],
         ttl_secs: u64,
         now: i64,
     ) -> Result<Self> {
+        if card.body.identity != inviter.public() {
+            return Err(CoreError::Invite(InviteErrorKind::Other(
+                "card identity != inviter".into(),
+            )));
+        }
         let expires_at = now
             .checked_add(i64::try_from(ttl_secs).map_err(|_| {
                 CoreError::Invite(InviteErrorKind::Other("ttl overflows i64".into()))
@@ -124,8 +118,7 @@ impl InviteLink {
             })?;
 
         let body = InviteLinkBody {
-            identity: inviter.public(),
-            onion,
+            card,
             key_package,
             psk,
             expires_at,
@@ -149,8 +142,7 @@ impl InviteLink {
         })?;
 
         // Parse key=value pairs. Unknown keys are ignored for forward-compat.
-        let mut id_str: Option<&str> = None;
-        let mut onion: Option<&str> = None;
+        let mut card_str: Option<&str> = None;
         let mut kp_str: Option<&str> = None;
         let mut psk_str: Option<&str> = None;
         let mut exp_str: Option<&str> = None;
@@ -160,8 +152,7 @@ impl InviteLink {
             let key = parts.next().unwrap_or_default();
             let value = parts.next().unwrap_or_default();
             match key {
-                "id" => id_str = Some(value),
-                "onion" => onion = Some(value),
+                "card" => card_str = Some(value),
                 "kp" => kp_str = Some(value),
                 "psk" => psk_str = Some(value),
                 "exp" => exp_str = Some(value),
@@ -170,11 +161,6 @@ impl InviteLink {
             }
         }
 
-        let id_str = id_str
-            .ok_or_else(|| CoreError::Invite(InviteErrorKind::Other("missing field id".into())))?;
-        let onion_str = onion.ok_or_else(|| {
-            CoreError::Invite(InviteErrorKind::Other("missing field onion".into()))
-        })?;
         let kp_str = kp_str
             .ok_or_else(|| CoreError::Invite(InviteErrorKind::Other("missing field kp".into())))?;
         let psk_str = psk_str
@@ -183,17 +169,6 @@ impl InviteLink {
             .ok_or_else(|| CoreError::Invite(InviteErrorKind::Other("missing field exp".into())))?;
         let sig_str = sig_str
             .ok_or_else(|| CoreError::Invite(InviteErrorKind::Other("missing field sig".into())))?;
-
-        let id_bytes = decode_b32(&id_str.to_ascii_lowercase())
-            .ok_or_else(|| CoreError::Invite(InviteErrorKind::Other("malformed id".into())))?;
-        if id_bytes.len() != 32 {
-            return Err(CoreError::Invite(InviteErrorKind::Other(
-                "malformed id".into(),
-            )));
-        }
-        let mut identity_bytes = [0u8; 32];
-        identity_bytes.copy_from_slice(&id_bytes);
-        let identity = PublicKey(identity_bytes);
 
         let key_package = decode_b64url(kp_str)
             .ok_or_else(|| CoreError::Invite(InviteErrorKind::Other("malformed kp".into())))?;
@@ -223,16 +198,23 @@ impl InviteLink {
         sig_arr.copy_from_slice(&sig_bytes);
         let signature = Signature(sig_arr);
 
+        let card_str = card_str.ok_or_else(|| {
+            CoreError::Invite(InviteErrorKind::Other("missing field card".into()))
+        })?;
+        let card_blob = decode_b64url(card_str)
+            .ok_or_else(|| CoreError::Invite(InviteErrorKind::Other("malformed card".into())))?;
+        let card: crate::contact::ContactCard = ciborium::de::from_reader(&card_blob[..])
+            .map_err(|e| CoreError::Invite(InviteErrorKind::Other(format!("card decode: {e}"))))?;
+
         let body = InviteLinkBody {
-            identity,
-            onion: onion_str.to_string(),
+            card,
             key_package,
             psk,
             expires_at,
         };
 
         // Verify signature.
-        IdentityKey::verify_cbor(&body.identity, &body, &signature)
+        IdentityKey::verify_cbor(&body.card.body.identity, &body, &signature)
             .map_err(|_| CoreError::Invite(InviteErrorKind::SignatureInvalid))?;
 
         // Expiry check.
@@ -253,15 +235,17 @@ impl InviteLink {
 
     /// Re-serialize to a URL.
     pub fn to_url(&self) -> Result<String> {
-        let id = encode_b32(&self.body.identity.0);
+        let mut card_blob = Vec::new();
+        ciborium::ser::into_writer(&self.body.card, &mut card_blob)
+            .map_err(|e| CoreError::Invite(InviteErrorKind::Other(format!("card cbor: {e}"))))?;
+        let card = encode_b64url(&card_blob);
         let kp = encode_b64url(&self.body.key_package);
         let psk = encode_b64url(&self.psk.0);
         let sig = encode_b64url(&self.signature.0);
         Ok(format!(
-            "{prefix}id={id}&onion={onion}&kp={kp}&psk={psk}&exp={exp}&sig={sig}",
+            "{prefix}card={card}&kp={kp}&psk={psk}&exp={exp}&sig={sig}",
             prefix = URL_PREFIX,
-            id = id,
-            onion = self.body.onion,
+            card = card,
             kp = kp,
             psk = psk,
             exp = self.body.expires_at,
@@ -317,13 +301,18 @@ mod tests {
         (0..64u8).collect()
     }
 
+    /// Build a self-card signed by `inviter` carrying `onion`.
+    fn card_for(inviter: &IdentityKey, onion: &str) -> crate::contact::ContactCard {
+        crate::contact::ContactCard::sign(inviter, onion.into(), vec![], 1, 86_400, 1_000).unwrap()
+    }
+
     #[test]
     fn generate_populates_body_and_signature() {
         let inviter = IdentityKey::generate().unwrap();
         let psk = [0xAA; 32];
         let invite = InviteLink::generate(
             &inviter,
-            "abc.onion".into(),
+            card_for(&inviter, "abc.onion"),
             fixed_kp(),
             psk,
             3600,
@@ -331,8 +320,8 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(invite.body.identity, inviter.public());
-        assert_eq!(invite.body.onion, "abc.onion");
+        assert_eq!(invite.body.card.body.identity, inviter.public());
+        assert_eq!(invite.body.card.body.onion, "abc.onion");
         assert_eq!(invite.body.key_package, fixed_kp());
         assert_eq!(invite.body.psk, psk);
         assert_eq!(invite.body.expires_at, 1_000_000 + 3600);
@@ -345,23 +334,23 @@ mod tests {
         let inviter = IdentityKey::generate().unwrap();
         let invite = InviteLink::generate(
             &inviter,
-            "xyz.onion".into(),
+            card_for(&inviter, "xyz.onion"),
             fixed_kp(),
             [0xBB; 32],
             3600,
             1_000_000,
         )
         .unwrap();
-        IdentityKey::verify_cbor(&invite.body.identity, &invite.body, &invite.signature)
+        IdentityKey::verify_cbor(&invite.body.card.body.identity, &invite.body, &invite.signature)
             .expect("body signature must verify against its embedded identity");
     }
 
     #[test]
-    fn to_url_has_expected_prefix_and_all_six_params() {
+    fn to_url_has_expected_prefix_and_all_params() {
         let inviter = IdentityKey::generate().unwrap();
         let invite = InviteLink::generate(
             &inviter,
-            "abc.onion".into(),
+            card_for(&inviter, "abc.onion"),
             fixed_kp(),
             [0xAA; 32],
             3600,
@@ -376,7 +365,7 @@ mod tests {
             .split('&')
             .map(|p| p.split('=').next().unwrap())
             .collect();
-        assert_eq!(keys, &["id", "onion", "kp", "psk", "exp", "sig"]);
+        assert_eq!(keys, &["card", "kp", "psk", "exp", "sig"]);
     }
 
     #[test]
@@ -384,7 +373,7 @@ mod tests {
         let inviter = IdentityKey::generate().unwrap();
         let invite = InviteLink::generate(
             &inviter,
-            "a.onion".into(),
+            card_for(&inviter, "a.onion"),
             fixed_kp(),
             [0xAA; 32],
             3600,
@@ -399,7 +388,7 @@ mod tests {
         let inviter = IdentityKey::generate().unwrap();
         let invite = InviteLink::generate(
             &inviter,
-            "xyz.onion".into(),
+            card_for(&inviter, "xyz.onion"),
             fixed_kp(),
             [0xCC; 32],
             3600,
@@ -409,8 +398,8 @@ mod tests {
         let url = invite.to_url().unwrap();
 
         let parsed = InviteLink::from_url(&url, 1_000_500).unwrap();
-        assert_eq!(parsed.body.identity, invite.body.identity);
-        assert_eq!(parsed.body.onion, invite.body.onion);
+        assert_eq!(parsed.body.card.body.identity, invite.body.card.body.identity);
+        assert_eq!(parsed.body.card.body.onion, invite.body.card.body.onion);
         assert_eq!(parsed.body.key_package, invite.body.key_package);
         assert_eq!(parsed.body.expires_at, invite.body.expires_at);
         // PSK moved into the Zeroizing guard; body.psk cleared.
@@ -434,7 +423,7 @@ mod tests {
         let inviter = IdentityKey::generate().unwrap();
         let url = InviteLink::generate(
             &inviter,
-            "a.onion".into(),
+            card_for(&inviter, "a.onion"),
             fixed_kp(),
             [0xDD; 32],
             3600,
@@ -478,7 +467,7 @@ mod tests {
         let inviter = IdentityKey::generate().unwrap();
         let url = InviteLink::generate(
             &inviter,
-            "a.onion".into(),
+            card_for(&inviter, "a.onion"),
             fixed_kp(),
             [0xEE; 32],
             3600,
@@ -515,7 +504,7 @@ mod tests {
         let inviter = IdentityKey::generate().unwrap();
         let url = InviteLink::generate(
             &inviter,
-            "a.onion".into(),
+            card_for(&inviter, "a.onion"),
             fixed_kp(),
             [0xFF; 32],
             3600,
@@ -538,7 +527,7 @@ mod tests {
         let inviter = IdentityKey::generate().unwrap();
         InviteLink::generate(
             &inviter,
-            "a.onion".into(),
+            card_for(&inviter, "a.onion"),
             fixed_kp(),
             [0xAA; 32],
             3600,
@@ -613,7 +602,7 @@ mod tests {
         let inviter = IdentityKey::generate().unwrap();
         let original = InviteLink::generate(
             &inviter,
-            "a.onion".into(),
+            card_for(&inviter, "a.onion"),
             fixed_kp(),
             [0x77; 32],
             3600,
@@ -628,5 +617,34 @@ mod tests {
         let url2 = parsed.to_url().unwrap();
 
         assert_eq!(url1, url2, "to_url must be idempotent across from_url");
+    }
+
+    #[test]
+    fn invite_round_trips_embedded_card() {
+        let inviter = IdentityKey::generate().unwrap();
+        let card =
+            crate::contact::ContactCard::sign(&inviter, "inviter.onion".into(), vec![], 1, 86_400, 1_000)
+                .unwrap();
+        let link = InviteLink::generate(&inviter, card, vec![9u8; 4], [7u8; 32], 600, 1_000).unwrap();
+        let url = link.to_url().unwrap();
+        assert!(url.starts_with(URL_PREFIX));
+        let parsed = InviteLink::from_url(&url, 1_100).unwrap();
+        assert_eq!(parsed.body.card.body.identity, inviter.public());
+        assert_eq!(parsed.body.card.body.onion, "inviter.onion");
+        assert_eq!(parsed.body.key_package, vec![9u8; 4]);
+        let attacker = IdentityKey::generate().unwrap();
+        let bad_card = crate::contact::ContactCard::sign(
+            &attacker,
+            "evil.onion".into(),
+            vec![],
+            1,
+            86_400,
+            1_000,
+        )
+        .unwrap();
+        assert!(
+            InviteLink::generate(&inviter, bad_card, vec![9u8; 4], [7u8; 32], 600, 1_000).is_err(),
+            "generate must reject a card whose identity != inviter"
+        );
     }
 }

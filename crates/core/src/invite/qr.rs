@@ -37,9 +37,18 @@ mod tests {
     #[test]
     fn render_svg_produces_non_empty_svg_document() {
         let inviter = IdentityKey::generate().unwrap();
-        let invite = InviteLink::generate(
+        let card = crate::contact::ContactCard::sign(
             &inviter,
             "a.onion".into(),
+            vec![],
+            1,
+            86_400,
+            1_000_000,
+        )
+        .unwrap();
+        let invite = InviteLink::generate(
+            &inviter,
+            card,
             (0..64u8).collect(),
             [0x11; 32],
             3600,

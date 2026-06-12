@@ -7,6 +7,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use skattr_core::contact::ContactCard;
 use skattr_core::identity::IdentityKey;
 use skattr_core::test_exports::{InviteLink, KeyPackageRepo, Pool};
 
@@ -19,9 +20,11 @@ fn alice_mints_invite_bob_parses_records_and_consumes() {
     let kp_bytes: Vec<u8> = (0..128u8).collect();
     let psk = [0x5A; 32];
 
+    let alice_card =
+        ContactCard::sign(&alice_id, "abc.onion".into(), vec![], 1, 86_400, 1_000_000).unwrap();
     let invite = InviteLink::generate(
         &alice_id,
-        "abc.onion".into(),
+        alice_card,
         kp_bytes.clone(),
         psk,
         3600,
@@ -35,7 +38,7 @@ fn alice_mints_invite_bob_parses_records_and_consumes() {
     let bob_kp_repo = KeyPackageRepo::new(&bob_pool);
 
     let parsed = InviteLink::from_url(&url, 1_000_010).unwrap();
-    assert_eq!(parsed.body.identity, alice_id.public());
+    assert_eq!(parsed.body.card.body.identity, alice_id.public());
     assert_eq!(parsed.body.key_package, kp_bytes);
 
     parsed.record_received(&bob_kp_repo).unwrap();
