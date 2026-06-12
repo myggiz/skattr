@@ -515,6 +515,32 @@ impl<'p> ContactRepo<'p> {
         })
     }
 
+    /// Resolve a peer's Noise static X25519 key to its Ed25519 identity by
+    /// converting each known contact's identity via `ed25519_pub_to_x25519`
+    /// and comparing in constant time. Returns `None` if no contact matches.
+    ///
+    /// O(contacts) per call — fine for v1.0 contact scale.
+    pub(crate) fn find_by_noise_x25519(&self, x: &[u8; 32]) -> Result<Option<PublicKey>> {
+        use subtle::ConstantTimeEq;
+        for contact in self.list()? {
+            let vk = match ed25519_dalek::VerifyingKey::from_bytes(&contact.identity.0) {
+                Ok(vk) => vk,
+                Err(_) => {
+                    // Near-unreachable: identity bytes are validated on insert.
+                    // A non-curve stored key signals storage corruption — make
+                    // it observable (no key bytes logged).
+                    tracing::warn!("contacts: skipping contact with non-curve stored identity");
+                    continue;
+                }
+            };
+            let cand = crate::identity::key::ed25519_pub_to_x25519(&vk);
+            if cand.ct_eq(x).into() {
+                return Ok(Some(contact.identity));
+            }
+        }
+        Ok(None)
+    }
+
     /// Return the highest-version `ContactCard` for `identity`, or
     /// `None` if no card exists (or the contact is unknown).
     pub fn latest_card(&self, identity: &PublicKey) -> Result<Option<ContactCard>> {
@@ -1008,5 +1034,35 @@ mod tests {
         let pool = Pool::in_memory();
         let repo = ContactRepo::new(&pool);
         assert!(!repo.is_muted(&PublicKey([0xBB; 32])).unwrap());
+    }
+
+    #[test]
+    fn find_by_noise_x25519_resolves_known_contact_and_rejects_stranger() {
+        use crate::identity::IdentityKey;
+
+        let pool = Pool::in_memory();
+        let repo = ContactRepo::new(&pool);
+
+        let alice = IdentityKey::generate().unwrap();
+        let alice_pk = alice.public();
+        repo.upsert(&Contact {
+            identity: alice_pk,
+            display_name: None,
+            added_at: 0,
+            card: None,
+            muted: false,
+        })
+        .unwrap();
+
+        let alice_x = crate::identity::key::ed25519_pub_to_x25519(
+            &ed25519_dalek::VerifyingKey::from_bytes(&alice_pk.0).unwrap(),
+        );
+        assert_eq!(repo.find_by_noise_x25519(&alice_x).unwrap(), Some(alice_pk));
+
+        let stranger = IdentityKey::generate().unwrap();
+        let stranger_x = crate::identity::key::ed25519_pub_to_x25519(
+            &ed25519_dalek::VerifyingKey::from_bytes(&stranger.public().0).unwrap(),
+        );
+        assert_eq!(repo.find_by_noise_x25519(&stranger_x).unwrap(), None);
     }
 }
