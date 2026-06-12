@@ -99,6 +99,18 @@ pub trait InboundDispatch: Send + Sync + 'static {
     fn dispatch_welcome(&self, _peer: PublicKey, _welcome: &[u8]) -> Option<MessageId> {
         None
     }
+
+    /// Decrypt and ingest a mailbox-fetched MLS ciphertext whose sender is
+    /// not known a priori. Implementations trial-decrypt against each known
+    /// group, attribute the matching peer, persist, and emit
+    /// `Event::MessageReceived`. Returns the `MessageId` on success (so the
+    /// caller can server-side delete the deposit) or `None` on failure (the
+    /// caller must NOT delete — the deposit is retried on the next poll).
+    ///
+    /// Default impl returns `None` so existing impls compile unchanged.
+    fn dispatch_mailbox(&self, _ciphertext: &[u8]) -> Option<MessageId> {
+        None
+    }
 }
 
 /// Per-peer actor. Owns an `Option<AuthenticatedConnection<S>>`, a
