@@ -341,8 +341,12 @@ mod tests {
             1_000_000,
         )
         .unwrap();
-        IdentityKey::verify_cbor(&invite.body.card.body.identity, &invite.body, &invite.signature)
-            .expect("body signature must verify against its embedded identity");
+        IdentityKey::verify_cbor(
+            &invite.body.card.body.identity,
+            &invite.body,
+            &invite.signature,
+        )
+        .expect("body signature must verify against its embedded identity");
     }
 
     #[test]
@@ -398,7 +402,10 @@ mod tests {
         let url = invite.to_url().unwrap();
 
         let parsed = InviteLink::from_url(&url, 1_000_500).unwrap();
-        assert_eq!(parsed.body.card.body.identity, invite.body.card.body.identity);
+        assert_eq!(
+            parsed.body.card.body.identity,
+            invite.body.card.body.identity
+        );
         assert_eq!(parsed.body.card.body.onion, invite.body.card.body.onion);
         assert_eq!(parsed.body.key_package, invite.body.key_package);
         assert_eq!(parsed.body.expires_at, invite.body.expires_at);
@@ -622,10 +629,17 @@ mod tests {
     #[test]
     fn invite_round_trips_embedded_card() {
         let inviter = IdentityKey::generate().unwrap();
-        let card =
-            crate::contact::ContactCard::sign(&inviter, "inviter.onion".into(), vec![], 1, 86_400, 1_000)
-                .unwrap();
-        let link = InviteLink::generate(&inviter, card, vec![9u8; 4], [7u8; 32], 600, 1_000).unwrap();
+        let card = crate::contact::ContactCard::sign(
+            &inviter,
+            "inviter.onion".into(),
+            vec![],
+            1,
+            86_400,
+            1_000,
+        )
+        .unwrap();
+        let link =
+            InviteLink::generate(&inviter, card, vec![9u8; 4], [7u8; 32], 600, 1_000).unwrap();
         let url = link.to_url().unwrap();
         assert!(url.starts_with(URL_PREFIX));
         let parsed = InviteLink::from_url(&url, 1_100).unwrap();
