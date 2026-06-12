@@ -478,6 +478,10 @@ async fn actor_loop(
         match poll_dispatch_once(&mut client, &identity, disp).await {
             Ok(dispatched) => {
                 consecutive_failures = 0;
+                // Hold the scheduler in Active (faster polling) only when a
+                // deposit was actually dispatched + drained — not merely
+                // fetched. Deposits that fetch but never dispatch (e.g. the
+                // deferred ts-replay poison case) should not keep us hot.
                 if dispatched > 0 {
                     active_until = Some(tokio::time::Instant::now() + ACTIVE_HOLD);
                 }
