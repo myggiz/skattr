@@ -296,7 +296,9 @@ where
     // only borrowed here, before the `shutdown.await` boundary, so the `&Path`
     // need not outlive the `'static` shutdown future.
     let hs_key_path = data_dir.join("hs.key.age");
-    let (onion, inbound_streams) = transport.publish(&hs_key_path, &seed, "skattr-daemon").await?;
+    let (onion, inbound_streams) = transport
+        .publish(&hs_key_path, &seed, "skattr-daemon")
+        .await?;
 
     // Step 2: DaemonInbound (MLS decrypt + persist + emit events).
     let inbound_impl = DaemonInbound::new(pool.clone(), events_tx.clone());
@@ -434,6 +436,117 @@ where
     transport.shutdown().await?;
     // Server::drop removes the socket file automatically.
     Ok(())
+}
+
+/// Loopback twin of [`Daemon::run_with_sink`] for the two-daemon guardrail
+/// (Task 8). Mirrors `run_with_sink` exactly except it (a) publishes over a
+/// [`LoopbackTransport`](crate::transport::LoopbackTransport) on the shared
+/// `net` instead of bootstrapping Tor, (b) supplies a no-op
+/// [`MailboxConnectFactory`](crate::mailbox::poll::MailboxConnectFactory)
+/// (no mailboxes are configured, so it is never called), and (c) has no
+/// `TorRuntime`. Everything else is the production
+/// [`run_with_transport`] assembly, so this exercises the real wiring.
+///
+/// Exported under `test-harness` via [`crate::test_exports::run_loopback`].
+#[cfg(feature = "test-harness")]
+#[allow(clippy::too_many_arguments)]
+pub async fn run_loopback(
+    data_dir: &Path,
+    passphrase: &zeroize::Zeroizing<String>,
+    config: Config,
+    config_path: std::path::PathBuf,
+    net: crate::transport::LoopbackNet,
+    my_onion: String,
+    ready: oneshot::Sender<Ready>,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<()> {
+    use crate::storage::Pool;
+
+    std::fs::create_dir_all(data_dir)?;
+
+    // Step 1: unlock vault → identity → derive storage seed. Mirrors
+    // `run_with_sink`: open the vault five times for five independent
+    // zeroize-on-drop handles.
+    let vault_path = data_dir.join("identity.vault");
+    let (_vault, identity_for_seed) = Vault::open(&vault_path, passphrase.as_str())?;
+    let seed = derive_storage_seed(identity_for_seed)?;
+    let (_vault2, identity) = Vault::open(&vault_path, passphrase.as_str())?;
+    let (_vault3, identity_for_poller) = Vault::open(&vault_path, passphrase.as_str())?;
+    let (_vault4, identity_for_inbound) = Vault::open(&vault_path, passphrase.as_str())?;
+    let (_vault5, identity_for_transport) = Vault::open(&vault_path, passphrase.as_str())?;
+
+    // Step 2: open Pool (migrations applied inside Pool::open).
+    let pool = Arc::new(Pool::open(data_dir, &seed)?);
+
+    match crate::storage::MessageRepo::new(&pool).backfill_body_text() {
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "body_text backfill failed"),
+    }
+    let n = crate::storage::MessageRepo::new(&pool).backfill_envelope_id()?;
+    if n > 0 {
+        tracing::info!(rows = n, "backfilled envelope_id for pre-1.H rows");
+    }
+
+    let config_arc = std::sync::Arc::new(tokio::sync::RwLock::new(config.clone()));
+
+    let (sweep_shutdown_tx, sweep_shutdown_rx) = tokio::sync::watch::channel(false);
+    let sweep_handle = crate::daemon::retention::spawn_sweep(
+        pool.clone(),
+        config_arc.clone(),
+        std::time::Duration::from_secs(3600),
+        sweep_shutdown_rx,
+    );
+
+    let (events_tx, _) = broadcast::channel::<Event>(EVENT_CHANNEL_CAPACITY);
+
+    // Step 3: loopback transport + no-op mailbox factory (in place of Tor).
+    let transport = Arc::new(crate::transport::LoopbackTransport::new(net, my_onion));
+    let mailbox_factory: Arc<dyn crate::mailbox::poll::MailboxConnectFactory> =
+        Arc::new(NoopMailboxFactory);
+    let transport_identity = Arc::new(identity_for_transport);
+
+    run_with_transport(
+        transport,
+        pool,
+        identity,
+        identity_for_poller,
+        identity_for_inbound,
+        transport_identity,
+        seed,
+        data_dir,
+        config,
+        config_path,
+        config_arc,
+        events_tx,
+        mailbox_factory,
+        LogSink::default(),
+        sweep_shutdown_tx,
+        sweep_handle,
+        ready,
+        shutdown,
+    )
+    .await
+}
+
+/// No-op `MailboxConnectFactory` for the loopback guardrail: no mailboxes are
+/// configured in the test, so `connect` is never invoked; it returns
+/// `Unreachable` to satisfy the signature.
+#[cfg(feature = "test-harness")]
+struct NoopMailboxFactory;
+
+#[cfg(feature = "test-harness")]
+#[async_trait::async_trait]
+impl crate::mailbox::poll::MailboxConnectFactory for NoopMailboxFactory {
+    async fn connect(
+        &self,
+        _onion: &str,
+    ) -> crate::error::Result<
+        crate::mailbox::client::MailboxClient<Box<dyn crate::mailbox::poll::MailboxStream>>,
+    > {
+        Err(crate::error::CoreError::MailboxClient(
+            crate::error::MailboxClientErrorKind::Unreachable,
+        ))
+    }
 }
 
 /// Production `MailboxConnectFactory`: dials each mailbox onion through

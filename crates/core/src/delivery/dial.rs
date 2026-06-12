@@ -57,21 +57,20 @@ impl<T: Transport> TransportDial<T> {
 #[async_trait::async_trait]
 impl<T: Transport> OutboundDial<T::Stream> for TransportDial<T> {
     async fn dial(&self, peer: PublicKey) -> Result<AuthenticatedConnection<T::Stream>> {
-        let card = ContactRepo::new(&self.pool).latest_card(&peer)?.ok_or_else(|| {
-            CoreError::Delivery(DeliveryErrorKind::Other(
-                "no route to peer: no contact card".into(),
-            ))
-        })?;
+        let card = ContactRepo::new(&self.pool)
+            .latest_card(&peer)?
+            .ok_or_else(|| {
+                CoreError::Delivery(DeliveryErrorKind::Other(
+                    "no route to peer: no contact card".into(),
+                ))
+            })?;
         let onion = card.body.onion.clone();
-        let stream = match tokio::time::timeout(
-            DIAL_TIMEOUT,
-            self.transport.dial(&onion, ONION_PORT),
-        )
-        .await
-        {
-            Ok(res) => res?,
-            Err(_) => return Err(CoreError::Delivery(DeliveryErrorKind::Timeout)),
-        };
+        let stream =
+            match tokio::time::timeout(DIAL_TIMEOUT, self.transport.dial(&onion, ONION_PORT)).await
+            {
+                Ok(res) => res?,
+                Err(_) => return Err(CoreError::Delivery(DeliveryErrorKind::Timeout)),
+            };
         let verifying = ed25519_dalek::VerifyingKey::from_bytes(&peer.0).map_err(|_| {
             CoreError::Delivery(DeliveryErrorKind::Other(
                 "no route to peer: malformed peer identity key".into(),

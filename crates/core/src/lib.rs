@@ -93,6 +93,11 @@ pub mod test_exports {
     // two-daemon loopback guardrail (Task 8).
     pub use crate::daemon::state::run_with_transport;
 
+    // Phase 1B Task 8: loopback twin of `run_with_sink` that drives the same
+    // `run_with_transport` assembly over `LoopbackTransport` (no Tor) for the
+    // two-daemon guardrail.
+    pub use crate::daemon::state::run_loopback;
+
     // Phase 1.G additions:
     pub use crate::daemon::retention::spawn_sweep;
 

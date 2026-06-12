@@ -104,7 +104,10 @@ mod tests {
         let alice = LoopbackTransport::new(net, "alice.onion");
         let mut a = alice.dial("bob.onion", ONION_PORT).await.unwrap();
 
-        let mut b = inbound.recv().await.expect("bob accepts the inbound stream");
+        let mut b = inbound
+            .recv()
+            .await
+            .expect("bob accepts the inbound stream");
         a.write_all(b"ping").await.unwrap();
         let mut buf = [0u8; 4];
         b.read_exact(&mut buf).await.unwrap();

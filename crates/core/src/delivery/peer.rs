@@ -152,7 +152,8 @@ impl PeerConnection {
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         tokio::spawn(async move {
-            let _ = full_run::<S>(peer, None, jobs, welcome_jobs, ctrl, pool, inbound, dialer).await;
+            let _ =
+                full_run::<S>(peer, None, jobs, welcome_jobs, ctrl, pool, inbound, dialer).await;
         })
     }
 

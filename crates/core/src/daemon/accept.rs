@@ -78,8 +78,12 @@ mod tests {
 
         let (tx, rx) = mpsc::channel::<tokio::io::DuplexStream>(4);
         let inbound = InboundStreams(rx);
-        let loop_task =
-            tokio::spawn(run_accept_loop(inbound, me.clone(), pool.clone(), hub.clone()));
+        let loop_task = tokio::spawn(run_accept_loop(
+            inbound,
+            me.clone(),
+            pool.clone(),
+            hub.clone(),
+        ));
 
         // The initiator must address the responder by ITS noise static pub.
         let me_x = me.noise_static_public();
@@ -132,8 +136,12 @@ mod tests {
 
         let (tx, rx) = mpsc::channel::<tokio::io::DuplexStream>(4);
         let inbound = InboundStreams(rx);
-        let loop_task =
-            tokio::spawn(run_accept_loop(inbound, me.clone(), pool.clone(), hub.clone()));
+        let loop_task = tokio::spawn(run_accept_loop(
+            inbound,
+            me.clone(),
+            pool.clone(),
+            hub.clone(),
+        ));
 
         let me_x = me.noise_static_public();
         let (cli, srv) = tokio::io::duplex(64 * 1024);
