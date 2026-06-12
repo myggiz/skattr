@@ -290,7 +290,18 @@ impl DaemonInbound {
 
     /// Join an MLS group from a Welcome, persist group + contact + consumed
     /// markers atomically, and emit `Event::ContactUpdated`.
-    fn dispatch_welcome_inner(&self, peer: PublicKey, welcome_bytes: &[u8]) -> Result<()> {
+    ///
+    /// The invitee's identity is **derived from the joined group**
+    /// ([`Group::peer_identity`]) — not passed in — so this is correct even when
+    /// the caller (the accept loop) has only the sender's X25519 static. If
+    /// `bind_x25519` is `Some`, the derived identity is required to bind to it
+    /// via `ed25519_pub_to_x25519` **before** anything is committed (the
+    /// transport↔MLS identity binding; see ADR 0007). Returns the derived peer.
+    fn welcome_join_persist(
+        &self,
+        welcome_bytes: &[u8],
+        bind_x25519: Option<&[u8; 32]>,
+    ) -> Result<PublicKey> {
         use crate::mls::key_package::{parse_welcome_kp_hash, KeyPackage};
         use crate::mls::provider::MlsProvider;
         use crate::storage::key_packages::KeyPackageRepo;
@@ -340,6 +351,29 @@ impl DaemonInbound {
         };
 
         let group = Group::join_from_welcome(&identity_arc, welcome_bytes, Some(&*psk), provider)?;
+
+        // Self-attribute: the contact's Ed25519 identity is the OTHER member's
+        // MLS signature key, derived from the joined group.
+        let derived = group.peer_identity()?;
+
+        // Transport↔MLS binding (security-critical): in the honest flow the
+        // invitee dials with its own identity as the Noise static, so the
+        // handshake's peer_x25519 equals ed25519_pub_to_x25519(invitee). A
+        // mismatch means the Welcome arrived over a connection not bound to the
+        // invitee's identity (relay/MITM) — abort BEFORE committing.
+        if let Some(expected) = bind_x25519 {
+            let vk = ed25519_dalek::VerifyingKey::from_bytes(&derived.0).map_err(|_| {
+                CoreError::from(MlsErrorKind::Other(
+                    "inbound welcome: derived identity not a valid key".into(),
+                ))
+            })?;
+            if crate::identity::key::ed25519_pub_to_x25519(&vk) != *expected {
+                return Err(CoreError::from(MlsErrorKind::Other(
+                    "inbound welcome: transport identity does not bind to MLS identity".into(),
+                )));
+            }
+        }
+
         let group_id = group.id().0.clone();
 
         let group_repo = MlsGroupRepo::new(&self.pool);
@@ -355,7 +389,7 @@ impl DaemonInbound {
                 "INSERT INTO contacts (identity_pubkey, display_name, added_at) \
                  VALUES (?1, ?2, ?3) \
                  ON CONFLICT(identity_pubkey) DO UPDATE SET display_name=excluded.display_name",
-                rusqlite::params![&peer.0[..], Option::<String>::None, now],
+                rusqlite::params![&derived.0[..], Option::<String>::None, now],
             )
             .map_err(|e| {
                 CoreError::Storage(crate::storage::StorageErrorKind::Other(format!(
@@ -364,7 +398,7 @@ impl DaemonInbound {
             })?;
             tx.execute(
                 "UPDATE contacts SET group_id = ?1 WHERE identity_pubkey = ?2",
-                rusqlite::params![&group_id[..], &peer.0[..]],
+                rusqlite::params![&group_id[..], &derived.0[..]],
             )
             .map_err(|e| {
                 CoreError::Storage(crate::storage::StorageErrorKind::Other(format!(
@@ -376,8 +410,8 @@ impl DaemonInbound {
             Ok(())
         })?;
 
-        let _ = self.events_tx.send(Event::ContactUpdated(peer));
-        Ok(())
+        let _ = self.events_tx.send(Event::ContactUpdated(derived));
+        Ok(derived)
     }
 }
 
@@ -397,15 +431,37 @@ impl InboundDispatch for DaemonInbound {
     }
 
     fn dispatch_welcome(&self, peer: PublicKey, welcome: &[u8]) -> Option<MessageId> {
-        let synthetic_id = crate::delivery::peer::welcome_msg_id(welcome);
-        match self.dispatch_welcome_inner(peer, welcome) {
-            Ok(()) => Some(synthetic_id),
+        // Welcome over an already-established connection: no binding check (the
+        // connection is already attributed to `peer`); derive + persist, then
+        // assert the derived identity matches the bound peer (defense in depth).
+        match self.welcome_join_persist(welcome, None) {
+            Ok(derived) => {
+                if derived != peer {
+                    // `peer` is an Ed25519 pubkey — not logged (warn is >= info;
+                    // CLAUDE.md forbids pubkeys at info+). Static text only.
+                    tracing::warn!("inbound: welcome derived identity differs from connected peer");
+                }
+                Some(crate::delivery::peer::welcome_msg_id(welcome))
+            }
             Err(e) => {
-                tracing::warn!(
-                    peer = ?peer,
-                    err = %e,
-                    "inbound: dispatch_welcome failed, not ACKing"
-                );
+                // `e` Display is onion/pubkey-free static text. Do NOT log `peer`.
+                tracing::warn!(err = %e, "inbound: dispatch_welcome failed, not ACKing");
+                None
+            }
+        }
+    }
+
+    fn dispatch_welcome_bootstrap(
+        &self,
+        welcome: &[u8],
+        expected_x25519: &[u8; 32],
+    ) -> Option<PublicKey> {
+        match self.welcome_join_persist(welcome, Some(expected_x25519)) {
+            Ok(derived) => Some(derived),
+            Err(_e) => {
+                // Static, onion/pubkey-free warn: do not leak the rejected
+                // Welcome bytes, the derived identity, or the expected x25519.
+                tracing::warn!("inbound: welcome bootstrap rejected");
                 None
             }
         }
@@ -956,6 +1012,150 @@ mod tests {
             .unwrap_or_else(|| panic!("gid must be set"));
         assert_eq!(gid.len(), 32);
         assert_eq!(stored.identity, bob_pubkey);
+    }
+
+    /// Build Alice (inviter) + an outstanding invite, then have Bob (invitee)
+    /// produce a Welcome. Returns everything the bootstrap tests need.
+    /// Mirrors `dispatch_welcome_joins_group_and_emits_contact_updated`.
+    fn bootstrap_fixture(
+        pool: &Arc<Pool>,
+    ) -> (
+        DaemonInbound,
+        crate::identity::IdentityKey, // bob (invitee)
+        Vec<u8>,                      // welcome_bytes
+        [u8; 32],                     // alice_kp_ref (for outstanding-invite assertions)
+        broadcast::Receiver<Event>,
+    ) {
+        use crate::mls::key_package::{key_package_ref, KeyPackage};
+        use crate::storage::key_packages::KeyPackageRepo;
+        use crate::storage::OutstandingInviteRepo;
+
+        let (events_tx, rx) = broadcast::channel::<Event>(16);
+
+        // Alice = inviter
+        let alice =
+            crate::identity::IdentityKey::from_seed(&crate::identity::Seed::generate().unwrap())
+                .unwrap();
+        let alice_provider = MlsProvider::new();
+        let kp_repo = KeyPackageRepo::new(pool);
+        let alice_kp = KeyPackage::generate(&alice, &alice_provider, &kp_repo).unwrap();
+        let alice_kp_ref = key_package_ref(&alice_kp).unwrap();
+        let alice_kp_bytes = alice_kp.to_bytes().unwrap();
+
+        let psk_bytes = [0xABu8; 32];
+        let provider_snap = alice_provider.snapshot().unwrap();
+        let oi = OutstandingInviteRepo::new(pool);
+        oi.put_with_provider(
+            &alice_kp_ref,
+            &zeroize::Zeroizing::new(psk_bytes),
+            &alice_kp_bytes,
+            &provider_snap,
+            crate::daemon::clock::now_unix_seconds() + 3600,
+            crate::daemon::clock::now_unix_seconds(),
+        )
+        .unwrap();
+
+        // Bob = invitee; builds his solo group and adds Alice's KP.
+        let bob =
+            crate::identity::IdentityKey::from_seed(&crate::identity::Seed::generate().unwrap())
+                .unwrap();
+        let mut bob_group =
+            crate::mls::Group::create_solo(&bob, Some(&psk_bytes), MlsProvider::new()).unwrap();
+        let alice_kp_for_add = KeyPackage::from_bytes(&alice_kp_bytes).unwrap();
+        let (welcome_bytes, _commit) = bob_group
+            .add_member(&alice_kp_for_add, Some(&psk_bytes))
+            .unwrap();
+
+        let inbound = DaemonInbound::new(pool.clone(), events_tx);
+        inbound.set_identity(Arc::new(alice));
+        (inbound, bob, welcome_bytes, alice_kp_ref, rx)
+    }
+
+    /// Honest first-contact bootstrap: the binding x25519 equals
+    /// `ed25519_pub_to_x25519(bob_identity)` (i.e. `bob.noise_static_public()`).
+    /// Must return Bob's identity, persist contact+group, consume the invite,
+    /// and emit `ContactUpdated`.
+    #[tokio::test]
+    async fn dispatch_welcome_bootstrap_succeeds_and_binds() {
+        let pool = Arc::new(Pool::in_memory());
+        let (inbound, bob, welcome_bytes, alice_kp_ref, mut rx) = bootstrap_fixture(&pool);
+        let bob_pubkey = bob.public();
+        let correct_x25519 = bob.noise_static_public();
+
+        let derived = crate::delivery::peer::InboundDispatch::dispatch_welcome_bootstrap(
+            &inbound,
+            &welcome_bytes,
+            &correct_x25519,
+        );
+        assert_eq!(
+            derived,
+            Some(bob_pubkey),
+            "bootstrap must return Bob's derived identity"
+        );
+
+        // ContactUpdated event must fire for the derived peer.
+        match tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv()).await {
+            Ok(Ok(Event::ContactUpdated(p))) => assert_eq!(p, bob_pubkey),
+            other => panic!("expected ContactUpdated, got {other:?}"),
+        }
+
+        // Invite consumed; contact + group_id persisted under Bob.
+        let oi = crate::storage::OutstandingInviteRepo::new(&pool);
+        assert!(
+            oi.get_psk(&alice_kp_ref).unwrap().is_none(),
+            "invite consumed"
+        );
+        let cr = crate::storage::ContactRepo::new(&pool);
+        assert!(cr.get(&bob_pubkey).unwrap().is_some(), "contact persisted");
+        let gid = cr.get_group_id(&bob_pubkey).unwrap();
+        assert_eq!(gid.map(|g| g.len()), Some(32), "group_id linked");
+    }
+
+    /// Binding mismatch: a WRONG `expected_x25519` (a third party's static)
+    /// must be REFUSED. The bootstrap returns `None` AND nothing is persisted —
+    /// no contact, no group, the invite is NOT consumed. This is the
+    /// anti-relay / anti-MITM guarantee of ADR 0007.
+    #[tokio::test]
+    async fn dispatch_welcome_bootstrap_rejects_binding_mismatch() {
+        let pool = Arc::new(Pool::in_memory());
+        let (inbound, bob, welcome_bytes, alice_kp_ref, mut rx) = bootstrap_fixture(&pool);
+        let bob_pubkey = bob.public();
+
+        // A relay's x25519 static — distinct from bob's own identity-derived one.
+        let relay =
+            crate::identity::IdentityKey::from_seed(&crate::identity::Seed::generate().unwrap())
+                .unwrap();
+        let wrong_x25519 = relay.noise_static_public();
+        assert_ne!(
+            wrong_x25519,
+            bob.noise_static_public(),
+            "test setup: relay static must differ from bob's"
+        );
+
+        let derived = crate::delivery::peer::InboundDispatch::dispatch_welcome_bootstrap(
+            &inbound,
+            &welcome_bytes,
+            &wrong_x25519,
+        );
+        assert_eq!(derived, None, "binding mismatch must be refused");
+
+        // NOTHING persisted: no contact, no group_id, invite NOT consumed.
+        let cr = crate::storage::ContactRepo::new(&pool);
+        assert!(
+            cr.get(&bob_pubkey).unwrap().is_none(),
+            "no contact may be persisted on binding mismatch"
+        );
+        let oi = crate::storage::OutstandingInviteRepo::new(&pool);
+        assert!(
+            oi.get_psk(&alice_kp_ref).unwrap().is_some(),
+            "invite must NOT be consumed on binding mismatch"
+        );
+
+        // No event must be emitted.
+        match tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await {
+            Err(_timeout) => {} // expected
+            Ok(other) => panic!("unexpected event on binding mismatch: {other:?}"),
+        }
     }
 
     #[tokio::test]

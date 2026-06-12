@@ -28,6 +28,8 @@ mod cli_tail_follow;
 #[cfg(test)]
 mod cli_two_daemons;
 #[cfg(test)]
+mod daemon_run_direct;
+#[cfg(test)]
 mod delivery_kill_mid_message;
 #[cfg(test)]
 mod delivery_real_tor;

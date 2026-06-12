@@ -110,11 +110,6 @@ impl Daemon {
         shutdown: impl std::future::Future<Output = ()> + Send + 'static,
         log_sink: Option<LogSink>,
     ) -> Result<()> {
-        use crate::daemon::handle::DaemonHandle;
-        use crate::daemon::inbound::DaemonInbound;
-        use crate::daemon::ipc::server::{serve, Server};
-        use crate::delivery::hub::DeliveryHub;
-        use crate::delivery::peer::InboundDispatch;
         use crate::storage::Pool;
 
         std::fs::create_dir_all(data_dir)?;
@@ -169,157 +164,55 @@ impl Daemon {
             sweep_shutdown_rx,
         );
 
-        // Step 3: Tor bootstrap + onion publish.
+        // Step 3: event broadcast channel.
+        let (events_tx, _) = broadcast::channel::<Event>(EVENT_CHANNEL_CAPACITY);
+
+        // Step 4: Tor bootstrap. Build the mailbox factory from a cloned
+        // TorClient BEFORE the runtime is moved into the ArtiTransport
+        // (the transport's `shutdown` consumes the runtime).
         let cfg = TorConfig {
             state_dir: data_dir.join("arti"),
             socks_port: None,
         };
-        let mut rt = TorRuntime::bootstrap(cfg).await?;
-
-        let hs_key_path = data_dir.join("hs.key.age");
-        let onion = rt
-            .publish_onion(&hs_key_path, &seed, "skattr-daemon")
-            .await?;
-
-        // Step 4: event broadcast channel.
-        let (events_tx, _) = broadcast::channel::<Event>(EVENT_CHANNEL_CAPACITY);
-
-        // Step 5: DaemonInbound + DeliveryHub.
-        let inbound_impl = DaemonInbound::new(pool.clone(), events_tx.clone());
-        inbound_impl.set_identity(Arc::new(identity_for_inbound));
-        let inbound = Arc::new(inbound_impl) as Arc<dyn InboundDispatch>;
-        // Use DataStream as the transport type parameter. The hub stores
-        // per-peer actor channels; actual DataStream-backed connections are
-        // injected via `hub.ingest()` from the onion-listener accept loop
-        // (wired in a later phase). For Phase 1.F we only need the hub
-        // constructed so IPC commands can be dispatched.
-        let hub: Arc<DeliveryHub<arti_client::DataStream>> =
-            Arc::new(DeliveryHub::new_with_inbound(pool.clone(), inbound.clone()));
-
-        // Step 5.5: Mailbox connect factory + PollScheduler.
-        // The factory holds a cloned `arti_client::TorClient` so
-        // `AddMailbox` / `RemoveMailbox` / `RotateOnion` handlers (and
-        // per-mailbox poll actors) can dial mailboxes through Arti
-        // independently of the daemon's owning `TorRuntime`. The
-        // scheduler is held by `Daemon::run` for the lifetime of the
-        // daemon — its `Drop` aborts the supervisor on shutdown.
+        let rt = TorRuntime::bootstrap(cfg).await?;
         let mailbox_factory: Arc<dyn crate::mailbox::poll::MailboxConnectFactory> =
             Arc::new(ArtiMailboxFactory {
                 tor_client: rt.client().clone(),
             });
-        let identity_arc = Arc::new(identity_for_poller);
-        let scheduler = crate::mailbox::poll::PollScheduler::spawn(
-            pool.clone(),
-            identity_arc,
-            events_tx.clone(),
-            mailbox_factory.clone(),
-            Some(inbound.clone()),
-        );
-        let poller_ctrl = scheduler.ctrl();
+        let transport = Arc::new(crate::transport::arti_transport::ArtiTransport::new(rt));
 
-        // Step 6: DaemonHandle — inject the shared config_arc so that
-        // SetConfig writes propagate to the retention sweep on the next tick.
-        let mut handle = DaemonHandle::<arti_client::DataStream>::new_with_mailbox(
-            pool,
-            hub,
-            identity,
-            events_tx.clone(),
-            mailbox_factory,
-            poller_ctrl,
-        );
-        handle.set_config_arc(config_arc, config_path);
-        handle.set_onion(onion.clone());
+        // One identity shared (by Arc) across the dialer (initiator
+        // handshakes) and the accept loop (responder handshakes); both only
+        // borrow `&IdentityKey`. IdentityKey is not Clone, so we open the
+        // vault a fifth time to mint an independent zeroize-on-drop handle.
+        let (_vault5, identity_for_transport) = Vault::open(&vault_path, passphrase.as_str())?;
+        let transport_identity = Arc::new(identity_for_transport);
 
-        // Install the LogSink (from caller-provided subscriber layer, or a
-        // standalone one if the caller didn't wire a RingBufferLayer).
+        // The LogSink is resolved here so `run_with_transport` receives an
+        // owned, already-installed sink.
         let resolved_sink = log_sink.unwrap_or_default();
-        handle.set_log_sink(resolved_sink.clone());
 
-        // Log tap: forward every record from the ring buffer's broadcast
-        // channel onto the daemon event bus so `EventFilter::Logs`
-        // subscribers receive live tail. This task terminates when the
-        // broadcast sender is dropped (process exit).
-        {
-            let mut log_rx = resolved_sink.subscribe();
-            let log_events_tx = events_tx.clone();
-            tokio::spawn(async move {
-                loop {
-                    match log_rx.recv().await {
-                        Ok(record) => {
-                            let _ =
-                                log_events_tx.send(crate::daemon::events::Event::LogRecord(record));
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                    }
-                }
-            });
-        }
-
-        // TorStatus tap: subscribe to the broadcast channel and copy
-        // every TorStatusChanged into the same Arc<RwLock<…>> the
-        // IpcServer reads via DaemonHandle::latest_tor_status(). Spawned
-        // after DaemonHandle is built so the tap and the readers share
-        // the same allocation. Held on a JoinHandle so the shutdown
-        // path can abort it.
-        let tor_status_cache_for_tap = handle.latest_tor_status.clone();
-        let mut tap_rx = events_tx.subscribe();
-        let tor_tap_task = tokio::spawn(async move {
-            loop {
-                match tap_rx.recv().await {
-                    Ok(crate::daemon::events::Event::TorStatusChanged(s)) => {
-                        if let Ok(mut g) = tor_status_cache_for_tap.write() {
-                            *g = Some(s);
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        });
-
-        // Step 7: IPC server.
-        let sock_path = config.ipc_socket_or_default()?;
-        let allowed = crate::daemon::ipc::current_peer_id();
-        let ipc_server = Server::bind(&sock_path, allowed)?;
-        let sock_path_copy = sock_path.clone();
-
-        let (ipc_shutdown_tx, ipc_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-        // Build the executor Arc from a clone of the handle's subsystems.
-        let executor: Arc<dyn crate::daemon::ipc::server::CommandExecutor> =
-            Arc::new(handle.clone_for_dispatch());
-        let ipc_events = events_tx.clone();
-        let ipc_task = tokio::spawn(async move {
-            serve(ipc_server, executor, ipc_events, async move {
-                let _ = ipc_shutdown_rx.await;
-            })
-            .await;
-        });
-
-        // Step 8: signal readiness.
-        let _ = ready.send(Ready {
-            onion,
-            ipc_socket: sock_path_copy.clone(),
-        });
-
-        // Step 9: await shutdown.
-        shutdown.await;
-
-        // Step 10: tear down.
-        let _ = ipc_shutdown_tx.send(());
-        let _ = ipc_task.await;
-        tor_tap_task.abort();
-        let _ = tor_tap_task.await;
-        let _ = sweep_shutdown_tx.send(true);
-        let _ = sweep_handle.await;
-        // Explicitly drop the PollScheduler so its supervisor task is
-        // aborted before Arti shuts down — a poll actor mid-Challenge
-        // would otherwise observe a torn-down circuit.
-        drop(scheduler);
-        rt.shutdown().await?;
-        // Server::drop removes the socket file automatically.
-        Ok(())
+        run_with_transport(
+            transport,
+            pool,
+            identity,
+            identity_for_poller,
+            identity_for_inbound,
+            transport_identity,
+            seed,
+            data_dir,
+            config,
+            config_path,
+            config_arc,
+            events_tx,
+            mailbox_factory,
+            resolved_sink,
+            sweep_shutdown_tx,
+            sweep_handle,
+            ready,
+            shutdown,
+        )
+        .await
     }
 
     /// Encrypt an envelope for `peer` via the existing MLS group, persist
@@ -343,6 +236,316 @@ impl Daemon {
             crate::delivery::DeliveryErrorKind::Other(
                 "Daemon::send requires 1.F CLI integration".into(),
             ),
+        ))
+    }
+}
+
+/// Generic post-bootstrap daemon assembly: publish the onion via the
+/// injected [`Transport`](crate::transport::Transport), spawn the inbound
+/// accept loop, inject the on-demand dialer into the [`DeliveryHub`], wire
+/// the [`PollScheduler`](crate::mailbox::poll::PollScheduler), build the
+/// [`DaemonHandle`], bind IPC, and await shutdown.
+///
+/// `Daemon::run` / `run_with_sink` are thin `ArtiTransport` wrappers around
+/// this function; the two-daemon loopback guardrail (Task 8) calls it with
+/// `LoopbackTransport`. Exported under `test-harness` via
+/// [`crate::test_exports::run_with_transport`].
+// `pub` so `lib.rs::test_exports` can re-export it for the two-daemon guardrail
+// (Task 8) — a `pub use` cannot re-export a `pub(crate)` item (E0364), so this
+// must be `pub`, mirroring the `pub struct Ready` pattern in this module.
+// `daemon::state` is a `pub mod`, but the function takes a `pub(crate)`
+// `Arc<dyn MailboxConnectFactory>` that external callers cannot construct, so
+// it is uncallable from outside the crate. `private_interfaces` flags exactly
+// that inert leak.
+#[allow(clippy::too_many_arguments, private_interfaces)]
+pub async fn run_with_transport<T>(
+    transport: Arc<T>,
+    pool: Arc<crate::storage::Pool>,
+    identity: crate::identity::IdentityKey,
+    identity_for_poller: crate::identity::IdentityKey,
+    identity_for_inbound: crate::identity::IdentityKey,
+    transport_identity: Arc<crate::identity::IdentityKey>,
+    seed: crate::identity::Seed,
+    data_dir: &Path,
+    config: Config,
+    config_path: std::path::PathBuf,
+    config_arc: Arc<tokio::sync::RwLock<Config>>,
+    events_tx: broadcast::Sender<Event>,
+    mailbox_factory: Arc<dyn crate::mailbox::poll::MailboxConnectFactory>,
+    log_sink: LogSink,
+    sweep_shutdown_tx: tokio::sync::watch::Sender<bool>,
+    sweep_handle: tokio::task::JoinHandle<()>,
+    ready: oneshot::Sender<Ready>,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<()>
+where
+    T: crate::transport::Transport,
+    // `DaemonHandle<S>: CommandExecutor` requires `S: Sync` (the IPC executor
+    // is shared across threads as `Arc<dyn CommandExecutor>`). Every concrete
+    // `Transport::Stream` (arti `DataStream`, loopback duplex) is `Sync`; the
+    // associated-type projection just doesn't carry it, so restate it here.
+    T::Stream: Sync,
+{
+    use crate::daemon::handle::DaemonHandle;
+    use crate::daemon::inbound::DaemonInbound;
+    use crate::daemon::ipc::server::{serve, Server};
+    use crate::delivery::hub::DeliveryHub;
+    use crate::delivery::peer::InboundDispatch;
+
+    // Step 1: publish onion + obtain the inbound stream source. `data_dir` is
+    // only borrowed here, before the `shutdown.await` boundary, so the `&Path`
+    // need not outlive the `'static` shutdown future.
+    let hs_key_path = data_dir.join("hs.key.age");
+    let (onion, inbound_streams) = transport
+        .publish(&hs_key_path, &seed, "skattr-daemon")
+        .await?;
+
+    // Step 2: DaemonInbound (MLS decrypt + persist + emit events).
+    let inbound_impl = DaemonInbound::new(pool.clone(), events_tx.clone());
+    inbound_impl.set_identity(Arc::new(identity_for_inbound));
+    let inbound = Arc::new(inbound_impl) as Arc<dyn InboundDispatch>;
+
+    // Step 3: DeliveryHub with the injected on-demand dialer. The dialer and
+    // the accept loop share `transport_identity` (both only borrow it).
+    let dialer = Arc::new(crate::delivery::dial::TransportDial::new(
+        transport.clone(),
+        transport_identity.clone(),
+        pool.clone(),
+    ));
+    let hub: Arc<DeliveryHub<T::Stream>> = Arc::new(DeliveryHub::new_with_inbound_and_dialer(
+        pool.clone(),
+        inbound.clone(),
+        dialer,
+    ));
+
+    // Step 4: inbound accept loop — handshake (responder) + resolve + ingest.
+    let accept_task = tokio::spawn(crate::daemon::accept::run_accept_loop(
+        inbound_streams,
+        transport_identity.clone(),
+        pool.clone(),
+        hub.clone(),
+        inbound.clone(),
+    ));
+
+    // Step 5: PollScheduler. Held for the daemon's lifetime — its `Drop`
+    // aborts the supervisor on shutdown.
+    let identity_arc = Arc::new(identity_for_poller);
+    let scheduler = crate::mailbox::poll::PollScheduler::spawn(
+        pool.clone(),
+        identity_arc,
+        events_tx.clone(),
+        mailbox_factory.clone(),
+        Some(inbound.clone()),
+    );
+    let poller_ctrl = scheduler.ctrl();
+
+    // Step 6: DaemonHandle — inject the shared config_arc so SetConfig writes
+    // propagate to the retention sweep on the next tick.
+    let mut handle = DaemonHandle::<T::Stream>::new_with_mailbox(
+        pool,
+        hub,
+        identity,
+        events_tx.clone(),
+        mailbox_factory,
+        poller_ctrl,
+    );
+    handle.set_config_arc(config_arc, config_path);
+    handle.set_onion(onion.clone());
+    handle.set_log_sink(log_sink.clone());
+
+    // Log tap: forward every record from the ring buffer's broadcast channel
+    // onto the daemon event bus so `EventFilter::Logs` subscribers receive
+    // live tail. Terminates when the broadcast sender is dropped (process exit).
+    {
+        let mut log_rx = log_sink.subscribe();
+        let log_events_tx = events_tx.clone();
+        tokio::spawn(async move {
+            loop {
+                match log_rx.recv().await {
+                    Ok(record) => {
+                        let _ = log_events_tx.send(crate::daemon::events::Event::LogRecord(record));
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
+
+    // TorStatus tap: copy every TorStatusChanged into the same Arc<RwLock<…>>
+    // the IpcServer reads via DaemonHandle::latest_tor_status(). Held on a
+    // JoinHandle so the shutdown path can abort it.
+    let tor_status_cache_for_tap = handle.latest_tor_status.clone();
+    let mut tap_rx = events_tx.subscribe();
+    let tor_tap_task = tokio::spawn(async move {
+        loop {
+            match tap_rx.recv().await {
+                Ok(crate::daemon::events::Event::TorStatusChanged(s)) => {
+                    if let Ok(mut g) = tor_status_cache_for_tap.write() {
+                        *g = Some(s);
+                    }
+                }
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+
+    // Step 7: IPC server.
+    let sock_path = config.ipc_socket_or_default()?;
+    let allowed = crate::daemon::ipc::current_peer_id();
+    let ipc_server = Server::bind(&sock_path, allowed)?;
+    let sock_path_copy = sock_path.clone();
+
+    let (ipc_shutdown_tx, ipc_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let executor: Arc<dyn crate::daemon::ipc::server::CommandExecutor> =
+        Arc::new(handle.clone_for_dispatch());
+    let ipc_events = events_tx.clone();
+    let ipc_task = tokio::spawn(async move {
+        serve(ipc_server, executor, ipc_events, async move {
+            let _ = ipc_shutdown_rx.await;
+        })
+        .await;
+    });
+
+    // Step 8: signal readiness.
+    let _ = ready.send(Ready {
+        onion,
+        ipc_socket: sock_path_copy.clone(),
+    });
+
+    // Step 9: await shutdown.
+    shutdown.await;
+
+    // Step 10: tear down.
+    let _ = ipc_shutdown_tx.send(());
+    let _ = ipc_task.await;
+    tor_tap_task.abort();
+    let _ = tor_tap_task.await;
+    let _ = sweep_shutdown_tx.send(true);
+    let _ = sweep_handle.await;
+    // Explicitly drop the PollScheduler so its supervisor task is aborted
+    // before the transport shuts down — a poll actor mid-Challenge would
+    // otherwise observe a torn-down circuit.
+    drop(scheduler);
+    // Stop the accept loop and join it (parity with the other teardown awaits)
+    // before shutting down the transport (which consumes the underlying runtime
+    // for ArtiTransport), so an in-flight accept can't race the teardown.
+    accept_task.abort();
+    let _ = accept_task.await;
+    transport.shutdown().await?;
+    // Server::drop removes the socket file automatically.
+    Ok(())
+}
+
+/// Loopback twin of [`Daemon::run_with_sink`] for the two-daemon guardrail
+/// (Task 8). Mirrors `run_with_sink` exactly except it (a) publishes over a
+/// [`LoopbackTransport`](crate::transport::LoopbackTransport) on the shared
+/// `net` instead of bootstrapping Tor, (b) supplies a no-op
+/// [`MailboxConnectFactory`](crate::mailbox::poll::MailboxConnectFactory)
+/// (no mailboxes are configured, so it is never called), and (c) has no
+/// `TorRuntime`. Everything else is the production
+/// [`run_with_transport`] assembly, so this exercises the real wiring.
+///
+/// Exported under `test-harness` via [`crate::test_exports::run_loopback`].
+#[cfg(feature = "test-harness")]
+#[allow(clippy::too_many_arguments)]
+pub async fn run_loopback(
+    data_dir: &Path,
+    passphrase: &zeroize::Zeroizing<String>,
+    config: Config,
+    config_path: std::path::PathBuf,
+    net: crate::transport::LoopbackNet,
+    my_onion: String,
+    ready: oneshot::Sender<Ready>,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<()> {
+    use crate::storage::Pool;
+
+    std::fs::create_dir_all(data_dir)?;
+
+    // Step 1: unlock vault → identity → derive storage seed. Mirrors
+    // `run_with_sink`: open the vault five times for five independent
+    // zeroize-on-drop handles.
+    let vault_path = data_dir.join("identity.vault");
+    let (_vault, identity_for_seed) = Vault::open(&vault_path, passphrase.as_str())?;
+    let seed = derive_storage_seed(identity_for_seed)?;
+    let (_vault2, identity) = Vault::open(&vault_path, passphrase.as_str())?;
+    let (_vault3, identity_for_poller) = Vault::open(&vault_path, passphrase.as_str())?;
+    let (_vault4, identity_for_inbound) = Vault::open(&vault_path, passphrase.as_str())?;
+    let (_vault5, identity_for_transport) = Vault::open(&vault_path, passphrase.as_str())?;
+
+    // Step 2: open Pool (migrations applied inside Pool::open).
+    let pool = Arc::new(Pool::open(data_dir, &seed)?);
+
+    match crate::storage::MessageRepo::new(&pool).backfill_body_text() {
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "body_text backfill failed"),
+    }
+    let n = crate::storage::MessageRepo::new(&pool).backfill_envelope_id()?;
+    if n > 0 {
+        tracing::info!(rows = n, "backfilled envelope_id for pre-1.H rows");
+    }
+
+    let config_arc = std::sync::Arc::new(tokio::sync::RwLock::new(config.clone()));
+
+    let (sweep_shutdown_tx, sweep_shutdown_rx) = tokio::sync::watch::channel(false);
+    let sweep_handle = crate::daemon::retention::spawn_sweep(
+        pool.clone(),
+        config_arc.clone(),
+        std::time::Duration::from_secs(3600),
+        sweep_shutdown_rx,
+    );
+
+    let (events_tx, _) = broadcast::channel::<Event>(EVENT_CHANNEL_CAPACITY);
+
+    // Step 3: loopback transport + no-op mailbox factory (in place of Tor).
+    let transport = Arc::new(crate::transport::LoopbackTransport::new(net, my_onion));
+    let mailbox_factory: Arc<dyn crate::mailbox::poll::MailboxConnectFactory> =
+        Arc::new(NoopMailboxFactory);
+    let transport_identity = Arc::new(identity_for_transport);
+
+    run_with_transport(
+        transport,
+        pool,
+        identity,
+        identity_for_poller,
+        identity_for_inbound,
+        transport_identity,
+        seed,
+        data_dir,
+        config,
+        config_path,
+        config_arc,
+        events_tx,
+        mailbox_factory,
+        LogSink::default(),
+        sweep_shutdown_tx,
+        sweep_handle,
+        ready,
+        shutdown,
+    )
+    .await
+}
+
+/// No-op `MailboxConnectFactory` for the loopback guardrail: no mailboxes are
+/// configured in the test, so `connect` is never invoked; it returns
+/// `Unreachable` to satisfy the signature.
+#[cfg(feature = "test-harness")]
+struct NoopMailboxFactory;
+
+#[cfg(feature = "test-harness")]
+#[async_trait::async_trait]
+impl crate::mailbox::poll::MailboxConnectFactory for NoopMailboxFactory {
+    async fn connect(
+        &self,
+        _onion: &str,
+    ) -> crate::error::Result<
+        crate::mailbox::client::MailboxClient<Box<dyn crate::mailbox::poll::MailboxStream>>,
+    > {
+        Err(crate::error::CoreError::MailboxClient(
+            crate::error::MailboxClientErrorKind::Unreachable,
         ))
     }
 }

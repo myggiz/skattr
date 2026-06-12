@@ -111,6 +111,24 @@ pub trait InboundDispatch: Send + Sync + 'static {
     fn dispatch_mailbox(&self, _ciphertext: &[u8]) -> Option<MessageId> {
         None
     }
+
+    /// Authenticate + join a first-contact Welcome from a peer not yet known,
+    /// deriving + binding the invitee's identity (ADR 0007). The Welcome is
+    /// validated against `outstanding_invites` (peer-independent), the invitee
+    /// identity is derived from the joined MLS group, and bound to the
+    /// handshake's X25519 static (`expected_x25519`) before anything is
+    /// persisted. Returns the derived peer [`PublicKey`] on success (so the
+    /// accept loop can ingest under it), or `None` if the Welcome is invalid or
+    /// fails the identity binding.
+    ///
+    /// Default impl returns `None` so existing impls compile unchanged.
+    fn dispatch_welcome_bootstrap(
+        &self,
+        _welcome: &[u8],
+        _expected_x25519: &[u8; 32],
+    ) -> Option<PublicKey> {
+        None
+    }
 }
 
 /// Per-peer actor. Owns an `Option<AuthenticatedConnection<S>>`, a
@@ -139,19 +157,21 @@ impl PeerConnection {
     /// provides job + control channels plus an optional inbound-MLS
     /// dispatcher. The actor starts receiving a fresh conn via
     /// `PeerCtrl::ReplaceConn` sent by the hub immediately after spawn.
-    pub fn spawn<S>(
+    pub(crate) fn spawn<S>(
         peer: PublicKey,
         jobs: mpsc::Receiver<DeliveryJob>,
         welcome_jobs: mpsc::Receiver<WelcomeJob>,
         ctrl: mpsc::Receiver<PeerCtrl<S>>,
         pool: std::sync::Arc<crate::storage::Pool>,
         inbound: Option<std::sync::Arc<dyn InboundDispatch>>,
+        dialer: Option<std::sync::Arc<dyn crate::delivery::dial::OutboundDial<S>>>,
     ) -> PeerHandle
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         tokio::spawn(async move {
-            let _ = full_run::<S>(peer, None, jobs, welcome_jobs, ctrl, pool, inbound).await;
+            let _ =
+                full_run::<S>(peer, None, jobs, welcome_jobs, ctrl, pool, inbound, dialer).await;
         })
     }
 
@@ -173,7 +193,17 @@ impl PeerConnection {
         tokio::spawn(async move {
             let (_ctrl_tx, ctrl_rx) = mpsc::channel::<PeerCtrl<S>>(4);
             let (_welcome_tx, welcome_rx) = mpsc::channel::<WelcomeJob>(4);
-            let _ = full_run(peer, Some(*conn), jobs, welcome_rx, ctrl_rx, pool, inbound).await;
+            let _ = full_run(
+                peer,
+                Some(*conn),
+                jobs,
+                welcome_rx,
+                ctrl_rx,
+                pool,
+                inbound,
+                None,
+            )
+            .await;
         })
     }
 }
@@ -253,6 +283,7 @@ const IDLE_CLOSE: std::time::Duration = std::time::Duration::from_secs(180);
 /// retry tick is responsible for redialing via the hub in production.
 /// For the test-only constructor, `conn == None` after an error means
 /// the actor exits (redial wiring lives on the hub side).
+#[allow(clippy::too_many_arguments)]
 async fn full_run<S>(
     peer: PublicKey,
     mut conn: Option<AuthenticatedConnection<S>>,
@@ -261,6 +292,7 @@ async fn full_run<S>(
     mut ctrl: mpsc::Receiver<PeerCtrl<S>>,
     pool: std::sync::Arc<crate::storage::Pool>,
     inbound: Option<std::sync::Arc<dyn InboundDispatch>>,
+    dialer: Option<std::sync::Arc<dyn crate::delivery::dial::OutboundDial<S>>>,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -284,6 +316,13 @@ where
         tokio::select! {
             job = jobs.recv() => {
                 let Some(job) = job else { break; };
+                // Dial on demand: if we have no live conn, try the injected
+                // dialer before dropping the job. A failed dial (or no dialer)
+                // leaves the row in the outbox for the retry tick.
+                if !ensure_conn::<S>(peer, &mut conn, &dialer).await {
+                    let _ = job.ack_tx.send(Err(()));
+                    continue;
+                }
                 let Some(c) = conn.as_mut() else {
                     let _ = job.ack_tx.send(Err(()));
                     continue;
@@ -314,6 +353,7 @@ where
                 }
             }
             _ = retry_tick.tick() => {
+                // dial-on-demand happens on the next job send; timer-driven redial is Phase-2 fallback work.
                 let ob = Outbox::new(&pool);
                 let now = now_ms();
                 let due = match ob.due(now, 32) { Ok(v) => v, Err(_) => continue };
@@ -448,6 +488,41 @@ where
     }
     drain_pending(&mut pending);
     Ok(())
+}
+
+/// Ensure the actor has a live connection, dialing on demand via the
+/// injected dialer when cold. Returns `true` if a connection is now
+/// present, `false` if there is no dialer or the dial failed (the caller
+/// then NACKs the job, leaving the row for the retry tick).
+async fn ensure_conn<S>(
+    peer: PublicKey,
+    conn: &mut Option<AuthenticatedConnection<S>>,
+    dialer: &Option<std::sync::Arc<dyn crate::delivery::dial::OutboundDial<S>>>,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    if conn.is_some() {
+        return true;
+    }
+    let Some(d) = dialer.as_ref() else {
+        return false;
+    };
+    match d.dial(peer).await {
+        Ok(c) => {
+            *conn = Some(c);
+            true
+        }
+        Err(e) => {
+            // The dial error string can embed the peer's onion address
+            // (ArtiTransport formats `connect {onion}:{port}`), which must not
+            // appear at info+. Keep the WARN redaction-safe; log the detail at
+            // DEBUG, where onions are permitted.
+            tracing::warn!("delivery: outbound dial failed");
+            tracing::debug!(error = %e, "delivery: outbound dial failure detail");
+            false
+        }
+    }
 }
 
 fn drain_pending(pending: &mut HashMap<MessageId, oneshot::Sender<std::result::Result<(), ()>>>) {
@@ -732,6 +807,7 @@ mod tests {
                 welcome_rx,
                 ctrl_rx,
                 pool,
+                None,
                 None,
             )
             .await;
