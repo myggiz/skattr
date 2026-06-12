@@ -4128,7 +4128,10 @@ mod tests {
         .unwrap_err();
 
         assert!(
-            matches!(err, IpcError::Daemon(DaemonErrorKind::InvalidArgument { .. })),
+            matches!(
+                err,
+                IpcError::Daemon(DaemonErrorKind::InvalidArgument { .. })
+            ),
             "ContactCardUpdate must be rejected as InvalidArgument, got {err:?}"
         );
     }

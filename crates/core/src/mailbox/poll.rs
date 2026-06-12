@@ -474,8 +474,7 @@ async fn actor_loop(
         let now_ts = crate::daemon::clock::now_unix_seconds();
         let _ = MailboxRepo::new(&pool).touch_poll(id, now_ts);
         let noop = NoopDispatch;
-        let disp: &dyn crate::delivery::peer::InboundDispatch =
-            inbound.as_deref().unwrap_or(&noop);
+        let disp: &dyn crate::delivery::peer::InboundDispatch = inbound.as_deref().unwrap_or(&noop);
         match poll_dispatch_once(&mut client, &identity, disp).await {
             Ok(dispatched) => {
                 consecutive_failures = 0;
@@ -733,7 +732,8 @@ mod tests {
         // Group: alice adds bob; persist alice's group; link bob as the
         // contact for the group so dispatch_mailbox can attribute the sender.
         let bob_provider = MlsProvider::new();
-        let bob_kp = KeyPackage::generate(&bob, &bob_provider, &KeyPackageRepo::new(&pool)).unwrap();
+        let bob_kp =
+            KeyPackage::generate(&bob, &bob_provider, &KeyPackageRepo::new(&pool)).unwrap();
         let mut alice_group =
             crate::mls::Group::create_solo(&alice, None, MlsProvider::new()).unwrap();
         let (welcome, _commit) = alice_group.add_member(&bob_kp, None).unwrap();
@@ -822,7 +822,11 @@ mod tests {
         assert_eq!(dispatched, 1, "one deposit must be dispatched + deleted");
 
         let rows = MessageRepo::new(&pool).recent(&gid, 10).unwrap();
-        assert_eq!(rows.len(), 1, "received message must persist in alice's pool");
+        assert_eq!(
+            rows.len(),
+            1,
+            "received message must persist in alice's pool"
+        );
 
         server.await.unwrap();
     }
