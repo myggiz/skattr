@@ -14,6 +14,7 @@
 //! 5. [`listener`] — accepts onion stream callbacks and feeds them to
 //!    the session manager.
 
+pub(crate) mod arti_transport;
 pub(crate) mod connection;
 mod error_kind;
 pub(crate) mod frame;

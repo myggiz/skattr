@@ -89,6 +89,14 @@ impl OnionListener {
         self.task.abort();
         Ok(())
     }
+
+    /// Consume the listener, returning its inbound stream receiver. The
+    /// accept task is detached (it is `tokio::spawn`ed and never aborted on
+    /// drop — there is no `Drop` impl), so dropping the rest of the struct
+    /// keeps the accept loop running.
+    pub(crate) fn into_accepted(self) -> mpsc::Receiver<DataStream> {
+        self.accepted
+    }
 }
 
 #[cfg(test)]
