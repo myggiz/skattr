@@ -234,6 +234,60 @@ impl DaemonInbound {
         Ok(msg_id)
     }
 
+    /// Trial-decrypt a mailbox-fetched ciphertext against each known group.
+    /// On the first group that decrypts, attribute the peer via
+    /// `contact_for_group` and persist through the transactional
+    /// `dispatch_for_group` path (which re-loads from disk, so the trial
+    /// decrypt above — performed on an in-memory copy that is never saved —
+    /// does not consume the on-disk message key).
+    ///
+    /// NOTE: trial-decrypt is O(groups) per deposit (each iteration does a full
+    /// `Group::load`). Fine for v1.0's 2-member-only groups; revisit if the
+    /// group count grows.
+    ///
+    /// TODO(phase-2): a deposit that trial-decrypts but is then rejected by the
+    /// ±1h `Envelope.ts` replay window — legitimate for store-and-forward
+    /// offline delivery, where a deposit can be hours/days old — yields `None`
+    /// here, so the poll actor retains it and re-fetches it every poll (a poison
+    /// deposit), and the delayed message never surfaces. Deferred to Phase 2
+    /// mailbox hardening; see docs/superpowers/specs/2026-06-12-v1.0-roadmap.md.
+    fn dispatch_mailbox_inner(&self, ciphertext: &[u8]) -> Option<MessageId> {
+        let group_repo = MlsGroupRepo::new(&self.pool);
+        let groups = match group_repo.list() {
+            Ok(groups) => groups,
+            Err(e) => {
+                tracing::warn!(error = %e, "inbound: mailbox dispatch could not list groups");
+                return None;
+            }
+        };
+        for (gid_bytes, _epoch) in groups {
+            let gid = GroupId(gid_bytes.clone());
+            let mut g = match Group::load(&gid, &group_repo) {
+                Ok(Some(g)) => g,
+                Ok(None) => continue,
+                Err(e) => {
+                    tracing::warn!(error = %e, "inbound: mailbox dispatch skipping unloadable group");
+                    continue;
+                }
+            };
+            // Trial decrypt on the in-memory copy; do NOT save.
+            if g.decrypt(ciphertext).is_err() {
+                continue;
+            }
+            let gid_arr: [u8; 32] = match gid_bytes.as_slice().try_into() {
+                Ok(a) => a,
+                Err(_) => continue,
+            };
+            let peer = match ContactRepo::new(&self.pool).contact_for_group(&gid_arr) {
+                Ok(Some(p)) => p,
+                _ => continue,
+            };
+            // Re-load + decrypt + persist atomically against the on-disk state.
+            return self.dispatch_for_group(peer, &gid_bytes, ciphertext).ok();
+        }
+        None
+    }
+
     /// Join an MLS group from a Welcome, persist group + contact + consumed
     /// markers atomically, and emit `Event::ContactUpdated`.
     fn dispatch_welcome_inner(&self, peer: PublicKey, welcome_bytes: &[u8]) -> Result<()> {
@@ -351,6 +405,18 @@ impl InboundDispatch for DaemonInbound {
                     peer = ?peer,
                     err = %e,
                     "inbound: dispatch_welcome failed, not ACKing"
+                );
+                None
+            }
+        }
+    }
+
+    fn dispatch_mailbox(&self, ciphertext: &[u8]) -> Option<MessageId> {
+        match self.dispatch_mailbox_inner(ciphertext) {
+            Some(mid) => Some(mid),
+            None => {
+                tracing::warn!(
+                    "inbound: mailbox dispatch found no matching group; deposit retained"
                 );
                 None
             }
@@ -890,6 +956,92 @@ mod tests {
             .unwrap_or_else(|| panic!("gid must be set"));
         assert_eq!(gid.len(), 32);
         assert_eq!(stored.identity, bob_pubkey);
+    }
+
+    #[tokio::test]
+    async fn dispatch_mailbox_trial_decrypts_attributes_sender_and_persists() {
+        use crate::contact::Contact;
+        use crate::mls::key_package::KeyPackage;
+        use crate::storage::key_packages::KeyPackageRepo;
+        use crate::storage::{ContactRepo, MessageRepo, MlsGroupRepo};
+
+        let pool = Arc::new(Pool::in_memory());
+        let (events_tx, mut rx) = broadcast::channel::<Event>(16);
+
+        let alice_seed = crate::identity::Seed::generate().unwrap();
+        let alice_id = crate::identity::IdentityKey::from_seed(&alice_seed).unwrap();
+        let bob_seed = crate::identity::Seed::generate().unwrap();
+        let bob_id = crate::identity::IdentityKey::from_seed(&bob_seed).unwrap();
+        let bob_pk = bob_id.public();
+
+        // Build the 2-member group (alice adds bob).
+        let bob_provider = MlsProvider::new();
+        let kp_repo = KeyPackageRepo::new(&pool);
+        let bob_kp = KeyPackage::generate(&bob_id, &bob_provider, &kp_repo).unwrap();
+        let mut alice_group =
+            crate::mls::Group::create_solo(&alice_id, None, MlsProvider::new()).unwrap();
+        let (welcome, _commit) = alice_group.add_member(&bob_kp, None).unwrap();
+        let group_id_bytes = alice_group.id().0.clone();
+        let mut bob_group =
+            crate::mls::Group::join_from_welcome(&bob_id, &welcome, None, bob_provider).unwrap();
+
+        // Persist alice's group + link bob as the contact for this group so
+        // contact_for_group can attribute the sender.
+        alice_group.save(&MlsGroupRepo::new(&pool)).unwrap();
+        let contacts = ContactRepo::new(&pool);
+        contacts
+            .upsert(&Contact {
+                identity: bob_pk,
+                display_name: Some("bob".into()),
+                added_at: 0,
+                card: None,
+                muted: false,
+            })
+            .unwrap();
+        contacts.set_group_id(&bob_pk, &group_id_bytes).unwrap();
+
+        // Bob encrypts a message (ts within ±1h of now).
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let env = crate::envelope::Envelope {
+            v: 1,
+            id: MessageId::generate(),
+            ts: now_ms,
+            reply_to: None,
+            kind: Kind::Text {
+                body: "from-mailbox".into(),
+            },
+        };
+        let expected_id = env.id;
+        let ciphertext = bob_group.encrypt(&env).unwrap();
+
+        let inbound = DaemonInbound::new(pool.clone(), events_tx.clone());
+        let returned = inbound.dispatch_mailbox(&ciphertext);
+
+        assert_eq!(
+            returned,
+            Some(expected_id),
+            "must return the decrypted message id"
+        );
+
+        // Event emitted, attributed to bob.
+        match tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv()).await {
+            Ok(Ok(Event::MessageReceived { contact, record })) => {
+                assert_eq!(contact, bob_pk, "sender must be attributed to bob");
+                assert!(
+                    matches!(&record.kind, Kind::Text { body } if body == "from-mailbox"),
+                    "unexpected kind: {:?}",
+                    record.kind
+                );
+            }
+            other => panic!("expected MessageReceived, got {other:?}"),
+        }
+
+        // Persisted exactly once.
+        let rows = MessageRepo::new(&pool).recent(&group_id_bytes, 10).unwrap();
+        assert_eq!(rows.len(), 1);
     }
 
     #[tokio::test]
