@@ -1,6 +1,9 @@
 # ADR 0007 — First-contact Welcome carve-out + transport↔MLS identity binding
 
-**Status:** Proposed
+**Status:** Accepted — carve-out + binding implemented in Phase 1B (Task 9). The
+full first-contact invite→add→first-message flow it enables (Welcome-arm
+dial-on-demand, inviter-onion bootstrapping, card exchange) is deferred to
+**Phase 1C**; this ADR is its down-payment.
 **Date:** 2026-06-12
 **Context:** Phase 1B (direct P2P transport wiring). Surfaced by the Phase 1B
 regression guardrail (`crates/tests/src/daemon_run_direct.rs`).
