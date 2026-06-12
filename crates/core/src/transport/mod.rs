@@ -21,6 +21,8 @@ pub(crate) mod hs_key;
 pub(crate) mod listener;
 pub(crate) mod noise;
 pub(crate) mod tor;
+#[allow(clippy::module_inception)]
+pub(crate) mod transport;
 
 pub(crate) use error_kind::TransportErrorKind;
 
@@ -54,3 +56,8 @@ pub(crate) use tor::{TorRuntime, TorStatus};
 pub use listener::OnionListener;
 #[cfg(feature = "test-harness")]
 pub use tor::{TorConfig, TorRuntime, TorStatus};
+
+#[cfg(not(feature = "test-harness"))]
+pub(crate) use transport::{InboundStreams, Transport, ONION_PORT};
+#[cfg(feature = "test-harness")]
+pub use transport::{InboundStreams, Transport, ONION_PORT};
