@@ -68,6 +68,51 @@ where
     Ok(resp)
 }
 
+/// One fetch → dispatch → delete-dispatched cycle for a recipient's own
+/// mailbox. Fetches pending deposits, hands each ciphertext to the inbound
+/// MLS pipeline via `dispatch_mailbox`, and server-side deletes ONLY the
+/// deposits that persisted successfully. Undispatched deposits are left on
+/// the server for the next poll (no silent loss on a transient failure).
+///
+/// Returns the number of deposits that were dispatched + deleted.
+pub(crate) async fn poll_dispatch_once<S>(
+    client: &mut crate::mailbox::client::MailboxClient<S>,
+    signer: &crate::identity::IdentityKey,
+    inbound: &dyn crate::delivery::peer::InboundDispatch,
+) -> crate::error::Result<usize>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send,
+{
+    let resp = client.fetch(signer).await?;
+    if resp.deposits.is_empty() {
+        return Ok(0);
+    }
+    let mut dispatched: Vec<[u8; 16]> = Vec::new();
+    for dep in &resp.deposits {
+        if inbound.dispatch_mailbox(&dep.ciphertext).is_some() {
+            dispatched.push(dep.deposit_id);
+        }
+    }
+    let count = dispatched.len();
+    if !dispatched.is_empty() {
+        client.delete(signer, dispatched).await?;
+    }
+    Ok(count)
+}
+
+/// Inbound dispatcher that ignores everything. Used when a poll actor has
+/// no MLS pipeline wired (tests).
+struct NoopDispatch;
+impl crate::delivery::peer::InboundDispatch for NoopDispatch {
+    fn dispatch(
+        &self,
+        _: crate::identity::PublicKey,
+        _: &[u8],
+    ) -> Option<crate::envelope::MessageId> {
+        None
+    }
+}
+
 // ─── Task 15: PollScheduler supervisor + per-mailbox actor ────────────
 
 /// Object-safe combined `AsyncRead + AsyncWrite + Send + Unpin` trait
@@ -428,28 +473,14 @@ async fn actor_loop(
         // ── One Challenge → Fetch → Delete cycle. ───────────────────
         let now_ts = crate::daemon::clock::now_unix_seconds();
         let _ = MailboxRepo::new(&pool).touch_poll(id, now_ts);
-        match run_one_poll_tick(&mut client, &identity).await {
-            Ok(resp) => {
+        let noop = NoopDispatch;
+        let disp: &dyn crate::delivery::peer::InboundDispatch =
+            inbound.as_deref().unwrap_or(&noop);
+        match poll_dispatch_once(&mut client, &identity, disp).await {
+            Ok(dispatched) => {
                 consecutive_failures = 0;
-                let deposit_count = resp.deposits.len();
-                if deposit_count > 0 {
+                if dispatched > 0 {
                     active_until = Some(tokio::time::Instant::now() + ACTIVE_HOLD);
-                    if let Some(disp) = inbound.as_deref() {
-                        // PublicKey reused for the dispatcher's `peer`
-                        // arg — at this point we don't yet know the
-                        // sender (envelope still encrypted).
-                        // `InboundDispatch::dispatch` expects a peer
-                        // pubkey, but mailbox-fetched deposits are
-                        // recipient-addressed only. Pass our own
-                        // pubkey as a stand-in so the inbound MLS
-                        // pipeline can decrypt; later tasks will
-                        // refine this once envelope-level routing
-                        // lands (TODO Task 16/20).
-                        let self_pk = identity.public();
-                        for dep in &resp.deposits {
-                            let _ = disp.dispatch(self_pk, &dep.ciphertext);
-                        }
-                    }
                 }
                 if !matches!(last_status, MailboxStatus::Reachable) {
                     let _ = MailboxRepo::new(&pool).mark_status(id, MailboxStatus::Reachable);
@@ -675,6 +706,124 @@ mod tests {
         let mut client = MailboxClient::from_stream("a.onion".into(), a);
         let resp = run_one_poll_tick(&mut client, &signer).await.unwrap();
         assert!(resp.deposits.is_empty());
+        server.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn poll_dispatch_once_persists_and_deletes_dispatched() {
+        use crate::contact::Contact;
+        use crate::daemon::inbound::DaemonInbound;
+        use crate::envelope::{Envelope, Kind, MessageId};
+        use crate::mailbox::client::MailboxClient;
+        use crate::mailbox::codec::{MailboxFrame, MailboxFrameCodec};
+        use crate::mailbox::protocol::{ChallengeNonce, DeleteOk, FetchResponse, PendingDeposit};
+        use crate::mls::key_package::KeyPackage;
+        use crate::mls::provider::MlsProvider;
+        use crate::storage::key_packages::KeyPackageRepo;
+        use crate::storage::{ContactRepo, MessageRepo, MlsGroupRepo, Pool};
+        use futures::{SinkExt, StreamExt};
+        use tokio::io::duplex;
+        use tokio_util::codec::Framed;
+
+        let pool = Arc::new(Pool::in_memory());
+        let alice = IdentityKey::generate().unwrap();
+        let bob = IdentityKey::generate().unwrap();
+        let bob_pk = bob.public();
+
+        // Group: alice adds bob; persist alice's group; link bob as the
+        // contact for the group so dispatch_mailbox can attribute the sender.
+        let bob_provider = MlsProvider::new();
+        let bob_kp = KeyPackage::generate(&bob, &bob_provider, &KeyPackageRepo::new(&pool)).unwrap();
+        let mut alice_group =
+            crate::mls::Group::create_solo(&alice, None, MlsProvider::new()).unwrap();
+        let (welcome, _commit) = alice_group.add_member(&bob_kp, None).unwrap();
+        let gid = alice_group.id().0.clone();
+        let mut bob_group =
+            crate::mls::Group::join_from_welcome(&bob, &welcome, None, bob_provider).unwrap();
+        alice_group.save(&MlsGroupRepo::new(&pool)).unwrap();
+        let contacts = ContactRepo::new(&pool);
+        contacts
+            .upsert(&Contact {
+                identity: bob_pk,
+                display_name: None,
+                added_at: 0,
+                card: None,
+                muted: false,
+            })
+            .unwrap();
+        contacts.set_group_id(&bob_pk, &gid).unwrap();
+
+        // Bob encrypts a message (ts within ±1h).
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let env = Envelope {
+            v: 1,
+            id: MessageId::generate(),
+            ts: now_ms,
+            reply_to: None,
+            kind: Kind::Text { body: "mbx".into() },
+        };
+        let ciphertext = bob_group.encrypt(&env).unwrap();
+
+        // Inline mailbox server: Challenge→Nonce, Fetch→one deposit,
+        // Challenge→Nonce, Delete→DeleteOk.
+        let (a, b) = duplex(64 * 1024);
+        let server = tokio::spawn(async move {
+            let mut framed = Framed::new(b, MailboxFrameCodec::new());
+            let _ = framed.next().await; // Challenge (for fetch)
+            framed
+                .send(MailboxFrame::ChallengeNonce(ChallengeNonce {
+                    nonce: [1; 32],
+                    issued_at: 1,
+                }))
+                .await
+                .unwrap();
+            let _ = framed.next().await; // Fetch
+            framed
+                .send(MailboxFrame::FetchResponse(FetchResponse {
+                    deposits: vec![PendingDeposit {
+                        deposit_id: [9; 16],
+                        ciphertext,
+                        received_at: 1,
+                    }],
+                }))
+                .await
+                .unwrap();
+            let _ = framed.next().await; // Challenge (for delete)
+            framed
+                .send(MailboxFrame::ChallengeNonce(ChallengeNonce {
+                    nonce: [2; 32],
+                    issued_at: 2,
+                }))
+                .await
+                .unwrap();
+            let _ = framed.next().await; // Delete
+            framed
+                .send(MailboxFrame::DeleteOk(DeleteOk {
+                    deleted: 1,
+                    not_found: 0,
+                }))
+                .await
+                .unwrap();
+        });
+
+        let (events_tx, _rx) = tokio::sync::broadcast::channel(16);
+        // DaemonInbound's dispatch_mailbox derives the reader from the group,
+        // not the daemon identity, so no set_identity is needed (mirrors the
+        // committed inbound test dispatch_mailbox_trial_decrypts...).
+        let inbound = DaemonInbound::new(pool.clone(), events_tx);
+        let mut client = MailboxClient::from_stream("a.onion".into(), a);
+
+        let dispatched = poll_dispatch_once(&mut client, &alice, &inbound)
+            .await
+            .unwrap();
+        assert_eq!(dispatched, 1, "one deposit must be dispatched + deleted");
+
+        let rows = MessageRepo::new(&pool).recent(&gid, 10).unwrap();
+        assert_eq!(rows.len(), 1, "received message must persist in alice's pool");
+
         server.await.unwrap();
     }
 
