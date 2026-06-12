@@ -150,4 +150,45 @@ mod tests {
             other => panic!("expected MlsApp, got {other:?}"),
         }
     }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn welcome_arm_dials_when_cold_and_delivers() {
+        use crate::transport::Frame;
+
+        let alice = IdentityKey::generate().unwrap();
+        let bob = IdentityKey::generate().unwrap();
+        let bob_pub = PublicKey(bob.public().0);
+        let bob_x = crate::identity::key::ed25519_pub_to_x25519(
+            &ed25519_dalek::VerifyingKey::from_bytes(&bob.public().0).unwrap(),
+        );
+        let (a, b) = tokio::io::duplex(64 * 1024);
+        let init = tokio::spawn(async move {
+            handshake_initiator(a, &alice, &bob_x, None)
+                .await
+                .unwrap()
+                .0
+        });
+        let resp = tokio::spawn(async move { handshake_responder(b, &bob, None).await.unwrap().0 });
+        let alice_conn = init.await.unwrap();
+        let mut bob_conn = resp.await.unwrap();
+
+        let pool = Arc::new(Pool::in_memory());
+        let dialer: Arc<dyn OutboundDial<DuplexStream>> =
+            Arc::new(OneShotDialer(StdMutex::new(Some(alice_conn))));
+        let hub = DeliveryHub::<DuplexStream>::new_with_dialer(pool, dialer);
+
+        // Cold actor: no conn ingested. send_welcome must dial then deliver.
+        let _ack = hub
+            .send_welcome(bob_pub, b"welcome-bytes".to_vec())
+            .await
+            .unwrap();
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(2), bob_conn.recv())
+            .await
+            .expect("frame within 2s")
+            .unwrap();
+        match frame {
+            Some(Frame::MlsWelcome(w)) => assert_eq!(w, b"welcome-bytes"),
+            other => panic!("expected MlsWelcome, got {other:?}"),
+        }
+    }
 }

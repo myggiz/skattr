@@ -339,18 +339,22 @@ where
             wj = welcome_jobs.recv() => {
                 let Some(wj) = wj else { break; };
                 let synthetic_id = welcome_msg_id(&wj.welcome_bytes);
-                if let Some(c) = conn.as_mut() {
-                    if c.send(Frame::MlsWelcome(wj.welcome_bytes)).await.is_err() {
-                        let _ = wj.ack_tx.send(Err(()));
-                        conn = None;
-                        drain_pending(&mut pending);
-                    } else {
-                        pending.insert(synthetic_id, wj.ack_tx);
-                        last_traffic = tokio::time::Instant::now();
-                    }
-                } else {
+                if !ensure_conn::<S>(peer, &mut conn, &dialer).await {
                     let _ = wj.ack_tx.send(Err(()));
+                    continue;
                 }
+                let Some(c) = conn.as_mut() else {
+                    let _ = wj.ack_tx.send(Err(()));
+                    continue;
+                };
+                if c.send(Frame::MlsWelcome(wj.welcome_bytes)).await.is_err() {
+                    let _ = wj.ack_tx.send(Err(()));
+                    conn = None;
+                    drain_pending(&mut pending);
+                    continue;
+                }
+                pending.insert(synthetic_id, wj.ack_tx);
+                last_traffic = tokio::time::Instant::now();
             }
             _ = retry_tick.tick() => {
                 // dial-on-demand happens on the next job send; timer-driven redial is Phase-2 fallback work.
