@@ -89,6 +89,10 @@ pub mod test_exports {
     };
     pub use crate::daemon::state::Ready;
 
+    // Phase 1B Task 7: generic daemon assembly entrypoint for the
+    // two-daemon loopback guardrail (Task 8).
+    pub use crate::daemon::state::run_with_transport;
+
     // Phase 1.G additions:
     pub use crate::daemon::retention::spawn_sweep;
 
