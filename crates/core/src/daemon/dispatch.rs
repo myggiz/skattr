@@ -377,6 +377,16 @@ where
     use crate::storage::outbox::OutboxRepo;
     use crate::storage::{ContactRepo, MessageRepo, MlsGroupRepo};
 
+    // Reject internal, non-user-sendable kinds before any MLS work.
+    // ContactCardUpdate is generated only by the daemon's own card-publish
+    // path; if it reaches MessageRepo::insert_in_tx it hits an unreachable!()
+    // inside the storage transaction (process abort in release).
+    if matches!(kind, crate::envelope::Kind::ContactCardUpdate { .. }) {
+        return Err(IpcError::Daemon(DaemonErrorKind::InvalidArgument {
+            message: "ContactCardUpdate is not a user-sendable message kind".into(),
+        }));
+    }
+
     // 1. Resolve group_id from contact.
     let contact_repo = ContactRepo::new(&handle.pool);
     let group_id_bytes = match contact_repo.get_group_id(&contact).map_err(map_err)? {
@@ -4067,5 +4077,59 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn send_message_with_contact_card_update_kind_is_rejected_not_panic() {
+        use crate::contact::card::{ContactCard, ContactCardBody};
+        use crate::daemon::error_kind::DaemonErrorKind;
+        use crate::envelope::Kind;
+        use crate::identity::Signature;
+
+        let handle = test_handle();
+        let peer = PublicKey([0x42; 32]);
+
+        // Seed a contact + group so resolution gets past ContactNotFound and
+        // reaches the kind path. (group_id can be any 32 bytes for this test;
+        // the kind check must fire before MLS load.)
+        {
+            let repo = ContactRepo::new(&handle.pool);
+            repo.upsert(&Contact {
+                identity: peer,
+                display_name: None,
+                added_at: 0,
+                card: None,
+                muted: false,
+            })
+            .unwrap();
+            repo.set_group_id(&peer, &[0x11u8; 32]).unwrap();
+        }
+
+        let card = ContactCard {
+            body: ContactCardBody {
+                identity: peer,
+                onion: "x.onion".into(),
+                mailboxes: vec![],
+                version: 1,
+                expires_at: 9_999_999_999,
+            },
+            signature: Signature([0u8; 64]),
+        };
+        let err = execute_command(
+            handle,
+            Command::SendMessage {
+                contact: peer,
+                kind: Kind::ContactCardUpdate {
+                    card: Box::new(card),
+                },
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(err, IpcError::Daemon(DaemonErrorKind::InvalidArgument { .. })),
+            "ContactCardUpdate must be rejected as InvalidArgument, got {err:?}"
+        );
     }
 }
