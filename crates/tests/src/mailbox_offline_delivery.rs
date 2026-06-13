@@ -59,13 +59,18 @@ fn paired_groups(
     bob_pool: &Pool,
 ) -> (Group, Group) {
     let psk = [0xA5u8; 32];
+    let kp_ref = [7u8; 32]; // ADR 0009: fixed test KeyPackageRef for the PSK id
     let bob_kp_repo = KeyPackageRepo::new(bob_pool);
     let bob_provider = MlsProvider::new();
     let bob_kp = KeyPackage::generate(bob_id, &bob_provider, &bob_kp_repo).unwrap();
 
-    let mut alice = Group::create_solo(alice_id, Some(&psk), MlsProvider::new()).unwrap();
-    let (welcome, _commit) = alice.add_member(&bob_kp, Some(&psk)).unwrap();
-    let bob = Group::join_from_welcome(bob_id, &welcome, Some(&psk), bob_provider).unwrap();
+    let mut alice =
+        Group::create_solo(alice_id, Some((&kp_ref, &psk)), None, MlsProvider::new()).unwrap();
+    let (welcome, _commit) = alice
+        .add_member(&bob_kp, Some((&kp_ref, &psk)), None)
+        .unwrap();
+    let bob = Group::join_from_welcome(bob_id, &welcome, Some((&kp_ref, &psk)), None, bob_provider)
+        .unwrap();
 
     let alice_repo = MlsGroupRepo::new(alice_pool);
     let bob_repo = MlsGroupRepo::new(bob_pool);

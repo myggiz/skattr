@@ -350,7 +350,16 @@ impl DaemonInbound {
             MlsProvider::new()
         };
 
-        let group = Group::join_from_welcome(&identity_arc, welcome_bytes, Some(&*psk), provider)?;
+        // Invite PSK id is derived per-invite from the same KeyPackageRef the
+        // committer used (ADR 0009, T2-8). h_transport binding activated in
+        // Task 4 (None here).
+        let group = Group::join_from_welcome(
+            &identity_arc,
+            welcome_bytes,
+            Some((&kp_ref, &*psk)),
+            None,
+            provider,
+        )?;
 
         // Self-attribute: the contact's Ed25519 identity is the OTHER member's
         // MLS signature key, derived from the joined group.
@@ -521,13 +530,14 @@ mod tests {
 
         // Alice creates a solo group, adds bob, producing a Welcome.
         let mut alice_group =
-            crate::mls::Group::create_solo(&alice_id, None, MlsProvider::new()).unwrap();
-        let (welcome, _commit) = alice_group.add_member(&bob_kp, None).unwrap();
+            crate::mls::Group::create_solo(&alice_id, None, None, MlsProvider::new()).unwrap();
+        let (welcome, _commit) = alice_group.add_member(&bob_kp, None, None).unwrap();
         let group_id_bytes = alice_group.id().0.clone();
 
         // Bob joins from the Welcome — this is bob's group state.
         let mut bob_group =
-            crate::mls::Group::join_from_welcome(&bob_id, &welcome, None, bob_provider).unwrap();
+            crate::mls::Group::join_from_welcome(&bob_id, &welcome, None, None, bob_provider)
+                .unwrap();
 
         // Bob encrypts an envelope. `Envelope.ts` is millis-since-epoch
         // and must land inside the ±1h replay window `receive()` checks.
@@ -599,11 +609,12 @@ mod tests {
         let kp_repo = KeyPackageRepo::new(&pool);
         let bob_kp = KeyPackage::generate(&bob_id, &bob_provider, &kp_repo).unwrap();
         let mut alice_group =
-            crate::mls::Group::create_solo(&alice_id, None, MlsProvider::new()).unwrap();
-        let (welcome, _commit) = alice_group.add_member(&bob_kp, None).unwrap();
+            crate::mls::Group::create_solo(&alice_id, None, None, MlsProvider::new()).unwrap();
+        let (welcome, _commit) = alice_group.add_member(&bob_kp, None, None).unwrap();
         let group_id_bytes = alice_group.id().0.clone();
         let mut bob_group =
-            crate::mls::Group::join_from_welcome(&bob_id, &welcome, None, bob_provider).unwrap();
+            crate::mls::Group::join_from_welcome(&bob_id, &welcome, None, None, bob_provider)
+                .unwrap();
 
         // Snapshot alice's post-add_member epoch — this is the ordering
         // signal our Event must surface.
@@ -710,13 +721,15 @@ mod tests {
         let mut alice_group = crate::mls::Group::create_solo(
             &alice_id,
             None,
+            None,
             crate::mls::provider::MlsProvider::new(),
         )
         .unwrap();
-        let (welcome, _commit) = alice_group.add_member(&bob_kp, None).unwrap();
+        let (welcome, _commit) = alice_group.add_member(&bob_kp, None, None).unwrap();
         let group_id_bytes = alice_group.id().0.clone();
         let mut bob_group =
-            crate::mls::Group::join_from_welcome(&bob_id, &welcome, None, bob_provider).unwrap();
+            crate::mls::Group::join_from_welcome(&bob_id, &welcome, None, None, bob_provider)
+                .unwrap();
 
         // Pre-upsert bob as a contact in alice's pool so put_card has a row to attach to.
         let contact_repo = crate::storage::ContactRepo::new(&pool);
@@ -847,13 +860,15 @@ mod tests {
         let mut alice_group = crate::mls::Group::create_solo(
             &alice_id,
             None,
+            None,
             crate::mls::provider::MlsProvider::new(),
         )
         .unwrap();
-        let (welcome, _commit) = alice_group.add_member(&bob_kp, None).unwrap();
+        let (welcome, _commit) = alice_group.add_member(&bob_kp, None, None).unwrap();
         let group_id_bytes = alice_group.id().0.clone();
         let mut bob_group =
-            crate::mls::Group::join_from_welcome(&bob_id, &welcome, None, bob_provider).unwrap();
+            crate::mls::Group::join_from_welcome(&bob_id, &welcome, None, None, bob_provider)
+                .unwrap();
 
         // Pre-upsert both contacts.
         let contact_repo = crate::storage::ContactRepo::new(&pool);
@@ -967,11 +982,16 @@ mod tests {
         let bob =
             crate::identity::IdentityKey::from_seed(&crate::identity::Seed::generate().unwrap())
                 .unwrap();
-        let mut bob_group =
-            crate::mls::Group::create_solo(&bob, Some(&psk_bytes), MlsProvider::new()).unwrap();
+        let mut bob_group = crate::mls::Group::create_solo(
+            &bob,
+            Some((&alice_kp_ref, &psk_bytes)),
+            None,
+            MlsProvider::new(),
+        )
+        .unwrap();
         let alice_kp_for_add = KeyPackage::from_bytes(&alice_kp_bytes).unwrap();
         let (welcome_bytes, _commit) = bob_group
-            .add_member(&alice_kp_for_add, Some(&psk_bytes))
+            .add_member(&alice_kp_for_add, Some((&alice_kp_ref, &psk_bytes)), None)
             .unwrap();
 
         // Drive Alice's dispatch_welcome
@@ -1059,11 +1079,16 @@ mod tests {
         let bob =
             crate::identity::IdentityKey::from_seed(&crate::identity::Seed::generate().unwrap())
                 .unwrap();
-        let mut bob_group =
-            crate::mls::Group::create_solo(&bob, Some(&psk_bytes), MlsProvider::new()).unwrap();
+        let mut bob_group = crate::mls::Group::create_solo(
+            &bob,
+            Some((&alice_kp_ref, &psk_bytes)),
+            None,
+            MlsProvider::new(),
+        )
+        .unwrap();
         let alice_kp_for_add = KeyPackage::from_bytes(&alice_kp_bytes).unwrap();
         let (welcome_bytes, _commit) = bob_group
-            .add_member(&alice_kp_for_add, Some(&psk_bytes))
+            .add_member(&alice_kp_for_add, Some((&alice_kp_ref, &psk_bytes)), None)
             .unwrap();
 
         let inbound = DaemonInbound::new(pool.clone(), events_tx);
@@ -1179,11 +1204,12 @@ mod tests {
         let kp_repo = KeyPackageRepo::new(&pool);
         let bob_kp = KeyPackage::generate(&bob_id, &bob_provider, &kp_repo).unwrap();
         let mut alice_group =
-            crate::mls::Group::create_solo(&alice_id, None, MlsProvider::new()).unwrap();
-        let (welcome, _commit) = alice_group.add_member(&bob_kp, None).unwrap();
+            crate::mls::Group::create_solo(&alice_id, None, None, MlsProvider::new()).unwrap();
+        let (welcome, _commit) = alice_group.add_member(&bob_kp, None, None).unwrap();
         let group_id_bytes = alice_group.id().0.clone();
         let mut bob_group =
-            crate::mls::Group::join_from_welcome(&bob_id, &welcome, None, bob_provider).unwrap();
+            crate::mls::Group::join_from_welcome(&bob_id, &welcome, None, None, bob_provider)
+                .unwrap();
 
         // Persist alice's group + link bob as the contact for this group so
         // contact_for_group can attribute the sender.
@@ -1296,10 +1322,17 @@ mod tests {
         let bob =
             crate::identity::IdentityKey::from_seed(&crate::identity::Seed::generate().unwrap())
                 .unwrap();
-        let mut bob_group =
-            crate::mls::Group::create_solo(&bob, Some(&psk), MlsProvider::new()).unwrap();
+        let mut bob_group = crate::mls::Group::create_solo(
+            &bob,
+            Some((&alice_kp_ref, &psk)),
+            None,
+            MlsProvider::new(),
+        )
+        .unwrap();
         let alice_kp_for_add = KeyPackage::from_bytes(&alice_kp_bytes).unwrap();
-        let (welcome_bytes, _) = bob_group.add_member(&alice_kp_for_add, Some(&psk)).unwrap();
+        let (welcome_bytes, _) = bob_group
+            .add_member(&alice_kp_for_add, Some((&alice_kp_ref, &psk)), None)
+            .unwrap();
 
         let alice_arc = Arc::new(alice);
         let inbound = DaemonInbound::new(pool, events_tx);
@@ -1370,11 +1403,12 @@ mod tests {
         let kp_repo = KeyPackageRepo::new(&pool);
         let bob_kp = KeyPackage::generate(&bob_id, &bob_provider, &kp_repo).unwrap();
         let mut alice_group =
-            crate::mls::Group::create_solo(&alice_id, None, MlsProvider::new()).unwrap();
-        let (welcome, _commit) = alice_group.add_member(&bob_kp, None).unwrap();
+            crate::mls::Group::create_solo(&alice_id, None, None, MlsProvider::new()).unwrap();
+        let (welcome, _commit) = alice_group.add_member(&bob_kp, None, None).unwrap();
         let group_id_bytes = alice_group.id().0.clone();
         let mut bob_group =
-            crate::mls::Group::join_from_welcome(&bob_id, &welcome, None, bob_provider).unwrap();
+            crate::mls::Group::join_from_welcome(&bob_id, &welcome, None, None, bob_provider)
+                .unwrap();
 
         // Bob encrypts an envelope with a ts that is 10 hours in the past —
         // far outside the ±1h replay window. `dispatch_for_group` must

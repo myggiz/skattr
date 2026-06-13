@@ -317,13 +317,22 @@ where
     }
 
     // Build our solo MLS group, then add the inviter as the second member.
+    // The invite PSK id is derived per-invite from the invite KeyPackageRef
+    // (ADR 0009, T2-8). h_transport binding is activated in Task 4 (None here).
     let provider = MlsProvider::new();
-    let mut group =
-        Group::create_solo(&handle.identity, Some(&link.psk.0), provider).map_err(map_err)?;
-
     let invitee_kp = KeyPackage::from_bytes(&link.body.key_package).map_err(map_err)?;
+    let kp_ref = crate::mls::key_package::key_package_ref(&invitee_kp).map_err(map_err)?;
+
+    let mut group = Group::create_solo(
+        &handle.identity,
+        Some((&kp_ref, &link.psk.0)),
+        None,
+        provider,
+    )
+    .map_err(map_err)?;
+
     let (welcome, _commit) = group
-        .add_member(&invitee_kp, Some(&link.psk.0))
+        .add_member(&invitee_kp, Some((&kp_ref, &link.psk.0)), None)
         .map_err(map_err)?;
     let group_id = group.id().0.clone();
 
@@ -3815,8 +3824,9 @@ mod tests {
         let kp_repo = crate::storage::KeyPackageRepo::new(&handle.pool);
         let bob_kp = KeyPackage::generate(&bob_id, &bob_provider, &kp_repo).unwrap();
         let mut group =
-            crate::mls::Group::create_solo(&handle.identity, None, MlsProvider::new()).unwrap();
-        let _ = group.add_member(&bob_kp, None).unwrap();
+            crate::mls::Group::create_solo(&handle.identity, None, None, MlsProvider::new())
+                .unwrap();
+        let _ = group.add_member(&bob_kp, None, None).unwrap();
         let group_repo = crate::storage::MlsGroupRepo::new(&handle.pool);
         group.save(&group_repo).unwrap();
         let gid = group.id().0.clone();

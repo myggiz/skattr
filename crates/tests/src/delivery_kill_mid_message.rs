@@ -146,14 +146,24 @@ fn setup_pair() -> Pair {
     let bob_group_repo = MlsGroupRepo::new(&bob_pool);
 
     let psk = [0x5Au8; 32];
+    let kp_ref = [7u8; 32]; // ADR 0009: fixed test KeyPackageRef for the PSK id
     let bob_kp = KeyPackage::generate(&bob_id, &bob_provider, &bob_kp_repo).unwrap();
 
-    let mut alice_group = Group::create_solo(&alice_id, Some(&psk), alice_provider).unwrap();
-    let (welcome, _commit) = alice_group.add_member(&bob_kp, Some(&psk)).unwrap();
+    let mut alice_group =
+        Group::create_solo(&alice_id, Some((&kp_ref, &psk)), None, alice_provider).unwrap();
+    let (welcome, _commit) = alice_group
+        .add_member(&bob_kp, Some((&kp_ref, &psk)), None)
+        .unwrap();
     alice_group.save(&alice_group_repo).unwrap();
 
-    let bob_group =
-        Group::join_from_welcome(&bob_id, welcome.as_slice(), Some(&psk), bob_provider).unwrap();
+    let bob_group = Group::join_from_welcome(
+        &bob_id,
+        welcome.as_slice(),
+        Some((&kp_ref, &psk)),
+        None,
+        bob_provider,
+    )
+    .unwrap();
     bob_group.save(&bob_group_repo).unwrap();
 
     let gid = alice_group.id().clone();

@@ -160,10 +160,10 @@ pub mod test_exports {
         let bob_provider = MlsProvider::new();
         let bob_kp = KeyPackage::generate(&bob_id, &bob_provider, &KeyPackageRepo::new(&pool_b))?;
 
-        let mut alice_group = Group::create_solo(&alice_id, None, MlsProvider::new())?;
-        let (welcome, _commit) = alice_group.add_member(&bob_kp, None)?;
+        let mut alice_group = Group::create_solo(&alice_id, None, None, MlsProvider::new())?;
+        let (welcome, _commit) = alice_group.add_member(&bob_kp, None, None)?;
         let gid = alice_group.id().0.clone();
-        let bob_group = Group::join_from_welcome(&bob_id, &welcome, None, bob_provider)?;
+        let bob_group = Group::join_from_welcome(&bob_id, &welcome, None, None, bob_provider)?;
 
         alice_group.save(&MlsGroupRepo::new(&pool_a))?;
         bob_group.save(&MlsGroupRepo::new(&pool_b))?;

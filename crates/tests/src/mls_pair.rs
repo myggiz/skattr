@@ -42,9 +42,17 @@ fn alice_bob_exchange_messages_and_survive_restart() {
     let bob_provider = MlsProvider::new();
     let bob_kp = KeyPackage::generate(&bob_id, &bob_provider, &bob_kp_repo).unwrap();
 
-    let mut alice = Group::create_solo(&alice_id, Some(&psk), MlsProvider::new()).unwrap();
-    let (welcome, _commit) = alice.add_member(&bob_kp, Some(&psk)).unwrap();
-    let mut bob = Group::join_from_welcome(&bob_id, &welcome, Some(&psk), bob_provider).unwrap();
+    // Fixed test KeyPackageRef used identically on both sides to derive the
+    // per-invite PSK id (ADR 0009). h_transport binding is None at this layer.
+    let kp_ref = [7u8; 32];
+    let mut alice =
+        Group::create_solo(&alice_id, Some((&kp_ref, &psk)), None, MlsProvider::new()).unwrap();
+    let (welcome, _commit) = alice
+        .add_member(&bob_kp, Some((&kp_ref, &psk)), None)
+        .unwrap();
+    let mut bob =
+        Group::join_from_welcome(&bob_id, &welcome, Some((&kp_ref, &psk)), None, bob_provider)
+            .unwrap();
 
     assert_eq!(alice.epoch(), 1);
     assert_eq!(bob.epoch(), 1);
