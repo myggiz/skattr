@@ -33,6 +33,9 @@
 use std::path::Path;
 use std::time::Duration;
 
+use crate::loopback_harness::{
+    config_for, init_vault, subscribe_messages, wait_for_group_active, wait_for_message, PASSPHRASE,
+};
 use skattr_core::daemon::commands::MlsGroupStateLabel;
 use skattr_core::daemon::events::Event;
 use skattr_core::daemon::ipc::wire::EventFilter;
@@ -42,105 +45,6 @@ use skattr_core::identity::PublicKey;
 use skattr_core::test_exports::{run_loopback, LoopbackNet};
 use tokio::sync::oneshot;
 use zeroize::Zeroizing;
-
-const PASSPHRASE: &str = "first-contact-guardrail-passphrase-xyz";
-
-// ---------------------------------------------------------------------------
-// Daemon-spawn scaffolding (copied from `daemon_run_direct.rs`)
-// ---------------------------------------------------------------------------
-
-/// Initialise a fresh identity vault at `data_dir/identity.vault`.
-fn init_vault(data_dir: &Path) {
-    std::fs::create_dir_all(data_dir).unwrap();
-    let seed = skattr_core::identity::Seed::generate().unwrap();
-    let identity = skattr_core::identity::IdentityKey::from_seed(&seed).unwrap();
-    skattr_core::identity::Vault::create(&data_dir.join("identity.vault"), identity, PASSPHRASE)
-        .unwrap();
-}
-
-/// Build a `Config` with a unique data dir + IPC socket path under `data_dir`.
-fn config_for(data_dir: &Path) -> Config {
-    let mut config = Config::defaults().unwrap();
-    config.data_dir = data_dir.to_path_buf();
-    config.ipc_socket = Some(data_dir.join("daemon.sock"));
-    config
-}
-
-/// Poll `ipc_path`'s `ListContacts` until the entry for `peer` reports
-/// `group_state == Active`, or panic after `timeout`.
-async fn wait_for_group_active(ipc_path: &Path, peer: PublicKey, timeout: Duration) {
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        let mut client = IpcClient::connect(ipc_path).await.expect("connect IPC");
-        if let CommandResult::Contacts(v) = client
-            .execute(Command::ListContacts)
-            .await
-            .expect("ListContacts")
-        {
-            if let Some(s) = v.into_iter().find(|s| s.pubkey == peer) {
-                if s.group_state == Some(MlsGroupStateLabel::Active) {
-                    return;
-                }
-            }
-        }
-        if tokio::time::Instant::now() >= deadline {
-            panic!("group_state for {peer:?} did not become Active within {timeout:?}");
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-}
-
-/// Open a subscription on `ipc_path` for `MessageReceived` events from
-/// `sender`. Must be established **before** the message is sent so the event
-/// cannot fire before we are listening.
-async fn subscribe_messages(
-    ipc_path: &Path,
-    sender: PublicKey,
-) -> IpcClient<skattr_core::daemon::ipc::IpcStream> {
-    let mut sub = IpcClient::connect(ipc_path)
-        .await
-        .expect("connect for subscribe");
-    sub.subscribe(EventFilter::Messages {
-        contact: Some(sender),
-    })
-    .await
-    .expect("subscribe to Messages");
-    sub
-}
-
-/// Drain a pre-established subscription until a `MessageReceived` from
-/// `sender` whose body equals `expected_body` arrives, or panic after
-/// `timeout`.
-async fn wait_for_message(
-    sub: &mut IpcClient<skattr_core::daemon::ipc::IpcStream>,
-    sender: PublicKey,
-    expected_body: &str,
-    timeout: Duration,
-) {
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            panic!(
-                "MessageReceived(body={expected_body:?}) from {sender:?} not seen in {timeout:?}"
-            );
-        }
-        match tokio::time::timeout(remaining, sub.next_event()).await {
-            Ok(Ok(Event::MessageReceived { contact, record })) if contact == sender => {
-                if let Kind::Text { body } = &record.kind {
-                    if body == expected_body {
-                        return;
-                    }
-                }
-            }
-            Ok(Ok(_)) => {}
-            Ok(Err(e)) => panic!("subscribe stream error: {e:?}"),
-            Err(_) => panic!(
-                "MessageReceived(body={expected_body:?}) from {sender:?} not seen in {timeout:?}"
-            ),
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Fast loopback first-contact guardrail (NOT #[ignore])

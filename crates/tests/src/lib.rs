@@ -40,6 +40,8 @@ mod history_sweep;
 #[cfg(test)]
 mod invite_roundtrip;
 #[cfg(test)]
+mod loopback_harness;
+#[cfg(test)]
 mod mailbox_client_real_tor;
 #[cfg(test)]
 mod mailbox_codec_parity;
