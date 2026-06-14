@@ -8,6 +8,7 @@ pub(crate) mod dial;
 mod error_kind;
 pub(crate) use error_kind::DeliveryErrorKind;
 pub(crate) mod hub;
+pub(crate) mod mailbox_sweeper;
 pub(crate) mod outbox;
 pub(crate) mod peer;
 pub(crate) mod receiver;

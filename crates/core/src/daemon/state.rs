@@ -353,6 +353,27 @@ where
     );
     let poller_ctrl = scheduler.ctrl();
 
+    // Mailbox-outbox sweeper: the single deposit/retry engine for offline
+    // delivery — re-deposits due mailbox-kind outbox rows with failover+backoff.
+    let sweeper_pool = pool.clone();
+    let sweeper_shared = fallback_shared.clone();
+    let mailbox_sweeper_task = tokio::spawn(async move {
+        const SWEEP_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
+        let mut t = tokio::time::interval(SWEEP_EVERY);
+        t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            t.tick().await;
+            let now = crate::daemon::clock::now_unix_millis();
+            crate::delivery::mailbox_sweeper::run_mailbox_sweep(
+                &sweeper_pool,
+                &sweeper_shared,
+                now,
+                32,
+            )
+            .await;
+        }
+    });
+
     // Step 6: DaemonHandle — inject the shared config_arc so SetConfig writes
     // propagate to the retention sweep on the next tick.
     let mut handle = DaemonHandle::<T::Stream>::new_with_mailbox(
@@ -455,6 +476,10 @@ where
     // for ArtiTransport), so an in-flight accept can't race the teardown.
     accept_task.abort();
     let _ = accept_task.await;
+    // Stop the mailbox-outbox sweeper before tearing down the transport, for
+    // parity with the accept loop (an in-flight deposit must not race teardown).
+    mailbox_sweeper_task.abort();
+    let _ = mailbox_sweeper_task.await;
     transport.shutdown().await?;
     // Server::drop removes the socket file automatically.
     Ok(())

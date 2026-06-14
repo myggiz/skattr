@@ -553,6 +553,79 @@ pub(crate) async fn run_mailbox_fallback(
     }
 }
 
+/// Deposit a single already-mailbox-kind outbox row, walking the peer's
+/// advertised mailbox list; delete the row + emit `DeliveryStatusChanged` on a
+/// successful deposit, reschedule with backoff on failure. Returns true on a
+/// successful deposit. Non-generic so the sweeper can call it without a
+/// reference to the generic `DeliveryHub<S>`.
+pub(crate) async fn redeposit_mailbox_row(
+    pool: &Pool,
+    shared: &MailboxFallbackShared,
+    row: &crate::storage::outbox::OutboxRow,
+    now: i64,
+) -> bool {
+    if row.target.len() != 32 {
+        tracing::warn!(
+            target: "skattr::delivery::sweeper",
+            row_id = row.id,
+            "redeposit: skipping outbox row with malformed target (len != 32)"
+        );
+        reschedule_with_backoff(pool, row.id, row.attempts, now);
+        return false;
+    }
+    let mut peer_bytes = [0u8; 32];
+    peer_bytes.copy_from_slice(&row.target);
+    let peer = PublicKey(peer_bytes);
+    let onions = match MailboxRepo::new(pool).list_for_contact(&peer) {
+        Ok(v) if !v.is_empty() => v,
+        _ => {
+            reschedule_with_backoff(pool, row.id, row.attempts, now);
+            return false;
+        }
+    };
+    let recipient_hash = recipient_hash_from_pubkey(&peer.0);
+    let mut mid = [0u8; 16];
+    mid.copy_from_slice(&row.message_id);
+    for onion in &onions {
+        let mut client = match shared.factory.connect(onion).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::debug!(target: "skattr::delivery::sweeper", error = %e, "redeposit: connect failed; next mailbox");
+                continue;
+            }
+        };
+        match client
+            .deposit(recipient_hash, row.payload.clone(), FALLBACK_TTL_SECS)
+            .await
+        {
+            Ok(_ok) => {
+                if let Err(e) = OutboxRepo::new(pool).delete_by_id(row.id) {
+                    tracing::warn!(target: "skattr::delivery::sweeper", error = %e, "redeposit: delete_by_id failed");
+                }
+                let _ = shared.events.send(Event::DeliveryStatusChanged {
+                    message: MessageId(mid),
+                    status: DeliveryStatus::Deposited,
+                });
+                return true;
+            }
+            Err(e) => {
+                tracing::debug!(target: "skattr::delivery::sweeper", error = %e, "redeposit: deposit failed; next mailbox");
+                continue;
+            }
+        }
+    }
+    reschedule_with_backoff(pool, row.id, row.attempts, now);
+    false
+}
+
+fn reschedule_with_backoff(pool: &Pool, row_id: i64, attempts: u32, now: i64) {
+    use crate::delivery::backoff::backoff;
+    let next = now.saturating_add(i64::try_from(backoff(attempts).as_millis()).unwrap_or(i64::MAX));
+    if let Err(e) = OutboxRepo::new(pool).reschedule(row_id, next) {
+        tracing::warn!(target: "skattr::delivery::sweeper", error = %e, "redeposit: reschedule failed");
+    }
+}
+
 impl<S> Drop for DeliveryHub<S>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
