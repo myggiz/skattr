@@ -302,6 +302,31 @@ impl<'p> ContactRepo<'p> {
         })
     }
 
+    /// Transactional companion to [`set_group_id`](Self::set_group_id).
+    /// Updates the contact's `group_id` inside the caller's `tx` so the
+    /// link commits atomically with the genesis-group save and the
+    /// invite consume (T2-1). Returns `CoreError::Contact(NotFound)` if
+    /// the contact row is missing.
+    pub(crate) fn set_group_id_in_tx(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        identity: &PublicKey,
+        group_id: &[u8],
+    ) -> Result<()> {
+        let changed = tx
+            .execute(
+                "UPDATE contacts SET group_id = ?1 WHERE identity_pubkey = ?2",
+                rusqlite::params![group_id, &identity.0[..]],
+            )
+            .map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!("set group_id (tx): {e}")))
+            })?;
+        if changed == 0 {
+            return Err(CoreError::Contact(ContactErrorKind::NotFound));
+        }
+        Ok(())
+    }
+
     /// 2-member-group reverse lookup: given a group_id, return the peer's
     /// PublicKey (the member that is not us). Returns `Ok(None)` if no
     /// contact row has this group_id.

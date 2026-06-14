@@ -311,18 +311,64 @@ where
     // same invite is re-submitted).
     link.record_received(&kp_repo).map_err(map_err)?;
 
-    // Reject if this invite's KP was already consumed (double-use guard).
+    // Fast-path double-use guard. The load-bearing single-use guarantee is
+    // the re-check INSIDE the consuming transaction below (T2-1); this early
+    // check just avoids the dial + MLS work for an obviously-spent invite.
     if link.is_consumed(&kp_repo).map_err(map_err)? {
         return Err(IpcError::Daemon(DaemonErrorKind::InviteConsumed));
     }
+
+    let inviter = link.body.card.body.identity;
+    let invitee_kp = KeyPackage::from_bytes(&link.body.key_package).map_err(map_err)?;
+    let kp_ref = crate::mls::key_package::key_package_ref(&invitee_kp).map_err(map_err)?;
+
+    // Persist the inviter's contact row + verified card BEFORE the dial: the
+    // dialer resolves the inviter's onion via ContactRepo::latest_card (ADR
+    // 0008), so the card must already be in the store for connect_and_ingest
+    // to find a route. Verify is defense-in-depth: the outer link signature
+    // already authenticates the card bytes, but verifying the card's own
+    // signature + expiry keeps a self-inconsistent or stale card out of the
+    // store. These writes are outside the single-use critical section. A normal
+    // re-submit never reaches them twice (the fast-path is_consumed check above
+    // short-circuits to InviteConsumed). KNOWN LIMITATION: a crash in the narrow
+    // window between this put_card committing and the txn below marking the
+    // invite consumed is not gracefully resumable — a retry's put_card rejects
+    // "stale version" (single-use is still preserved: zero second groups). A
+    // fully-atomic alternative (resolve the onion from the in-invite card so
+    // put_card moves inside the txn) is a follow-up that touches ADR 0008.
+    let contact_repo = ContactRepo::new(&handle.pool);
+    let contact = Contact {
+        identity: inviter,
+        display_name: None,
+        added_at: now,
+        card: None,
+        muted: false,
+    };
+    contact_repo.upsert(&contact).map_err(map_err)?;
+    link.body.card.verify(now).map_err(map_err)?;
+    contact_repo.put_card(&link.body.card).map_err(map_err)?;
+
+    // Dial the inviter FIRST (ADR 0009): the genesis Commit binds to this
+    // connection's h_transport (activated in Task 4), and the per-peer actor
+    // reuses this one connection for the Welcome below (no second dial). The
+    // value is captured but not yet injected into the commit this task — it is
+    // used in Task 4. Best-effort: a missing dialer (unit-test handles) or a
+    // dial failure does not abort first contact — the Welcome path
+    // (send_welcome) lazily dials on its own, exactly as in 1C. Task 4
+    // hardens this to require the connection once the binding is load-bearing.
+    let _h_transport = match handle.hub.connect_and_ingest(inviter).await {
+        Ok(h) => Some(h),
+        Err(e) => {
+            tracing::warn!(?e, "add_contact: dial-first connect_and_ingest failed; \
+                proceeding (Welcome will dial lazily); binding inactive until Task 4");
+            None
+        }
+    };
 
     // Build our solo MLS group, then add the inviter as the second member.
     // The invite PSK id is derived per-invite from the invite KeyPackageRef
     // (ADR 0009, T2-8). h_transport binding is activated in Task 4 (None here).
     let provider = MlsProvider::new();
-    let invitee_kp = KeyPackage::from_bytes(&link.body.key_package).map_err(map_err)?;
-    let kp_ref = crate::mls::key_package::key_package_ref(&invitee_kp).map_err(map_err)?;
-
     let mut group = Group::create_solo(
         &handle.identity,
         Some((&kp_ref, &link.psk.0)),
@@ -336,38 +382,29 @@ where
         .map_err(map_err)?;
     let group_id = group.id().0.clone();
 
-    // Persist group state.
+    // Single-use atomicity (T2-1): re-check consumed + save the genesis group +
+    // link the group_id + mark the invite consumed, ALL in one transaction.
+    // The re-check inside the tx is the load-bearing guarantee: two concurrent
+    // (or re-submitted) AddContacts cannot both pass it, so an invite can never
+    // create two groups. The inviter card was already persisted above (outside
+    // the tx, for onion resolution); the dial happened above (async, before the
+    // sync tx). On a re-submit the second caller sees consumed=true here and
+    // returns InviteConsumed without writing a second group.
     let group_repo = MlsGroupRepo::new(&handle.pool);
-    group.save(&group_repo).map_err(map_err)?;
-
-    // Persist contact row + group_id link.
-    let contact_repo = ContactRepo::new(&handle.pool);
-    let contact = Contact {
-        identity: link.body.card.body.identity,
-        display_name: None,
-        added_at: now,
-        card: None,
-        muted: false,
-    };
-    contact_repo.upsert(&contact).map_err(map_err)?;
-    contact_repo
-        .set_group_id(&link.body.card.body.identity, &group_id)
+    handle
+        .pool
+        .transaction(|tx| {
+            if link.is_consumed_in_tx(tx, &kp_repo)? {
+                return Err(CoreError::Invite(crate::invite::InviteErrorKind::Consumed));
+            }
+            group.save_in_tx(&group_repo, tx)?;
+            contact_repo.set_group_id_in_tx(tx, &inviter, &group_id)?;
+            link.mark_consumed_in_tx(tx, &kp_repo)?;
+            Ok(())
+        })
         .map_err(map_err)?;
 
-    // Verify the inviter's embedded card, then persist it so the dialer can
-    // resolve their onion via latest_card (ADR 0008). Verify is defense-in-depth:
-    // the outer link signature already authenticates the card bytes, but
-    // verifying the card's own signature + expiry keeps a self-inconsistent or
-    // stale card out of the store.
-    link.body.card.verify(now).map_err(map_err)?;
-    contact_repo.put_card(&link.body.card).map_err(map_err)?;
-
-    // Mark the inviter's single-use KP as consumed.
-    link.mark_consumed(&kp_repo).map_err(map_err)?;
-
-    let _ = handle
-        .events_tx
-        .send(Event::ContactUpdated(link.body.card.body.identity));
+    let _ = handle.events_tx.send(Event::ContactUpdated(inviter));
 
     // Submit Welcome to the inviter via the hub. We do not await the
     // ACK here — UI responsiveness comes first, and a failed delivery
@@ -375,7 +412,7 @@ where
     // existing failure path.
     handle
         .hub
-        .send_welcome(link.body.card.body.identity, welcome)
+        .send_welcome(inviter, welcome)
         .await
         .map_err(map_err)?;
 
@@ -383,7 +420,6 @@ where
     // reverse direction. Best-effort: rides the same peer-actor connection
     // after the Welcome; if it fails, the inviter learns our onion on our next
     // message instead.
-    let inviter = link.body.card.body.identity;
     match build_self_card(handle) {
         Ok(self_card) => {
             send_card_to_contact(handle, &self_card, inviter).await;
@@ -397,7 +433,7 @@ where
     }
 
     Ok(CommandResult::ContactAdded(ContactSummary {
-        pubkey: link.body.card.body.identity,
+        pubkey: inviter,
         nickname: None,
         onion: link.body.card.body.onion.clone(),
         card_version: 0,
@@ -1838,6 +1874,86 @@ mod tests {
             ),
             "expected InviteConsumed, got {res:?}"
         );
+    }
+
+    /// T2-1: an invite is single-use *atomically* — re-submitting the same
+    /// invite URL must reject with InviteConsumed and must NOT create a second
+    /// group or a second contact. The consumed re-check + group write +
+    /// mark_consumed run in one transaction, so the second AddContact can never
+    /// pass the in-tx check and write a second group.
+    #[tokio::test]
+    async fn add_contact_is_single_use_under_resubmit() {
+        use crate::mls::group::{Group, GroupId};
+        use crate::storage::MlsGroupRepo;
+
+        let handle_a = test_handle();
+        handle_a.set_onion("alice.onion".to_string());
+        let alice_pub = handle_a.identity.public();
+
+        let CommandResult::InviteCreated { url, .. } = execute_command(
+            handle_a.clone(),
+            Command::CreateInvite {
+                nickname: None,
+                ttl_secs: Some(3600),
+            },
+        )
+        .await
+        .unwrap() else {
+            panic!("expected InviteCreated");
+        };
+
+        let handle_b = test_handle();
+
+        // First AddContact succeeds.
+        let first = execute_command(
+            handle_b.clone(),
+            Command::AddContact {
+                invite_url: url.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(first, CommandResult::ContactAdded(_)));
+
+        // Capture the single group_id created for Alice.
+        let repo = ContactRepo::new(&handle_b.pool);
+        let gid_after_first = repo
+            .get_group_id(&alice_pub)
+            .unwrap()
+            .expect("group_id present after first AddContact");
+        assert!(!gid_after_first.is_empty());
+
+        // Re-submitting the SAME invite must reject and write nothing new.
+        let second =
+            execute_command(handle_b.clone(), Command::AddContact { invite_url: url }).await;
+        assert!(
+            matches!(
+                second,
+                Err(IpcError::Daemon(
+                    crate::daemon::error_kind::DaemonErrorKind::InviteConsumed
+                ))
+            ),
+            "second AddContact must be InviteConsumed, got {second:?}"
+        );
+
+        // Exactly ONE contact for Alice, and its group_id is unchanged.
+        let all = repo.list_all().unwrap();
+        let alice_rows = all.iter().filter(|c| c.identity == alice_pub).count();
+        assert_eq!(alice_rows, 1, "exactly one contact row for the inviter");
+        let gid_after_second = repo
+            .get_group_id(&alice_pub)
+            .unwrap()
+            .expect("group_id still present");
+        assert_eq!(
+            gid_after_first, gid_after_second,
+            "the inviter's group_id must not change on a rejected re-submit"
+        );
+
+        // The single group exists and loads; no orphan second group was written
+        // (the rejected attempt's create_solo group was never saved).
+        let group_repo = MlsGroupRepo::new(&handle_b.pool);
+        let loaded = Group::load(&GroupId(gid_after_first.clone()), &group_repo).unwrap();
+        assert!(loaded.is_some(), "the one genesis group must be persisted");
     }
 
     #[tokio::test]

@@ -290,6 +290,38 @@ impl InviteLink {
         }
         kp_repo.mark_consumed(&hash)
     }
+
+    /// Whether this invite's KP is consumed, read inside a caller-owned
+    /// transaction. Pairs with [`mark_consumed_in_tx`](Self::mark_consumed_in_tx)
+    /// so `add_contact` can re-check + consume atomically, closing the
+    /// is_consumed→mark_consumed TOCTOU window (T2-1).
+    pub fn is_consumed_in_tx(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        kp_repo: &KeyPackageRepo<'_>,
+    ) -> Result<bool> {
+        let hash = self.kp_hash();
+        match kp_repo.get_in_tx(tx, &hash)? {
+            Some((_, consumed)) => Ok(consumed),
+            None => Ok(false),
+        }
+    }
+
+    /// Flip `consumed=1` for this invite's KP inside a caller-owned
+    /// transaction. Errors if the KP was never recorded.
+    pub fn mark_consumed_in_tx(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        kp_repo: &KeyPackageRepo<'_>,
+    ) -> Result<()> {
+        let hash = self.kp_hash();
+        if kp_repo.get_in_tx(tx, &hash)?.is_none() {
+            return Err(CoreError::Invite(InviteErrorKind::Other(
+                "unknown: not recorded".into(),
+            )));
+        }
+        kp_repo.mark_consumed_in_tx(tx, &hash)
+    }
 }
 
 #[cfg(test)]
