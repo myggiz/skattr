@@ -43,16 +43,37 @@ pub(crate) struct DaemonInbound {
     /// Local identity for MLS Welcome processing. Set once after
     /// construction via [`set_identity`]; `None` until that call.
     pub identity: std::sync::RwLock<Option<Arc<IdentityKey>>>,
+    /// Per-group ratchet-serialization registry (T1-3). This is the SAME Arc
+    /// the send-side `DaemonHandle` holds (wired in `Daemon::run`), so an
+    /// inbound decrypt+save and a concurrent outbound encrypt+save on one group
+    /// serialize on the same lock. Defaults to a private registry (used by unit
+    /// tests that exercise only the inbound path).
+    group_locks: crate::daemon::handle::GroupLockRegistry,
 }
 
 impl DaemonInbound {
-    /// Create a new `DaemonInbound`.
+    /// Create a new `DaemonInbound` with a private group-lock registry. Used by
+    /// unit tests that drive only the inbound path. Production callers
+    /// (`Daemon::run`) must call [`set_group_locks`] with the send handle's
+    /// registry so send + receive serialize together (T1-3).
     pub(crate) fn new(pool: Arc<Pool>, events_tx: broadcast::Sender<Event>) -> Self {
         Self {
             pool,
             events_tx,
             identity: std::sync::RwLock::new(None),
+            group_locks: crate::daemon::handle::new_group_lock_registry(),
         }
+    }
+
+    /// Replace the group-lock registry with the shared one the send-side
+    /// `DaemonHandle` holds, so inbound decrypt+save and outbound encrypt+save
+    /// on the same group serialize on the same lock (T1-3). Called by
+    /// `Daemon::run` before the inbound dispatcher starts processing frames.
+    pub(crate) fn set_group_locks(
+        &mut self,
+        registry: crate::daemon::handle::GroupLockRegistry,
+    ) {
+        self.group_locks = registry;
     }
 
     /// Wire the local identity so Welcome messages can be processed.
@@ -89,6 +110,24 @@ impl DaemonInbound {
         group_id: &[u8],
         ciphertext: &[u8],
     ) -> Result<MessageId> {
+        // Per-group ratchet serialization (T1-3): hold the group's lock across
+        // the entire load→decrypt→save critical section so a concurrent
+        // outbound send (or another inbound frame) on this group can't load the
+        // same on-disk snapshot and process at the same ratchet generation.
+        // This is the SAME registry the send-side `DaemonHandle` uses (wired in
+        // `Daemon::run`), so send + receive serialize together. The whole
+        // function is synchronous, so a blocking `std::sync::Mutex` guard held
+        // for its duration is correct. A group_id that isn't 32 bytes is an
+        // MLS-storage anomaly — surfaced as the same unknown-group error below.
+        let group_id_arr: [u8; 32] = group_id.try_into().map_err(|_| {
+            CoreError::from(MlsErrorKind::Other("mls: inbound: bad group_id length".into()))
+        })?;
+        let group_lock =
+            crate::daemon::handle::group_lock_for(&self.group_locks, &group_id_arr);
+        let _guard = group_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
         let group_repo = MlsGroupRepo::new(&self.pool);
         let gid = GroupId(group_id.to_vec());
         let mut group = Group::load(&gid, &group_repo)?.ok_or_else(|| {
@@ -394,6 +433,23 @@ impl DaemonInbound {
         }
 
         let group_id = group.id().0.clone();
+
+        // Per-group ratchet serialization (T1-3): take the new group's lock
+        // around the genesis save. The group doesn't exist on disk yet, but
+        // holding the lock keyed by its id is correct + cheap and keeps the
+        // first message after join from racing this persist. Fully synchronous,
+        // so a blocking guard for the save section is fine. A non-32-byte
+        // group_id is an MLS anomaly — surfaced as an error.
+        let group_id_arr: [u8; 32] = group_id.as_slice().try_into().map_err(|_| {
+            CoreError::from(MlsErrorKind::Other(
+                "inbound welcome: bad group_id length".into(),
+            ))
+        })?;
+        let group_lock =
+            crate::daemon::handle::group_lock_for(&self.group_locks, &group_id_arr);
+        let _guard = group_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         let group_repo = MlsGroupRepo::new(&self.pool);
         let kp_repo = KeyPackageRepo::new(&self.pool);

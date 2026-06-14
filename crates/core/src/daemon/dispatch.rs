@@ -483,6 +483,24 @@ where
     };
 
     // 2. Load MLS group (provider is embedded in the blob).
+    //
+    // Per-group ratchet serialization (T1-3): acquire the group's lock BEFORE
+    // load and hold it across encrypt + the save transaction so two concurrent
+    // sends (or a send racing an inbound receive) can never load the same
+    // on-disk snapshot and encrypt at the same ratchet generation. The guard is
+    // a blocking `std::sync::Mutex` held only across this fully-synchronous
+    // critical section; it is `drop`ped explicitly before the first `.await`
+    // below so the future stays `Send`. The registry is shared with the inbound
+    // dispatcher, so send + receive on this group serialize together.
+    let group_id_arr: [u8; 32] = group_id_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| IpcError::Daemon(DaemonErrorKind::GroupCorrupt))?;
+    let group_lock = handle.group_lock(&group_id_arr);
+    let _guard = group_lock
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
     let group_repo = MlsGroupRepo::new(&handle.pool);
     let group_id = GroupId(group_id_bytes.clone());
     let mut group = Group::load(&group_id, &group_repo)
@@ -547,6 +565,12 @@ where
         }
         Err(e) => return Err(map_err(e)),
     };
+
+    // Critical section done (ratchet advanced + persisted). Release the
+    // per-group lock BEFORE any `.await` so the guard never crosses an await
+    // point (keeps the future `Send`) and the hub round-trip below doesn't
+    // serialize other sends on this group.
+    drop(_guard);
 
     // 6. Kick the delivery hub, wait up to 2 s for an ACK.
     let ack_rx = handle
@@ -1097,6 +1121,21 @@ async fn send_card_to_contact<S>(
         Ok(Some(gid)) if !gid.is_empty() => gid,
         _ => return,
     };
+
+    // Per-group ratchet serialization (T1-3): the card-send load→encrypt→save
+    // advances the same ratchet as `send_message`, so it must take the same
+    // per-group lock. Guard scoped to the sync critical section and dropped
+    // before the `hub.send().await` at the end. A group_id that isn't 32 bytes
+    // is an MLS-storage anomaly — skip (matching the load-miss handling below).
+    let group_id_arr: [u8; 32] = match group_id_bytes.as_slice().try_into() {
+        Ok(a) => a,
+        Err(_) => return,
+    };
+    let group_lock = handle.group_lock(&group_id_arr);
+    let prepared = {
+        let _guard = group_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
     let group_repo = MlsGroupRepo::new(&handle.pool);
     // A linked group_id whose group fails to load is an MLS-storage signal —
     // surface it rather than skip silently ("MLS state is fragile").
@@ -1135,7 +1174,7 @@ async fn send_card_to_contact<S>(
             card: Box::new(card.clone()),
         },
     };
-    let ciphertext = match group.encrypt(&env) {
+    let ct = match group.encrypt(&env) {
         Ok(ct) => ct,
         Err(e) => {
             tracing::warn!(
@@ -1157,6 +1196,11 @@ async fn send_card_to_contact<S>(
         );
         return;
     }
+        // Block value: (msg_id, ciphertext). The `_guard` drops here, releasing
+        // the per-group lock before the `hub.send().await` below.
+        (msg_id, ct)
+    };
+    let (msg_id, ciphertext) = prepared;
     let _ = handle.hub.send(peer, msg_id, ciphertext).await;
 }
 
@@ -4502,5 +4546,158 @@ mod tests {
             ),
             "ContactCardUpdate must be rejected as InvalidArgument, got {err:?}"
         );
+    }
+
+    // ── Task 5 (T1-3): per-group ratchet-serialization lock ────────────────────
+
+    /// Concurrency guardrail for T1-3. Builds one real 2-member MLS group
+    /// (Bob = the sender handle's identity, Alice the joiner), fires N
+    /// concurrent `send_message` for Alice on a multi-thread runtime, then
+    /// decrypts ALL N collected ciphertexts on Alice's sibling `Group`.
+    ///
+    /// With the per-group lock in place every concurrent send loads the
+    /// previous on-disk ratchet snapshot and encrypts at a DISTINCT generation,
+    /// so all N decrypt. Without the lock, two sends would load the same
+    /// snapshot and encrypt at the same generation → at least one ciphertext
+    /// fails to decrypt (the race this lock closes). The test is therefore
+    /// RED without the lock and GREEN with it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_sends_on_one_group_all_decrypt() {
+        use crate::envelope::Kind;
+        use crate::mls::group::Group;
+        use crate::mls::key_package::KeyPackage;
+        use crate::mls::provider::MlsProvider;
+        use crate::storage::{ContactRepo, MlsGroupRepo};
+        use tokio::task::JoinSet;
+
+        const N: usize = 8;
+
+        // Bob's handle (sender). Dialer wired so `send_message`'s hub.send
+        // resolves (it returns Queued — no real peer — which is fine here).
+        let handle = test_handle_with_dialer();
+
+        // Alice (the joiner) — a fresh identity + KeyPackage. Her provider must
+        // be reused at join time so OpenMLS can find the init private key.
+        let alice_id = IdentityKey::from_seed(&Seed::generate().unwrap()).unwrap();
+        let alice_pk = alice_id.public();
+        let alice_provider = MlsProvider::new();
+        let kp_repo = crate::storage::KeyPackageRepo::new(&handle.pool);
+        let alice_kp = KeyPackage::generate(&alice_id, &alice_provider, &kp_repo).unwrap();
+
+        // Bob builds the solo group with the SENDER handle's identity (so
+        // `send_message`'s encrypt — which loads from handle.pool — uses it),
+        // then adds Alice. Save Bob's genesis group + link the contact.
+        let mut bob_group =
+            Group::create_solo(&handle.identity, None, None, MlsProvider::new()).unwrap();
+        let (welcome, _commit) = bob_group.add_member(&alice_kp, None, None).unwrap();
+        let group_repo = MlsGroupRepo::new(&handle.pool);
+        bob_group.save(&group_repo).unwrap();
+        let gid = bob_group.id().0.clone();
+
+        let contact_repo = ContactRepo::new(&handle.pool);
+        contact_repo
+            .upsert(&crate::contact::Contact {
+                identity: alice_pk,
+                display_name: None,
+                added_at: 0,
+                card: None,
+                muted: false,
+            })
+            .unwrap();
+        contact_repo.set_group_id(&alice_pk, &gid).unwrap();
+
+        // Alice joins from the Welcome — her decrypting sibling group.
+        let mut alice_group =
+            Group::join_from_welcome(&alice_id, &welcome, None, None, alice_provider).unwrap();
+
+        // Fire N concurrent sends on the SAME group.
+        let mut set: JoinSet<()> = JoinSet::new();
+        for i in 0..N {
+            let h = handle.clone();
+            set.spawn(async move {
+                let res = execute_command(
+                    h,
+                    Command::SendMessage {
+                        contact: alice_pk,
+                        kind: Kind::Text {
+                            body: format!("concurrent-{i}"),
+                        },
+                    },
+                )
+                .await;
+                assert!(res.is_ok(), "concurrent send {i} failed: {res:?}");
+            });
+        }
+        while let Some(joined) = set.join_next().await {
+            joined.expect("send task panicked");
+        }
+
+        // Collect every ciphertext queued for Alice from the outbox.
+        let payloads: Vec<Vec<u8>> = handle
+            .pool
+            .with(|c| {
+                let mut stmt = c
+                    .prepare("SELECT payload FROM outbox WHERE target = ?1 ORDER BY id")
+                    .map_err(|e| {
+                        crate::error::CoreError::Storage(
+                            crate::storage::StorageErrorKind::Other(e.to_string()),
+                        )
+                    })?;
+                let rows = stmt
+                    .query_map(rusqlite::params![&alice_pk.0[..]], |r| {
+                        r.get::<_, Vec<u8>>(0)
+                    })
+                    .map_err(|e| {
+                        crate::error::CoreError::Storage(
+                            crate::storage::StorageErrorKind::Other(e.to_string()),
+                        )
+                    })?;
+                let mut out = Vec::new();
+                for row in rows {
+                    out.push(row.map_err(|e| {
+                        crate::error::CoreError::Storage(
+                            crate::storage::StorageErrorKind::Other(e.to_string()),
+                        )
+                    })?);
+                }
+                Ok(out)
+            })
+            .unwrap();
+
+        assert_eq!(
+            payloads.len(),
+            N,
+            "every concurrent send must persist exactly one outbox ciphertext"
+        );
+
+        // Bob's on-disk ratchet must have advanced N generations.
+        let bob_after = Group::load(&crate::mls::group::GroupId(gid.clone()), &group_repo)
+            .unwrap()
+            .expect("bob group still present");
+        assert_eq!(
+            bob_after.epoch(),
+            1,
+            "epoch stays at 1 (application messages, no commits)"
+        );
+
+        // ALL N ciphertexts must decrypt on Alice's side — the core T1-3
+        // assertion. A generation collision (no lock) would make at least one
+        // fail here.
+        let mut decrypted = std::collections::HashSet::new();
+        for (i, ct) in payloads.iter().enumerate() {
+            let env = alice_group
+                .decrypt(ct)
+                .unwrap_or_else(|e| panic!("ciphertext {i} failed to decrypt: {e}"));
+            match env.kind {
+                Kind::Text { body } => {
+                    assert!(
+                        decrypted.insert(body),
+                        "duplicate plaintext — a generation was reused (race not serialized)"
+                    );
+                }
+                other => panic!("unexpected kind: {other:?}"),
+            }
+        }
+        assert_eq!(decrypted.len(), N, "all N distinct messages decrypted");
     }
 }

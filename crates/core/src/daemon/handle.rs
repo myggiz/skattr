@@ -5,7 +5,8 @@
 
 //! `DaemonHandle` groups the subsystems every command handler needs.
 
-use std::sync::{Arc, RwLock};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, RwLock};
 
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::broadcast;
@@ -19,6 +20,43 @@ use crate::daemon::logs::LogSink;
 use crate::delivery::hub::DeliveryHub;
 use crate::identity::IdentityKey;
 use crate::storage::Pool;
+
+/// Per-group serialization registry: maps a 32-byte MLS `group_id` to its
+/// own lock. The load→encrypt/decrypt→save critical section for a group must
+/// hold the group's lock so two concurrent operations can never load the same
+/// on-disk ratchet snapshot and encrypt at the same generation (T1-3).
+///
+/// The registry uses `std::sync::Mutex` (not `tokio::sync::Mutex`) on purpose:
+/// the inbound path ([`crate::daemon::inbound::DaemonInbound::dispatch_for_group`])
+/// is a synchronous `fn` invoked from inside the per-peer actor's async loop, so
+/// it cannot `.await` a lock; the send path's critical section
+/// ([`crate::daemon::dispatch::send_message`]) is itself fully synchronous
+/// (load → encrypt → `pool.transaction`) with all `.await`s only AFTER it, so a
+/// blocking guard scoped to that section never crosses an await point. A single
+/// `GroupLockRegistry` Arc is therefore shared verbatim across the send handle
+/// and the inbound dispatcher so send + receive serialize on the SAME locks.
+pub(crate) type GroupLockRegistry = Arc<Mutex<HashMap<[u8; 32], Arc<Mutex<()>>>>>;
+
+/// Construct an empty [`GroupLockRegistry`].
+#[must_use]
+pub(crate) fn new_group_lock_registry() -> GroupLockRegistry {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
+/// Resolve (creating if absent) the per-group lock for `group_id` in `registry`.
+/// The returned `Arc<Mutex<()>>` is then `.lock()`ed by the caller around the
+/// load→encrypt/decrypt→save critical section.
+#[must_use]
+pub(crate) fn group_lock_for(registry: &GroupLockRegistry, group_id: &[u8; 32]) -> Arc<Mutex<()>> {
+    // Poisoning is not a correctness concern here: the guarded data is `()`.
+    let mut map = match registry.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    map.entry(*group_id)
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
 
 /// Shared handle to the long-lived daemon subsystems. Generic over the
 /// transport stream type so the integration tests can instantiate one
@@ -70,6 +108,11 @@ where
     /// `EventFilter::Logs` subscribers receive live tail. `TailLogs`
     /// handlers call `snapshot()` directly for paginated snapshots.
     pub log_sink: LogSink,
+    /// Per-group ratchet-serialization registry (T1-3). Shared (same Arc)
+    /// with the inbound dispatcher via [`DaemonHandle::group_locks`] so send +
+    /// receive on one group serialize on the same lock. See
+    /// [`GroupLockRegistry`].
+    pub(crate) group_locks: GroupLockRegistry,
 }
 
 impl<S> DaemonHandle<S>
@@ -106,6 +149,7 @@ where
             config: Arc::new(tokio::sync::RwLock::new(config)),
             config_path: std::path::PathBuf::from("/dev/null"),
             log_sink: LogSink::default(),
+            group_locks: new_group_lock_registry(),
         }
     }
 
@@ -133,6 +177,7 @@ where
             config: Arc::new(tokio::sync::RwLock::new(config)),
             config_path,
             log_sink: LogSink::default(),
+            group_locks: new_group_lock_registry(),
         }
     }
 
@@ -167,6 +212,7 @@ where
             config: Arc::new(tokio::sync::RwLock::new(config)),
             config_path: std::path::PathBuf::from("/dev/null"),
             log_sink: LogSink::default(),
+            group_locks: new_group_lock_registry(),
         }
     }
 
@@ -188,6 +234,14 @@ where
     ) {
         self.config = config;
         self.config_path = config_path;
+    }
+
+    /// Replace the per-group lock registry with a shared one (T1-3). Called by
+    /// `Daemon::run` so the send-side handle and the inbound dispatcher lock on
+    /// the SAME per-group locks; without this the two would serialize on
+    /// separate maps and a concurrent send/receive race would persist.
+    pub(crate) fn set_group_locks(&mut self, registry: GroupLockRegistry) {
+        self.group_locks = registry;
     }
 
     /// Snapshot the latest cached `TorStatus`. Non-blocking RwLock read.
@@ -220,6 +274,24 @@ where
     #[must_use]
     pub fn onion(&self) -> Option<String> {
         self.onion.read().ok().and_then(|g| g.clone())
+    }
+
+    /// Per-group serialization lock (T1-3). The load→encrypt→save critical
+    /// section in [`crate::daemon::dispatch::send_message`] (and the card-send
+    /// path) MUST hold this so concurrent ops can't encrypt at the same ratchet
+    /// generation. The registry is shared (same Arc) with the inbound
+    /// dispatcher so send + receive serialize on the same lock.
+    #[must_use]
+    pub(crate) fn group_lock(&self, group_id: &[u8; 32]) -> Arc<Mutex<()>> {
+        group_lock_for(&self.group_locks, group_id)
+    }
+
+    /// Clone the shared group-lock registry Arc so the inbound dispatcher can
+    /// lock on the SAME per-group locks the send path uses (T1-3). Used by
+    /// `Daemon::run` to wire `DaemonInbound`.
+    #[must_use]
+    pub(crate) fn group_locks(&self) -> GroupLockRegistry {
+        self.group_locks.clone()
     }
 }
 
@@ -258,6 +330,7 @@ where
             config: self.config.clone(),
             config_path: self.config_path.clone(),
             log_sink: self.log_sink.clone(),
+            group_locks: self.group_locks.clone(),
         }
     }
 }
