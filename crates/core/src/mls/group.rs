@@ -976,7 +976,11 @@ mod tests {
         // Alice receives it through `decrypt`: merged, no payload, epoch advances.
         let out = alice.decrypt(&commit).unwrap();
         assert!(out.is_none(), "a Commit carries no application payload");
-        assert_eq!(alice.epoch(), 2, "decrypt must advance the epoch on a Commit");
+        assert_eq!(
+            alice.epoch(),
+            2,
+            "decrypt must advance the epoch on a Commit"
+        );
 
         // A subsequent application message still round-trips at the new epoch.
         let env = test_envelope("after merged commit");

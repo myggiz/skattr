@@ -37,10 +37,7 @@ where
     async fn dial(
         &self,
         peer: PublicKey,
-    ) -> Result<(
-        AuthenticatedConnection<S>,
-        zeroize::Zeroizing<[u8; 32]>,
-    )>;
+    ) -> Result<(AuthenticatedConnection<S>, zeroize::Zeroizing<[u8; 32]>)>;
 
     /// Like [`dial`](Self::dial), but uses a caller-supplied `onion` instead of
     /// resolving via `latest_card`. Used by first-contact `add_contact`, where
@@ -51,10 +48,7 @@ where
         &self,
         peer: PublicKey,
         onion: &str,
-    ) -> Result<(
-        AuthenticatedConnection<S>,
-        zeroize::Zeroizing<[u8; 32]>,
-    )>;
+    ) -> Result<(AuthenticatedConnection<S>, zeroize::Zeroizing<[u8; 32]>)>;
 }
 
 /// Production [`OutboundDial`] backed by a real [`Transport`]. Resolves
@@ -89,11 +83,15 @@ impl<T: Transport> TransportDial<T> {
         AuthenticatedConnection<T::Stream>,
         zeroize::Zeroizing<[u8; 32]>,
     )> {
-        let stream =
-            match tokio::time::timeout(DIAL_TIMEOUT, self.transport.dial(onion, ONION_PORT)).await {
-                Ok(res) => res?,
-                Err(_) => return Err(CoreError::Delivery(DeliveryErrorKind::Timeout)),
-            };
+        let stream = match tokio::time::timeout(
+            DIAL_TIMEOUT,
+            self.transport.dial(onion, ONION_PORT),
+        )
+        .await
+        {
+            Ok(res) => res?,
+            Err(_) => return Err(CoreError::Delivery(DeliveryErrorKind::Timeout)),
+        };
         let verifying = ed25519_dalek::VerifyingKey::from_bytes(&peer.0).map_err(|_| {
             CoreError::Delivery(DeliveryErrorKind::Other(
                 "no route to peer: malformed peer identity key".into(),

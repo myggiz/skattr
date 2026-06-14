@@ -239,7 +239,8 @@ impl<'p> ContactRepo<'p> {
     /// `CoreError::Contact("contact: card: contact not found")` if
     /// the contact row doesn't exist.
     pub fn put_card(&self, card: &ContactCard) -> Result<()> {
-        self.pool.transaction(|tx| Self::put_card_in_tx_inner(tx, card))
+        self.pool
+            .transaction(|tx| Self::put_card_in_tx_inner(tx, card))
     }
 
     /// Transactional companion to [`put_card`](Self::put_card). Inserts a

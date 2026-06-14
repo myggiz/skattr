@@ -1136,66 +1136,66 @@ async fn send_card_to_contact<S>(
         let _guard = group_lock
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let group_repo = MlsGroupRepo::new(&handle.pool);
-    // A linked group_id whose group fails to load is an MLS-storage signal —
-    // surface it rather than skip silently ("MLS state is fragile").
-    let mut group = match Group::load(&GroupId(group_id_bytes), &group_repo) {
-        Ok(Some(g)) => g,
-        Ok(None) => {
-            tracing::warn!(
-                target: "skattr::daemon::dispatch",
-                "card-send: group_id present but Group::load missed; skipping"
-            );
-            return;
-        }
-        Err(e) => {
+        let group_repo = MlsGroupRepo::new(&handle.pool);
+        // A linked group_id whose group fails to load is an MLS-storage signal —
+        // surface it rather than skip silently ("MLS state is fragile").
+        let mut group = match Group::load(&GroupId(group_id_bytes), &group_repo) {
+            Ok(Some(g)) => g,
+            Ok(None) => {
+                tracing::warn!(
+                    target: "skattr::daemon::dispatch",
+                    "card-send: group_id present but Group::load missed; skipping"
+                );
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "skattr::daemon::dispatch",
+                    err = %e,
+                    "card-send: load group failed; skipping"
+                );
+                return;
+            }
+        };
+        let now_ms = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0),
+        )
+        .unwrap_or(0);
+        let msg_id = MessageId::generate();
+        let env = Envelope {
+            v: 1,
+            id: msg_id,
+            ts: now_ms,
+            reply_to: None,
+            kind: Kind::ContactCardUpdate {
+                card: Box::new(card.clone()),
+            },
+        };
+        let ct = match group.encrypt(&env) {
+            Ok(ct) => ct,
+            Err(e) => {
+                tracing::warn!(
+                    target: "skattr::daemon::dispatch",
+                    err = %e,
+                    "card-send: encrypt failed; skipping"
+                );
+                return;
+            }
+        };
+        // Persist the advanced ratchet before handing off to the hub — if save
+        // fails we MUST NOT send the ciphertext (the peer would accept it and we'd
+        // be one epoch behind on disk).
+        if let Err(e) = group.save(&group_repo) {
             tracing::warn!(
                 target: "skattr::daemon::dispatch",
                 err = %e,
-                "card-send: load group failed; skipping"
+                "card-send: save group failed; skipping"
             );
             return;
         }
-    };
-    let now_ms = i64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0),
-    )
-    .unwrap_or(0);
-    let msg_id = MessageId::generate();
-    let env = Envelope {
-        v: 1,
-        id: msg_id,
-        ts: now_ms,
-        reply_to: None,
-        kind: Kind::ContactCardUpdate {
-            card: Box::new(card.clone()),
-        },
-    };
-    let ct = match group.encrypt(&env) {
-        Ok(ct) => ct,
-        Err(e) => {
-            tracing::warn!(
-                target: "skattr::daemon::dispatch",
-                err = %e,
-                "card-send: encrypt failed; skipping"
-            );
-            return;
-        }
-    };
-    // Persist the advanced ratchet before handing off to the hub — if save
-    // fails we MUST NOT send the ciphertext (the peer would accept it and we'd
-    // be one epoch behind on disk).
-    if let Err(e) = group.save(&group_repo) {
-        tracing::warn!(
-            target: "skattr::daemon::dispatch",
-            err = %e,
-            "card-send: save group failed; skipping"
-        );
-        return;
-    }
         // Block value: (msg_id, ciphertext). The `_guard` drops here, releasing
         // the per-group lock before the `hub.send().await` below.
         (msg_id, ct)
@@ -4639,25 +4639,25 @@ mod tests {
                 let mut stmt = c
                     .prepare("SELECT payload FROM outbox WHERE target = ?1 ORDER BY id")
                     .map_err(|e| {
-                        crate::error::CoreError::Storage(
-                            crate::storage::StorageErrorKind::Other(e.to_string()),
-                        )
+                        crate::error::CoreError::Storage(crate::storage::StorageErrorKind::Other(
+                            e.to_string(),
+                        ))
                     })?;
                 let rows = stmt
                     .query_map(rusqlite::params![&alice_pk.0[..]], |r| {
                         r.get::<_, Vec<u8>>(0)
                     })
                     .map_err(|e| {
-                        crate::error::CoreError::Storage(
-                            crate::storage::StorageErrorKind::Other(e.to_string()),
-                        )
+                        crate::error::CoreError::Storage(crate::storage::StorageErrorKind::Other(
+                            e.to_string(),
+                        ))
                     })?;
                 let mut out = Vec::new();
                 for row in rows {
                     out.push(row.map_err(|e| {
-                        crate::error::CoreError::Storage(
-                            crate::storage::StorageErrorKind::Other(e.to_string()),
-                        )
+                        crate::error::CoreError::Storage(crate::storage::StorageErrorKind::Other(
+                            e.to_string(),
+                        ))
                     })?);
                 }
                 Ok(out)

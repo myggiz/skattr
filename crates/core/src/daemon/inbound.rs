@@ -69,10 +69,7 @@ impl DaemonInbound {
     /// `DaemonHandle` holds, so inbound decrypt+save and outbound encrypt+save
     /// on the same group serialize on the same lock (T1-3). Called by
     /// `Daemon::run` before the inbound dispatcher starts processing frames.
-    pub(crate) fn set_group_locks(
-        &mut self,
-        registry: crate::daemon::handle::GroupLockRegistry,
-    ) {
+    pub(crate) fn set_group_locks(&mut self, registry: crate::daemon::handle::GroupLockRegistry) {
         self.group_locks = registry;
     }
 
@@ -120,10 +117,11 @@ impl DaemonInbound {
         // for its duration is correct. A group_id that isn't 32 bytes is an
         // MLS-storage anomaly — surfaced as the same unknown-group error below.
         let group_id_arr: [u8; 32] = group_id.try_into().map_err(|_| {
-            CoreError::from(MlsErrorKind::Other("mls: inbound: bad group_id length".into()))
+            CoreError::from(MlsErrorKind::Other(
+                "mls: inbound: bad group_id length".into(),
+            ))
         })?;
-        let group_lock =
-            crate::daemon::handle::group_lock_for(&self.group_locks, &group_id_arr);
+        let group_lock = crate::daemon::handle::group_lock_for(&self.group_locks, &group_id_arr);
         let _guard = group_lock
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -142,7 +140,9 @@ impl DaemonInbound {
             // ACK without a message row or `MessageReceived` event (T2-2,
             // defensive — v1.0 does not perform PCS). Hold the per-group lock,
             // already acquired above, across this save.
-            let saved = self.pool.transaction(|tx| group.save_in_tx(&group_repo, tx));
+            let saved = self
+                .pool
+                .transaction(|tx| group.save_in_tx(&group_repo, tx));
             saved?;
             // No envelope id is available (a Commit has no Envelope). Return a
             // fresh id so the caller's ACK contract (which only needs *an* id to
@@ -463,8 +463,7 @@ impl DaemonInbound {
                 "inbound welcome: bad group_id length".into(),
             ))
         })?;
-        let group_lock =
-            crate::daemon::handle::group_lock_for(&self.group_locks, &group_id_arr);
+        let group_lock = crate::daemon::handle::group_lock_for(&self.group_locks, &group_id_arr);
         let _guard = group_lock
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
