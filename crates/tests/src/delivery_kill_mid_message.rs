@@ -71,7 +71,7 @@ impl InboundDispatch for MlsInboundDispatch {
         // Full path: reload group, decrypt, save, run receiver.
         let repo = MlsGroupRepo::new(&self.pool);
         let mut g = Group::load(&self.group_id, &repo).ok().flatten()?;
-        let envelope = g.decrypt(ciphertext).ok()?;
+        let envelope = g.decrypt(ciphertext).ok().flatten()?;
         let mls_generation = g.epoch();
         let _ = g.save(&repo);
         let mid = envelope.id;

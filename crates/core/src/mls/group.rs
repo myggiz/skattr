@@ -271,9 +271,19 @@ impl Group {
         })
     }
 
-    /// Decrypt a TLS-encoded MLS application message. Returns the decoded `Envelope`.
-    pub fn decrypt(&mut self, ciphertext: &[u8]) -> Result<Envelope> {
-        if !self.state.can_send() {
+    /// Decrypt a TLS-encoded inbound MLS message.
+    ///
+    /// Returns `Ok(Some(envelope))` for an application message and `Ok(None)`
+    /// when the inbound message was a Commit: a Commit advances the epoch but
+    /// carries no application payload, so it is merged in place (the ratchet
+    /// advances on `&mut self`) and the caller MUST persist the advanced group
+    /// even though there is no message row to write. This defensively tolerates
+    /// an inbound Commit (e.g. a peer epoch-advance) instead of stalling
+    /// delivery; v1.0 does not perform PCS, so this path is not normally hit
+    /// (T2-2). Proposals are not expected in a 2-member v1.0 group and remain an
+    /// error.
+    pub fn decrypt(&mut self, ciphertext: &[u8]) -> Result<Option<Envelope>> {
+        if !self.state.can_receive() {
             return Err(MlsErrorKind::Other(format!(
                 "mls: decrypt: invalid state {:?}",
                 self.state
@@ -305,27 +315,41 @@ impl Group {
                 )))
             })?;
 
-        let plaintext_bytes = match processed.into_content() {
-            ProcessedMessageContent::ApplicationMessage(app) => app.into_bytes(),
-            ProcessedMessageContent::StagedCommitMessage(_) => {
-                return Err(MlsErrorKind::Other(
-                    "mls: decrypt: received Commit on encrypt path — route to process_incoming_commit"
-                        .into(),
-                )
-                .into());
+        match processed.into_content() {
+            ProcessedMessageContent::ApplicationMessage(app) => {
+                Ok(Some(Envelope::decode(&app.into_bytes())?))
+            }
+            ProcessedMessageContent::StagedCommitMessage(staged) => {
+                // A Commit advances the epoch but carries no application
+                // payload — merge it and signal "no message" to the caller.
+                self.merge_staged(*staged)?;
+                Ok(None)
             }
             ProcessedMessageContent::ProposalMessage(_) => {
-                return Err(MlsErrorKind::Other("mls: decrypt: received Proposal".into()).into());
+                Err(MlsErrorKind::Other("mls: decrypt: received Proposal".into()).into())
             }
-            ProcessedMessageContent::ExternalJoinProposalMessage(_) => {
-                return Err(MlsErrorKind::Other(
-                    "mls: decrypt: received ExternalJoinProposal".into(),
-                )
-                .into());
-            }
-        };
+            ProcessedMessageContent::ExternalJoinProposalMessage(_) => Err(MlsErrorKind::Other(
+                "mls: decrypt: received ExternalJoinProposal".into(),
+            )
+            .into()),
+        }
+    }
 
-        Envelope::decode(&plaintext_bytes)
+    /// Merge an already-processed staged Commit and advance `self.state` to the
+    /// new epoch. Shared by [`decrypt`](Self::decrypt) (defensive inbound-Commit
+    /// tolerance) and [`process_incoming_commit`](Self::process_incoming_commit).
+    fn merge_staged(&mut self, staged: openmls::group::StagedCommit) -> Result<()> {
+        self.inner
+            .merge_staged_commit(self.provider.as_openmls(), staged)
+            .map_err(|e| {
+                CoreError::from(MlsErrorKind::Other(format!(
+                    "mls: merge_staged_commit: {e:?}"
+                )))
+            })?;
+        self.state = GroupState::Active {
+            epoch: self.inner.epoch().as_u64(),
+        };
+        Ok(())
     }
 
     /// Process a TLS-encoded Commit message from the peer and merge it.
@@ -355,19 +379,7 @@ impl Group {
             })?;
 
         match processed.into_content() {
-            ProcessedMessageContent::StagedCommitMessage(staged) => {
-                self.inner
-                    .merge_staged_commit(self.provider.as_openmls(), *staged)
-                    .map_err(|e| {
-                        CoreError::from(MlsErrorKind::Other(format!(
-                            "mls: merge_staged_commit: {e:?}"
-                        )))
-                    })?;
-                self.state = GroupState::Active {
-                    epoch: self.inner.epoch().as_u64(),
-                };
-                Ok(())
-            }
+            ProcessedMessageContent::StagedCommitMessage(staged) => self.merge_staged(*staged),
             _ => {
                 Err(MlsErrorKind::Other("mls: process_commit: not a Commit message".into()).into())
             }
@@ -739,12 +751,12 @@ mod tests {
 
         let msg_a = test_envelope("hi from alice");
         let ct_a = alice.encrypt(&msg_a).unwrap();
-        let got_a = bob.decrypt(&ct_a).unwrap();
+        let got_a = bob.decrypt(&ct_a).unwrap().expect("app message");
         assert_eq!(format!("{got_a:?}"), format!("{msg_a:?}"));
 
         let msg_b = test_envelope("hi from bob");
         let ct_b = bob.encrypt(&msg_b).unwrap();
-        let got_b = alice.decrypt(&ct_b).unwrap();
+        let got_b = alice.decrypt(&ct_b).unwrap().expect("app message");
         assert_eq!(format!("{got_b:?}"), format!("{msg_b:?}"));
     }
 
@@ -846,7 +858,7 @@ mod tests {
         // Round-trip both directions.
         let env = test_envelope("bound hello");
         let ct = bob.encrypt(&env).unwrap();
-        let got = alice.decrypt(&ct).unwrap();
+        let got = alice.decrypt(&ct).unwrap().expect("app message");
         assert_eq!(format!("{got:?}"), format!("{env:?}"));
     }
 
@@ -944,7 +956,32 @@ mod tests {
         // Both sides can still encrypt/decrypt at epoch 2.
         let env = test_envelope("post-PCS");
         let ct = alice.encrypt(&env).unwrap();
-        let got = bob.decrypt(&ct).unwrap();
+        let got = bob.decrypt(&ct).unwrap().expect("app message");
+        assert_eq!(format!("{got:?}"), format!("{env:?}"));
+    }
+
+    #[test]
+    fn decrypt_merges_inbound_commit_instead_of_erroring() {
+        // T2-2 (defensive): an inbound Commit fed to `decrypt` must be merged
+        // (advancing the epoch) and return `Ok(None)` — NOT error. (The old
+        // behavior errored on the StagedCommitMessage arm.)
+        let (mut alice, mut bob) = pair_no_psk();
+        assert_eq!(alice.epoch(), 1);
+        assert_eq!(bob.epoch(), 1);
+
+        // Bob produces a real inbound Commit via a self-update.
+        let commit = bob.advance_epoch().unwrap();
+        assert_eq!(bob.epoch(), 2);
+
+        // Alice receives it through `decrypt`: merged, no payload, epoch advances.
+        let out = alice.decrypt(&commit).unwrap();
+        assert!(out.is_none(), "a Commit carries no application payload");
+        assert_eq!(alice.epoch(), 2, "decrypt must advance the epoch on a Commit");
+
+        // A subsequent application message still round-trips at the new epoch.
+        let env = test_envelope("after merged commit");
+        let ct = bob.encrypt(&env).unwrap();
+        let got = alice.decrypt(&ct).unwrap().expect("app message");
         assert_eq!(format!("{got:?}"), format!("{env:?}"));
     }
 

@@ -35,6 +35,18 @@ impl GroupState {
         matches!(self, GroupState::Active { .. })
     }
 
+    /// Whether inbound messages (application messages + commits) may be
+    /// processed from this state. At least every state where [`can_send`] is
+    /// true; receiving is valid in `Active` (v1.0 has no other receiving
+    /// state). Kept as a SEPARATE predicate from `can_send` so future states
+    /// (e.g. a receive-only `CatchingUp`) can diverge without re-gating sends.
+    ///
+    /// [`can_send`]: Self::can_send
+    #[must_use]
+    pub fn can_receive(&self) -> bool {
+        matches!(self, GroupState::Active { .. })
+    }
+
     /// Whether the group is in any recoverable state.
     #[must_use]
     pub fn is_recoverable(&self) -> bool {

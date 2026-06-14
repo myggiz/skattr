@@ -134,7 +134,21 @@ impl DaemonInbound {
             CoreError::from(MlsErrorKind::Other("mls: inbound: unknown group_id".into()))
         })?;
 
-        let envelope = group.decrypt(ciphertext)?;
+        let Some(envelope) = group.decrypt(ciphertext)? else {
+            // The inbound message was a Commit (not an application message):
+            // it advanced the ratchet on `group` in memory but carries no
+            // payload. Persist the advanced group so the epoch bump is durable
+            // (otherwise the next inbound message would fail to decrypt), then
+            // ACK without a message row or `MessageReceived` event (T2-2,
+            // defensive — v1.0 does not perform PCS). Hold the per-group lock,
+            // already acquired above, across this save.
+            let saved = self.pool.transaction(|tx| group.save_in_tx(&group_repo, tx));
+            saved?;
+            // No envelope id is available (a Commit has no Envelope). Return a
+            // fresh id so the caller's ACK contract (which only needs *an* id to
+            // stop the sender retrying) is satisfied.
+            return Ok(MessageId::generate());
+        };
 
         // --- ContactCardUpdate fast path ---
         // Intercept before the message-persist transaction so that card
@@ -309,8 +323,12 @@ impl DaemonInbound {
                     continue;
                 }
             };
-            // Trial decrypt on the in-memory copy; do NOT save.
-            if g.decrypt(ciphertext).is_err() {
+            // Trial decrypt on the in-memory copy; do NOT save. Only an
+            // application message (`Ok(Some(_))`) identifies the owning group;
+            // `Ok(None)` is a Commit (no user payload) and `Err` is a
+            // non-matching group — skip both (a mailbox-delivered Commit is not
+            // a user message and is not persisted here).
+            if !matches!(g.decrypt(ciphertext), Ok(Some(_))) {
                 continue;
             }
             let gid_arr: [u8; 32] = match gid_bytes.as_slice().try_into() {

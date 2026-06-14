@@ -4687,7 +4687,8 @@ mod tests {
         for (i, ct) in payloads.iter().enumerate() {
             let env = alice_group
                 .decrypt(ct)
-                .unwrap_or_else(|e| panic!("ciphertext {i} failed to decrypt: {e}"));
+                .unwrap_or_else(|e| panic!("ciphertext {i} failed to decrypt: {e}"))
+                .unwrap_or_else(|| panic!("ciphertext {i} was a commit, not an app message"));
             match env.kind {
                 Kind::Text { body } => {
                     assert!(

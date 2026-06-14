@@ -195,7 +195,8 @@ async fn primary_unreachable_secondary_accepts() {
     // ── Decrypt + assert round-trip ──────────────────────────────────
     let got = bob_group
         .decrypt(&secondary_deposits[0].ciphertext)
-        .unwrap();
+        .unwrap()
+        .expect("app message");
     assert_eq!(got.id, msg_id, "envelope id must match after failover");
     match got.kind {
         Kind::Text { body } => assert_eq!(body, body_text),

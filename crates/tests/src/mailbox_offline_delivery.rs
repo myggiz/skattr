@@ -214,7 +214,7 @@ async fn alice_deposits_to_mailbox_bob_fetches_then_decrypts() {
 
     // ── Decrypt the fetched ciphertext through Bob's MLS group. ──────
     let fetched_ct = &deposits[0].ciphertext;
-    let got = bob_group.decrypt(fetched_ct).unwrap();
+    let got = bob_group.decrypt(fetched_ct).unwrap().expect("app message");
     assert_eq!(got.id, msg_id, "round-tripped envelope id must match");
     match got.kind {
         Kind::Text { body } => {
