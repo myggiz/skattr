@@ -35,13 +35,18 @@ fn paired_groups(
     bob_pool: &Pool,
 ) -> (Group, Group) {
     let psk = [0x99u8; 32];
+    let kp_ref = [7u8; 32]; // ADR 0009: fixed test KeyPackageRef for the PSK id
     let bob_kp_repo = KeyPackageRepo::new(bob_pool);
     let bob_provider = MlsProvider::new();
     let bob_kp = KeyPackage::generate(bob_id, &bob_provider, &bob_kp_repo).unwrap();
 
-    let mut alice = Group::create_solo(alice_id, Some(&psk), MlsProvider::new()).unwrap();
-    let (welcome, _commit) = alice.add_member(&bob_kp, Some(&psk)).unwrap();
-    let bob = Group::join_from_welcome(bob_id, &welcome, Some(&psk), bob_provider).unwrap();
+    let mut alice =
+        Group::create_solo(alice_id, Some((&kp_ref, &psk)), None, MlsProvider::new()).unwrap();
+    let (welcome, _commit) = alice
+        .add_member(&bob_kp, Some((&kp_ref, &psk)), None)
+        .unwrap();
+    let bob = Group::join_from_welcome(bob_id, &welcome, Some((&kp_ref, &psk)), None, bob_provider)
+        .unwrap();
 
     alice.save(&MlsGroupRepo::new(alice_pool)).unwrap();
     bob.save(&MlsGroupRepo::new(bob_pool)).unwrap();
@@ -190,7 +195,8 @@ async fn primary_unreachable_secondary_accepts() {
     // ── Decrypt + assert round-trip ──────────────────────────────────
     let got = bob_group
         .decrypt(&secondary_deposits[0].ciphertext)
-        .unwrap();
+        .unwrap()
+        .expect("app message");
     assert_eq!(got.id, msg_id, "envelope id must match after failover");
     match got.kind {
         Kind::Text { body } => assert_eq!(body, body_text),

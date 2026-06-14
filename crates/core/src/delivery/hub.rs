@@ -273,6 +273,31 @@ where
         let _ = ctrl_tx.send(PeerCtrl::ReplaceConn(Box::new(conn))).await;
     }
 
+    /// Dial `peer` by a caller-supplied `onion` (e.g. from an invite card,
+    /// before the inviter's `ContactCard` is persisted), ingest the resulting
+    /// connection, and return its `h_transport` for the caller to bind into the
+    /// genesis MLS Commit (ADR 0009). Used by first-contact `add_contact`, where
+    /// the card is written inside the same transaction as the genesis group,
+    /// *after* this dial succeeds — full add_contact atomicity (T2-1). Errors if
+    /// no dialer is wired or the dial fails.
+    ///
+    /// The `dialer` `Arc` is cloned because `dial_at` borrows `&self` across the
+    /// `.await`; cloning avoids holding a borrow of `self.dialer`.
+    pub(crate) async fn connect_and_ingest_at(
+        &self,
+        peer: PublicKey,
+        onion: &str,
+    ) -> Result<zeroize::Zeroizing<[u8; 32]>> {
+        let dialer = self.dialer.clone().ok_or_else(|| {
+            crate::error::CoreError::Delivery(crate::delivery::DeliveryErrorKind::Other(
+                "no dialer wired".into(),
+            ))
+        })?;
+        let (conn, h_transport) = dialer.dial_at(peer, onion).await?;
+        self.ingest(peer, conn).await;
+        Ok(h_transport)
+    }
+
     /// Whether a per-peer actor currently exists for `peer`. Used by the
     /// accept-loop test to assert an unknown peer was NOT ingested.
     pub(crate) async fn has_peer(&self, peer: &PublicKey) -> bool {

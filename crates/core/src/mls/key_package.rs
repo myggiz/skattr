@@ -295,8 +295,8 @@ mod welcome_hash_tests {
         // that value.
         let expected_kp_ref = kp_ref_from_kp(&bob_kp);
 
-        let mut alice_group = Group::create_solo(&alice, None, MlsProvider::new()).unwrap();
-        let (welcome, _commit) = alice_group.add_member(&bob_kp, None).unwrap();
+        let mut alice_group = Group::create_solo(&alice, None, None, MlsProvider::new()).unwrap();
+        let (welcome, _commit) = alice_group.add_member(&bob_kp, None, None).unwrap();
 
         let parsed = parse_welcome_kp_hash(&welcome).unwrap();
         assert_eq!(parsed, expected_kp_ref);

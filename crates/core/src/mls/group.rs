@@ -43,9 +43,17 @@ pub struct Group {
 
 impl Group {
     /// Create a fresh single-member group.
+    ///
+    /// `invite_psk` and `h_transport` are each `(kp_ref, secret)`: the 32-byte
+    /// invite KeyPackageRef (which derives the per-invite-unique PSK id) and the
+    /// 32-byte PSK secret. Both are registered (no proposal — solo) so the
+    /// subsequent `add_member` genesis Commit can reference them. `h_transport`
+    /// is the transport↔MLS binding PSK (ADR 0009); callers pass `None` until
+    /// the binding is activated.
     pub fn create_solo(
         identity: &IdentityKey,
-        psk: Option<&[u8; 32]>,
+        invite_psk: Option<(&[u8; 32], &[u8; 32])>,
+        h_transport: Option<(&[u8; 32], &[u8; 32])>,
         provider: MlsProvider,
     ) -> Result<Self> {
         let signer = signer_from_identity(identity, &provider)?;
@@ -74,8 +82,11 @@ impl Group {
 
         let gid = GroupId(gid_bytes.to_vec());
 
-        if let Some(psk_bytes) = psk {
-            register_external_psk(&provider, psk_bytes)?;
+        if let Some((kp_ref, secret)) = invite_psk {
+            register_psk(&provider, b"invite", kp_ref, secret)?;
+        }
+        if let Some((kp_ref, secret)) = h_transport {
+            register_psk(&provider, b"htransport", kp_ref, secret)?;
         }
 
         Ok(Self {
@@ -88,27 +99,45 @@ impl Group {
 
     /// Add `invitee_kp` to this group. Returns `(welcome_bytes, commit_bytes)`.
     /// Merges the pending Commit eagerly (2-member only, Phase 1.C).
-    /// Optional `psk` is proposed as an external PSK before the Commit.
+    ///
+    /// `invite_psk` and `h_transport` are each `(kp_ref, secret)`. When `Some`,
+    /// each is registered and proposed as an external PSK (under a label-distinct,
+    /// per-invite-unique id) before the genesis Commit, so the joiner's Welcome
+    /// can only be processed if it holds the same secrets (ADR 0009). Two
+    /// external-PSK proposals in one Commit is valid MLS.
     pub fn add_member(
         &mut self,
         invitee_kp: &KeyPackage,
-        psk: Option<&[u8; 32]>,
+        invite_psk: Option<(&[u8; 32], &[u8; 32])>,
+        h_transport: Option<(&[u8; 32], &[u8; 32])>,
     ) -> Result<(WelcomeBytes, CommitBytes)> {
         // Guard against 3rd member (2-member only for 1.C).
         if self.inner.members().count() >= 2 {
             return Err(MlsErrorKind::Other("mls: add_member: already 2-member".into()).into());
         }
 
-        if let Some(psk_bytes) = psk {
-            let psk_id = register_external_psk(&self.provider, psk_bytes)?;
+        if invite_psk.is_some() || h_transport.is_some() {
             let signer = load_signer(&self.provider, &own_public_key(&self.inner)?)?;
-            self.inner
-                .propose_external_psk(self.provider.as_openmls(), &signer, psk_id)
-                .map_err(|e| {
-                    CoreError::from(MlsErrorKind::Other(format!(
-                        "mls: propose external psk: {e:?}"
-                    )))
-                })?;
+            if let Some((kp_ref, secret)) = invite_psk {
+                let id = register_psk(&self.provider, b"invite", kp_ref, secret)?;
+                self.inner
+                    .propose_external_psk(self.provider.as_openmls(), &signer, id)
+                    .map_err(|e| {
+                        CoreError::from(MlsErrorKind::Other(format!(
+                            "mls: propose external psk: {e:?}"
+                        )))
+                    })?;
+            }
+            if let Some((kp_ref, secret)) = h_transport {
+                let id = register_psk(&self.provider, b"htransport", kp_ref, secret)?;
+                self.inner
+                    .propose_external_psk(self.provider.as_openmls(), &signer, id)
+                    .map_err(|e| {
+                        CoreError::from(MlsErrorKind::Other(format!(
+                            "mls: propose external psk: {e:?}"
+                        )))
+                    })?;
+            }
         }
 
         let signer = load_signer(&self.provider, &own_public_key(&self.inner)?)?;
@@ -150,11 +179,16 @@ impl Group {
     }
 
     /// Join an existing group from a TLS-serialized Welcome message.
-    /// `psk` must match the value used by the inviter.
+    ///
+    /// `invite_psk` and `h_transport` are each `(kp_ref, secret)` and MUST match
+    /// the values the inviter proposed into the genesis Commit, or OpenMLS will
+    /// fail to resolve the PSK proposals when processing the Welcome (ADR 0009).
+    /// Both are registered before `StagedWelcome::new_from_welcome`.
     pub fn join_from_welcome(
         identity: &IdentityKey,
         welcome: &[u8],
-        psk: Option<&[u8; 32]>,
+        invite_psk: Option<(&[u8; 32], &[u8; 32])>,
+        h_transport: Option<(&[u8; 32], &[u8; 32])>,
         provider: MlsProvider,
     ) -> Result<Self> {
         // Ensure the signer is registered in this provider so OpenMLS can
@@ -163,8 +197,11 @@ impl Group {
         // the "already present" error and proceed.
         let _ = signer_from_identity(identity, &provider);
 
-        if let Some(psk_bytes) = psk {
-            register_external_psk(&provider, psk_bytes)?;
+        if let Some((kp_ref, secret)) = invite_psk {
+            register_psk(&provider, b"invite", kp_ref, secret)?;
+        }
+        if let Some((kp_ref, secret)) = h_transport {
+            register_psk(&provider, b"htransport", kp_ref, secret)?;
         }
 
         let welcome_msg = MlsMessageIn::tls_deserialize_exact(welcome).map_err(|e| {
@@ -234,9 +271,19 @@ impl Group {
         })
     }
 
-    /// Decrypt a TLS-encoded MLS application message. Returns the decoded `Envelope`.
-    pub fn decrypt(&mut self, ciphertext: &[u8]) -> Result<Envelope> {
-        if !self.state.can_send() {
+    /// Decrypt a TLS-encoded inbound MLS message.
+    ///
+    /// Returns `Ok(Some(envelope))` for an application message and `Ok(None)`
+    /// when the inbound message was a Commit: a Commit advances the epoch but
+    /// carries no application payload, so it is merged in place (the ratchet
+    /// advances on `&mut self`) and the caller MUST persist the advanced group
+    /// even though there is no message row to write. This defensively tolerates
+    /// an inbound Commit (e.g. a peer epoch-advance) instead of stalling
+    /// delivery; v1.0 does not perform PCS, so this path is not normally hit
+    /// (T2-2). Proposals are not expected in a 2-member v1.0 group and remain an
+    /// error.
+    pub fn decrypt(&mut self, ciphertext: &[u8]) -> Result<Option<Envelope>> {
+        if !self.state.can_receive() {
             return Err(MlsErrorKind::Other(format!(
                 "mls: decrypt: invalid state {:?}",
                 self.state
@@ -268,27 +315,41 @@ impl Group {
                 )))
             })?;
 
-        let plaintext_bytes = match processed.into_content() {
-            ProcessedMessageContent::ApplicationMessage(app) => app.into_bytes(),
-            ProcessedMessageContent::StagedCommitMessage(_) => {
-                return Err(MlsErrorKind::Other(
-                    "mls: decrypt: received Commit on encrypt path — route to process_incoming_commit"
-                        .into(),
-                )
-                .into());
+        match processed.into_content() {
+            ProcessedMessageContent::ApplicationMessage(app) => {
+                Ok(Some(Envelope::decode(&app.into_bytes())?))
+            }
+            ProcessedMessageContent::StagedCommitMessage(staged) => {
+                // A Commit advances the epoch but carries no application
+                // payload — merge it and signal "no message" to the caller.
+                self.merge_staged(*staged)?;
+                Ok(None)
             }
             ProcessedMessageContent::ProposalMessage(_) => {
-                return Err(MlsErrorKind::Other("mls: decrypt: received Proposal".into()).into());
+                Err(MlsErrorKind::Other("mls: decrypt: received Proposal".into()).into())
             }
-            ProcessedMessageContent::ExternalJoinProposalMessage(_) => {
-                return Err(MlsErrorKind::Other(
-                    "mls: decrypt: received ExternalJoinProposal".into(),
-                )
-                .into());
-            }
-        };
+            ProcessedMessageContent::ExternalJoinProposalMessage(_) => Err(MlsErrorKind::Other(
+                "mls: decrypt: received ExternalJoinProposal".into(),
+            )
+            .into()),
+        }
+    }
 
-        Envelope::decode(&plaintext_bytes)
+    /// Merge an already-processed staged Commit and advance `self.state` to the
+    /// new epoch. Shared by [`decrypt`](Self::decrypt) (defensive inbound-Commit
+    /// tolerance) and [`process_incoming_commit`](Self::process_incoming_commit).
+    fn merge_staged(&mut self, staged: openmls::group::StagedCommit) -> Result<()> {
+        self.inner
+            .merge_staged_commit(self.provider.as_openmls(), staged)
+            .map_err(|e| {
+                CoreError::from(MlsErrorKind::Other(format!(
+                    "mls: merge_staged_commit: {e:?}"
+                )))
+            })?;
+        self.state = GroupState::Active {
+            epoch: self.inner.epoch().as_u64(),
+        };
+        Ok(())
     }
 
     /// Process a TLS-encoded Commit message from the peer and merge it.
@@ -318,19 +379,7 @@ impl Group {
             })?;
 
         match processed.into_content() {
-            ProcessedMessageContent::StagedCommitMessage(staged) => {
-                self.inner
-                    .merge_staged_commit(self.provider.as_openmls(), *staged)
-                    .map_err(|e| {
-                        CoreError::from(MlsErrorKind::Other(format!(
-                            "mls: merge_staged_commit: {e:?}"
-                        )))
-                    })?;
-                self.state = GroupState::Active {
-                    epoch: self.inner.epoch().as_u64(),
-                };
-                Ok(())
-            }
+            ProcessedMessageContent::StagedCommitMessage(staged) => self.merge_staged(*staged),
             _ => {
                 Err(MlsErrorKind::Other("mls: process_commit: not a Commit message".into()).into())
             }
@@ -507,22 +556,38 @@ fn own_public_key(group: &openmls::group::MlsGroup) -> Result<Vec<u8>> {
     Ok(own_leaf.signature_key().as_slice().to_vec())
 }
 
-/// The external-PSK identifier byte string. Matches the HKDF label from
-/// 1.B so the two layers use the same constant. Both sides must register
-/// a PSK under this identifier for the Add Commit's PSK proposal to
-/// decrypt on the other side.
-const PSK_ID_BYTES: &[u8] = b"skattr-binding-v1";
+/// Derive a per-invite-unique external PSK id. `label` distinguishes the two
+/// PSKs carried in one genesis Commit ("invite" vs "htransport"); `kp_ref`
+/// (the invite's 32-byte KeyPackageRef) makes every invite's PSK ids unique so
+/// registering one never overwrites another invite's (ADR 0009, fixes T2-8).
+///
+/// The id is an unprefixed concatenation, which is unambiguous ONLY because
+/// `label` is a fixed closed set of constants (`b"invite"`, `b"htransport"`)
+/// and `kp_ref` is always the fixed 32-byte trailing segment. Do not pass a
+/// variable-length or caller-controlled `label`.
+fn psk_id(label: &[u8], kp_ref: &[u8; 32]) -> PreSharedKeyId {
+    // id = "skattr-" ++ label ++ "-v1" ++ kp_ref
+    let mut id = Vec::with_capacity(7 + label.len() + 3 + 32);
+    id.extend_from_slice(b"skattr-");
+    id.extend_from_slice(label);
+    id.extend_from_slice(b"-v1");
+    id.extend_from_slice(kp_ref);
+    PreSharedKeyId::external(id, kp_ref.to_vec())
+}
 
-/// Register a 32-byte external PSK with the provider under the
-/// canonical Skattr PSK identifier. Returns a `PreSharedKeyId` that
-/// the caller embeds in the Commit's PSK proposal (inviter side) or
-/// that gets derived from the Welcome (invitee side).
-fn register_external_psk(provider: &MlsProvider, psk: &[u8; 32]) -> Result<PreSharedKeyId> {
-    let psk_id = PreSharedKeyId::external(PSK_ID_BYTES.to_vec(), vec![0u8; 32]);
-    psk_id
-        .store(provider.as_openmls(), psk)
+/// Register an external PSK secret under `psk_id(label, kp_ref)`. Returns the
+/// `PreSharedKeyId` that the caller embeds in the Commit's PSK proposal
+/// (committer side) or that gets resolved from the Welcome (joiner side).
+fn register_psk(
+    provider: &MlsProvider,
+    label: &[u8],
+    kp_ref: &[u8; 32],
+    secret: &[u8; 32],
+) -> Result<PreSharedKeyId> {
+    let id = psk_id(label, kp_ref);
+    id.store(provider.as_openmls(), secret)
         .map_err(|e| CoreError::from(MlsErrorKind::Other(format!("mls: psk register: {e:?}"))))?;
-    Ok(psk_id)
+    Ok(id)
 }
 
 #[cfg(test)]
@@ -538,7 +603,7 @@ mod tests {
     #[test]
     fn create_solo_is_active_at_epoch_0() {
         let id = alice();
-        let g = Group::create_solo(&id, None, MlsProvider::new()).unwrap();
+        let g = Group::create_solo(&id, None, None, MlsProvider::new()).unwrap();
         assert_eq!(g.epoch(), 0);
         assert!(matches!(g.state(), GroupState::Active { epoch: 0 }));
         assert!(!g.id().0.is_empty(), "group id must be set");
@@ -550,7 +615,7 @@ mod tests {
         let repo = MlsGroupRepo::new(&pool);
         let id = alice();
 
-        let g = Group::create_solo(&id, None, MlsProvider::new()).unwrap();
+        let g = Group::create_solo(&id, None, None, MlsProvider::new()).unwrap();
         let gid = g.id().clone();
         g.save(&repo).unwrap();
 
@@ -596,10 +661,10 @@ mod tests {
         let bob_provider = MlsProvider::new();
         let bob_kp = KeyPackage::generate(&bob_id, &bob_provider, &kp_repo).unwrap();
 
-        let mut alice = Group::create_solo(&alice_id, None, MlsProvider::new()).unwrap();
+        let mut alice = Group::create_solo(&alice_id, None, None, MlsProvider::new()).unwrap();
         assert_eq!(alice.epoch(), 0);
 
-        let (welcome, commit) = alice.add_member(&bob_kp, None).unwrap();
+        let (welcome, commit) = alice.add_member(&bob_kp, None, None).unwrap();
         assert!(!welcome.is_empty());
         assert!(!commit.is_empty());
         assert_eq!(alice.epoch(), 1);
@@ -616,10 +681,10 @@ mod tests {
         let bob_provider = MlsProvider::new();
         let bob_kp = KeyPackage::generate(&bob_id, &bob_provider, &kp_repo).unwrap();
 
-        let mut alice = Group::create_solo(&alice_id, None, MlsProvider::new()).unwrap();
-        let (welcome, _commit) = alice.add_member(&bob_kp, None).unwrap();
+        let mut alice = Group::create_solo(&alice_id, None, None, MlsProvider::new()).unwrap();
+        let (welcome, _commit) = alice.add_member(&bob_kp, None, None).unwrap();
 
-        let bob = Group::join_from_welcome(&bob_id, &welcome, None, bob_provider).unwrap();
+        let bob = Group::join_from_welcome(&bob_id, &welcome, None, None, bob_provider).unwrap();
 
         assert_eq!(bob.epoch(), 1);
         assert_eq!(bob.id(), alice.id(), "both sides see the same group id");
@@ -636,9 +701,9 @@ mod tests {
         let bob_provider = MlsProvider::new();
         let bob_kp = KeyPackage::generate(&bob_id, &bob_provider, &kp_repo).unwrap();
 
-        let mut alice = Group::create_solo(&alice_id, None, MlsProvider::new()).unwrap();
-        let (welcome, _commit) = alice.add_member(&bob_kp, None).unwrap();
-        let bob = Group::join_from_welcome(&bob_id, &welcome, None, bob_provider).unwrap();
+        let mut alice = Group::create_solo(&alice_id, None, None, MlsProvider::new()).unwrap();
+        let (welcome, _commit) = alice.add_member(&bob_kp, None, None).unwrap();
+        let bob = Group::join_from_welcome(&bob_id, &welcome, None, None, bob_provider).unwrap();
 
         // From alice's view, the distinct peer is bob.
         assert_eq!(
@@ -661,9 +726,9 @@ mod tests {
         let bob_id = IdentityKey::generate().unwrap();
         let bob_provider = MlsProvider::new();
         let bob_kp = KeyPackage::generate(&bob_id, &bob_provider, &kp_repo).unwrap();
-        let mut alice = Group::create_solo(&alice_id, None, MlsProvider::new()).unwrap();
-        let (welcome, _commit) = alice.add_member(&bob_kp, None).unwrap();
-        let bob = Group::join_from_welcome(&bob_id, &welcome, None, bob_provider).unwrap();
+        let mut alice = Group::create_solo(&alice_id, None, None, MlsProvider::new()).unwrap();
+        let (welcome, _commit) = alice.add_member(&bob_kp, None, None).unwrap();
+        let bob = Group::join_from_welcome(&bob_id, &welcome, None, None, bob_provider).unwrap();
         (alice, bob)
     }
 
@@ -686,12 +751,12 @@ mod tests {
 
         let msg_a = test_envelope("hi from alice");
         let ct_a = alice.encrypt(&msg_a).unwrap();
-        let got_a = bob.decrypt(&ct_a).unwrap();
+        let got_a = bob.decrypt(&ct_a).unwrap().expect("app message");
         assert_eq!(format!("{got_a:?}"), format!("{msg_a:?}"));
 
         let msg_b = test_envelope("hi from bob");
         let ct_b = bob.encrypt(&msg_b).unwrap();
-        let got_b = alice.decrypt(&ct_b).unwrap();
+        let got_b = alice.decrypt(&ct_b).unwrap().expect("app message");
         assert_eq!(format!("{got_b:?}"), format!("{msg_b:?}"));
     }
 
@@ -702,9 +767,22 @@ mod tests {
         let bob_id = IdentityKey::generate().unwrap();
         let bob_provider = MlsProvider::new();
         let bob_kp = KeyPackage::generate(&bob_id, &bob_provider, &kp_repo)?;
-        let mut alice = Group::create_solo(&alice_id, Some(&psk_alice), MlsProvider::new())?;
-        let (welcome, _commit) = alice.add_member(&bob_kp, Some(&psk_alice))?;
-        let bob = Group::join_from_welcome(&bob_id, &welcome, Some(&psk_bob), bob_provider)?;
+        // Both sides derive the invite PSK id from the same KeyPackageRef.
+        let kp_ref = crate::mls::key_package::key_package_ref(&bob_kp)?;
+        let mut alice = Group::create_solo(
+            &alice_id,
+            Some((&kp_ref, &psk_alice)),
+            None,
+            MlsProvider::new(),
+        )?;
+        let (welcome, _commit) = alice.add_member(&bob_kp, Some((&kp_ref, &psk_alice)), None)?;
+        let bob = Group::join_from_welcome(
+            &bob_id,
+            &welcome,
+            Some((&kp_ref, &psk_bob)),
+            None,
+            bob_provider,
+        )?;
         Ok((alice, bob))
     }
 
@@ -738,6 +816,117 @@ mod tests {
     }
 
     #[test]
+    fn genesis_two_psk_commit_round_trips_and_binds() {
+        // Bob (committer) builds the genesis Commit with BOTH the invite PSK and
+        // h_transport, keyed by the same KeyPackageRef. Alice joins with the same
+        // pair; the group binds and a round-trip message decrypts.
+        let pool = Pool::in_memory();
+        let kp_repo = crate::storage::KeyPackageRepo::new(&pool);
+        let bob_id = alice();
+        let alice_id = IdentityKey::generate().unwrap();
+        let alice_provider = MlsProvider::new();
+        let alice_kp = KeyPackage::generate(&alice_id, &alice_provider, &kp_repo).unwrap();
+        let kp_ref = crate::mls::key_package::key_package_ref(&alice_kp).unwrap();
+
+        let inv = [0x11u8; 32];
+        let ht = [0x22u8; 32];
+
+        let mut bob = Group::create_solo(
+            &bob_id,
+            Some((&kp_ref, &inv)),
+            Some((&kp_ref, &ht)),
+            MlsProvider::new(),
+        )
+        .unwrap();
+        let (welcome, _commit) = bob
+            .add_member(&alice_kp, Some((&kp_ref, &inv)), Some((&kp_ref, &ht)))
+            .unwrap();
+
+        let mut alice = Group::join_from_welcome(
+            &alice_id,
+            &welcome,
+            Some((&kp_ref, &inv)),
+            Some((&kp_ref, &ht)),
+            alice_provider,
+        )
+        .unwrap();
+
+        assert_eq!(bob.epoch(), 1);
+        assert_eq!(alice.epoch(), 1);
+        assert_eq!(bob.id(), alice.id());
+
+        // Round-trip both directions.
+        let env = test_envelope("bound hello");
+        let ct = bob.encrypt(&env).unwrap();
+        let got = alice.decrypt(&ct).unwrap().expect("app message");
+        assert_eq!(format!("{got:?}"), format!("{env:?}"));
+    }
+
+    #[test]
+    fn wrong_h_transport_rejects_join() {
+        // Alice joins with a DIFFERENT h_transport secret than Bob proposed;
+        // OpenMLS cannot resolve the binding PSK and the join fails.
+        let pool = Pool::in_memory();
+        let kp_repo = crate::storage::KeyPackageRepo::new(&pool);
+        let bob_id = alice();
+        let alice_id = IdentityKey::generate().unwrap();
+        let alice_provider = MlsProvider::new();
+        let alice_kp = KeyPackage::generate(&alice_id, &alice_provider, &kp_repo).unwrap();
+        let kp_ref = crate::mls::key_package::key_package_ref(&alice_kp).unwrap();
+
+        let inv = [0x11u8; 32];
+        let ht_bob = [0x22u8; 32];
+        let ht_alice = [0x33u8; 32]; // mismatch
+
+        let mut bob = Group::create_solo(
+            &bob_id,
+            Some((&kp_ref, &inv)),
+            Some((&kp_ref, &ht_bob)),
+            MlsProvider::new(),
+        )
+        .unwrap();
+        let (welcome, _commit) = bob
+            .add_member(&alice_kp, Some((&kp_ref, &inv)), Some((&kp_ref, &ht_bob)))
+            .unwrap();
+
+        let result = Group::join_from_welcome(
+            &alice_id,
+            &welcome,
+            Some((&kp_ref, &inv)),
+            Some((&kp_ref, &ht_alice)),
+            alice_provider,
+        );
+        assert!(
+            result.is_err(),
+            "join must fail when h_transport does not match"
+        );
+    }
+
+    #[test]
+    fn distinct_kp_refs_yield_distinct_psk_ids() {
+        let ref_a = [1u8; 32];
+        let ref_b = [2u8; 32];
+
+        // Different kp_ref -> different id (and different nonce).
+        let id_a = psk_id(b"invite", &ref_a);
+        let id_b = psk_id(b"invite", &ref_b);
+        assert_ne!(
+            id_a.tls_serialize_detached().unwrap(),
+            id_b.tls_serialize_detached().unwrap(),
+            "distinct kp_refs must yield distinct invite PSK ids"
+        );
+
+        // Different label, same kp_ref -> different id (invite vs htransport).
+        let id_inv = psk_id(b"invite", &ref_a);
+        let id_ht = psk_id(b"htransport", &ref_a);
+        assert_ne!(
+            id_inv.tls_serialize_detached().unwrap(),
+            id_ht.tls_serialize_detached().unwrap(),
+            "invite and htransport PSK ids must differ for the same kp_ref"
+        );
+    }
+
+    #[test]
     fn no_psk_path_still_works() {
         let pool = Pool::in_memory();
         let kp_repo = crate::storage::KeyPackageRepo::new(&pool);
@@ -745,9 +934,9 @@ mod tests {
         let bob_id = IdentityKey::generate().unwrap();
         let bob_provider = MlsProvider::new();
         let bob_kp = KeyPackage::generate(&bob_id, &bob_provider, &kp_repo).unwrap();
-        let mut alice = Group::create_solo(&alice_id, None, MlsProvider::new()).unwrap();
-        let (welcome, _commit) = alice.add_member(&bob_kp, None).unwrap();
-        let bob = Group::join_from_welcome(&bob_id, &welcome, None, bob_provider).unwrap();
+        let mut alice = Group::create_solo(&alice_id, None, None, MlsProvider::new()).unwrap();
+        let (welcome, _commit) = alice.add_member(&bob_kp, None, None).unwrap();
+        let bob = Group::join_from_welcome(&bob_id, &welcome, None, None, bob_provider).unwrap();
         assert_eq!(alice.epoch(), 1);
         assert_eq!(bob.epoch(), 1);
     }
@@ -767,7 +956,36 @@ mod tests {
         // Both sides can still encrypt/decrypt at epoch 2.
         let env = test_envelope("post-PCS");
         let ct = alice.encrypt(&env).unwrap();
-        let got = bob.decrypt(&ct).unwrap();
+        let got = bob.decrypt(&ct).unwrap().expect("app message");
+        assert_eq!(format!("{got:?}"), format!("{env:?}"));
+    }
+
+    #[test]
+    fn decrypt_merges_inbound_commit_instead_of_erroring() {
+        // T2-2 (defensive): an inbound Commit fed to `decrypt` must be merged
+        // (advancing the epoch) and return `Ok(None)` — NOT error. (The old
+        // behavior errored on the StagedCommitMessage arm.)
+        let (mut alice, mut bob) = pair_no_psk();
+        assert_eq!(alice.epoch(), 1);
+        assert_eq!(bob.epoch(), 1);
+
+        // Bob produces a real inbound Commit via a self-update.
+        let commit = bob.advance_epoch().unwrap();
+        assert_eq!(bob.epoch(), 2);
+
+        // Alice receives it through `decrypt`: merged, no payload, epoch advances.
+        let out = alice.decrypt(&commit).unwrap();
+        assert!(out.is_none(), "a Commit carries no application payload");
+        assert_eq!(
+            alice.epoch(),
+            2,
+            "decrypt must advance the epoch on a Commit"
+        );
+
+        // A subsequent application message still round-trips at the new epoch.
+        let env = test_envelope("after merged commit");
+        let ct = bob.encrypt(&env).unwrap();
+        let got = alice.decrypt(&ct).unwrap().expect("app message");
         assert_eq!(format!("{got:?}"), format!("{env:?}"));
     }
 
@@ -781,7 +999,7 @@ mod tests {
         let charlie_provider = MlsProvider::new();
         let charlie_kp = KeyPackage::generate(&charlie_id, &charlie_provider, &kp_repo).unwrap();
 
-        let err = match alice.add_member(&charlie_kp, None) {
+        let err = match alice.add_member(&charlie_kp, None, None) {
             Ok(_) => panic!("must reject 3rd"),
             Err(e) => e,
         };
@@ -837,7 +1055,7 @@ mod tests {
         let pool = Pool::in_memory();
         let repo = MlsGroupRepo::new(&pool);
         let id = alice();
-        let group = Group::create_solo(&id, None, MlsProvider::new()).unwrap();
+        let group = Group::create_solo(&id, None, None, MlsProvider::new()).unwrap();
 
         // Run save_in_tx inside a tx we explicitly roll back.
         let result: crate::error::Result<()> = pool.transaction(|tx| {

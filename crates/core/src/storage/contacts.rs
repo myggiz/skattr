@@ -44,6 +44,31 @@ impl<'p> ContactRepo<'p> {
         })
     }
 
+    /// Transactional companion to [`upsert`](Self::upsert). Inserts (or
+    /// updates the display name of) a contact inside the caller's `tx` so it
+    /// commits atomically with the card / genesis-group / invite-consume writes
+    /// of first-contact `add_contact` (full atomicity, T2-1).
+    pub(crate) fn upsert_in_tx(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        contact: &Contact,
+    ) -> Result<()> {
+        tx.execute(
+            "INSERT INTO contacts (identity_pubkey, display_name, added_at) \
+             VALUES (?1, ?2, ?3) \
+             ON CONFLICT(identity_pubkey) DO UPDATE SET display_name=excluded.display_name",
+            rusqlite::params![
+                &contact.identity.0[..],
+                &contact.display_name,
+                contact.added_at,
+            ],
+        )
+        .map_err(|e| {
+            CoreError::Storage(StorageErrorKind::Other(format!("upsert contact (tx): {e}")))
+        })?;
+        Ok(())
+    }
+
     /// Look up by identity pubkey. Returns `Ok(None)` if not present.
     ///
     /// Hydrates the contact's latest card (or `None` if no card exists).
@@ -214,6 +239,27 @@ impl<'p> ContactRepo<'p> {
     /// `CoreError::Contact("contact: card: contact not found")` if
     /// the contact row doesn't exist.
     pub fn put_card(&self, card: &ContactCard) -> Result<()> {
+        self.pool
+            .transaction(|tx| Self::put_card_in_tx_inner(tx, card))
+    }
+
+    /// Transactional companion to [`put_card`](Self::put_card). Inserts a
+    /// freshly-verified card inside the caller's `tx` so it commits atomically
+    /// with the contact upsert / genesis-group save / invite consume of
+    /// first-contact `add_contact` (full atomicity, T2-1). Keeps the same
+    /// monotonic-version guard and "contact not found" rejection as `put_card`.
+    pub(crate) fn put_card_in_tx(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        card: &ContactCard,
+    ) -> Result<()> {
+        Self::put_card_in_tx_inner(tx, card)
+    }
+
+    /// Shared body for [`put_card`] and [`put_card_in_tx`]: resolve the contact
+    /// row, enforce the strictly-increasing version guard, and insert the card
+    /// blob. Runs entirely inside the caller's `tx`.
+    fn put_card_in_tx_inner(tx: &rusqlite::Transaction<'_>, card: &ContactCard) -> Result<()> {
         let identity_bytes = card.body.identity.0;
         let version_i: i64 = i64::try_from(card.body.version).map_err(|_| {
             CoreError::Contact(ContactErrorKind::Other(
@@ -231,56 +277,52 @@ impl<'p> ContactRepo<'p> {
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
 
-        self.pool.transaction(|tx| {
-            // Resolve the contact's row id. If missing, fail with the
-            // fixed message before touching contact_cards.
-            let contact_id: i64 = match tx.query_row(
-                "SELECT id FROM contacts WHERE identity_pubkey = ?1",
-                rusqlite::params![&identity_bytes[..]],
-                |r| r.get(0),
-            ) {
-                Ok(id) => id,
-                Err(rusqlite::Error::QueryReturnedNoRows) => {
-                    return Err(CoreError::Contact(ContactErrorKind::NotFound));
-                }
-                Err(e) => {
-                    return Err(CoreError::Contact(ContactErrorKind::Other(format!(
-                        "card: lookup: {e}"
-                    ))))
-                }
-            };
-
-            // Compare against the stored max version; reject if not strictly greater.
-            let max_version: Option<i64> = tx
-                .query_row(
-                    "SELECT MAX(version) FROM contact_cards WHERE contact_id = ?1",
-                    rusqlite::params![contact_id],
-                    |r| r.get::<_, Option<i64>>(0),
-                )
-                .map_err(|e| {
-                    CoreError::Contact(ContactErrorKind::Other(format!(
-                        "card: max-version lookup: {e}"
-                    )))
-                })?;
-
-            if let Some(max_v) = max_version {
-                if version_i <= max_v {
-                    return Err(CoreError::Contact(ContactErrorKind::Other(
-                        "card: stale version".into(),
-                    )));
-                }
+        // Resolve the contact's row id. If missing, fail with the
+        // fixed message before touching contact_cards.
+        let contact_id: i64 = match tx.query_row(
+            "SELECT id FROM contacts WHERE identity_pubkey = ?1",
+            rusqlite::params![&identity_bytes[..]],
+            |r| r.get(0),
+        ) {
+            Ok(id) => id,
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                return Err(CoreError::Contact(ContactErrorKind::NotFound));
             }
+            Err(e) => {
+                return Err(CoreError::Contact(ContactErrorKind::Other(format!(
+                    "card: lookup: {e}"
+                ))))
+            }
+        };
 
-            tx.execute(
-                "INSERT INTO contact_cards (contact_id, version, card_blob, verified_at) \
-                 VALUES (?1, ?2, ?3, ?4)",
-                rusqlite::params![contact_id, version_i, &blob, verified_at],
+        // Compare against the stored max version; reject if not strictly greater.
+        let max_version: Option<i64> = tx
+            .query_row(
+                "SELECT MAX(version) FROM contact_cards WHERE contact_id = ?1",
+                rusqlite::params![contact_id],
+                |r| r.get::<_, Option<i64>>(0),
             )
             .map_err(|e| {
-                CoreError::Contact(ContactErrorKind::Other(format!("card: insert: {e}")))
+                CoreError::Contact(ContactErrorKind::Other(format!(
+                    "card: max-version lookup: {e}"
+                )))
             })?;
-            Ok(())
-        })
+
+        if let Some(max_v) = max_version {
+            if version_i <= max_v {
+                return Err(CoreError::Contact(ContactErrorKind::Other(
+                    "card: stale version".into(),
+                )));
+            }
+        }
+
+        tx.execute(
+            "INSERT INTO contact_cards (contact_id, version, card_blob, verified_at) \
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![contact_id, version_i, &blob, verified_at],
+        )
+        .map_err(|e| CoreError::Contact(ContactErrorKind::Other(format!("card: insert: {e}"))))?;
+        Ok(())
     }
 
     /// Set the MLS group id for `identity`. Returns `CoreError::Contact`
@@ -300,6 +342,31 @@ impl<'p> ContactRepo<'p> {
             }
             Ok(())
         })
+    }
+
+    /// Transactional companion to [`set_group_id`](Self::set_group_id).
+    /// Updates the contact's `group_id` inside the caller's `tx` so the
+    /// link commits atomically with the genesis-group save and the
+    /// invite consume (T2-1). Returns `CoreError::Contact(NotFound)` if
+    /// the contact row is missing.
+    pub(crate) fn set_group_id_in_tx(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        identity: &PublicKey,
+        group_id: &[u8],
+    ) -> Result<()> {
+        let changed = tx
+            .execute(
+                "UPDATE contacts SET group_id = ?1 WHERE identity_pubkey = ?2",
+                rusqlite::params![group_id, &identity.0[..]],
+            )
+            .map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!("set group_id (tx): {e}")))
+            })?;
+        if changed == 0 {
+            return Err(CoreError::Contact(ContactErrorKind::NotFound));
+        }
+        Ok(())
     }
 
     /// 2-member-group reverse lookup: given a group_id, return the peer's

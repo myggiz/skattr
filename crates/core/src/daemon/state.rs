@@ -301,8 +301,15 @@ where
         .await?;
 
     // Step 2: DaemonInbound (MLS decrypt + persist + emit events).
-    let inbound_impl = DaemonInbound::new(pool.clone(), events_tx.clone());
+    //
+    // Per-group ratchet serialization (T1-3): create ONE shared lock registry
+    // here and give it to both the inbound dispatcher and (below) the send-side
+    // DaemonHandle, so a concurrent send + receive on the same group serialize
+    // on the same lock.
+    let group_locks = crate::daemon::handle::new_group_lock_registry();
+    let mut inbound_impl = DaemonInbound::new(pool.clone(), events_tx.clone());
     inbound_impl.set_identity(Arc::new(identity_for_inbound));
+    inbound_impl.set_group_locks(group_locks.clone());
     let inbound = Arc::new(inbound_impl) as Arc<dyn InboundDispatch>;
 
     // Step 3: DeliveryHub with the injected on-demand dialer. The dialer and
@@ -352,6 +359,9 @@ where
     handle.set_config_arc(config_arc, config_path);
     handle.set_onion(onion.clone());
     handle.set_log_sink(log_sink.clone());
+    // Share the SAME group-lock registry with the inbound dispatcher (T1-3) so
+    // a send and a receive on one group serialize on the same lock.
+    handle.set_group_locks(group_locks);
 
     // Log tap: forward every record from the ring buffer's broadcast channel
     // onto the daemon event bus so `EventFilter::Logs` subscribers receive

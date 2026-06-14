@@ -27,6 +27,22 @@
 //! via `test_exports::run_loopback`, which only swaps Arti for an in-process
 //! `LoopbackTransport`. This is the live CI guardrail that proves all of
 //! Phase 1C Tasks 1–4 compose into a working first-contact flow.
+//!
+//! **Phase 2.A binding coverage (ADR 0009):** since the 2.A MLS-integrity
+//! work, this flow also exercises the `h_transport`↔MLS binding end-to-end.
+//! Bob's `AddContact` now dials Alice first and injects the dialed
+//! connection's `h_transport` (the authenticated Noise transcript hash) as a
+//! second external PSK into the genesis `add_member` Commit; Alice, as the
+//! Noise responder, registers the SAME `h_transport` from her side of the
+//! same session before `join_from_welcome`. Because the genesis Commit
+//! references that PSK, Alice's group can only reach `Active` if both sides
+//! registered identical transcript-derived bytes — a mismatch (a dropped or
+//! relayed binding) would make `join_from_welcome` reject the genesis Commit
+//! and the group would never leave `PendingJoin`. So this guardrail reaching
+//! the bidirectional-messages stage is itself proof the binding round-trips.
+//! The pure-MLS wrong-`h_transport`-rejects-join and distinct-PSK-id cases
+//! are unit-tested in `mls::group`; the daemon-level mismatch is covered by
+//! `dispatch_welcome_bootstrap_rejects_binding_mismatch` in `daemon::inbound`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -54,6 +70,16 @@ use zeroize::Zeroizing;
 /// REAL first-contact flow (invite → add → Welcome-via-dial → bidirectional
 /// messages) with no Tor, no seeding, and no `test_exports` hub hand-wiring.
 /// This is the Phase 1C exit criterion — it exercises Tasks 1–4 together.
+///
+/// Since Phase 2.A (ADR 0009) it ALSO exercises the `h_transport`↔MLS binding:
+/// the genesis `add_member` Commit carries the dialed connection's
+/// transcript-derived `h_transport` as a second external PSK, and both the
+/// committer (Bob) and the joiner (Alice) must register the same value or
+/// `join_from_welcome` rejects the genesis Commit. Reaching the
+/// bidirectional-messages stage therefore proves the binding round-trips
+/// end-to-end (see the module doc and the `mls::group` /
+/// `dispatch_welcome_bootstrap_rejects_binding_mismatch` unit tests for the
+/// negative cases).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn first_contact_invite_add_then_bidirectional_over_loopback() {
     let tmp_a = tempfile::tempdir().unwrap();
@@ -179,7 +205,11 @@ async fn first_contact_invite_add_then_bidirectional_over_loopback() {
     };
 
     // --- Step 4: Alice's group must reach Active (the Welcome landed via the
-    // on-demand dial — Task 4). ---
+    // on-demand dial — Task 4). Reaching Active also validates the h_transport
+    // binding PSK (ADR 0009): the genesis Commit references the transcript-
+    // derived h_transport, so join_from_welcome only succeeds because Alice
+    // (responder) and Bob (committer) registered identical bytes from the same
+    // Noise session — a binding mismatch would leave the group in PendingJoin. ---
     wait_for_group_active(&ready_a.ipc_socket, bob_pubkey, Duration::from_secs(30)).await;
 
     // --- Step 5: Alice → Bob. Subscribe BEFORE sending (delivery can complete

@@ -61,9 +61,15 @@ pub(crate) async fn run_accept_loop<S>(
                     // else from an unknown peer reaches the MLS app pipeline.
                     match tokio::time::timeout(WELCOME_READ_TIMEOUT, conn.recv()).await {
                         Ok(Ok(Some(crate::transport::Frame::MlsWelcome(bytes)))) => {
-                            match inbound_dispatch
-                                .dispatch_welcome_bootstrap(&bytes, &outcome.peer_x25519)
-                            {
+                            match inbound_dispatch.dispatch_welcome_bootstrap(
+                                &bytes,
+                                &outcome.peer_x25519,
+                                // The responder's h_transport is the SAME Noise
+                                // session's transcript value as the dialing
+                                // committer's, so the genesis binding PSK matches
+                                // on both ends (ADR 0009, T1-1).
+                                Some(&*outcome.h_transport),
+                            ) {
                                 Some(peer) => {
                                     // ACK so the inviter-side WelcomeJob resolves,
                                     // then ingest under the derived, binding-

@@ -43,16 +43,34 @@ pub(crate) struct DaemonInbound {
     /// Local identity for MLS Welcome processing. Set once after
     /// construction via [`set_identity`]; `None` until that call.
     pub identity: std::sync::RwLock<Option<Arc<IdentityKey>>>,
+    /// Per-group ratchet-serialization registry (T1-3). This is the SAME Arc
+    /// the send-side `DaemonHandle` holds (wired in `Daemon::run`), so an
+    /// inbound decrypt+save and a concurrent outbound encrypt+save on one group
+    /// serialize on the same lock. Defaults to a private registry (used by unit
+    /// tests that exercise only the inbound path).
+    group_locks: crate::daemon::handle::GroupLockRegistry,
 }
 
 impl DaemonInbound {
-    /// Create a new `DaemonInbound`.
+    /// Create a new `DaemonInbound` with a private group-lock registry. Used by
+    /// unit tests that drive only the inbound path. Production callers
+    /// (`Daemon::run`) must call [`set_group_locks`] with the send handle's
+    /// registry so send + receive serialize together (T1-3).
     pub(crate) fn new(pool: Arc<Pool>, events_tx: broadcast::Sender<Event>) -> Self {
         Self {
             pool,
             events_tx,
             identity: std::sync::RwLock::new(None),
+            group_locks: crate::daemon::handle::new_group_lock_registry(),
         }
+    }
+
+    /// Replace the group-lock registry with the shared one the send-side
+    /// `DaemonHandle` holds, so inbound decrypt+save and outbound encrypt+save
+    /// on the same group serialize on the same lock (T1-3). Called by
+    /// `Daemon::run` before the inbound dispatcher starts processing frames.
+    pub(crate) fn set_group_locks(&mut self, registry: crate::daemon::handle::GroupLockRegistry) {
+        self.group_locks = registry;
     }
 
     /// Wire the local identity so Welcome messages can be processed.
@@ -89,13 +107,48 @@ impl DaemonInbound {
         group_id: &[u8],
         ciphertext: &[u8],
     ) -> Result<MessageId> {
+        // Per-group ratchet serialization (T1-3): hold the group's lock across
+        // the entire load→decrypt→save critical section so a concurrent
+        // outbound send (or another inbound frame) on this group can't load the
+        // same on-disk snapshot and process at the same ratchet generation.
+        // This is the SAME registry the send-side `DaemonHandle` uses (wired in
+        // `Daemon::run`), so send + receive serialize together. The whole
+        // function is synchronous, so a blocking `std::sync::Mutex` guard held
+        // for its duration is correct. A group_id that isn't 32 bytes is an
+        // MLS-storage anomaly — surfaced as the same unknown-group error below.
+        let group_id_arr: [u8; 32] = group_id.try_into().map_err(|_| {
+            CoreError::from(MlsErrorKind::Other(
+                "mls: inbound: bad group_id length".into(),
+            ))
+        })?;
+        let group_lock = crate::daemon::handle::group_lock_for(&self.group_locks, &group_id_arr);
+        let _guard = group_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
         let group_repo = MlsGroupRepo::new(&self.pool);
         let gid = GroupId(group_id.to_vec());
         let mut group = Group::load(&gid, &group_repo)?.ok_or_else(|| {
             CoreError::from(MlsErrorKind::Other("mls: inbound: unknown group_id".into()))
         })?;
 
-        let envelope = group.decrypt(ciphertext)?;
+        let Some(envelope) = group.decrypt(ciphertext)? else {
+            // The inbound message was a Commit (not an application message):
+            // it advanced the ratchet on `group` in memory but carries no
+            // payload. Persist the advanced group so the epoch bump is durable
+            // (otherwise the next inbound message would fail to decrypt), then
+            // ACK without a message row or `MessageReceived` event (T2-2,
+            // defensive — v1.0 does not perform PCS). Hold the per-group lock,
+            // already acquired above, across this save.
+            let saved = self
+                .pool
+                .transaction(|tx| group.save_in_tx(&group_repo, tx));
+            saved?;
+            // No envelope id is available (a Commit has no Envelope). Return a
+            // fresh id so the caller's ACK contract (which only needs *an* id to
+            // stop the sender retrying) is satisfied.
+            return Ok(MessageId::generate());
+        };
 
         // --- ContactCardUpdate fast path ---
         // Intercept before the message-persist transaction so that card
@@ -270,8 +323,12 @@ impl DaemonInbound {
                     continue;
                 }
             };
-            // Trial decrypt on the in-memory copy; do NOT save.
-            if g.decrypt(ciphertext).is_err() {
+            // Trial decrypt on the in-memory copy; do NOT save. Only an
+            // application message (`Ok(Some(_))`) identifies the owning group;
+            // `Ok(None)` is a Commit (no user payload) and `Err` is a
+            // non-matching group — skip both (a mailbox-delivered Commit is not
+            // a user message and is not persisted here).
+            if !matches!(g.decrypt(ciphertext), Ok(Some(_))) {
                 continue;
             }
             let gid_arr: [u8; 32] = match gid_bytes.as_slice().try_into() {
@@ -301,6 +358,14 @@ impl DaemonInbound {
         &self,
         welcome_bytes: &[u8],
         bind_x25519: Option<&[u8; 32]>,
+        // The handshake's transport↔MLS binding value (ADR 0009). When `Some`,
+        // it is registered as the genesis commit's second external PSK before
+        // `join_from_welcome`, so OpenMLS validates the binding while processing
+        // the genesis Commit carried by the Welcome (active since 2.A Task 4).
+        // `None` (the established-conn `dispatch_welcome` path) registers no
+        // transport binding. Typed `Option` — never a `[0u8; 32]` sentinel — so
+        // a zero array can never masquerade as a real binding.
+        h_transport: Option<&[u8; 32]>,
     ) -> Result<PublicKey> {
         use crate::mls::key_package::{parse_welcome_kp_hash, KeyPackage};
         use crate::mls::provider::MlsProvider;
@@ -350,7 +415,18 @@ impl DaemonInbound {
             MlsProvider::new()
         };
 
-        let group = Group::join_from_welcome(&identity_arc, welcome_bytes, Some(&*psk), provider)?;
+        // Invite PSK id is derived per-invite from the same KeyPackageRef the
+        // committer used (ADR 0009, T2-8). The h_transport binding (second
+        // external PSK, same kp_ref) is registered when present — both ids are
+        // keyed by `kp_ref` so OpenMLS resolves the same two PSKs the committer
+        // proposed in the genesis Commit (ADR 0009, T1-1).
+        let group = Group::join_from_welcome(
+            &identity_arc,
+            welcome_bytes,
+            Some((&kp_ref, &*psk)),
+            h_transport.map(|h| (&kp_ref, h)),
+            provider,
+        )?;
 
         // Self-attribute: the contact's Ed25519 identity is the OTHER member's
         // MLS signature key, derived from the joined group.
@@ -375,6 +451,22 @@ impl DaemonInbound {
         }
 
         let group_id = group.id().0.clone();
+
+        // Per-group ratchet serialization (T1-3): take the new group's lock
+        // around the genesis save. The group doesn't exist on disk yet, but
+        // holding the lock keyed by its id is correct + cheap and keeps the
+        // first message after join from racing this persist. Fully synchronous,
+        // so a blocking guard for the save section is fine. A non-32-byte
+        // group_id is an MLS anomaly — surfaced as an error.
+        let group_id_arr: [u8; 32] = group_id.as_slice().try_into().map_err(|_| {
+            CoreError::from(MlsErrorKind::Other(
+                "inbound welcome: bad group_id length".into(),
+            ))
+        })?;
+        let group_lock = crate::daemon::handle::group_lock_for(&self.group_locks, &group_id_arr);
+        let _guard = group_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         let group_repo = MlsGroupRepo::new(&self.pool);
         let kp_repo = KeyPackageRepo::new(&self.pool);
@@ -434,7 +526,12 @@ impl InboundDispatch for DaemonInbound {
         // Welcome over an already-established connection: no binding check (the
         // connection is already attributed to `peer`); derive + persist, then
         // assert the derived identity matches the bound peer (defense in depth).
-        match self.welcome_join_persist(welcome, None) {
+        // No h_transport is available on this path: the connection predates
+        // this Welcome, so there is no fresh handshake transcript to bind. Pass
+        // `None` STRUCTURALLY — the binding is registered only on the bootstrap
+        // (fresh-handshake) path; a zero array must never stand in for a real
+        // binding here.
+        match self.welcome_join_persist(welcome, None, None) {
             Ok(derived) => {
                 if derived != peer {
                     // `peer` is an Ed25519 pubkey — not logged (warn is >= info;
@@ -455,8 +552,9 @@ impl InboundDispatch for DaemonInbound {
         &self,
         welcome: &[u8],
         expected_x25519: &[u8; 32],
+        h_transport: Option<&[u8; 32]>,
     ) -> Option<PublicKey> {
-        match self.welcome_join_persist(welcome, Some(expected_x25519)) {
+        match self.welcome_join_persist(welcome, Some(expected_x25519), h_transport) {
             Ok(derived) => Some(derived),
             Err(_e) => {
                 // Static, onion/pubkey-free warn: do not leak the rejected
@@ -521,13 +619,14 @@ mod tests {
 
         // Alice creates a solo group, adds bob, producing a Welcome.
         let mut alice_group =
-            crate::mls::Group::create_solo(&alice_id, None, MlsProvider::new()).unwrap();
-        let (welcome, _commit) = alice_group.add_member(&bob_kp, None).unwrap();
+            crate::mls::Group::create_solo(&alice_id, None, None, MlsProvider::new()).unwrap();
+        let (welcome, _commit) = alice_group.add_member(&bob_kp, None, None).unwrap();
         let group_id_bytes = alice_group.id().0.clone();
 
         // Bob joins from the Welcome — this is bob's group state.
         let mut bob_group =
-            crate::mls::Group::join_from_welcome(&bob_id, &welcome, None, bob_provider).unwrap();
+            crate::mls::Group::join_from_welcome(&bob_id, &welcome, None, None, bob_provider)
+                .unwrap();
 
         // Bob encrypts an envelope. `Envelope.ts` is millis-since-epoch
         // and must land inside the ±1h replay window `receive()` checks.
@@ -599,11 +698,12 @@ mod tests {
         let kp_repo = KeyPackageRepo::new(&pool);
         let bob_kp = KeyPackage::generate(&bob_id, &bob_provider, &kp_repo).unwrap();
         let mut alice_group =
-            crate::mls::Group::create_solo(&alice_id, None, MlsProvider::new()).unwrap();
-        let (welcome, _commit) = alice_group.add_member(&bob_kp, None).unwrap();
+            crate::mls::Group::create_solo(&alice_id, None, None, MlsProvider::new()).unwrap();
+        let (welcome, _commit) = alice_group.add_member(&bob_kp, None, None).unwrap();
         let group_id_bytes = alice_group.id().0.clone();
         let mut bob_group =
-            crate::mls::Group::join_from_welcome(&bob_id, &welcome, None, bob_provider).unwrap();
+            crate::mls::Group::join_from_welcome(&bob_id, &welcome, None, None, bob_provider)
+                .unwrap();
 
         // Snapshot alice's post-add_member epoch — this is the ordering
         // signal our Event must surface.
@@ -710,13 +810,15 @@ mod tests {
         let mut alice_group = crate::mls::Group::create_solo(
             &alice_id,
             None,
+            None,
             crate::mls::provider::MlsProvider::new(),
         )
         .unwrap();
-        let (welcome, _commit) = alice_group.add_member(&bob_kp, None).unwrap();
+        let (welcome, _commit) = alice_group.add_member(&bob_kp, None, None).unwrap();
         let group_id_bytes = alice_group.id().0.clone();
         let mut bob_group =
-            crate::mls::Group::join_from_welcome(&bob_id, &welcome, None, bob_provider).unwrap();
+            crate::mls::Group::join_from_welcome(&bob_id, &welcome, None, None, bob_provider)
+                .unwrap();
 
         // Pre-upsert bob as a contact in alice's pool so put_card has a row to attach to.
         let contact_repo = crate::storage::ContactRepo::new(&pool);
@@ -847,13 +949,15 @@ mod tests {
         let mut alice_group = crate::mls::Group::create_solo(
             &alice_id,
             None,
+            None,
             crate::mls::provider::MlsProvider::new(),
         )
         .unwrap();
-        let (welcome, _commit) = alice_group.add_member(&bob_kp, None).unwrap();
+        let (welcome, _commit) = alice_group.add_member(&bob_kp, None, None).unwrap();
         let group_id_bytes = alice_group.id().0.clone();
         let mut bob_group =
-            crate::mls::Group::join_from_welcome(&bob_id, &welcome, None, bob_provider).unwrap();
+            crate::mls::Group::join_from_welcome(&bob_id, &welcome, None, None, bob_provider)
+                .unwrap();
 
         // Pre-upsert both contacts.
         let contact_repo = crate::storage::ContactRepo::new(&pool);
@@ -967,11 +1071,16 @@ mod tests {
         let bob =
             crate::identity::IdentityKey::from_seed(&crate::identity::Seed::generate().unwrap())
                 .unwrap();
-        let mut bob_group =
-            crate::mls::Group::create_solo(&bob, Some(&psk_bytes), MlsProvider::new()).unwrap();
+        let mut bob_group = crate::mls::Group::create_solo(
+            &bob,
+            Some((&alice_kp_ref, &psk_bytes)),
+            None,
+            MlsProvider::new(),
+        )
+        .unwrap();
         let alice_kp_for_add = KeyPackage::from_bytes(&alice_kp_bytes).unwrap();
         let (welcome_bytes, _commit) = bob_group
-            .add_member(&alice_kp_for_add, Some(&psk_bytes))
+            .add_member(&alice_kp_for_add, Some((&alice_kp_ref, &psk_bytes)), None)
             .unwrap();
 
         // Drive Alice's dispatch_welcome
@@ -1059,11 +1168,16 @@ mod tests {
         let bob =
             crate::identity::IdentityKey::from_seed(&crate::identity::Seed::generate().unwrap())
                 .unwrap();
-        let mut bob_group =
-            crate::mls::Group::create_solo(&bob, Some(&psk_bytes), MlsProvider::new()).unwrap();
+        let mut bob_group = crate::mls::Group::create_solo(
+            &bob,
+            Some((&alice_kp_ref, &psk_bytes)),
+            None,
+            MlsProvider::new(),
+        )
+        .unwrap();
         let alice_kp_for_add = KeyPackage::from_bytes(&alice_kp_bytes).unwrap();
         let (welcome_bytes, _commit) = bob_group
-            .add_member(&alice_kp_for_add, Some(&psk_bytes))
+            .add_member(&alice_kp_for_add, Some((&alice_kp_ref, &psk_bytes)), None)
             .unwrap();
 
         let inbound = DaemonInbound::new(pool.clone(), events_tx);
@@ -1086,6 +1200,7 @@ mod tests {
             &inbound,
             &welcome_bytes,
             &correct_x25519,
+            None, // no transport binding registered: the fixture committer used None too
         );
         assert_eq!(
             derived,
@@ -1136,6 +1251,7 @@ mod tests {
             &inbound,
             &welcome_bytes,
             &wrong_x25519,
+            None, // no transport binding registered: the fixture committer used None too
         );
         assert_eq!(derived, None, "binding mismatch must be refused");
 
@@ -1179,11 +1295,12 @@ mod tests {
         let kp_repo = KeyPackageRepo::new(&pool);
         let bob_kp = KeyPackage::generate(&bob_id, &bob_provider, &kp_repo).unwrap();
         let mut alice_group =
-            crate::mls::Group::create_solo(&alice_id, None, MlsProvider::new()).unwrap();
-        let (welcome, _commit) = alice_group.add_member(&bob_kp, None).unwrap();
+            crate::mls::Group::create_solo(&alice_id, None, None, MlsProvider::new()).unwrap();
+        let (welcome, _commit) = alice_group.add_member(&bob_kp, None, None).unwrap();
         let group_id_bytes = alice_group.id().0.clone();
         let mut bob_group =
-            crate::mls::Group::join_from_welcome(&bob_id, &welcome, None, bob_provider).unwrap();
+            crate::mls::Group::join_from_welcome(&bob_id, &welcome, None, None, bob_provider)
+                .unwrap();
 
         // Persist alice's group + link bob as the contact for this group so
         // contact_for_group can attribute the sender.
@@ -1296,10 +1413,17 @@ mod tests {
         let bob =
             crate::identity::IdentityKey::from_seed(&crate::identity::Seed::generate().unwrap())
                 .unwrap();
-        let mut bob_group =
-            crate::mls::Group::create_solo(&bob, Some(&psk), MlsProvider::new()).unwrap();
+        let mut bob_group = crate::mls::Group::create_solo(
+            &bob,
+            Some((&alice_kp_ref, &psk)),
+            None,
+            MlsProvider::new(),
+        )
+        .unwrap();
         let alice_kp_for_add = KeyPackage::from_bytes(&alice_kp_bytes).unwrap();
-        let (welcome_bytes, _) = bob_group.add_member(&alice_kp_for_add, Some(&psk)).unwrap();
+        let (welcome_bytes, _) = bob_group
+            .add_member(&alice_kp_for_add, Some((&alice_kp_ref, &psk)), None)
+            .unwrap();
 
         let alice_arc = Arc::new(alice);
         let inbound = DaemonInbound::new(pool, events_tx);
@@ -1370,11 +1494,12 @@ mod tests {
         let kp_repo = KeyPackageRepo::new(&pool);
         let bob_kp = KeyPackage::generate(&bob_id, &bob_provider, &kp_repo).unwrap();
         let mut alice_group =
-            crate::mls::Group::create_solo(&alice_id, None, MlsProvider::new()).unwrap();
-        let (welcome, _commit) = alice_group.add_member(&bob_kp, None).unwrap();
+            crate::mls::Group::create_solo(&alice_id, None, None, MlsProvider::new()).unwrap();
+        let (welcome, _commit) = alice_group.add_member(&bob_kp, None, None).unwrap();
         let group_id_bytes = alice_group.id().0.clone();
         let mut bob_group =
-            crate::mls::Group::join_from_welcome(&bob_id, &welcome, None, bob_provider).unwrap();
+            crate::mls::Group::join_from_welcome(&bob_id, &welcome, None, None, bob_provider)
+                .unwrap();
 
         // Bob encrypts an envelope with a ts that is 10 hours in the past —
         // far outside the ±1h replay window. `dispatch_for_group` must

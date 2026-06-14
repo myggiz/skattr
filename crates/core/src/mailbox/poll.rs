@@ -739,11 +739,11 @@ mod tests {
         let bob_kp =
             KeyPackage::generate(&bob, &bob_provider, &KeyPackageRepo::new(&pool)).unwrap();
         let mut alice_group =
-            crate::mls::Group::create_solo(&alice, None, MlsProvider::new()).unwrap();
-        let (welcome, _commit) = alice_group.add_member(&bob_kp, None).unwrap();
+            crate::mls::Group::create_solo(&alice, None, None, MlsProvider::new()).unwrap();
+        let (welcome, _commit) = alice_group.add_member(&bob_kp, None, None).unwrap();
         let gid = alice_group.id().0.clone();
         let mut bob_group =
-            crate::mls::Group::join_from_welcome(&bob, &welcome, None, bob_provider).unwrap();
+            crate::mls::Group::join_from_welcome(&bob, &welcome, None, None, bob_provider).unwrap();
         alice_group.save(&MlsGroupRepo::new(&pool)).unwrap();
         let contacts = ContactRepo::new(&pool);
         contacts

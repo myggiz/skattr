@@ -65,6 +65,33 @@ impl<'p> KeyPackageRepo<'p> {
         })
     }
 
+    /// Return `(kp_bytes, consumed)` for `hash` inside a caller-owned
+    /// transaction, or `None` if unknown. Used by `add_contact`'s
+    /// single-use re-check so the consumed test and the consume write
+    /// happen atomically (T2-1 TOCTOU close).
+    pub(crate) fn get_in_tx(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        hash: &[u8; 32],
+    ) -> Result<Option<(Vec<u8>, bool)>> {
+        let result = tx.query_row(
+            "SELECT kp_bytes, consumed FROM key_packages WHERE kp_hash = ?1",
+            rusqlite::params![hash],
+            |r| {
+                let bytes: Vec<u8> = r.get(0)?;
+                let consumed: i64 = r.get(1)?;
+                Ok((bytes, consumed != 0))
+            },
+        );
+        match result {
+            Ok(row) => Ok(Some(row)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(CoreError::Storage(StorageErrorKind::Other(format!(
+                "kp: get_in_tx: {e}"
+            )))),
+        }
+    }
+
     /// Mark a KeyPackage consumed inside a caller-owned transaction.
     /// Used by `dispatch_welcome_inner` to atomically consume the KP
     /// alongside the group-save and outstanding-invite delete.

@@ -79,6 +79,79 @@ pub mod test_exports {
         PeerCtrl, ReceiveOutcome, REPLAY_WINDOW_MS,
     };
 
+    // Phase 2.A addition: build a `DeliveryHub` that owns BOTH an inbound-MLS
+    // `dispatch` and an on-demand outbound dialer, so a cross-crate harness can
+    // drive the dial-first `add_contact` path (ADR 0009, T1-1) without widening
+    // the crate-private `OutboundDial` trait or `new_with_inbound_and_dialer`
+    // constructor. The injected dialer runs a real, self-consistent Noise_XK
+    // handshake over an in-process `tokio::io::duplex` and hands back the
+    // initiator connection plus its `h_transport`; the responder half is dropped
+    // (the subsequent best-effort Welcome send over the conn fails quietly — the
+    // peer is never actually reached, which suits the local-state assertions in
+    // `cli_two_daemons`). It targets a throwaway responder static (NOT the real
+    // peer key, which the harness does not hold), so this does not exercise the
+    // binding round-trip — only that the mandatory committer dial resolves.
+    /// Build a `DeliveryHub` wired with both an inbound-MLS `dispatch` and a
+    /// stub on-demand dialer, for cross-crate harnesses exercising the
+    /// dial-first `add_contact` path. See the surrounding comment for the
+    /// stub's exact behaviour and limits.
+    #[allow(clippy::missing_panics_doc)]
+    #[must_use]
+    pub fn delivery_hub_with_stub_dialer(
+        pool: std::sync::Arc<crate::storage::Pool>,
+        dispatch: std::sync::Arc<dyn crate::delivery::InboundDispatch>,
+    ) -> std::sync::Arc<crate::delivery::DeliveryHub<tokio::io::DuplexStream>> {
+        use crate::delivery::dial::OutboundDial;
+        use crate::identity::{IdentityKey, PublicKey as IdPublicKey, Seed};
+        use crate::transport::{handshake_initiator, handshake_responder, AuthenticatedConnection};
+
+        struct StubDialer;
+
+        #[async_trait::async_trait]
+        impl OutboundDial<tokio::io::DuplexStream> for StubDialer {
+            async fn dial_at(
+                &self,
+                peer: IdPublicKey,
+                _onion: &str,
+            ) -> crate::error::Result<(
+                AuthenticatedConnection<tokio::io::DuplexStream>,
+                zeroize::Zeroizing<[u8; 32]>,
+            )> {
+                self.dial(peer).await
+            }
+
+            async fn dial(
+                &self,
+                _peer: IdPublicKey,
+            ) -> crate::error::Result<(
+                AuthenticatedConnection<tokio::io::DuplexStream>,
+                zeroize::Zeroizing<[u8; 32]>,
+            )> {
+                // The initiator must target the responder's ACTUAL static
+                // (rs), so derive the target from the throwaway responder
+                // identity. Setup errors surface via `?` (this lib module
+                // disallows `unwrap`, unlike the in-crate `#[cfg(test)]`
+                // dispatch harness this mirrors).
+                let init_id = IdentityKey::from_seed(&Seed::generate()?)?;
+                let resp_id = IdentityKey::from_seed(&Seed::generate()?)?;
+                let peer_x = resp_id.noise_static_public();
+                let (a, b) = tokio::io::duplex(64 * 1024);
+                let (init_res, _resp_res) = tokio::join!(
+                    handshake_initiator(a, &init_id, &peer_x, None),
+                    handshake_responder(b, &resp_id, None),
+                );
+                let (conn, outcome) = init_res?;
+                Ok((conn, outcome.h_transport))
+            }
+        }
+
+        let dialer: std::sync::Arc<dyn OutboundDial<tokio::io::DuplexStream>> =
+            std::sync::Arc::new(StubDialer);
+        std::sync::Arc::new(crate::delivery::DeliveryHub::new_with_inbound_and_dialer(
+            pool, dispatch, dialer,
+        ))
+    }
+
     // Phase 1.F additions:
     pub use crate::daemon::handle::DaemonHandle;
     pub use crate::daemon::ipc::{
@@ -160,10 +233,10 @@ pub mod test_exports {
         let bob_provider = MlsProvider::new();
         let bob_kp = KeyPackage::generate(&bob_id, &bob_provider, &KeyPackageRepo::new(&pool_b))?;
 
-        let mut alice_group = Group::create_solo(&alice_id, None, MlsProvider::new())?;
-        let (welcome, _commit) = alice_group.add_member(&bob_kp, None)?;
+        let mut alice_group = Group::create_solo(&alice_id, None, None, MlsProvider::new())?;
+        let (welcome, _commit) = alice_group.add_member(&bob_kp, None, None)?;
         let gid = alice_group.id().0.clone();
-        let bob_group = Group::join_from_welcome(&bob_id, &welcome, None, bob_provider)?;
+        let bob_group = Group::join_from_welcome(&bob_id, &welcome, None, None, bob_provider)?;
 
         alice_group.save(&MlsGroupRepo::new(&pool_a))?;
         bob_group.save(&MlsGroupRepo::new(&pool_b))?;

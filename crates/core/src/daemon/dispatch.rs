@@ -311,54 +311,101 @@ where
     // same invite is re-submitted).
     link.record_received(&kp_repo).map_err(map_err)?;
 
-    // Reject if this invite's KP was already consumed (double-use guard).
+    // Fast-path double-use guard. The load-bearing single-use guarantee is
+    // the re-check INSIDE the consuming transaction below (T2-1); this early
+    // check just avoids the dial + MLS work for an obviously-spent invite.
     if link.is_consumed(&kp_repo).map_err(map_err)? {
         return Err(IpcError::Daemon(DaemonErrorKind::InviteConsumed));
     }
 
-    // Build our solo MLS group, then add the inviter as the second member.
-    let provider = MlsProvider::new();
-    let mut group =
-        Group::create_solo(&handle.identity, Some(&link.psk.0), provider).map_err(map_err)?;
-
+    let inviter = link.body.card.body.identity;
     let invitee_kp = KeyPackage::from_bytes(&link.body.key_package).map_err(map_err)?;
-    let (welcome, _commit) = group
-        .add_member(&invitee_kp, Some(&link.psk.0))
+    let kp_ref = crate::mls::key_package::key_package_ref(&invitee_kp).map_err(map_err)?;
+
+    // Verify the inviter's card BEFORE the dial. This is a pure check (no write):
+    // the outer link signature already authenticates the card bytes, but
+    // verifying the card's own signature + expiry keeps a self-inconsistent or
+    // stale card out of the store. No DB write happens here, so a failure leaves
+    // the store untouched.
+    link.body.card.verify(now).map_err(map_err)?;
+
+    // Dial the inviter FIRST (ADR 0009, T1-1) — by the onion embedded in the
+    // invite card, NOT via ContactRepo::latest_card. Dialing the in-invite onion
+    // means the inviter's card no longer has to be persisted before the dial, so
+    // ALL writes (contact, card, group, group_id, mark_consumed) can move into
+    // the single transaction below. Full add_contact atomicity (T2-1): a dial
+    // failure (inviter offline / Tor flaky — common) leaves ZERO writes, so a
+    // retry is clean and idempotent (no stranded contact, no stale-version retry
+    // wall). The genesis Commit binds to this connection's h_transport (the
+    // second external PSK below), and the per-peer actor reuses this one
+    // connection for the Welcome (no second dial). The dial is MANDATORY —
+    // first contact requires the connection anyway (to deliver the Welcome).
+    let inviter_onion = link.body.card.body.onion.clone();
+    let h_transport = handle
+        .hub
+        .connect_and_ingest_at(inviter, &inviter_onion)
+        .await
         .map_err(map_err)?;
-    let group_id = group.id().0.clone();
 
-    // Persist group state.
-    let group_repo = MlsGroupRepo::new(&handle.pool);
-    group.save(&group_repo).map_err(map_err)?;
-
-    // Persist contact row + group_id link.
     let contact_repo = ContactRepo::new(&handle.pool);
     let contact = Contact {
-        identity: link.body.card.body.identity,
+        identity: inviter,
         display_name: None,
         added_at: now,
         card: None,
         muted: false,
     };
-    contact_repo.upsert(&contact).map_err(map_err)?;
-    contact_repo
-        .set_group_id(&link.body.card.body.identity, &group_id)
+
+    // Build our solo MLS group, then add the inviter as the second member.
+    // Both external PSKs (invite + h_transport) are keyed per-invite by the
+    // invite KeyPackageRef (ADR 0009, T2-8) and proposed in the genesis Commit;
+    // the inviter registers the same two values before join_from_welcome, so the
+    // genesis group is bound to the authenticated transport transcript (T1-1).
+    let provider = MlsProvider::new();
+    let mut group = Group::create_solo(
+        &handle.identity,
+        Some((&kp_ref, &link.psk.0)),
+        Some((&kp_ref, &*h_transport)),
+        provider,
+    )
+    .map_err(map_err)?;
+
+    let (welcome, _commit) = group
+        .add_member(
+            &invitee_kp,
+            Some((&kp_ref, &link.psk.0)),
+            Some((&kp_ref, &*h_transport)),
+        )
+        .map_err(map_err)?;
+    let group_id = group.id().0.clone();
+
+    // Full atomicity (T2-1): re-check consumed + upsert the inviter contact +
+    // persist the verified card + save the genesis group + link the group_id +
+    // mark the invite consumed, ALL in one transaction. Because the dial above
+    // used the in-invite onion (not latest_card), the card no longer has to be
+    // written before the dial — so every write lives here. The re-check inside
+    // the tx is the load-bearing single-use guarantee: two concurrent (or
+    // re-submitted) AddContacts cannot both pass it, so an invite can never
+    // create two groups. On a re-submit the second caller sees consumed=true
+    // here and returns InviteConsumed without writing anything. A dial failure
+    // (above) aborts before this txn, leaving ZERO writes → clean retry.
+    let group_repo = MlsGroupRepo::new(&handle.pool);
+    handle
+        .pool
+        .transaction(|tx| {
+            if link.is_consumed_in_tx(tx, &kp_repo)? {
+                return Err(CoreError::Invite(crate::invite::InviteErrorKind::Consumed));
+            }
+            contact_repo.upsert_in_tx(tx, &contact)?;
+            contact_repo.put_card_in_tx(tx, &link.body.card)?;
+            group.save_in_tx(&group_repo, tx)?;
+            contact_repo.set_group_id_in_tx(tx, &inviter, &group_id)?;
+            link.mark_consumed_in_tx(tx, &kp_repo)?;
+            Ok(())
+        })
         .map_err(map_err)?;
 
-    // Verify the inviter's embedded card, then persist it so the dialer can
-    // resolve their onion via latest_card (ADR 0008). Verify is defense-in-depth:
-    // the outer link signature already authenticates the card bytes, but
-    // verifying the card's own signature + expiry keeps a self-inconsistent or
-    // stale card out of the store.
-    link.body.card.verify(now).map_err(map_err)?;
-    contact_repo.put_card(&link.body.card).map_err(map_err)?;
-
-    // Mark the inviter's single-use KP as consumed.
-    link.mark_consumed(&kp_repo).map_err(map_err)?;
-
-    let _ = handle
-        .events_tx
-        .send(Event::ContactUpdated(link.body.card.body.identity));
+    let _ = handle.events_tx.send(Event::ContactUpdated(inviter));
 
     // Submit Welcome to the inviter via the hub. We do not await the
     // ACK here — UI responsiveness comes first, and a failed delivery
@@ -366,7 +413,7 @@ where
     // existing failure path.
     handle
         .hub
-        .send_welcome(link.body.card.body.identity, welcome)
+        .send_welcome(inviter, welcome)
         .await
         .map_err(map_err)?;
 
@@ -374,7 +421,6 @@ where
     // reverse direction. Best-effort: rides the same peer-actor connection
     // after the Welcome; if it fails, the inviter learns our onion on our next
     // message instead.
-    let inviter = link.body.card.body.identity;
     match build_self_card(handle) {
         Ok(self_card) => {
             send_card_to_contact(handle, &self_card, inviter).await;
@@ -388,7 +434,7 @@ where
     }
 
     Ok(CommandResult::ContactAdded(ContactSummary {
-        pubkey: link.body.card.body.identity,
+        pubkey: inviter,
         nickname: None,
         onion: link.body.card.body.onion.clone(),
         card_version: 0,
@@ -437,6 +483,24 @@ where
     };
 
     // 2. Load MLS group (provider is embedded in the blob).
+    //
+    // Per-group ratchet serialization (T1-3): acquire the group's lock BEFORE
+    // load and hold it across encrypt + the save transaction so two concurrent
+    // sends (or a send racing an inbound receive) can never load the same
+    // on-disk snapshot and encrypt at the same ratchet generation. The guard is
+    // a blocking `std::sync::Mutex` held only across this fully-synchronous
+    // critical section; it is `drop`ped explicitly before the first `.await`
+    // below so the future stays `Send`. The registry is shared with the inbound
+    // dispatcher, so send + receive on this group serialize together.
+    let group_id_arr: [u8; 32] = group_id_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| IpcError::Daemon(DaemonErrorKind::GroupCorrupt))?;
+    let group_lock = handle.group_lock(&group_id_arr);
+    let _guard = group_lock
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
     let group_repo = MlsGroupRepo::new(&handle.pool);
     let group_id = GroupId(group_id_bytes.clone());
     let mut group = Group::load(&group_id, &group_repo)
@@ -501,6 +565,12 @@ where
         }
         Err(e) => return Err(map_err(e)),
     };
+
+    // Critical section done (ratchet advanced + persisted). Release the
+    // per-group lock BEFORE any `.await` so the guard never crosses an await
+    // point (keeps the future `Send`) and the hub round-trip below doesn't
+    // serialize other sends on this group.
+    drop(_guard);
 
     // 6. Kick the delivery hub, wait up to 2 s for an ACK.
     let ack_rx = handle
@@ -1051,66 +1121,86 @@ async fn send_card_to_contact<S>(
         Ok(Some(gid)) if !gid.is_empty() => gid,
         _ => return,
     };
-    let group_repo = MlsGroupRepo::new(&handle.pool);
-    // A linked group_id whose group fails to load is an MLS-storage signal —
-    // surface it rather than skip silently ("MLS state is fragile").
-    let mut group = match Group::load(&GroupId(group_id_bytes), &group_repo) {
-        Ok(Some(g)) => g,
-        Ok(None) => {
-            tracing::warn!(
-                target: "skattr::daemon::dispatch",
-                "card-send: group_id present but Group::load missed; skipping"
-            );
-            return;
-        }
-        Err(e) => {
+
+    // Per-group ratchet serialization (T1-3): the card-send load→encrypt→save
+    // advances the same ratchet as `send_message`, so it must take the same
+    // per-group lock. Guard scoped to the sync critical section and dropped
+    // before the `hub.send().await` at the end. A group_id that isn't 32 bytes
+    // is an MLS-storage anomaly — skip (matching the load-miss handling below).
+    let group_id_arr: [u8; 32] = match group_id_bytes.as_slice().try_into() {
+        Ok(a) => a,
+        Err(_) => return,
+    };
+    let group_lock = handle.group_lock(&group_id_arr);
+    let prepared = {
+        let _guard = group_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let group_repo = MlsGroupRepo::new(&handle.pool);
+        // A linked group_id whose group fails to load is an MLS-storage signal —
+        // surface it rather than skip silently ("MLS state is fragile").
+        let mut group = match Group::load(&GroupId(group_id_bytes), &group_repo) {
+            Ok(Some(g)) => g,
+            Ok(None) => {
+                tracing::warn!(
+                    target: "skattr::daemon::dispatch",
+                    "card-send: group_id present but Group::load missed; skipping"
+                );
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "skattr::daemon::dispatch",
+                    err = %e,
+                    "card-send: load group failed; skipping"
+                );
+                return;
+            }
+        };
+        let now_ms = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0),
+        )
+        .unwrap_or(0);
+        let msg_id = MessageId::generate();
+        let env = Envelope {
+            v: 1,
+            id: msg_id,
+            ts: now_ms,
+            reply_to: None,
+            kind: Kind::ContactCardUpdate {
+                card: Box::new(card.clone()),
+            },
+        };
+        let ct = match group.encrypt(&env) {
+            Ok(ct) => ct,
+            Err(e) => {
+                tracing::warn!(
+                    target: "skattr::daemon::dispatch",
+                    err = %e,
+                    "card-send: encrypt failed; skipping"
+                );
+                return;
+            }
+        };
+        // Persist the advanced ratchet before handing off to the hub — if save
+        // fails we MUST NOT send the ciphertext (the peer would accept it and we'd
+        // be one epoch behind on disk).
+        if let Err(e) = group.save(&group_repo) {
             tracing::warn!(
                 target: "skattr::daemon::dispatch",
                 err = %e,
-                "card-send: load group failed; skipping"
+                "card-send: save group failed; skipping"
             );
             return;
         }
+        // Block value: (msg_id, ciphertext). The `_guard` drops here, releasing
+        // the per-group lock before the `hub.send().await` below.
+        (msg_id, ct)
     };
-    let now_ms = i64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0),
-    )
-    .unwrap_or(0);
-    let msg_id = MessageId::generate();
-    let env = Envelope {
-        v: 1,
-        id: msg_id,
-        ts: now_ms,
-        reply_to: None,
-        kind: Kind::ContactCardUpdate {
-            card: Box::new(card.clone()),
-        },
-    };
-    let ciphertext = match group.encrypt(&env) {
-        Ok(ct) => ct,
-        Err(e) => {
-            tracing::warn!(
-                target: "skattr::daemon::dispatch",
-                err = %e,
-                "card-send: encrypt failed; skipping"
-            );
-            return;
-        }
-    };
-    // Persist the advanced ratchet before handing off to the hub — if save
-    // fails we MUST NOT send the ciphertext (the peer would accept it and we'd
-    // be one epoch behind on disk).
-    if let Err(e) = group.save(&group_repo) {
-        tracing::warn!(
-            target: "skattr::daemon::dispatch",
-            err = %e,
-            "card-send: save group failed; skipping"
-        );
-        return;
-    }
+    let (msg_id, ciphertext) = prepared;
     let _ = handle.hub.send(peer, msg_id, ciphertext).await;
 }
 
@@ -1532,9 +1622,11 @@ mod tests {
     use crate::daemon::events::Event;
     use crate::daemon::handle::DaemonHandle;
     use crate::daemon::ipc::wire::IpcError;
+    use crate::delivery::dial::OutboundDial;
     use crate::delivery::hub::DeliveryHub;
-    use crate::identity::{IdentityKey, Seed};
+    use crate::identity::{IdentityKey, PublicKey as IdPublicKey, Seed};
     use crate::storage::Pool;
+    use crate::transport::{handshake_initiator, handshake_responder, AuthenticatedConnection};
 
     fn test_handle() -> Arc<DaemonHandle<tokio::io::DuplexStream>> {
         let seed = Seed::generate().unwrap();
@@ -1542,6 +1634,76 @@ mod tests {
         let pool = Arc::new(Pool::in_memory());
         let hub: Arc<DeliveryHub<tokio::io::DuplexStream>> =
             Arc::new(DeliveryHub::new(pool.clone()));
+        let (events_tx, _) = broadcast::channel::<Event>(16);
+        Arc::new(DaemonHandle::new(pool, hub, identity, events_tx))
+    }
+
+    /// Stub dialer for `add_contact` tests: on each `dial`, runs a real
+    /// Noise_XK handshake over an in-process duplex and hands back the
+    /// initiator's authenticated connection plus the handshake's `h_transport`.
+    /// `add_contact`'s dial is mandatory (ADR 0009, T1-1), so the single-daemon
+    /// dispatch tests need a working dialer; they do not exercise the binding
+    /// round-trip (no joiner present), only that the committer dial succeeds.
+    /// The responder side is dropped immediately — the subsequent best-effort
+    /// Welcome send over the conn just fails quietly, which is fine here.
+    struct StubDialer;
+
+    #[async_trait::async_trait]
+    impl OutboundDial<tokio::io::DuplexStream> for StubDialer {
+        // `dial_at` ignores the supplied onion (the stub has no real transport)
+        // and returns the same canned authenticated connection as `dial`.
+        async fn dial_at(
+            &self,
+            peer: IdPublicKey,
+            _onion: &str,
+        ) -> crate::error::Result<(
+            AuthenticatedConnection<tokio::io::DuplexStream>,
+            zeroize::Zeroizing<[u8; 32]>,
+        )> {
+            self.dial(peer).await
+        }
+
+        async fn dial(
+            &self,
+            _peer: IdPublicKey,
+        ) -> crate::error::Result<(
+            AuthenticatedConnection<tokio::io::DuplexStream>,
+            zeroize::Zeroizing<[u8; 32]>,
+        )> {
+            // Build a self-consistent Noise_XK pair: the initiator must target
+            // the responder's ACTUAL static (rs), so derive `peer_x` from the
+            // throwaway responder identity — NOT from the real `peer` (we don't
+            // hold the inviter's private key, and these single-daemon tests do
+            // not exercise the binding round-trip). Setup steps are infallible
+            // in the test environment, so `unwrap` is acceptable (the test
+            // module allows it); a real handshake error surfaces as a Delivery
+            // error via `?`.
+            let init_id = IdentityKey::from_seed(&Seed::generate().unwrap()).unwrap();
+            let resp_id = IdentityKey::from_seed(&Seed::generate().unwrap()).unwrap();
+            let peer_x = resp_id.noise_static_public();
+            let (a, b) = tokio::io::duplex(64 * 1024);
+            // Drive both handshake halves concurrently on this task (works on a
+            // current_thread runtime — no spawn). The responder side is then
+            // dropped; the subsequent best-effort Welcome send over the conn
+            // just fails quietly, which is fine for these single-daemon tests.
+            let (init_res, _resp_res) = tokio::join!(
+                handshake_initiator(a, &init_id, &peer_x, None),
+                handshake_responder(b, &resp_id, None),
+            );
+            let (conn, outcome) = init_res?;
+            Ok((conn, outcome.h_transport))
+        }
+    }
+
+    /// Like [`test_handle`] but with a working stub dialer wired into the hub,
+    /// for tests that drive `add_contact` (whose dial is mandatory).
+    fn test_handle_with_dialer() -> Arc<DaemonHandle<tokio::io::DuplexStream>> {
+        let seed = Seed::generate().unwrap();
+        let identity = IdentityKey::from_seed(&seed).unwrap();
+        let pool = Arc::new(Pool::in_memory());
+        let dialer: Arc<dyn OutboundDial<tokio::io::DuplexStream>> = Arc::new(StubDialer);
+        let hub: Arc<DeliveryHub<tokio::io::DuplexStream>> =
+            Arc::new(DeliveryHub::new_with_dialer(pool.clone(), dialer));
         let (events_tx, _) = broadcast::channel::<Event>(16);
         Arc::new(DaemonHandle::new(pool, hub, identity, events_tx))
     }
@@ -1735,7 +1897,7 @@ mod tests {
         };
 
         // Bob's handle consumes it. Bob is a separate daemon with a separate pool.
-        let handle_b = test_handle();
+        let handle_b = test_handle_with_dialer();
         let mut events_rx = handle_b.events_tx.subscribe();
         let res = execute_command(handle_b.clone(), Command::AddContact { invite_url: url })
             .await
@@ -1778,7 +1940,7 @@ mod tests {
         };
 
         // Bob (dialer) consumes the invite.
-        let handle_b = test_handle();
+        let handle_b = test_handle_with_dialer();
         execute_command(handle_b.clone(), Command::AddContact { invite_url: url })
             .await
             .unwrap();
@@ -1808,7 +1970,7 @@ mod tests {
             panic!("expected InviteCreated");
         };
 
-        let handle_b = test_handle();
+        let handle_b = test_handle_with_dialer();
         // First use succeeds.
         execute_command(
             handle_b.clone(),
@@ -1829,6 +1991,155 @@ mod tests {
             ),
             "expected InviteConsumed, got {res:?}"
         );
+    }
+
+    /// T2-1: an invite is single-use *atomically* — re-submitting the same
+    /// invite URL must reject with InviteConsumed and must NOT create a second
+    /// group or a second contact. The consumed re-check + group write +
+    /// mark_consumed run in one transaction, so the second AddContact can never
+    /// pass the in-tx check and write a second group.
+    #[tokio::test]
+    async fn add_contact_is_single_use_under_resubmit() {
+        use crate::mls::group::{Group, GroupId};
+        use crate::storage::MlsGroupRepo;
+
+        let handle_a = test_handle();
+        handle_a.set_onion("alice.onion".to_string());
+        let alice_pub = handle_a.identity.public();
+
+        let CommandResult::InviteCreated { url, .. } = execute_command(
+            handle_a.clone(),
+            Command::CreateInvite {
+                nickname: None,
+                ttl_secs: Some(3600),
+            },
+        )
+        .await
+        .unwrap() else {
+            panic!("expected InviteCreated");
+        };
+
+        let handle_b = test_handle_with_dialer();
+
+        // First AddContact succeeds.
+        let first = execute_command(
+            handle_b.clone(),
+            Command::AddContact {
+                invite_url: url.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(first, CommandResult::ContactAdded(_)));
+
+        // Capture the single group_id created for Alice.
+        let repo = ContactRepo::new(&handle_b.pool);
+        let gid_after_first = repo
+            .get_group_id(&alice_pub)
+            .unwrap()
+            .expect("group_id present after first AddContact");
+        assert!(!gid_after_first.is_empty());
+
+        // Re-submitting the SAME invite must reject and write nothing new.
+        let second =
+            execute_command(handle_b.clone(), Command::AddContact { invite_url: url }).await;
+        assert!(
+            matches!(
+                second,
+                Err(IpcError::Daemon(
+                    crate::daemon::error_kind::DaemonErrorKind::InviteConsumed
+                ))
+            ),
+            "second AddContact must be InviteConsumed, got {second:?}"
+        );
+
+        // Exactly ONE contact for Alice, and its group_id is unchanged.
+        let all = repo.list_all().unwrap();
+        let alice_rows = all.iter().filter(|c| c.identity == alice_pub).count();
+        assert_eq!(alice_rows, 1, "exactly one contact row for the inviter");
+        let gid_after_second = repo
+            .get_group_id(&alice_pub)
+            .unwrap()
+            .expect("group_id still present");
+        assert_eq!(
+            gid_after_first, gid_after_second,
+            "the inviter's group_id must not change on a rejected re-submit"
+        );
+
+        // The single group exists and loads; no orphan second group was written
+        // (the rejected attempt's create_solo group was never saved).
+        let group_repo = MlsGroupRepo::new(&handle_b.pool);
+        let loaded = Group::load(&GroupId(gid_after_first.clone()), &group_repo).unwrap();
+        assert!(loaded.is_some(), "the one genesis group must be persisted");
+    }
+
+    /// T2-1 (full atomicity): a dial failure during `add_contact` must leave
+    /// ZERO writes — no contact row, no card, no group — so a later retry (with
+    /// a working dialer) succeeds cleanly. Before this fix the inviter contact +
+    /// card were persisted BEFORE the (mandatory) dial, so a routine dial
+    /// failure stranded a contact + card and the monotonic-version `put_card`
+    /// guard blocked the natural retry. Now every write lives in one
+    /// transaction that only runs after the dial succeeds.
+    #[tokio::test]
+    async fn add_contact_dial_failure_writes_nothing_then_retry_succeeds() {
+        let handle_a = test_handle();
+        handle_a.set_onion("alice.onion".to_string());
+        let alice_pub = handle_a.identity.public();
+
+        let CommandResult::InviteCreated { url, .. } = execute_command(
+            handle_a.clone(),
+            Command::CreateInvite {
+                nickname: None,
+                ttl_secs: Some(3600),
+            },
+        )
+        .await
+        .unwrap() else {
+            panic!("expected InviteCreated");
+        };
+
+        // Bob's daemon has NO dialer wired → connect_and_ingest_at errors
+        // ("no dialer wired") BEFORE any DB write.
+        let handle_b_nodial = test_handle();
+        let failed = execute_command(
+            handle_b_nodial.clone(),
+            Command::AddContact {
+                invite_url: url.clone(),
+            },
+        )
+        .await;
+        assert!(failed.is_err(), "add_contact must fail when the dial fails");
+
+        // Nothing was written: no contact row, no card, no group_id for Alice.
+        let repo = ContactRepo::new(&handle_b_nodial.pool);
+        assert!(
+            repo.get(&alice_pub).unwrap().is_none(),
+            "dial failure must leave NO contact row (no stranded contact)"
+        );
+        assert!(
+            repo.latest_card(&alice_pub).unwrap().is_none(),
+            "dial failure must leave NO card"
+        );
+
+        // A retry on a fresh daemon WITH a working dialer succeeds cleanly —
+        // proving the invite is still spendable and nothing is stuck. (We use a
+        // fresh daemon because the failed attempt's daemon never persisted the
+        // inbound KP either; the invite URL itself is unconsumed.)
+        let handle_b = test_handle_with_dialer();
+        let ok = execute_command(handle_b.clone(), Command::AddContact { invite_url: url })
+            .await
+            .unwrap();
+        assert!(
+            matches!(ok, CommandResult::ContactAdded(_)),
+            "retry with a working dialer must succeed"
+        );
+        let repo2 = ContactRepo::new(&handle_b.pool);
+        assert!(
+            repo2.get(&alice_pub).unwrap().is_some(),
+            "retry persists the contact"
+        );
+        let gid = repo2.get_group_id(&alice_pub).unwrap().unwrap();
+        assert!(!gid.is_empty(), "retry persists the group_id");
     }
 
     #[tokio::test]
@@ -2140,7 +2451,7 @@ mod tests {
 
         // Bob consumes Alice's invite; this creates a group with Alice as
         // the contact (group_id is set on Alice's pubkey in Bob's pool).
-        let handle_b = test_handle();
+        let handle_b = test_handle_with_dialer();
         let CommandResult::ContactAdded(summary) =
             execute_command(handle_b.clone(), Command::AddContact { invite_url: url })
                 .await
@@ -2191,7 +2502,7 @@ mod tests {
             panic!("expected InviteCreated");
         };
 
-        let handle_b = test_handle();
+        let handle_b = test_handle_with_dialer();
         let CommandResult::ContactAdded(summary) =
             execute_command(handle_b.clone(), Command::AddContact { invite_url: url })
                 .await
@@ -3493,7 +3804,7 @@ mod tests {
         use crate::daemon::commands::Direction;
         use crate::envelope::Kind;
 
-        let handle = test_handle();
+        let handle = test_handle_with_dialer();
         let (peer_pk, _gid) = seed_contact_with_real_group(&handle).await;
 
         let result = execute_command(
@@ -3601,7 +3912,7 @@ mod tests {
     async fn list_contacts_carries_group_state_and_read_cursor() {
         use crate::daemon::commands::MlsGroupStateLabel;
 
-        let handle = test_handle();
+        let handle = test_handle_with_dialer();
         let (peer_pk, _gid) = seed_contact_with_real_group(&handle).await;
 
         // Send a real message so a row exists, then mark up to its row_id as read.
@@ -3815,8 +4126,9 @@ mod tests {
         let kp_repo = crate::storage::KeyPackageRepo::new(&handle.pool);
         let bob_kp = KeyPackage::generate(&bob_id, &bob_provider, &kp_repo).unwrap();
         let mut group =
-            crate::mls::Group::create_solo(&handle.identity, None, MlsProvider::new()).unwrap();
-        let _ = group.add_member(&bob_kp, None).unwrap();
+            crate::mls::Group::create_solo(&handle.identity, None, None, MlsProvider::new())
+                .unwrap();
+        let _ = group.add_member(&bob_kp, None, None).unwrap();
         let group_repo = crate::storage::MlsGroupRepo::new(&handle.pool);
         group.save(&group_repo).unwrap();
         let gid = group.id().0.clone();
@@ -4234,5 +4546,159 @@ mod tests {
             ),
             "ContactCardUpdate must be rejected as InvalidArgument, got {err:?}"
         );
+    }
+
+    // ── Task 5 (T1-3): per-group ratchet-serialization lock ────────────────────
+
+    /// Concurrency guardrail for T1-3. Builds one real 2-member MLS group
+    /// (Bob = the sender handle's identity, Alice the joiner), fires N
+    /// concurrent `send_message` for Alice on a multi-thread runtime, then
+    /// decrypts ALL N collected ciphertexts on Alice's sibling `Group`.
+    ///
+    /// With the per-group lock in place every concurrent send loads the
+    /// previous on-disk ratchet snapshot and encrypts at a DISTINCT generation,
+    /// so all N decrypt. Without the lock, two sends would load the same
+    /// snapshot and encrypt at the same generation → at least one ciphertext
+    /// fails to decrypt (the race this lock closes). The test is therefore
+    /// RED without the lock and GREEN with it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_sends_on_one_group_all_decrypt() {
+        use crate::envelope::Kind;
+        use crate::mls::group::Group;
+        use crate::mls::key_package::KeyPackage;
+        use crate::mls::provider::MlsProvider;
+        use crate::storage::{ContactRepo, MlsGroupRepo};
+        use tokio::task::JoinSet;
+
+        const N: usize = 8;
+
+        // Bob's handle (sender). Dialer wired so `send_message`'s hub.send
+        // resolves (it returns Queued — no real peer — which is fine here).
+        let handle = test_handle_with_dialer();
+
+        // Alice (the joiner) — a fresh identity + KeyPackage. Her provider must
+        // be reused at join time so OpenMLS can find the init private key.
+        let alice_id = IdentityKey::from_seed(&Seed::generate().unwrap()).unwrap();
+        let alice_pk = alice_id.public();
+        let alice_provider = MlsProvider::new();
+        let kp_repo = crate::storage::KeyPackageRepo::new(&handle.pool);
+        let alice_kp = KeyPackage::generate(&alice_id, &alice_provider, &kp_repo).unwrap();
+
+        // Bob builds the solo group with the SENDER handle's identity (so
+        // `send_message`'s encrypt — which loads from handle.pool — uses it),
+        // then adds Alice. Save Bob's genesis group + link the contact.
+        let mut bob_group =
+            Group::create_solo(&handle.identity, None, None, MlsProvider::new()).unwrap();
+        let (welcome, _commit) = bob_group.add_member(&alice_kp, None, None).unwrap();
+        let group_repo = MlsGroupRepo::new(&handle.pool);
+        bob_group.save(&group_repo).unwrap();
+        let gid = bob_group.id().0.clone();
+
+        let contact_repo = ContactRepo::new(&handle.pool);
+        contact_repo
+            .upsert(&crate::contact::Contact {
+                identity: alice_pk,
+                display_name: None,
+                added_at: 0,
+                card: None,
+                muted: false,
+            })
+            .unwrap();
+        contact_repo.set_group_id(&alice_pk, &gid).unwrap();
+
+        // Alice joins from the Welcome — her decrypting sibling group.
+        let mut alice_group =
+            Group::join_from_welcome(&alice_id, &welcome, None, None, alice_provider).unwrap();
+
+        // Fire N concurrent sends on the SAME group.
+        let mut set: JoinSet<()> = JoinSet::new();
+        for i in 0..N {
+            let h = handle.clone();
+            set.spawn(async move {
+                let res = execute_command(
+                    h,
+                    Command::SendMessage {
+                        contact: alice_pk,
+                        kind: Kind::Text {
+                            body: format!("concurrent-{i}"),
+                        },
+                    },
+                )
+                .await;
+                assert!(res.is_ok(), "concurrent send {i} failed: {res:?}");
+            });
+        }
+        while let Some(joined) = set.join_next().await {
+            joined.expect("send task panicked");
+        }
+
+        // Collect every ciphertext queued for Alice from the outbox.
+        let payloads: Vec<Vec<u8>> = handle
+            .pool
+            .with(|c| {
+                let mut stmt = c
+                    .prepare("SELECT payload FROM outbox WHERE target = ?1 ORDER BY id")
+                    .map_err(|e| {
+                        crate::error::CoreError::Storage(crate::storage::StorageErrorKind::Other(
+                            e.to_string(),
+                        ))
+                    })?;
+                let rows = stmt
+                    .query_map(rusqlite::params![&alice_pk.0[..]], |r| {
+                        r.get::<_, Vec<u8>>(0)
+                    })
+                    .map_err(|e| {
+                        crate::error::CoreError::Storage(crate::storage::StorageErrorKind::Other(
+                            e.to_string(),
+                        ))
+                    })?;
+                let mut out = Vec::new();
+                for row in rows {
+                    out.push(row.map_err(|e| {
+                        crate::error::CoreError::Storage(crate::storage::StorageErrorKind::Other(
+                            e.to_string(),
+                        ))
+                    })?);
+                }
+                Ok(out)
+            })
+            .unwrap();
+
+        assert_eq!(
+            payloads.len(),
+            N,
+            "every concurrent send must persist exactly one outbox ciphertext"
+        );
+
+        // Bob's on-disk ratchet must have advanced N generations.
+        let bob_after = Group::load(&crate::mls::group::GroupId(gid.clone()), &group_repo)
+            .unwrap()
+            .expect("bob group still present");
+        assert_eq!(
+            bob_after.epoch(),
+            1,
+            "epoch stays at 1 (application messages, no commits)"
+        );
+
+        // ALL N ciphertexts must decrypt on Alice's side — the core T1-3
+        // assertion. A generation collision (no lock) would make at least one
+        // fail here.
+        let mut decrypted = std::collections::HashSet::new();
+        for (i, ct) in payloads.iter().enumerate() {
+            let env = alice_group
+                .decrypt(ct)
+                .unwrap_or_else(|e| panic!("ciphertext {i} failed to decrypt: {e}"))
+                .unwrap_or_else(|| panic!("ciphertext {i} was a commit, not an app message"));
+            match env.kind {
+                Kind::Text { body } => {
+                    assert!(
+                        decrypted.insert(body),
+                        "duplicate plaintext — a generation was reused (race not serialized)"
+                    );
+                }
+                other => panic!("unexpected kind: {other:?}"),
+            }
+        }
+        assert_eq!(decrypted.len(), N, "all N distinct messages decrypted");
     }
 }
