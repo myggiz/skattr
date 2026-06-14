@@ -319,11 +319,18 @@ where
         transport_identity.clone(),
         pool.clone(),
     ));
-    let hub: Arc<DeliveryHub<T::Stream>> = Arc::new(DeliveryHub::new_with_inbound_and_dialer(
-        pool.clone(),
-        inbound.clone(),
-        dialer,
-    ));
+    let fallback_shared = std::sync::Arc::new(crate::delivery::hub::MailboxFallbackShared {
+        factory: mailbox_factory.clone(),
+        events: events_tx.clone(),
+        identity: transport_identity.clone(),
+    });
+    let hub: Arc<DeliveryHub<T::Stream>> =
+        Arc::new(DeliveryHub::new_with_inbound_dialer_and_fallback(
+            pool.clone(),
+            inbound.clone(),
+            dialer,
+            fallback_shared.clone(),
+        ));
 
     // Step 4: inbound accept loop — handshake (responder) + resolve + ingest.
     let accept_task = tokio::spawn(crate::daemon::accept::run_accept_loop(

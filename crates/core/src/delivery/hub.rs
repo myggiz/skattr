@@ -60,21 +60,18 @@ where
     }
 }
 
-/// Mailbox-fallback dependencies kept together so the hub can carry
-/// `Option<MailboxFallback>` for callers that don't wire fallback yet
-/// (`DeliveryHub::new` / `new_with_inbound`) without inflating the
-/// per-field count.
-struct MailboxFallback {
-    factory: Arc<dyn MailboxConnectFactory>,
-    events: broadcast::Sender<Event>,
-    /// Held for symmetry with the rest of the mailbox client stack and
-    /// for forward compatibility with signed-deposit variants. The
-    /// current `Deposit` wire frame is depositor-anonymous (no signature)
-    /// so the identity isn't used at deposit time — but storing it here
-    /// keeps the constructor signature stable when 2.B introduces
-    /// signed deposit flows.
+/// Mailbox-fallback dependencies, kept together and shareable via `Arc` so the
+/// hub, the per-peer actor, and the sweeper can all run deposits without a
+/// reference to the generic `DeliveryHub<S>` (avoids an Arc cycle — the hub
+/// owns the per-peer actors).
+pub(crate) struct MailboxFallbackShared {
+    pub(crate) factory: Arc<dyn MailboxConnectFactory>,
+    pub(crate) events: broadcast::Sender<Event>,
+    /// Held for forward-compat with signed-deposit variants; the current
+    /// Deposit frame is depositor-anonymous so identity isn't used at deposit
+    /// time.
     #[allow(dead_code)]
-    identity: Arc<IdentityKey>,
+    pub(crate) identity: Arc<IdentityKey>,
 }
 
 /// Daemon-scoped delivery router. Routes outbound sends and inbound
@@ -96,7 +93,7 @@ where
     sweep: tokio::task::JoinHandle<()>,
     /// `None` when the hub was constructed without fallback support — in
     /// which case `ensure_mailbox_fallback` is a logged no-op.
-    fallback: Option<MailboxFallback>,
+    fallback: Option<Arc<MailboxFallbackShared>>,
     /// On-demand outbound dialer, injected so the per-peer actor can
     /// resolve + dial a peer when it has no live connection. `None` for
     /// outbound-only tests that pre-seed connections via `ingest`.
@@ -139,6 +136,17 @@ where
         Self::new_inner(pool, Some(dispatch), None, Some(dialer))
     }
 
+    /// Production constructor: on-demand `dialer` AND the direct→mailbox
+    /// fallback orchestrator. Used by `run_with_transport`.
+    pub(crate) fn new_with_inbound_dialer_and_fallback(
+        pool: Arc<Pool>,
+        dispatch: Arc<dyn InboundDispatch>,
+        dialer: Arc<dyn crate::delivery::dial::OutboundDial<S>>,
+        fallback: Arc<MailboxFallbackShared>,
+    ) -> Self {
+        Self::new_inner(pool, Some(dispatch), Some(fallback), Some(dialer))
+    }
+
     /// Test-only constructor: an on-demand `dialer` with no inbound-MLS
     /// handling and no mailbox fallback. Used by the dial-on-demand unit
     /// test where the responder reads the dialed frame directly.
@@ -167,11 +175,11 @@ where
         Self::new_inner(
             pool,
             inbound,
-            Some(MailboxFallback {
+            Some(Arc::new(MailboxFallbackShared {
                 factory: mailbox_factory,
                 events,
                 identity,
-            }),
+            })),
             None,
         )
     }
@@ -179,7 +187,7 @@ where
     fn new_inner(
         pool: Arc<Pool>,
         inbound: Option<Arc<dyn InboundDispatch>>,
-        fallback: Option<MailboxFallback>,
+        fallback: Option<Arc<MailboxFallbackShared>>,
         dialer: Option<Arc<dyn crate::delivery::dial::OutboundDial<S>>>,
     ) -> Self {
         let sweep_pool = pool.clone();
@@ -377,150 +385,171 @@ where
         message_id: MessageId,
         ciphertext: Vec<u8>,
     ) {
-        let Some(fallback) = self.fallback.as_ref() else {
+        let Some(shared) = self.fallback.as_ref() else {
             tracing::debug!(
                 target: "skattr::delivery::hub",
                 "fallback skipped: hub has no mailbox factory"
             );
             return;
         };
+        run_mailbox_fallback(&self.pool, shared, peer, message_id, ciphertext).await;
+    }
 
-        // 1. Look up peer's mailboxes.
-        let mailbox_repo = MailboxRepo::new(&self.pool);
-        let onions = match mailbox_repo.list_for_contact(&peer) {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(
-                    target: "skattr::delivery::hub",
-                    error = %e,
-                    "fallback: list_for_contact failed"
-                );
-                return;
-            }
-        };
-        if onions.is_empty() {
-            tracing::debug!(
+    /// Clone the shareable fallback bundle, if this hub has one. Used by the
+    /// per-peer actor (timeout trigger) and the sweeper.
+    pub(crate) fn fallback_shared(&self) -> Option<Arc<MailboxFallbackShared>> {
+        self.fallback.clone()
+    }
+}
+
+/// Retarget the existing direct outbox row for `(peer, message_id)` to one of
+/// the peer's advertised mailboxes and deposit `ciphertext`, walking the list
+/// on failure. Deletes the outbox row + emits `DeliveryStatusChanged` on
+/// success; leaves the (now mailbox-kind) row for the sweeper on failure.
+/// Non-generic so the per-peer actor and the sweeper can call it without a
+/// reference to the generic `DeliveryHub<S>`.
+pub(crate) async fn run_mailbox_fallback(
+    pool: &Pool,
+    shared: &MailboxFallbackShared,
+    peer: PublicKey,
+    message_id: MessageId,
+    ciphertext: Vec<u8>,
+) {
+    // 1. Look up peer's mailboxes.
+    let mailbox_repo = MailboxRepo::new(pool);
+    let onions = match mailbox_repo.list_for_contact(&peer) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
                 target: "skattr::delivery::hub",
-                "fallback: peer has no advertised mailboxes; leaving outbox row untouched"
+                error = %e,
+                "fallback: list_for_contact failed"
             );
             return;
         }
+    };
+    if onions.is_empty() {
+        tracing::debug!(
+            target: "skattr::delivery::hub",
+            "fallback: peer has no advertised mailboxes; leaving outbox row untouched"
+        );
+        return;
+    }
 
-        // 2. Find the existing direct outbox row (orchestrator MOVES, never duplicates).
-        let outbox = OutboxRepo::new(&self.pool);
-        let row_id = match outbox.find_direct_id(&peer.0, &message_id.0) {
-            Ok(Some(id)) => id,
-            Ok(None) => {
-                tracing::debug!(
-                    target: "skattr::delivery::hub",
-                    "fallback: no direct outbox row to retarget"
-                );
-                return;
-            }
+    // 2. Find the existing direct outbox row (orchestrator MOVES, never duplicates).
+    let outbox = OutboxRepo::new(pool);
+    let row_id = match outbox.find_direct_id(&peer.0, &message_id.0) {
+        Ok(Some(id)) => id,
+        Ok(None) => {
+            tracing::debug!(
+                target: "skattr::delivery::hub",
+                "fallback: no direct outbox row to retarget"
+            );
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(
+                target: "skattr::delivery::hub",
+                error = %e,
+                "fallback: find_direct_id failed"
+            );
+            return;
+        }
+    };
+
+    // 3. Pick a primary index, then walk sequentially.
+    let n = onions.len();
+    let primary = pick_first_mailbox_index(&message_id, n);
+    let recipient_hash = recipient_hash_from_pubkey(&peer.0);
+    let mut last_err: Option<crate::error::CoreError> = None;
+
+    for offset in 0..n {
+        let idx = (primary + offset) % n;
+        let onion = &onions[idx];
+
+        // 3a. Ensure a 'theirs' row exists for this onion → mailbox_id.
+        let now = crate::daemon::clock::now_unix_seconds();
+        let mailbox_id = match mailbox_repo.ensure_theirs(onion, now) {
+            Ok(id) => id,
             Err(e) => {
                 tracing::warn!(
                     target: "skattr::delivery::hub",
                     error = %e,
-                    "fallback: find_direct_id failed"
-                );
-                return;
-            }
-        };
-
-        // 3. Pick a primary index, then walk sequentially.
-        let n = onions.len();
-        let primary = pick_first_mailbox_index(&message_id, n);
-        let recipient_hash = recipient_hash_from_pubkey(&peer.0);
-        let mut last_err: Option<crate::error::CoreError> = None;
-
-        for offset in 0..n {
-            let idx = (primary + offset) % n;
-            let onion = &onions[idx];
-
-            // 3a. Ensure a 'theirs' row exists for this onion → mailbox_id.
-            let now = crate::daemon::clock::now_unix_seconds();
-            let mailbox_id = match mailbox_repo.ensure_theirs(onion, now) {
-                Ok(id) => id,
-                Err(e) => {
-                    tracing::warn!(
-                        target: "skattr::delivery::hub",
-                        error = %e,
-                        "fallback: ensure_theirs failed; trying next mailbox"
-                    );
-                    last_err = Some(e);
-                    continue;
-                }
-            };
-
-            // 3b. Retarget the existing outbox row to this mailbox.
-            if let Err(e) = outbox.set_mailbox_target(row_id, mailbox_id) {
-                tracing::warn!(
-                    target: "skattr::delivery::hub",
-                    error = %e,
-                    "fallback: set_mailbox_target failed; trying next mailbox"
+                    "fallback: ensure_theirs failed; trying next mailbox"
                 );
                 last_err = Some(e);
                 continue;
             }
+        };
 
-            // 3c. Connect + deposit.
-            let mut client = match fallback.factory.connect(onion).await {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::debug!(
-                        target: "skattr::delivery::hub",
-                        error = %e,
-                        "fallback: connect failed; trying next mailbox"
-                    );
-                    last_err = Some(e);
-                    continue;
-                }
-            };
-
-            match client
-                .deposit(recipient_hash, ciphertext.clone(), FALLBACK_TTL_SECS)
-                .await
-            {
-                Ok(_ok) => {
-                    // 4. Success: delete the outbox row + emit event.
-                    if let Err(e) = outbox.delete_by_id(row_id) {
-                        tracing::warn!(
-                            target: "skattr::delivery::hub",
-                            error = %e,
-                            "fallback: delete_by_id after deposit failed"
-                        );
-                    }
-                    let _ = fallback.events.send(Event::DeliveryStatusChanged {
-                        message: message_id,
-                        status: DeliveryStatus::Deposited,
-                    });
-                    tracing::debug!(
-                        target: "skattr::delivery::hub",
-                        "fallback: deposit succeeded"
-                    );
-                    return;
-                }
-                Err(e) => {
-                    tracing::debug!(
-                        target: "skattr::delivery::hub",
-                        error = %e,
-                        "fallback: deposit failed; trying next mailbox"
-                    );
-                    last_err = Some(e);
-                    continue;
-                }
-            }
-        }
-
-        // 5. All mailboxes exhausted. Leave outbox row in place.
-        if let Some(e) = last_err {
-            tracing::info!(
+        // 3b. Retarget the existing outbox row to this mailbox.
+        if let Err(e) = outbox.set_mailbox_target(row_id, mailbox_id) {
+            tracing::warn!(
                 target: "skattr::delivery::hub",
                 error = %e,
-                mailboxes = n,
-                "fallback: all mailboxes failed; outbox row retained"
+                "fallback: set_mailbox_target failed; trying next mailbox"
             );
+            last_err = Some(e);
+            continue;
         }
+
+        // 3c. Connect + deposit.
+        let mut client = match shared.factory.connect(onion).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::debug!(
+                    target: "skattr::delivery::hub",
+                    error = %e,
+                    "fallback: connect failed; trying next mailbox"
+                );
+                last_err = Some(e);
+                continue;
+            }
+        };
+
+        match client
+            .deposit(recipient_hash, ciphertext.clone(), FALLBACK_TTL_SECS)
+            .await
+        {
+            Ok(_ok) => {
+                // 4. Success: delete the outbox row + emit event.
+                if let Err(e) = outbox.delete_by_id(row_id) {
+                    tracing::warn!(
+                        target: "skattr::delivery::hub",
+                        error = %e,
+                        "fallback: delete_by_id after deposit failed"
+                    );
+                }
+                let _ = shared.events.send(Event::DeliveryStatusChanged {
+                    message: message_id,
+                    status: DeliveryStatus::Deposited,
+                });
+                tracing::debug!(
+                    target: "skattr::delivery::hub",
+                    "fallback: deposit succeeded"
+                );
+                return;
+            }
+            Err(e) => {
+                tracing::debug!(
+                    target: "skattr::delivery::hub",
+                    error = %e,
+                    "fallback: deposit failed; trying next mailbox"
+                );
+                last_err = Some(e);
+                continue;
+            }
+        }
+    }
+
+    // 5. All mailboxes exhausted. Leave outbox row in place.
+    if let Some(e) = last_err {
+        tracing::info!(
+            target: "skattr::delivery::hub",
+            error = %e,
+            mailboxes = n,
+            "fallback: all mailboxes failed; outbox row retained"
+        );
     }
 }
 
