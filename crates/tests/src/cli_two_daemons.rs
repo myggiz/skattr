@@ -106,6 +106,7 @@ impl InboundDispatch for MlsInboundDispatch {
             ts_daemon_recv,
             &seen_repo,
             &msg_repo,
+            true,
         )
         .ok()?
         {

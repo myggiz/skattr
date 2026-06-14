@@ -93,7 +93,7 @@ impl DaemonInbound {
                     "mls: inbound: no group for peer".into(),
                 ))
             })?;
-        self.dispatch_for_group(from, &group_id, ciphertext)
+        self.dispatch_for_group(from, &group_id, ciphertext, true)
     }
 
     /// Test hook and inner implementation: run the decrypt + persist + emit
@@ -106,6 +106,7 @@ impl DaemonInbound {
         from: PublicKey,
         group_id: &[u8],
         ciphertext: &[u8],
+        enforce_ts_window: bool,
     ) -> Result<MessageId> {
         // Per-group ratchet serialization (T1-3): hold the group's lock across
         // the entire load→decrypt→save critical section so a concurrent
@@ -222,6 +223,7 @@ impl DaemonInbound {
                 ts_daemon_recv,
                 &seen_repo,
                 &msg_repo,
+                enforce_ts_window,
             )?;
             match &out {
                 ReceiveOutcome::Rejected(reason) => {
@@ -298,12 +300,10 @@ impl DaemonInbound {
     /// `Group::load`). Fine for v1.0's 2-member-only groups; revisit if the
     /// group count grows.
     ///
-    /// TODO(phase-2): a deposit that trial-decrypts but is then rejected by the
-    /// ±1h `Envelope.ts` replay window — legitimate for store-and-forward
-    /// offline delivery, where a deposit can be hours/days old — yields `None`
-    /// here, so the poll actor retains it and re-fetches it every poll (a poison
-    /// deposit), and the delayed message never surfaces. Deferred to Phase 2
-    /// mailbox hardening; see docs/superpowers/specs/2026-06-12-v1.0-roadmap.md.
+    /// The mailbox path passes `enforce_ts_window = false`: store-and-forward
+    /// deposits are legitimately old, so replay resistance comes from the
+    /// `(sender, envelope_id)` dedup + MLS generation + server delete, not the
+    /// ±1h window (which still guards the live direct path).
     fn dispatch_mailbox_inner(&self, ciphertext: &[u8]) -> Option<MessageId> {
         let group_repo = MlsGroupRepo::new(&self.pool);
         let groups = match group_repo.list() {
@@ -340,7 +340,9 @@ impl DaemonInbound {
                 _ => continue,
             };
             // Re-load + decrypt + persist atomically against the on-disk state.
-            return self.dispatch_for_group(peer, &gid_bytes, ciphertext).ok();
+            return self
+                .dispatch_for_group(peer, &gid_bytes, ciphertext, false)
+                .ok();
         }
         None
     }
@@ -654,7 +656,7 @@ mod tests {
         let inbound = DaemonInbound::new(pool.clone(), events_tx.clone());
 
         let returned_mid = inbound
-            .dispatch_for_group(peer, &group_id_bytes, &ciphertext)
+            .dispatch_for_group(peer, &group_id_bytes, &ciphertext, true)
             .unwrap();
 
         // Message id must round-trip.
@@ -742,7 +744,7 @@ mod tests {
 
         let inbound = DaemonInbound::new(pool.clone(), events_tx.clone());
         inbound
-            .dispatch_for_group(peer, &group_id_bytes, &ciphertext)
+            .dispatch_for_group(peer, &group_id_bytes, &ciphertext, true)
             .unwrap();
 
         match tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv()).await {
@@ -870,7 +872,7 @@ mod tests {
 
         let inbound = DaemonInbound::new(pool.clone(), events_tx.clone());
         let returned_mid = inbound
-            .dispatch_for_group(peer, &group_id_bytes, &ciphertext)
+            .dispatch_for_group(peer, &group_id_bytes, &ciphertext, true)
             .unwrap();
 
         // Message id must round-trip.
@@ -1012,7 +1014,7 @@ mod tests {
         alice_group.save(&group_repo).unwrap();
 
         let inbound = DaemonInbound::new(pool.clone(), events_tx.clone());
-        let result = inbound.dispatch_for_group(peer, &group_id_bytes, &ciphertext);
+        let result = inbound.dispatch_for_group(peer, &group_id_bytes, &ciphertext, true);
 
         // Must return Err.
         assert!(
@@ -1449,7 +1451,7 @@ mod tests {
         let unknown_gid = vec![0xDE; 32];
         let garbage_ct = b"not a real ciphertext";
 
-        let result = inbound.dispatch_for_group(peer, &unknown_gid, garbage_ct);
+        let result = inbound.dispatch_for_group(peer, &unknown_gid, garbage_ct, true);
         assert!(result.is_err(), "expected Err for unknown group, got Ok");
 
         // The InboundDispatch impl must return None (not panic).
@@ -1547,7 +1549,7 @@ mod tests {
         let inbound = DaemonInbound::new(pool.clone(), events_tx);
 
         // dispatch_for_group must return Err (rejected by replay window).
-        let result = inbound.dispatch_for_group(peer, &group_id_bytes, &ciphertext);
+        let result = inbound.dispatch_for_group(peer, &group_id_bytes, &ciphertext, true);
         assert!(
             result.is_err(),
             "expected Err for stale-ts envelope, got Ok"
