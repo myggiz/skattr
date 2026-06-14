@@ -330,6 +330,7 @@ where
             inbound.clone(),
             dialer,
             fallback_shared.clone(),
+            std::time::Duration::from_secs(u64::from(config.delivery.direct_timeout_secs)),
         ));
 
     // Step 4: inbound accept loop — handshake (responder) + resolve + ingest.

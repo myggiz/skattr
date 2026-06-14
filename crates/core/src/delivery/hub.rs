@@ -38,6 +38,10 @@ const SEEN_WINDOW_MS: i64 = 24 * 3600 * 1000;
 /// without unnecessarily encouraging the server to retain ciphertext.
 const FALLBACK_TTL_SECS: u32 = 24 * 3600;
 
+/// Default per-peer direct→mailbox fallback timeout used by constructors
+/// that don't take one from config (matches `default_direct_timeout_secs`).
+const DEFAULT_DIRECT_TIMEOUT: Duration = std::time::Duration::from_secs(30);
+
 struct PeerChannels<S>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -98,6 +102,10 @@ where
     /// resolve + dial a peer when it has no live connection. `None` for
     /// outbound-only tests that pre-seed connections via `ingest`.
     dialer: Option<Arc<dyn crate::delivery::dial::OutboundDial<S>>>,
+    /// How long a per-peer actor tolerates UNBROKEN direct-delivery
+    /// failure before handing the peer's pending direct rows to the
+    /// mailbox fallback. Passed to each spawned actor.
+    direct_timeout: Duration,
 }
 
 impl<S> DeliveryHub<S>
@@ -110,7 +118,7 @@ where
     /// [`DeliveryHub::new_with_inbound`] or
     /// [`DeliveryHub::new_with_mailbox_fallback`] instead.
     pub fn new(pool: Arc<Pool>) -> Self {
-        Self::new_inner(pool, None, None, None)
+        Self::new_inner(pool, None, None, None, DEFAULT_DIRECT_TIMEOUT)
     }
 
     /// Construct a hub that decrypts inbound `Frame::MlsApp` through
@@ -121,7 +129,7 @@ where
     /// No mailbox-fallback orchestrator: callers wanting fallback must
     /// use [`DeliveryHub::new_with_mailbox_fallback`].
     pub fn new_with_inbound(pool: Arc<Pool>, dispatch: Arc<dyn InboundDispatch>) -> Self {
-        Self::new_inner(pool, Some(dispatch), None, None)
+        Self::new_inner(pool, Some(dispatch), None, None, DEFAULT_DIRECT_TIMEOUT)
     }
 
     /// Construct a hub that decrypts inbound `Frame::MlsApp` AND owns an
@@ -133,7 +141,13 @@ where
         dispatch: Arc<dyn InboundDispatch>,
         dialer: Arc<dyn crate::delivery::dial::OutboundDial<S>>,
     ) -> Self {
-        Self::new_inner(pool, Some(dispatch), None, Some(dialer))
+        Self::new_inner(
+            pool,
+            Some(dispatch),
+            None,
+            Some(dialer),
+            DEFAULT_DIRECT_TIMEOUT,
+        )
     }
 
     /// Production constructor: on-demand `dialer` AND the direct→mailbox
@@ -143,8 +157,15 @@ where
         dispatch: Arc<dyn InboundDispatch>,
         dialer: Arc<dyn crate::delivery::dial::OutboundDial<S>>,
         fallback: Arc<MailboxFallbackShared>,
+        direct_timeout: Duration,
     ) -> Self {
-        Self::new_inner(pool, Some(dispatch), Some(fallback), Some(dialer))
+        Self::new_inner(
+            pool,
+            Some(dispatch),
+            Some(fallback),
+            Some(dialer),
+            direct_timeout,
+        )
     }
 
     /// Test-only constructor: an on-demand `dialer` with no inbound-MLS
@@ -155,7 +176,7 @@ where
         pool: Arc<Pool>,
         dialer: Arc<dyn crate::delivery::dial::OutboundDial<S>>,
     ) -> Self {
-        Self::new_inner(pool, None, None, Some(dialer))
+        Self::new_inner(pool, None, None, Some(dialer), DEFAULT_DIRECT_TIMEOUT)
     }
 
     /// Construct a hub that owns the direct → mailbox fallback
@@ -181,6 +202,7 @@ where
                 identity,
             })),
             None,
+            DEFAULT_DIRECT_TIMEOUT,
         )
     }
 
@@ -189,6 +211,7 @@ where
         inbound: Option<Arc<dyn InboundDispatch>>,
         fallback: Option<Arc<MailboxFallbackShared>>,
         dialer: Option<Arc<dyn crate::delivery::dial::OutboundDial<S>>>,
+        direct_timeout: Duration,
     ) -> Self {
         let sweep_pool = pool.clone();
         let sweep = tokio::spawn(async move {
@@ -209,6 +232,7 @@ where
             sweep,
             fallback,
             dialer,
+            direct_timeout,
         }
     }
 
@@ -232,6 +256,8 @@ where
             self.pool.clone(),
             self.inbound.clone(),
             self.dialer.clone(),
+            self.direct_timeout,
+            self.fallback_shared(),
         );
         let channels = PeerChannels {
             jobs: jobs_tx,
