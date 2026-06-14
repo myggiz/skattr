@@ -117,15 +117,19 @@ pub trait InboundDispatch: Send + Sync + 'static {
     /// validated against `outstanding_invites` (peer-independent), the invitee
     /// identity is derived from the joined MLS group, and bound to the
     /// handshake's X25519 static (`expected_x25519`) before anything is
-    /// persisted. Returns the derived peer [`PublicKey`] on success (so the
-    /// accept loop can ingest under it), or `None` if the Welcome is invalid or
-    /// fails the identity binding.
+    /// persisted. `h_transport` is the handshake's transport↔MLS binding
+    /// value (ADR 0009), carried so the joiner can register it as the genesis
+    /// commit's second external PSK; it is plumbed but not yet registered
+    /// (binding activated in 2.A Task 4). Returns the derived peer
+    /// [`PublicKey`] on success (so the accept loop can ingest under it), or
+    /// `None` if the Welcome is invalid or fails the identity binding.
     ///
     /// Default impl returns `None` so existing impls compile unchanged.
     fn dispatch_welcome_bootstrap(
         &self,
         _welcome: &[u8],
         _expected_x25519: &[u8; 32],
+        _h_transport: &[u8; 32],
     ) -> Option<PublicKey> {
         None
     }
@@ -513,7 +517,7 @@ where
         return false;
     };
     match d.dial(peer).await {
-        Ok(c) => {
+        Ok((c, _h_transport)) => {
             *conn = Some(c);
             true
         }

@@ -273,6 +273,27 @@ where
         let _ = ctrl_tx.send(PeerCtrl::ReplaceConn(Box::new(conn))).await;
     }
 
+    /// Dial `peer`, ingest the resulting connection (so the per-peer actor
+    /// reuses it for the Welcome + messages), and return the connection's
+    /// `h_transport` for the caller to bind into the genesis MLS Commit
+    /// (ADR 0009). Errors if no dialer is wired or the dial fails.
+    ///
+    /// The `dialer` `Arc` is cloned because `dial` borrows `&self` across the
+    /// `.await`; cloning avoids holding a borrow of `self.dialer`.
+    pub(crate) async fn connect_and_ingest(
+        &self,
+        peer: PublicKey,
+    ) -> Result<zeroize::Zeroizing<[u8; 32]>> {
+        let dialer = self.dialer.clone().ok_or_else(|| {
+            crate::error::CoreError::Delivery(crate::delivery::DeliveryErrorKind::Other(
+                "no dialer wired".into(),
+            ))
+        })?;
+        let (conn, h_transport) = dialer.dial(peer).await?;
+        self.ingest(peer, conn).await;
+        Ok(h_transport)
+    }
+
     /// Whether a per-peer actor currently exists for `peer`. Used by the
     /// accept-loop test to assert an unknown peer was NOT ingested.
     pub(crate) async fn has_peer(&self, peer: &PublicKey) -> bool {

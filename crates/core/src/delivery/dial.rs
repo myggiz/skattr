@@ -30,8 +30,17 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     /// Establish an authenticated connection to `peer`, or error if the peer
-    /// has no resolvable onion / the dial or handshake fails.
-    async fn dial(&self, peer: PublicKey) -> Result<AuthenticatedConnection<S>>;
+    /// has no resolvable onion / the dial or handshake fails. Returns the
+    /// connection together with the handshake's `h_transport` (the
+    /// transport↔MLS binding value; ADR 0009) so the caller can bind it into
+    /// a genesis MLS Commit. Most callers ignore the second element.
+    async fn dial(
+        &self,
+        peer: PublicKey,
+    ) -> Result<(
+        AuthenticatedConnection<S>,
+        zeroize::Zeroizing<[u8; 32]>,
+    )>;
 }
 
 /// Production [`OutboundDial`] backed by a real [`Transport`]. Resolves
@@ -56,7 +65,13 @@ impl<T: Transport> TransportDial<T> {
 
 #[async_trait::async_trait]
 impl<T: Transport> OutboundDial<T::Stream> for TransportDial<T> {
-    async fn dial(&self, peer: PublicKey) -> Result<AuthenticatedConnection<T::Stream>> {
+    async fn dial(
+        &self,
+        peer: PublicKey,
+    ) -> Result<(
+        AuthenticatedConnection<T::Stream>,
+        zeroize::Zeroizing<[u8; 32]>,
+    )> {
         let card = ContactRepo::new(&self.pool)
             .latest_card(&peer)?
             .ok_or_else(|| {
@@ -77,9 +92,9 @@ impl<T: Transport> OutboundDial<T::Stream> for TransportDial<T> {
             ))
         })?;
         let peer_x25519 = crate::identity::key::ed25519_pub_to_x25519(&verifying);
-        let (conn, _outcome) =
+        let (conn, outcome) =
             handshake_initiator(stream, &self.identity, &peer_x25519, None).await?;
-        Ok(conn)
+        Ok((conn, outcome.h_transport))
     }
 }
 
@@ -100,10 +115,21 @@ mod tests {
 
     #[async_trait::async_trait]
     impl OutboundDial<DuplexStream> for OneShotDialer {
-        async fn dial(&self, _peer: PublicKey) -> Result<AuthenticatedConnection<DuplexStream>> {
-            self.0.lock().unwrap().take().ok_or_else(|| {
-                CoreError::Delivery(DeliveryErrorKind::Other("oneshot exhausted".into()))
-            })
+        async fn dial(
+            &self,
+            _peer: PublicKey,
+        ) -> Result<(
+            AuthenticatedConnection<DuplexStream>,
+            zeroize::Zeroizing<[u8; 32]>,
+        )> {
+            self.0
+                .lock()
+                .unwrap()
+                .take()
+                .map(|conn| (conn, zeroize::Zeroizing::new([0u8; 32])))
+                .ok_or_else(|| {
+                    CoreError::Delivery(DeliveryErrorKind::Other("oneshot exhausted".into()))
+                })
         }
     }
 

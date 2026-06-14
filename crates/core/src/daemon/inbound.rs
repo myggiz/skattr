@@ -301,6 +301,12 @@ impl DaemonInbound {
         &self,
         welcome_bytes: &[u8],
         bind_x25519: Option<&[u8; 32]>,
+        // Carried for 2.A Task 4 (h_transport binding activation): the joiner
+        // will register this as the genesis commit's second external PSK. For
+        // now it is plumbed but NOT registered — `join_from_welcome` is still
+        // called with `h_transport: None` so first contact stays green until
+        // both committer and joiner flip on together (ADR 0009).
+        _h_transport: &[u8; 32],
     ) -> Result<PublicKey> {
         use crate::mls::key_package::{parse_welcome_kp_hash, KeyPackage};
         use crate::mls::provider::MlsProvider;
@@ -443,7 +449,10 @@ impl InboundDispatch for DaemonInbound {
         // Welcome over an already-established connection: no binding check (the
         // connection is already attributed to `peer`); derive + persist, then
         // assert the derived identity matches the bound peer (defense in depth).
-        match self.welcome_join_persist(welcome, None) {
+        // No h_transport is captured on this path (the conn predates this
+        // Welcome); pass a placeholder since the param is carried-but-unused
+        // until Task 4 (and Task 4 only registers it on the bootstrap path).
+        match self.welcome_join_persist(welcome, None, &[0u8; 32]) {
             Ok(derived) => {
                 if derived != peer {
                     // `peer` is an Ed25519 pubkey — not logged (warn is >= info;
@@ -464,8 +473,9 @@ impl InboundDispatch for DaemonInbound {
         &self,
         welcome: &[u8],
         expected_x25519: &[u8; 32],
+        h_transport: &[u8; 32],
     ) -> Option<PublicKey> {
-        match self.welcome_join_persist(welcome, Some(expected_x25519)) {
+        match self.welcome_join_persist(welcome, Some(expected_x25519), h_transport) {
             Ok(derived) => Some(derived),
             Err(_e) => {
                 // Static, onion/pubkey-free warn: do not leak the rejected
@@ -1111,6 +1121,7 @@ mod tests {
             &inbound,
             &welcome_bytes,
             &correct_x25519,
+            &[0u8; 32], // h_transport carried but not registered until Task 4
         );
         assert_eq!(
             derived,
@@ -1161,6 +1172,7 @@ mod tests {
             &inbound,
             &welcome_bytes,
             &wrong_x25519,
+            &[0u8; 32], // h_transport carried but not registered until Task 4
         );
         assert_eq!(derived, None, "binding mismatch must be refused");
 
