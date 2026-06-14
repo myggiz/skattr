@@ -372,6 +372,9 @@ where
                 for entry in due {
                     if pending.contains_key(&entry.message_id) { continue; }
                     if entry.target != peer { continue; }
+                    if entry.target_kind == crate::storage::outbox::OutboxTargetKind::Mailbox {
+                        continue;
+                    }
                     let Some(c) = conn.as_mut() else { break; };
                     if c.send(Frame::MlsApp(entry.payload.clone())).await.is_err() {
                         conn = None;
@@ -849,5 +852,63 @@ mod tests {
             Ok(Ok(Ok(()))) => {}
             other => panic!("expected ACK, got {other:?}"),
         }
+    }
+
+    /// The direct retry tick must skip `target_kind='mailbox'` outbox
+    /// rows: those are routed via the mailbox fallback path, never sent
+    /// as `Frame::MlsApp` over the direct peer connection.
+    #[tokio::test]
+    async fn retry_tick_skips_mailbox_rows() {
+        use crate::storage::outbox::OutboxRepo;
+
+        let actor_id = IdentityKey::generate().unwrap();
+        let responder_id = IdentityKey::generate().unwrap();
+        let responder_static = responder_id.noise_static_public();
+        let peer = PublicKey(responder_id.public().0);
+
+        let (client_stream, server_stream) = tokio::io::duplex(64 * 1024);
+
+        // Handshakes run concurrently; keep the responder end to read from.
+        let responder_task = tokio::spawn(async move {
+            handshake_responder(server_stream, &responder_id, None)
+                .await
+                .unwrap()
+        });
+        let (actor_conn, _) =
+            handshake_initiator(client_stream, &actor_id, &responder_static, None)
+                .await
+                .unwrap();
+        let (mut responder_conn, _) = responder_task.await.unwrap();
+
+        // Seed a DUE mailbox-kind outbox row targeting the peer.
+        let pool = std::sync::Arc::new(Pool::in_memory());
+        OutboxRepo::new(&pool)
+            .insert_for_mailbox(&peer.0, &[0x01; 16], 7, b"ct", 0)
+            .unwrap();
+
+        let (_job_tx, job_rx) = mpsc::channel::<DeliveryJob>(4);
+        let handle = PeerConnection::spawn_full_for_test(
+            peer,
+            Box::new(actor_conn),
+            job_rx,
+            pool.clone(),
+            None,
+        );
+
+        // Read for longer than one retry tick (1 s). No MlsApp must arrive.
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(1_500),
+            responder_conn.recv(),
+        )
+        .await
+        {
+            Err(_) => { /* timeout: no frame arrived — correct */ }
+            Ok(Ok(Some(Frame::MlsApp(_)))) => {
+                panic!("mailbox-kind row must NOT be sent as direct MlsApp")
+            }
+            Ok(other) => panic!("unexpected frame: {other:?}"),
+        }
+
+        handle.abort();
     }
 }
