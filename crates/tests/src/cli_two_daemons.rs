@@ -52,9 +52,9 @@ use skattr_core::daemon::{Command, CommandResult, IpcClient, IpcClientError};
 use skattr_core::envelope::{Kind, MessageId};
 use skattr_core::identity::IdentityKey;
 use skattr_core::test_exports::{
-    handle_connection, handshake_initiator, handshake_responder, noise_public_of, now_unix_seconds,
-    receive, CommandExecutor, ContactRepo, DaemonHandle, DeliveryHub, Group, GroupId,
-    InboundDispatch, MessageRepo, MlsGroupRepo, Pool, ReceiveOutcome, SeenMessagesRepo,
+    delivery_hub_with_stub_dialer, handle_connection, handshake_initiator, handshake_responder,
+    noise_public_of, now_unix_seconds, receive, CommandExecutor, ContactRepo, DaemonHandle, Group,
+    GroupId, InboundDispatch, MessageRepo, MlsGroupRepo, Pool, ReceiveOutcome, SeenMessagesRepo,
 };
 use tokio::sync::broadcast;
 
@@ -184,7 +184,15 @@ impl DaemonBundle {
         let pool = Arc::new(Pool::in_memory());
         let (events_tx, _) = broadcast::channel::<Event>(16);
         let dispatch: Arc<dyn InboundDispatch> = Arc::new(NoopInbound);
-        let hub = Arc::new(DeliveryHub::new_with_inbound(pool.clone(), dispatch));
+        // Phase 2.A: `add_contact` is now dial-first (`connect_and_ingest_at`,
+        // ADR 0009 / T1-1), so a hub with no dialer errors "no dialer wired"
+        // before any local write. Wire a stub dialer (real Noise_XK handshake
+        // over an in-process duplex, throwaway responder) so the mandatory dial
+        // resolves; the peer is never actually reached, which is fine — these
+        // tests assert only local state (contact persisted, double-use rejected,
+        // recent-messages empty, message queued). Production direct→peer
+        // delivery is covered by the loopback guardrails.
+        let hub = delivery_hub_with_stub_dialer(pool.clone(), dispatch);
 
         // Handle owns one copy of the identity.
         let id_for_handle = IdentityKey::from_seed(&seed).unwrap();
