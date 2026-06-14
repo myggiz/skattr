@@ -64,7 +64,11 @@ pub(crate) async fn run_accept_loop<S>(
                             match inbound_dispatch.dispatch_welcome_bootstrap(
                                 &bytes,
                                 &outcome.peer_x25519,
-                                &outcome.h_transport,
+                                // The responder's h_transport is the SAME Noise
+                                // session's transcript value as the dialing
+                                // committer's, so the genesis binding PSK matches
+                                // on both ends (ADR 0009, T1-1).
+                                Some(&*outcome.h_transport),
                             ) {
                                 Some(peer) => {
                                     // ACK so the inviter-side WelcomeJob resolves,

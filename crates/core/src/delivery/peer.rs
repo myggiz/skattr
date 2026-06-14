@@ -118,9 +118,13 @@ pub trait InboundDispatch: Send + Sync + 'static {
     /// identity is derived from the joined MLS group, and bound to the
     /// handshake's X25519 static (`expected_x25519`) before anything is
     /// persisted. `h_transport` is the handshake's transport↔MLS binding
-    /// value (ADR 0009), carried so the joiner can register it as the genesis
-    /// commit's second external PSK; it is plumbed but not yet registered
-    /// (binding activated in 2.A Task 4). Returns the derived peer
+    /// value (ADR 0009): when `Some`, the joiner registers it as the genesis
+    /// commit's second external PSK and validates the binding while processing
+    /// the Welcome's genesis Commit (active since 2.A Task 4). `None` means no
+    /// transport binding is registered — used only by the established-conn
+    /// `dispatch_welcome` path, which has no fresh handshake transcript. Typing
+    /// it `Option` (rather than a zero-array sentinel) keeps a `[0u8; 32]` from
+    /// ever masquerading as a real binding. Returns the derived peer
     /// [`PublicKey`] on success (so the accept loop can ingest under it), or
     /// `None` if the Welcome is invalid or fails the identity binding.
     ///
@@ -129,7 +133,7 @@ pub trait InboundDispatch: Send + Sync + 'static {
         &self,
         _welcome: &[u8],
         _expected_x25519: &[u8; 32],
-        _h_transport: &[u8; 32],
+        _h_transport: Option<&[u8; 32]>,
     ) -> Option<PublicKey> {
         None
     }

@@ -348,37 +348,34 @@ where
     link.body.card.verify(now).map_err(map_err)?;
     contact_repo.put_card(&link.body.card).map_err(map_err)?;
 
-    // Dial the inviter FIRST (ADR 0009): the genesis Commit binds to this
-    // connection's h_transport (activated in Task 4), and the per-peer actor
-    // reuses this one connection for the Welcome below (no second dial). The
-    // value is captured but not yet injected into the commit this task — it is
-    // used in Task 4. Best-effort: a missing dialer (unit-test handles) or a
-    // dial failure does not abort first contact — the Welcome path
-    // (send_welcome) lazily dials on its own, exactly as in 1C. Task 4
-    // hardens this to require the connection once the binding is load-bearing.
-    let _h_transport = match handle.hub.connect_and_ingest(inviter).await {
-        Ok(h) => Some(h),
-        Err(e) => {
-            tracing::warn!(?e, "add_contact: dial-first connect_and_ingest failed; \
-                proceeding (Welcome will dial lazily); binding inactive until Task 4");
-            None
-        }
-    };
+    // Dial the inviter FIRST (ADR 0009, T1-1): the genesis Commit binds to this
+    // connection's h_transport (the second external PSK below), and the per-peer
+    // actor reuses this one connection for the Welcome (no second dial). The
+    // dial is now MANDATORY — first contact requires the connection anyway (to
+    // deliver the Welcome), and a half-bound first contact (group created but
+    // not transport-bound) is not allowed. A dial failure aborts the add.
+    let h_transport = handle.hub.connect_and_ingest(inviter).await.map_err(map_err)?;
 
     // Build our solo MLS group, then add the inviter as the second member.
-    // The invite PSK id is derived per-invite from the invite KeyPackageRef
-    // (ADR 0009, T2-8). h_transport binding is activated in Task 4 (None here).
+    // Both external PSKs (invite + h_transport) are keyed per-invite by the
+    // invite KeyPackageRef (ADR 0009, T2-8) and proposed in the genesis Commit;
+    // the inviter registers the same two values before join_from_welcome, so the
+    // genesis group is bound to the authenticated transport transcript (T1-1).
     let provider = MlsProvider::new();
     let mut group = Group::create_solo(
         &handle.identity,
         Some((&kp_ref, &link.psk.0)),
-        None,
+        Some((&kp_ref, &*h_transport)),
         provider,
     )
     .map_err(map_err)?;
 
     let (welcome, _commit) = group
-        .add_member(&invitee_kp, Some((&kp_ref, &link.psk.0)), None)
+        .add_member(
+            &invitee_kp,
+            Some((&kp_ref, &link.psk.0)),
+            Some((&kp_ref, &*h_transport)),
+        )
         .map_err(map_err)?;
     let group_id = group.id().0.clone();
 
@@ -1577,9 +1574,11 @@ mod tests {
     use crate::daemon::events::Event;
     use crate::daemon::handle::DaemonHandle;
     use crate::daemon::ipc::wire::IpcError;
+    use crate::delivery::dial::OutboundDial;
     use crate::delivery::hub::DeliveryHub;
-    use crate::identity::{IdentityKey, Seed};
+    use crate::identity::{IdentityKey, PublicKey as IdPublicKey, Seed};
     use crate::storage::Pool;
+    use crate::transport::{handshake_initiator, handshake_responder, AuthenticatedConnection};
 
     fn test_handle() -> Arc<DaemonHandle<tokio::io::DuplexStream>> {
         let seed = Seed::generate().unwrap();
@@ -1587,6 +1586,63 @@ mod tests {
         let pool = Arc::new(Pool::in_memory());
         let hub: Arc<DeliveryHub<tokio::io::DuplexStream>> =
             Arc::new(DeliveryHub::new(pool.clone()));
+        let (events_tx, _) = broadcast::channel::<Event>(16);
+        Arc::new(DaemonHandle::new(pool, hub, identity, events_tx))
+    }
+
+    /// Stub dialer for `add_contact` tests: on each `dial`, runs a real
+    /// Noise_XK handshake over an in-process duplex and hands back the
+    /// initiator's authenticated connection plus the handshake's `h_transport`.
+    /// `add_contact`'s dial is mandatory (ADR 0009, T1-1), so the single-daemon
+    /// dispatch tests need a working dialer; they do not exercise the binding
+    /// round-trip (no joiner present), only that the committer dial succeeds.
+    /// The responder side is dropped immediately — the subsequent best-effort
+    /// Welcome send over the conn just fails quietly, which is fine here.
+    struct StubDialer;
+
+    #[async_trait::async_trait]
+    impl OutboundDial<tokio::io::DuplexStream> for StubDialer {
+        async fn dial(
+            &self,
+            _peer: IdPublicKey,
+        ) -> crate::error::Result<(
+            AuthenticatedConnection<tokio::io::DuplexStream>,
+            zeroize::Zeroizing<[u8; 32]>,
+        )> {
+            // Build a self-consistent Noise_XK pair: the initiator must target
+            // the responder's ACTUAL static (rs), so derive `peer_x` from the
+            // throwaway responder identity — NOT from the real `peer` (we don't
+            // hold the inviter's private key, and these single-daemon tests do
+            // not exercise the binding round-trip). Setup steps are infallible
+            // in the test environment, so `unwrap` is acceptable (the test
+            // module allows it); a real handshake error surfaces as a Delivery
+            // error via `?`.
+            let init_id = IdentityKey::from_seed(&Seed::generate().unwrap()).unwrap();
+            let resp_id = IdentityKey::from_seed(&Seed::generate().unwrap()).unwrap();
+            let peer_x = resp_id.noise_static_public();
+            let (a, b) = tokio::io::duplex(64 * 1024);
+            // Drive both handshake halves concurrently on this task (works on a
+            // current_thread runtime — no spawn). The responder side is then
+            // dropped; the subsequent best-effort Welcome send over the conn
+            // just fails quietly, which is fine for these single-daemon tests.
+            let (init_res, _resp_res) = tokio::join!(
+                handshake_initiator(a, &init_id, &peer_x, None),
+                handshake_responder(b, &resp_id, None),
+            );
+            let (conn, outcome) = init_res?;
+            Ok((conn, outcome.h_transport))
+        }
+    }
+
+    /// Like [`test_handle`] but with a working stub dialer wired into the hub,
+    /// for tests that drive `add_contact` (whose dial is mandatory).
+    fn test_handle_with_dialer() -> Arc<DaemonHandle<tokio::io::DuplexStream>> {
+        let seed = Seed::generate().unwrap();
+        let identity = IdentityKey::from_seed(&seed).unwrap();
+        let pool = Arc::new(Pool::in_memory());
+        let dialer: Arc<dyn OutboundDial<tokio::io::DuplexStream>> = Arc::new(StubDialer);
+        let hub: Arc<DeliveryHub<tokio::io::DuplexStream>> =
+            Arc::new(DeliveryHub::new_with_dialer(pool.clone(), dialer));
         let (events_tx, _) = broadcast::channel::<Event>(16);
         Arc::new(DaemonHandle::new(pool, hub, identity, events_tx))
     }
@@ -1780,7 +1836,7 @@ mod tests {
         };
 
         // Bob's handle consumes it. Bob is a separate daemon with a separate pool.
-        let handle_b = test_handle();
+        let handle_b = test_handle_with_dialer();
         let mut events_rx = handle_b.events_tx.subscribe();
         let res = execute_command(handle_b.clone(), Command::AddContact { invite_url: url })
             .await
@@ -1823,7 +1879,7 @@ mod tests {
         };
 
         // Bob (dialer) consumes the invite.
-        let handle_b = test_handle();
+        let handle_b = test_handle_with_dialer();
         execute_command(handle_b.clone(), Command::AddContact { invite_url: url })
             .await
             .unwrap();
@@ -1853,7 +1909,7 @@ mod tests {
             panic!("expected InviteCreated");
         };
 
-        let handle_b = test_handle();
+        let handle_b = test_handle_with_dialer();
         // First use succeeds.
         execute_command(
             handle_b.clone(),
@@ -1902,7 +1958,7 @@ mod tests {
             panic!("expected InviteCreated");
         };
 
-        let handle_b = test_handle();
+        let handle_b = test_handle_with_dialer();
 
         // First AddContact succeeds.
         let first = execute_command(
@@ -2265,7 +2321,7 @@ mod tests {
 
         // Bob consumes Alice's invite; this creates a group with Alice as
         // the contact (group_id is set on Alice's pubkey in Bob's pool).
-        let handle_b = test_handle();
+        let handle_b = test_handle_with_dialer();
         let CommandResult::ContactAdded(summary) =
             execute_command(handle_b.clone(), Command::AddContact { invite_url: url })
                 .await
@@ -2316,7 +2372,7 @@ mod tests {
             panic!("expected InviteCreated");
         };
 
-        let handle_b = test_handle();
+        let handle_b = test_handle_with_dialer();
         let CommandResult::ContactAdded(summary) =
             execute_command(handle_b.clone(), Command::AddContact { invite_url: url })
                 .await
@@ -3618,7 +3674,7 @@ mod tests {
         use crate::daemon::commands::Direction;
         use crate::envelope::Kind;
 
-        let handle = test_handle();
+        let handle = test_handle_with_dialer();
         let (peer_pk, _gid) = seed_contact_with_real_group(&handle).await;
 
         let result = execute_command(
@@ -3726,7 +3782,7 @@ mod tests {
     async fn list_contacts_carries_group_state_and_read_cursor() {
         use crate::daemon::commands::MlsGroupStateLabel;
 
-        let handle = test_handle();
+        let handle = test_handle_with_dialer();
         let (peer_pk, _gid) = seed_contact_with_real_group(&handle).await;
 
         // Send a real message so a row exists, then mark up to its row_id as read.
