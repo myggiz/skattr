@@ -1230,17 +1230,19 @@ where
 }
 
 /// `RemoveMailbox` handler: mark `pending_removal`, attempt a best-effort
-/// final drain (fetch + server-side delete via `run_one_poll_tick`), then
-/// mark `removed`, stop the poll actor, and republish the self-card.
+/// final drain (fetch → dispatch → delete-only-dispatched via
+/// `poll_dispatch_once`), then mark `removed`, stop the poll actor, and
+/// republish the self-card.
 ///
 /// If the mailbox is unreachable during the drain attempt, we proceed
 /// anyway — callers must not get stuck on a misbehaving mailbox.
 ///
-/// # TODO Task 22.5
-/// The deposits returned by `run_one_poll_tick` are deleted server-side but
-/// their plaintext is not dispatched through `DaemonInbound` in this initial
-/// cut. A follow-up task should iterate the `FetchResponse` envelopes and
-/// pass each through `DaemonInbound::dispatch`.
+/// The drain dispatches each held deposit through the inbound MLS pipeline
+/// ([`InboundDispatch::dispatch_mailbox`]) and server-side deletes ONLY the
+/// deposits that persisted, so offline messages are preserved into local
+/// storage before the mailbox is forgotten and a transient dispatch failure
+/// cannot lose them on this irreversible path (Task 22.5). The drain is
+/// skipped entirely when no inbound dispatcher is wired (test handles).
 async fn handle_remove_mailbox<S>(
     handle: Arc<DaemonHandle<S>>,
     id: i64,
@@ -1272,14 +1274,18 @@ where
             status: crate::storage::MailboxStatus::PendingRemoval,
         });
 
-    // 3. Best-effort final drain. If anything fails (unreachable, auth,
-    //    timeout), proceed to finalize anyway — keeps users from getting
-    //    stuck on a misbehaving mailbox.
-    if let Some(factory) = &handle.mailbox_factory {
+    // 3. Best-effort final drain: fetch → dispatch → delete-only-dispatched, so a
+    //    transient dispatch failure on this irreversible removal path does not
+    //    destroy held offline messages (poll_dispatch_once, not run_one_poll_tick).
+    //    We only drain when an inbound dispatcher is wired; without one we cannot
+    //    persist deposits, so we skip the drain entirely rather than delete
+    //    messages we can't dispatch. Any error (unreachable, auth, timeout) is
+    //    swallowed — removal must finalize regardless (Task 22.5).
+    if let (Some(factory), Some(inbound)) = (&handle.mailbox_factory, &handle.inbound) {
         if let Ok(mut client) = factory.connect(&row.onion).await {
-            // run_one_poll_tick fetches + server-side deletes deposits.
-            // TODO Task 22.5: dispatch each deposit through DaemonInbound.
-            let _ = crate::mailbox::poll::run_one_poll_tick(&mut client, &handle.identity).await;
+            let _ =
+                crate::mailbox::poll::poll_dispatch_once(&mut client, &handle.identity, &**inbound)
+                    .await;
         }
     }
 

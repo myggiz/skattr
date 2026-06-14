@@ -362,6 +362,10 @@ where
     // Share the SAME group-lock registry with the inbound dispatcher (T1-3) so
     // a send and a receive on one group serialize on the same lock.
     handle.set_group_locks(group_locks);
+    // Give the handle the shared inbound dispatcher so the RemoveMailbox drain
+    // can dispatch held deposits into local storage before finalizing removal
+    // (Task 22.5).
+    handle.set_inbound(inbound.clone());
 
     // Log tap: forward every record from the ring buffer's broadcast channel
     // onto the daemon event bus so `EventFilter::Logs` subscribers receive

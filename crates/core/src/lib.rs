@@ -540,6 +540,35 @@ pub mod test_exports {
         (std::sync::Arc::new(handle), pub_observer_rx)
     }
 
+    /// Test-only constructor for a production `DaemonInbound` (the real
+    /// MLS decrypt + persist + emit dispatcher) as an
+    /// `Arc<dyn InboundDispatch>`, with the recipient identity wired so
+    /// `dispatch_mailbox` can trial-decrypt + persist held deposits. Used
+    /// by the RemoveMailbox-drain integration test (Task 22.5).
+    #[must_use]
+    pub fn daemon_inbound_dispatch(
+        pool: std::sync::Arc<crate::storage::Pool>,
+        identity: std::sync::Arc<crate::identity::IdentityKey>,
+        events_tx: tokio::sync::broadcast::Sender<crate::daemon::events::Event>,
+    ) -> std::sync::Arc<dyn crate::delivery::InboundDispatch> {
+        let inbound = crate::daemon::inbound::DaemonInbound::new(pool, events_tx);
+        inbound.set_identity(identity);
+        std::sync::Arc::new(inbound)
+    }
+
+    /// Test-only setter that injects a shared inbound dispatcher into a
+    /// `DaemonHandle`, mirroring the `handle.set_inbound(...)` call made
+    /// in `Daemon::run`. Lets the RemoveMailbox-drain integration test
+    /// give the handle a real dispatcher (Task 22.5).
+    pub fn daemon_handle_set_inbound<S>(
+        handle: &mut crate::daemon::handle::DaemonHandle<S>,
+        inbound: std::sync::Arc<dyn crate::delivery::InboundDispatch>,
+    ) where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        handle.set_inbound(inbound);
+    }
+
     /// Public mirror of the crate-private `PollerCtrl` enum. The
     /// `daemon_handle_with_mailbox` helper translates between the two so
     /// integration tests can observe scheduler notifications without

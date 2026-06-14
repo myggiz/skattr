@@ -113,6 +113,11 @@ where
     /// receive on one group serialize on the same lock. See
     /// [`GroupLockRegistry`].
     pub(crate) group_locks: GroupLockRegistry,
+    /// The inbound MLS dispatcher, shared with the delivery hub and accept
+    /// loop. `Some` in production (`run_with_transport`), `None` in handle
+    /// unit tests. Used by the RemoveMailbox drain to dispatch held deposits
+    /// before finalizing removal.
+    pub(crate) inbound: Option<Arc<dyn crate::delivery::peer::InboundDispatch>>,
 }
 
 impl<S> DaemonHandle<S>
@@ -150,6 +155,7 @@ where
             config_path: std::path::PathBuf::from("/dev/null"),
             log_sink: LogSink::default(),
             group_locks: new_group_lock_registry(),
+            inbound: None,
         }
     }
 
@@ -178,6 +184,7 @@ where
             config_path,
             log_sink: LogSink::default(),
             group_locks: new_group_lock_registry(),
+            inbound: None,
         }
     }
 
@@ -213,6 +220,7 @@ where
             config_path: std::path::PathBuf::from("/dev/null"),
             log_sink: LogSink::default(),
             group_locks: new_group_lock_registry(),
+            inbound: None,
         }
     }
 
@@ -242,6 +250,13 @@ where
     /// separate maps and a concurrent send/receive race would persist.
     pub(crate) fn set_group_locks(&mut self, registry: GroupLockRegistry) {
         self.group_locks = registry;
+    }
+
+    /// Inject the shared inbound MLS dispatcher. Called by `Daemon::run` so the
+    /// RemoveMailbox drain can dispatch held deposits into local storage before
+    /// finalizing removal.
+    pub(crate) fn set_inbound(&mut self, inbound: Arc<dyn crate::delivery::peer::InboundDispatch>) {
+        self.inbound = Some(inbound);
     }
 
     /// Snapshot the latest cached `TorStatus`. Non-blocking RwLock read.
@@ -331,6 +346,7 @@ where
             config_path: self.config_path.clone(),
             log_sink: self.log_sink.clone(),
             group_locks: self.group_locks.clone(),
+            inbound: self.inbound.clone(),
         }
     }
 }
