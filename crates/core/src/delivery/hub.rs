@@ -273,33 +273,16 @@ where
         let _ = ctrl_tx.send(PeerCtrl::ReplaceConn(Box::new(conn))).await;
     }
 
-    /// Dial `peer`, ingest the resulting connection (so the per-peer actor
-    /// reuses it for the Welcome + messages), and return the connection's
-    /// `h_transport` for the caller to bind into the genesis MLS Commit
-    /// (ADR 0009). Errors if no dialer is wired or the dial fails.
+    /// Dial `peer` by a caller-supplied `onion` (e.g. from an invite card,
+    /// before the inviter's `ContactCard` is persisted), ingest the resulting
+    /// connection, and return its `h_transport` for the caller to bind into the
+    /// genesis MLS Commit (ADR 0009). Used by first-contact `add_contact`, where
+    /// the card is written inside the same transaction as the genesis group,
+    /// *after* this dial succeeds — full add_contact atomicity (T2-1). Errors if
+    /// no dialer is wired or the dial fails.
     ///
-    /// The `dialer` `Arc` is cloned because `dial` borrows `&self` across the
+    /// The `dialer` `Arc` is cloned because `dial_at` borrows `&self` across the
     /// `.await`; cloning avoids holding a borrow of `self.dialer`.
-    pub(crate) async fn connect_and_ingest(
-        &self,
-        peer: PublicKey,
-    ) -> Result<zeroize::Zeroizing<[u8; 32]>> {
-        let dialer = self.dialer.clone().ok_or_else(|| {
-            crate::error::CoreError::Delivery(crate::delivery::DeliveryErrorKind::Other(
-                "no dialer wired".into(),
-            ))
-        })?;
-        let (conn, h_transport) = dialer.dial(peer).await?;
-        self.ingest(peer, conn).await;
-        Ok(h_transport)
-    }
-
-    /// Like [`connect_and_ingest`](Self::connect_and_ingest), but dials a
-    /// caller-supplied `onion` (e.g. from an invite card) instead of resolving
-    /// via `latest_card`. Used by first-contact `add_contact`, where the
-    /// inviter's `ContactCard` is not yet persisted (it is written inside the
-    /// same transaction as the genesis group, *after* this dial succeeds — full
-    /// add_contact atomicity, T2-1).
     pub(crate) async fn connect_and_ingest_at(
         &self,
         peer: PublicKey,
