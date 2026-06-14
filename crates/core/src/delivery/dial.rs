@@ -41,6 +41,20 @@ where
         AuthenticatedConnection<S>,
         zeroize::Zeroizing<[u8; 32]>,
     )>;
+
+    /// Like [`dial`](Self::dial), but uses a caller-supplied `onion` instead of
+    /// resolving via `latest_card`. Used by first-contact `add_contact`, where
+    /// the inviter's onion lives in the invite card and its `ContactCard` is not
+    /// persisted until *after* a successful dial (full add_contact atomicity,
+    /// T2-1) — so `latest_card` would find nothing.
+    async fn dial_at(
+        &self,
+        peer: PublicKey,
+        onion: &str,
+    ) -> Result<(
+        AuthenticatedConnection<S>,
+        zeroize::Zeroizing<[u8; 32]>,
+    )>;
 }
 
 /// Production [`OutboundDial`] backed by a real [`Transport`]. Resolves
@@ -61,6 +75,35 @@ impl<T: Transport> TransportDial<T> {
             pool,
         }
     }
+
+    /// Shared "dial onion + Noise_XK initiator handshake" core for both
+    /// [`OutboundDial::dial`] (which resolves the onion via `latest_card`) and
+    /// [`OutboundDial::dial_at`] (which is handed the onion directly). Returns
+    /// the authenticated connection plus the handshake's `h_transport` binding
+    /// value (ADR 0009).
+    async fn dial_onion(
+        &self,
+        peer: PublicKey,
+        onion: &str,
+    ) -> Result<(
+        AuthenticatedConnection<T::Stream>,
+        zeroize::Zeroizing<[u8; 32]>,
+    )> {
+        let stream =
+            match tokio::time::timeout(DIAL_TIMEOUT, self.transport.dial(onion, ONION_PORT)).await {
+                Ok(res) => res?,
+                Err(_) => return Err(CoreError::Delivery(DeliveryErrorKind::Timeout)),
+            };
+        let verifying = ed25519_dalek::VerifyingKey::from_bytes(&peer.0).map_err(|_| {
+            CoreError::Delivery(DeliveryErrorKind::Other(
+                "no route to peer: malformed peer identity key".into(),
+            ))
+        })?;
+        let peer_x25519 = crate::identity::key::ed25519_pub_to_x25519(&verifying);
+        let (conn, outcome) =
+            handshake_initiator(stream, &self.identity, &peer_x25519, None).await?;
+        Ok((conn, outcome.h_transport))
+    }
 }
 
 #[async_trait::async_trait]
@@ -80,21 +123,18 @@ impl<T: Transport> OutboundDial<T::Stream> for TransportDial<T> {
                 ))
             })?;
         let onion = card.body.onion.clone();
-        let stream =
-            match tokio::time::timeout(DIAL_TIMEOUT, self.transport.dial(&onion, ONION_PORT)).await
-            {
-                Ok(res) => res?,
-                Err(_) => return Err(CoreError::Delivery(DeliveryErrorKind::Timeout)),
-            };
-        let verifying = ed25519_dalek::VerifyingKey::from_bytes(&peer.0).map_err(|_| {
-            CoreError::Delivery(DeliveryErrorKind::Other(
-                "no route to peer: malformed peer identity key".into(),
-            ))
-        })?;
-        let peer_x25519 = crate::identity::key::ed25519_pub_to_x25519(&verifying);
-        let (conn, outcome) =
-            handshake_initiator(stream, &self.identity, &peer_x25519, None).await?;
-        Ok((conn, outcome.h_transport))
+        self.dial_onion(peer, &onion).await
+    }
+
+    async fn dial_at(
+        &self,
+        peer: PublicKey,
+        onion: &str,
+    ) -> Result<(
+        AuthenticatedConnection<T::Stream>,
+        zeroize::Zeroizing<[u8; 32]>,
+    )> {
+        self.dial_onion(peer, onion).await
     }
 }
 
@@ -113,11 +153,9 @@ mod tests {
     /// test only proves the actor dials when cold and delivers a frame.
     struct OneShotDialer(StdMutex<Option<AuthenticatedConnection<DuplexStream>>>);
 
-    #[async_trait::async_trait]
-    impl OutboundDial<DuplexStream> for OneShotDialer {
-        async fn dial(
+    impl OneShotDialer {
+        fn take_one(
             &self,
-            _peer: PublicKey,
         ) -> Result<(
             AuthenticatedConnection<DuplexStream>,
             zeroize::Zeroizing<[u8; 32]>,
@@ -130,6 +168,30 @@ mod tests {
                 .ok_or_else(|| {
                     CoreError::Delivery(DeliveryErrorKind::Other("oneshot exhausted".into()))
                 })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl OutboundDial<DuplexStream> for OneShotDialer {
+        async fn dial(
+            &self,
+            _peer: PublicKey,
+        ) -> Result<(
+            AuthenticatedConnection<DuplexStream>,
+            zeroize::Zeroizing<[u8; 32]>,
+        )> {
+            self.take_one()
+        }
+
+        async fn dial_at(
+            &self,
+            _peer: PublicKey,
+            _onion: &str,
+        ) -> Result<(
+            AuthenticatedConnection<DuplexStream>,
+            zeroize::Zeroizing<[u8; 32]>,
+        )> {
+            self.take_one()
         }
     }
 

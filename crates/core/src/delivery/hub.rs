@@ -294,6 +294,27 @@ where
         Ok(h_transport)
     }
 
+    /// Like [`connect_and_ingest`](Self::connect_and_ingest), but dials a
+    /// caller-supplied `onion` (e.g. from an invite card) instead of resolving
+    /// via `latest_card`. Used by first-contact `add_contact`, where the
+    /// inviter's `ContactCard` is not yet persisted (it is written inside the
+    /// same transaction as the genesis group, *after* this dial succeeds — full
+    /// add_contact atomicity, T2-1).
+    pub(crate) async fn connect_and_ingest_at(
+        &self,
+        peer: PublicKey,
+        onion: &str,
+    ) -> Result<zeroize::Zeroizing<[u8; 32]>> {
+        let dialer = self.dialer.clone().ok_or_else(|| {
+            crate::error::CoreError::Delivery(crate::delivery::DeliveryErrorKind::Other(
+                "no dialer wired".into(),
+            ))
+        })?;
+        let (conn, h_transport) = dialer.dial_at(peer, onion).await?;
+        self.ingest(peer, conn).await;
+        Ok(h_transport)
+    }
+
     /// Whether a per-peer actor currently exists for `peer`. Used by the
     /// accept-loop test to assert an unknown peer was NOT ingested.
     pub(crate) async fn has_peer(&self, peer: &PublicKey) -> bool {

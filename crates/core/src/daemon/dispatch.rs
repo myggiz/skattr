@@ -322,20 +322,31 @@ where
     let invitee_kp = KeyPackage::from_bytes(&link.body.key_package).map_err(map_err)?;
     let kp_ref = crate::mls::key_package::key_package_ref(&invitee_kp).map_err(map_err)?;
 
-    // Persist the inviter's contact row + verified card BEFORE the dial: the
-    // dialer resolves the inviter's onion via ContactRepo::latest_card (ADR
-    // 0008), so the card must already be in the store for connect_and_ingest
-    // to find a route. Verify is defense-in-depth: the outer link signature
-    // already authenticates the card bytes, but verifying the card's own
-    // signature + expiry keeps a self-inconsistent or stale card out of the
-    // store. These writes are outside the single-use critical section. A normal
-    // re-submit never reaches them twice (the fast-path is_consumed check above
-    // short-circuits to InviteConsumed). KNOWN LIMITATION: a crash in the narrow
-    // window between this put_card committing and the txn below marking the
-    // invite consumed is not gracefully resumable — a retry's put_card rejects
-    // "stale version" (single-use is still preserved: zero second groups). A
-    // fully-atomic alternative (resolve the onion from the in-invite card so
-    // put_card moves inside the txn) is a follow-up that touches ADR 0008.
+    // Verify the inviter's card BEFORE the dial. This is a pure check (no write):
+    // the outer link signature already authenticates the card bytes, but
+    // verifying the card's own signature + expiry keeps a self-inconsistent or
+    // stale card out of the store. No DB write happens here, so a failure leaves
+    // the store untouched.
+    link.body.card.verify(now).map_err(map_err)?;
+
+    // Dial the inviter FIRST (ADR 0009, T1-1) — by the onion embedded in the
+    // invite card, NOT via ContactRepo::latest_card. Dialing the in-invite onion
+    // means the inviter's card no longer has to be persisted before the dial, so
+    // ALL writes (contact, card, group, group_id, mark_consumed) can move into
+    // the single transaction below. Full add_contact atomicity (T2-1): a dial
+    // failure (inviter offline / Tor flaky — common) leaves ZERO writes, so a
+    // retry is clean and idempotent (no stranded contact, no stale-version retry
+    // wall). The genesis Commit binds to this connection's h_transport (the
+    // second external PSK below), and the per-peer actor reuses this one
+    // connection for the Welcome (no second dial). The dial is MANDATORY —
+    // first contact requires the connection anyway (to deliver the Welcome).
+    let inviter_onion = link.body.card.body.onion.clone();
+    let h_transport = handle
+        .hub
+        .connect_and_ingest_at(inviter, &inviter_onion)
+        .await
+        .map_err(map_err)?;
+
     let contact_repo = ContactRepo::new(&handle.pool);
     let contact = Contact {
         identity: inviter,
@@ -344,17 +355,6 @@ where
         card: None,
         muted: false,
     };
-    contact_repo.upsert(&contact).map_err(map_err)?;
-    link.body.card.verify(now).map_err(map_err)?;
-    contact_repo.put_card(&link.body.card).map_err(map_err)?;
-
-    // Dial the inviter FIRST (ADR 0009, T1-1): the genesis Commit binds to this
-    // connection's h_transport (the second external PSK below), and the per-peer
-    // actor reuses this one connection for the Welcome (no second dial). The
-    // dial is now MANDATORY — first contact requires the connection anyway (to
-    // deliver the Welcome), and a half-bound first contact (group created but
-    // not transport-bound) is not allowed. A dial failure aborts the add.
-    let h_transport = handle.hub.connect_and_ingest(inviter).await.map_err(map_err)?;
 
     // Build our solo MLS group, then add the inviter as the second member.
     // Both external PSKs (invite + h_transport) are keyed per-invite by the
@@ -379,14 +379,16 @@ where
         .map_err(map_err)?;
     let group_id = group.id().0.clone();
 
-    // Single-use atomicity (T2-1): re-check consumed + save the genesis group +
-    // link the group_id + mark the invite consumed, ALL in one transaction.
-    // The re-check inside the tx is the load-bearing guarantee: two concurrent
-    // (or re-submitted) AddContacts cannot both pass it, so an invite can never
-    // create two groups. The inviter card was already persisted above (outside
-    // the tx, for onion resolution); the dial happened above (async, before the
-    // sync tx). On a re-submit the second caller sees consumed=true here and
-    // returns InviteConsumed without writing a second group.
+    // Full atomicity (T2-1): re-check consumed + upsert the inviter contact +
+    // persist the verified card + save the genesis group + link the group_id +
+    // mark the invite consumed, ALL in one transaction. Because the dial above
+    // used the in-invite onion (not latest_card), the card no longer has to be
+    // written before the dial — so every write lives here. The re-check inside
+    // the tx is the load-bearing single-use guarantee: two concurrent (or
+    // re-submitted) AddContacts cannot both pass it, so an invite can never
+    // create two groups. On a re-submit the second caller sees consumed=true
+    // here and returns InviteConsumed without writing anything. A dial failure
+    // (above) aborts before this txn, leaving ZERO writes → clean retry.
     let group_repo = MlsGroupRepo::new(&handle.pool);
     handle
         .pool
@@ -394,6 +396,8 @@ where
             if link.is_consumed_in_tx(tx, &kp_repo)? {
                 return Err(CoreError::Invite(crate::invite::InviteErrorKind::Consumed));
             }
+            contact_repo.upsert_in_tx(tx, &contact)?;
+            contact_repo.put_card_in_tx(tx, &link.body.card)?;
             group.save_in_tx(&group_repo, tx)?;
             contact_repo.set_group_id_in_tx(tx, &inviter, &group_id)?;
             link.mark_consumed_in_tx(tx, &kp_repo)?;
@@ -1602,6 +1606,19 @@ mod tests {
 
     #[async_trait::async_trait]
     impl OutboundDial<tokio::io::DuplexStream> for StubDialer {
+        // `dial_at` ignores the supplied onion (the stub has no real transport)
+        // and returns the same canned authenticated connection as `dial`.
+        async fn dial_at(
+            &self,
+            peer: IdPublicKey,
+            _onion: &str,
+        ) -> crate::error::Result<(
+            AuthenticatedConnection<tokio::io::DuplexStream>,
+            zeroize::Zeroizing<[u8; 32]>,
+        )> {
+            self.dial(peer).await
+        }
+
         async fn dial(
             &self,
             _peer: IdPublicKey,
@@ -2010,6 +2027,75 @@ mod tests {
         let group_repo = MlsGroupRepo::new(&handle_b.pool);
         let loaded = Group::load(&GroupId(gid_after_first.clone()), &group_repo).unwrap();
         assert!(loaded.is_some(), "the one genesis group must be persisted");
+    }
+
+    /// T2-1 (full atomicity): a dial failure during `add_contact` must leave
+    /// ZERO writes — no contact row, no card, no group — so a later retry (with
+    /// a working dialer) succeeds cleanly. Before this fix the inviter contact +
+    /// card were persisted BEFORE the (mandatory) dial, so a routine dial
+    /// failure stranded a contact + card and the monotonic-version `put_card`
+    /// guard blocked the natural retry. Now every write lives in one
+    /// transaction that only runs after the dial succeeds.
+    #[tokio::test]
+    async fn add_contact_dial_failure_writes_nothing_then_retry_succeeds() {
+        let handle_a = test_handle();
+        handle_a.set_onion("alice.onion".to_string());
+        let alice_pub = handle_a.identity.public();
+
+        let CommandResult::InviteCreated { url, .. } = execute_command(
+            handle_a.clone(),
+            Command::CreateInvite {
+                nickname: None,
+                ttl_secs: Some(3600),
+            },
+        )
+        .await
+        .unwrap() else {
+            panic!("expected InviteCreated");
+        };
+
+        // Bob's daemon has NO dialer wired → connect_and_ingest_at errors
+        // ("no dialer wired") BEFORE any DB write.
+        let handle_b_nodial = test_handle();
+        let failed = execute_command(
+            handle_b_nodial.clone(),
+            Command::AddContact {
+                invite_url: url.clone(),
+            },
+        )
+        .await;
+        assert!(failed.is_err(), "add_contact must fail when the dial fails");
+
+        // Nothing was written: no contact row, no card, no group_id for Alice.
+        let repo = ContactRepo::new(&handle_b_nodial.pool);
+        assert!(
+            repo.get(&alice_pub).unwrap().is_none(),
+            "dial failure must leave NO contact row (no stranded contact)"
+        );
+        assert!(
+            repo.latest_card(&alice_pub).unwrap().is_none(),
+            "dial failure must leave NO card"
+        );
+
+        // A retry on a fresh daemon WITH a working dialer succeeds cleanly —
+        // proving the invite is still spendable and nothing is stuck. (We use a
+        // fresh daemon because the failed attempt's daemon never persisted the
+        // inbound KP either; the invite URL itself is unconsumed.)
+        let handle_b = test_handle_with_dialer();
+        let ok = execute_command(handle_b.clone(), Command::AddContact { invite_url: url })
+            .await
+            .unwrap();
+        assert!(
+            matches!(ok, CommandResult::ContactAdded(_)),
+            "retry with a working dialer must succeed"
+        );
+        let repo2 = ContactRepo::new(&handle_b.pool);
+        assert!(
+            repo2.get(&alice_pub).unwrap().is_some(),
+            "retry persists the contact"
+        );
+        let gid = repo2.get_group_id(&alice_pub).unwrap().unwrap();
+        assert!(!gid.is_empty(), "retry persists the group_id");
     }
 
     #[tokio::test]
