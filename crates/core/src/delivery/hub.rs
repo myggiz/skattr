@@ -509,6 +509,15 @@ pub(crate) async fn run_mailbox_fallback(
         };
 
         // 3b. Retarget the existing outbox row to this mailbox.
+        //
+        // The row is flipped to mailbox-kind here, before the deposit + delete
+        // below. A mailbox-outbox sweeper tick landing in that window observes
+        // the now-due mailbox-kind row and may deposit the same payload a second
+        // time. This is benign: the recipient dedups on `(sender, envelope_id)`
+        // in the same transaction as the message insert, so a second fetch
+        // resolves to `Duplicate` (no second row, no second event). The only
+        // cost is one extra ciphertext briefly resident on the semi-trusted
+        // mailbox until fetched/deleted.
         if let Err(e) = outbox.set_mailbox_target(row_id, mailbox_id) {
             tracing::warn!(
                 target: "skattr::delivery::hub",
