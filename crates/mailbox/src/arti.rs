@@ -165,8 +165,8 @@ pub async fn run_onion(
                 };
                 let server_per_stream = server_for_task.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = server_per_stream.accept_loop(data_stream).await {
-                        tracing::warn!(error = %e, "mailbox accept_loop returned error");
+                    if let Err(e) = server_per_stream.serve_connection(data_stream).await {
+                        tracing::warn!(error = %e, "mailbox serve_connection returned error");
                     }
                 });
             }

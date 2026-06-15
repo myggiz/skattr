@@ -12,10 +12,19 @@ use crate::storage::{ContactRepo, Pool};
 use crate::transport::{handshake_responder, InboundStreams};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 
 /// Bound on how long an unknown peer has to present its single first-contact
 /// frame before we reject the connection (ADR 0007 carve-out).
 const WELCOME_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Maximum concurrent inbound handshake tasks. Onion-gated +
+/// handshake-timeout-bounded; this caps a flood of simultaneous dials.
+/// Deliberately a const (not config, unlike the mailbox server's
+/// `max_connections`): this is the daemon's own single-user inbound, and 64
+/// simultaneous handshakes behind an onion gate is a generous ceiling.
+const MAX_INFLIGHT_HANDSHAKES: usize = 64;
 
 /// Drive the inbound stream source until it closes. Each accepted stream is
 /// handshaked + resolved on its own task so a slow handshake can't stall the
@@ -29,77 +38,98 @@ pub(crate) async fn run_accept_loop<S>(
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    let sem = Arc::new(Semaphore::new(MAX_INFLIGHT_HANDSHAKES));
+    let mut tasks: JoinSet<()> = JoinSet::new();
     while let Some(stream) = inbound.recv().await {
+        // Reap finished handshake tasks so the JoinSet doesn't grow unbounded.
+        while tasks.try_join_next().is_some() {}
+        // Backpressure: wait for a permit before spawning. acquire_owned only
+        // errors if the semaphore is closed (never here) → stop accepting.
+        let permit = match sem.clone().acquire_owned().await {
+            Ok(p) => p,
+            Err(_) => break,
+        };
         let identity = identity.clone();
         let pool = pool.clone();
         let hub = hub.clone();
         let inbound_dispatch = inbound_dispatch.clone();
-        // TODO(phase-2 transport hardening): each inbound stream spawns a
-        // detached handshake task. It's onion-gated and 30s-timeout-bounded, but
-        // an attacker who knows the onion could open many connections at once.
-        // Bound concurrency with a Semaphore permit acquired before spawn, and
-        // track tasks (JoinSet) so shutdown can drain them. Mirrors the mailbox
-        // server's per-conn/global token buckets (Phase 2.A).
-        tokio::spawn(async move {
-            let (mut conn, outcome) = match handshake_responder(stream, &identity, None).await {
-                Ok(v) => v,
-                Err(e) => {
-                    // `e` is a `TransportErrorKind`-backed `CoreError`. The
-                    // responder never learns the inbound peer's onion, so its
-                    // Display carries only static handshake/timeout text — no
-                    // onion or pubkey to leak.
-                    tracing::warn!(error = %e, "accept: inbound handshake failed");
-                    return;
-                }
-            };
-            match ContactRepo::new(&pool).find_by_noise_x25519(&outcome.peer_x25519) {
-                Ok(Some(peer)) => hub.ingest(peer, conn).await,
-                Ok(None) => {
-                    // Unknown peer: ADR 0007 carve-out. Allow EXACTLY ONE frame
-                    // under a bounded timeout. If it is a first-contact Welcome,
-                    // authenticate + bind + join it; otherwise reject. Nothing
-                    // else from an unknown peer reaches the MLS app pipeline.
-                    match tokio::time::timeout(WELCOME_READ_TIMEOUT, conn.recv()).await {
-                        Ok(Ok(Some(crate::transport::Frame::MlsWelcome(bytes)))) => {
-                            match inbound_dispatch.dispatch_welcome_bootstrap(
-                                &bytes,
-                                &outcome.peer_x25519,
-                                // The responder's h_transport is the SAME Noise
-                                // session's transcript value as the dialing
-                                // committer's, so the genesis binding PSK matches
-                                // on both ends (ADR 0009, T1-1).
-                                Some(&*outcome.h_transport),
-                            ) {
-                                Some(peer) => {
-                                    // ACK so the inviter-side WelcomeJob resolves,
-                                    // then ingest under the derived, binding-
-                                    // verified peer so subsequent app frames flow.
-                                    let ack_id = crate::delivery::peer::welcome_msg_id(&bytes);
-                                    let _ = conn.send(crate::transport::Frame::Ack(ack_id.0)).await;
-                                    hub.ingest(peer, conn).await;
-                                }
-                                None => {
-                                    tracing::warn!(
-                                        "accept: rejected first-contact welcome (invalid or unbound)"
-                                    );
-                                    let _ = conn.close().await;
-                                }
-                            }
+        tasks.spawn(async move {
+            let _permit = permit; // released when the task ends
+            handle_inbound_stream(stream, identity, pool, hub, inbound_dispatch).await;
+        });
+    }
+    // inbound closed (transport shutdown): drain in-flight handshakes.
+    tasks.shutdown().await;
+}
+
+/// Handshake one inbound stream, resolve the peer, and ingest (or run the
+/// ADR 0007 first-contact Welcome carve-out for an unknown peer).
+async fn handle_inbound_stream<S>(
+    stream: S,
+    identity: Arc<IdentityKey>,
+    pool: Arc<Pool>,
+    hub: Arc<DeliveryHub<S>>,
+    inbound_dispatch: Arc<dyn InboundDispatch>,
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (mut conn, outcome) = match handshake_responder(stream, &identity, None).await {
+        Ok(v) => v,
+        Err(e) => {
+            // `e` is a `TransportErrorKind`-backed `CoreError`. The
+            // responder never learns the inbound peer's onion, so its
+            // Display carries only static handshake/timeout text — no
+            // onion or pubkey to leak.
+            tracing::warn!(error = %e, "accept: inbound handshake failed");
+            return;
+        }
+    };
+    match ContactRepo::new(&pool).find_by_noise_x25519(&outcome.peer_x25519) {
+        Ok(Some(peer)) => hub.ingest(peer, conn).await,
+        Ok(None) => {
+            // Unknown peer: ADR 0007 carve-out. Allow EXACTLY ONE frame
+            // under a bounded timeout. If it is a first-contact Welcome,
+            // authenticate + bind + join it; otherwise reject. Nothing
+            // else from an unknown peer reaches the MLS app pipeline.
+            match tokio::time::timeout(WELCOME_READ_TIMEOUT, conn.recv()).await {
+                Ok(Ok(Some(crate::transport::Frame::MlsWelcome(bytes)))) => {
+                    match inbound_dispatch.dispatch_welcome_bootstrap(
+                        &bytes,
+                        &outcome.peer_x25519,
+                        // The responder's h_transport is the SAME Noise
+                        // session's transcript value as the dialing
+                        // committer's, so the genesis binding PSK matches
+                        // on both ends (ADR 0009, T1-1).
+                        Some(&*outcome.h_transport),
+                    ) {
+                        Some(peer) => {
+                            // ACK so the inviter-side WelcomeJob resolves,
+                            // then ingest under the derived, binding-
+                            // verified peer so subsequent app frames flow.
+                            let ack_id = crate::delivery::peer::welcome_msg_id(&bytes);
+                            let _ = conn.send(crate::transport::Frame::Ack(ack_id.0)).await;
+                            hub.ingest(peer, conn).await;
                         }
-                        _ => {
-                            tracing::warn!("accept: rejected inbound connection from unknown peer");
+                        None => {
+                            tracing::warn!(
+                                "accept: rejected first-contact welcome (invalid or unbound)"
+                            );
                             let _ = conn.close().await;
                         }
                     }
                 }
-                Err(e) => {
-                    // Storage error Display: static SQL/`StorageErrorKind` text,
-                    // onion- and secret-free.
-                    tracing::warn!(error = %e, "accept: peer resolution failed");
+                _ => {
+                    tracing::warn!("accept: rejected inbound connection from unknown peer");
                     let _ = conn.close().await;
                 }
             }
-        });
+        }
+        Err(e) => {
+            // Storage error Display: static SQL/`StorageErrorKind` text,
+            // onion- and secret-free.
+            tracing::warn!(error = %e, "accept: peer resolution failed");
+            let _ = conn.close().await;
+        }
     }
 }
 
@@ -120,6 +150,43 @@ mod tests {
         fn dispatch(&self, _peer: PublicKey, _ciphertext: &[u8]) -> Option<MessageId> {
             None
         }
+    }
+
+    #[test]
+    fn max_inflight_is_bounded() {
+        assert!((1..=256).contains(&MAX_INFLIGHT_HANDSHAKES));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn accept_loop_drains_inflight_on_shutdown() {
+        let pool = Arc::new(Pool::in_memory());
+        let me = Arc::new(IdentityKey::generate().unwrap());
+        let hub = Arc::new(DeliveryHub::<tokio::io::DuplexStream>::new(pool.clone()));
+        let (tx, rx) = mpsc::channel::<tokio::io::DuplexStream>(8);
+        let inbound = InboundStreams(rx);
+        let loop_task = tokio::spawn(run_accept_loop(
+            inbound,
+            me.clone(),
+            pool.clone(),
+            hub.clone(),
+            Arc::new(NoopDispatch) as Arc<dyn InboundDispatch>,
+        ));
+        // Feed streams whose peers never complete a handshake (keep the client
+        // ends, send nothing) so handshake tasks are in-flight.
+        let mut held = Vec::new();
+        for _ in 0..4 {
+            let (cli, srv) = tokio::io::duplex(64 * 1024);
+            tx.send(srv).await.unwrap();
+            held.push(cli);
+        }
+        // Close inbound: the loop must exit AND drain its JoinSet — loop_task completes.
+        drop(tx);
+        let res = tokio::time::timeout(std::time::Duration::from_secs(10), loop_task).await;
+        assert!(
+            res.is_ok(),
+            "accept loop must return after inbound closes (JoinSet drained)"
+        );
+        drop(held);
     }
 
     #[tokio::test(flavor = "multi_thread")]

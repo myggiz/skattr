@@ -68,6 +68,11 @@ pub fn error_frame(err: &MailboxError) -> MailboxFrame {
         MailboxError::Policy(PolicyErrorKind::TtlTooShort) => "ttl too short".to_string(),
         MailboxError::Policy(PolicyErrorKind::RateLimited) => "rate limited".to_string(),
         MailboxError::Policy(PolicyErrorKind::RecipientFull) => "recipient full".to_string(),
+        MailboxError::Policy(PolicyErrorKind::ServerFull) => "server full".to_string(),
+        MailboxError::Policy(PolicyErrorKind::RecipientLimit) => "recipient limit".to_string(),
+        MailboxError::Policy(PolicyErrorKind::TooManyDeleteIds) => {
+            "too many delete ids".to_string()
+        }
         MailboxError::Transport(TransportErrorKind::UnsupportedVersion) => {
             "unsupported version".to_string()
         }
@@ -109,6 +114,8 @@ pub fn handle_deposit(
         now,
         expires_at,
         ctx.policy.recipient_cap_bytes,
+        ctx.policy.global_storage_cap_bytes,
+        ctx.policy.max_recipients,
         now,
     )?;
 
@@ -194,6 +201,10 @@ pub fn handle_delete(
     now: i64,
 ) -> Result<MailboxFrame, MailboxError> {
     check_version(body.version)?;
+
+    if body.deposit_ids.len() > ctx.policy.max_delete_ids as usize {
+        return Err(MailboxError::Policy(PolicyErrorKind::TooManyDeleteIds));
+    }
 
     let digest = payload_digest(&(
         body.version,
@@ -377,6 +388,8 @@ mod tests {
                 100,
                 999_999,
                 policy.recipient_cap_bytes,
+                policy.global_storage_cap_bytes,
+                policy.max_recipients,
                 100,
             )
             .unwrap();
@@ -416,5 +429,36 @@ mod tests {
         };
         let err = handle_fetch(&ctx, fetch, 210, 0.0).expect_err("must reject");
         assert_eq!(err.to_wire_code(), ErrorCode::InvalidSignature);
+    }
+
+    #[test]
+    fn delete_rejects_oversize_id_list() {
+        let (store, mut policy, chal, conn, global) = fixture();
+        policy.max_delete_ids = 2;
+        let sk = SigningKey::generate(&mut OsRng);
+        let pk: [u8; 32] = sk.verifying_key().to_bytes();
+        let id_hash: [u8; 32] = sha2::Sha256::digest(pk).into();
+        let nonce = chal.lock().unwrap().issue(id_hash, 200);
+        // 3 ids > cap of 2. Signature need not be valid: the length check
+        // must reject BEFORE auth.
+        let body = Delete {
+            version: PROTOCOL_VERSION,
+            identity_pubkey: pk,
+            nonce,
+            signature: [0u8; 64],
+            deposit_ids: vec![[1u8; 16], [2u8; 16], [3u8; 16]],
+        };
+        let ctx = DispatchCtx {
+            store: &store,
+            policy: &policy,
+            challenges: &chal,
+            conn_rl: &conn,
+            global_rl: &global,
+        };
+        let err = handle_delete(&ctx, body, 210).expect_err("must reject oversize");
+        assert!(matches!(
+            err,
+            MailboxError::Policy(PolicyErrorKind::TooManyDeleteIds)
+        ));
     }
 }

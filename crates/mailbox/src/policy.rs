@@ -29,6 +29,41 @@ pub struct Policy {
     pub per_conn_fetches_per_min: u32,
     /// Server-wide token bucket for Deposits across all connections.
     pub global_deposits_per_min: u32,
+    /// Server-wide ceiling on total stored ciphertext bytes across all
+    /// recipients. Deposits that would exceed it are rejected after
+    /// evicting expired rows (never evicting accepted, non-expired rows).
+    #[serde(default = "default_global_storage_cap_bytes")]
+    pub global_storage_cap_bytes: u64,
+    /// Cap on the number of distinct recipient hashes with stored rows.
+    #[serde(default = "default_max_recipients")]
+    pub max_recipients: u64,
+    /// Per-connection idle read deadline in seconds; an idle connection
+    /// is closed once it elapses.
+    #[serde(default = "default_idle_timeout_secs")]
+    pub idle_timeout_secs: u32,
+    /// Server-wide ceiling on concurrent connections; excess connections
+    /// are shed (closed immediately).
+    #[serde(default = "default_max_connections")]
+    pub max_connections: u32,
+    /// Maximum number of deposit ids accepted in one `Delete`.
+    #[serde(default = "default_max_delete_ids")]
+    pub max_delete_ids: u32,
+}
+
+fn default_global_storage_cap_bytes() -> u64 {
+    4 * 1024 * 1024 * 1024 // 4 GiB
+}
+fn default_max_recipients() -> u64 {
+    100_000
+}
+fn default_idle_timeout_secs() -> u32 {
+    120
+}
+fn default_max_connections() -> u32 {
+    512
+}
+fn default_max_delete_ids() -> u32 {
+    1_024
 }
 
 impl Policy {
@@ -44,6 +79,11 @@ impl Policy {
             per_conn_deposits_per_min: 30,
             per_conn_fetches_per_min: 6,
             global_deposits_per_min: 1_000,
+            global_storage_cap_bytes: default_global_storage_cap_bytes(),
+            max_recipients: default_max_recipients(),
+            idle_timeout_secs: default_idle_timeout_secs(),
+            max_connections: default_max_connections(),
+            max_delete_ids: default_max_delete_ids(),
         }
     }
 

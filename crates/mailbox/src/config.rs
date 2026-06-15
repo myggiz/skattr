@@ -21,6 +21,11 @@
 //! per_conn_deposits_per_min  = 30
 //! per_conn_fetches_per_min   = 6
 //! global_deposits_per_min    = 1000
+//! global_storage_cap_bytes   = 4294967296  # 4 GiB
+//! max_recipients             = 100000
+//! idle_timeout_secs          = 120
+//! max_connections            = 512
+//! max_delete_ids             = 1024
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -132,6 +137,31 @@ impl MailboxConfig {
                 "policy.recipient_cap_bytes < max_deposit_size".into(),
             )));
         }
+        if self.policy.global_storage_cap_bytes < self.policy.recipient_cap_bytes {
+            return Err(MailboxError::Config(ConfigErrorKind::Invalid(
+                "policy.global_storage_cap_bytes < recipient_cap_bytes".into(),
+            )));
+        }
+        if self.policy.max_recipients == 0 {
+            return Err(MailboxError::Config(ConfigErrorKind::Invalid(
+                "policy.max_recipients must be >= 1".into(),
+            )));
+        }
+        if self.policy.idle_timeout_secs == 0 {
+            return Err(MailboxError::Config(ConfigErrorKind::Invalid(
+                "policy.idle_timeout_secs must be >= 1".into(),
+            )));
+        }
+        if self.policy.max_connections == 0 {
+            return Err(MailboxError::Config(ConfigErrorKind::Invalid(
+                "policy.max_connections must be >= 1".into(),
+            )));
+        }
+        if self.policy.max_delete_ids == 0 {
+            return Err(MailboxError::Config(ConfigErrorKind::Invalid(
+                "policy.max_delete_ids must be >= 1".into(),
+            )));
+        }
         Ok(())
     }
 }
@@ -204,6 +234,54 @@ recipient_cap_bytes = 268435456
 per_conn_deposits_per_min = 30
 per_conn_fetches_per_min = 6
 global_deposits_per_min = 1000
+"#,
+        );
+        let err = MailboxConfig::load(&path).expect_err("must reject");
+        assert!(matches!(
+            err,
+            MailboxError::Config(ConfigErrorKind::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn omitted_new_caps_use_recommended_defaults() {
+        let path = write_temp_toml(
+            "default-new-caps",
+            r#"
+[server]
+data_dir = "/tmp/skattr-mailbox"
+"#,
+        );
+        let cfg = MailboxConfig::load(&path).unwrap();
+        assert_eq!(cfg.policy.global_storage_cap_bytes, 4_294_967_296);
+        assert_eq!(cfg.policy.max_recipients, 100_000);
+        assert_eq!(cfg.policy.idle_timeout_secs, 120);
+        assert_eq!(cfg.policy.max_connections, 512);
+        assert_eq!(cfg.policy.max_delete_ids, 1_024);
+    }
+
+    #[test]
+    fn rejects_global_cap_below_recipient_cap() {
+        let path = write_temp_toml(
+            "bad-global-cap",
+            r#"
+[server]
+data_dir = "/tmp/skattr-mailbox"
+
+[policy]
+max_deposit_size = 1048576
+min_ttl_secs = 3600
+max_ttl_secs = 2592000
+default_ttl_secs = 604800
+recipient_cap_bytes = 268435456
+per_conn_deposits_per_min = 30
+per_conn_fetches_per_min = 6
+global_deposits_per_min = 1000
+global_storage_cap_bytes = 1024
+max_recipients = 100000
+idle_timeout_secs = 120
+max_connections = 512
+max_delete_ids = 1024
 "#,
         );
         let err = MailboxConfig::load(&path).expect_err("must reject");

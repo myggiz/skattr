@@ -62,9 +62,15 @@ impl Store {
         })
     }
 
-    /// Insert a deposit, enforcing the per-recipient cap atomically.
-    /// Returns the generated `deposit_id` on success or
-    /// [`PolicyErrorKind::RecipientFull`] when the cap can't be made.
+    /// Insert a deposit, enforcing three caps atomically: the per-recipient
+    /// byte cap ([`PolicyErrorKind::RecipientFull`]), the distinct-recipient
+    /// count cap ([`PolicyErrorKind::RecipientLimit`], checked only for a
+    /// brand-new recipient), and the global byte cap
+    /// ([`PolicyErrorKind::ServerFull`]). To make room, only expired rows are
+    /// evicted (oldest first); accepted non-expired rows are never evicted, so
+    /// a cap that can't be satisfied by reclaiming expired space rejects.
+    /// Returns the generated `deposit_id` on success.
+    #[allow(clippy::too_many_arguments)]
     pub fn insert(
         &self,
         recipient_hash: [u8; 32],
@@ -72,6 +78,8 @@ impl Store {
         deposited_at: i64,
         expires_at: i64,
         recipient_cap_bytes: u64,
+        global_storage_cap_bytes: u64,
+        max_recipients: u64,
         now: i64,
     ) -> Result<[u8; 16], MailboxError> {
         let new_len = u64::try_from(ciphertext.len()).unwrap_or(u64::MAX);
@@ -107,6 +115,56 @@ impl Store {
             if existing_bytes + new_len > recipient_cap_bytes {
                 tx.rollback()?;
                 return Err(MailboxError::Policy(PolicyErrorKind::RecipientFull));
+            }
+        }
+
+        // ── recipient-count cap: only when this is a NEW recipient ──
+        let recipient_rows: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM deposits WHERE recipient_hash = ?1",
+                params![recipient_hash.to_vec()],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        if recipient_rows == 0 {
+            // O(n) scan over deposits; acceptable — only runs when this is a
+            // brand-new recipient, gating the distinct-recipient count cap.
+            let distinct: i64 = tx
+                .query_row(
+                    "SELECT COUNT(DISTINCT recipient_hash) FROM deposits",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0);
+            if distinct.max(0) as u64 >= max_recipients {
+                tx.rollback()?;
+                return Err(MailboxError::Policy(PolicyErrorKind::RecipientLimit));
+            }
+        }
+
+        // ── global byte cap: evict expired globally, then reject if still over ──
+        let total: i64 = tx
+            .query_row(
+                "SELECT COALESCE(SUM(LENGTH(ciphertext)), 0) FROM deposits",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        let mut total_bytes = total.max(0) as u64;
+        if total_bytes + new_len > global_storage_cap_bytes {
+            let to_free = (total_bytes + new_len) - global_storage_cap_bytes;
+            evict_expired_global(&tx, to_free, now)?;
+            let after: i64 = tx
+                .query_row(
+                    "SELECT COALESCE(SUM(LENGTH(ciphertext)), 0) FROM deposits",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0);
+            total_bytes = after.max(0) as u64;
+            if total_bytes + new_len > global_storage_cap_bytes {
+                tx.rollback()?;
+                return Err(MailboxError::Policy(PolicyErrorKind::ServerFull));
             }
         }
 
@@ -248,6 +306,32 @@ fn evict_expired_for(
     Ok::<(), MailboxError>(())
 }
 
+fn evict_expired_global(
+    tx: &rusqlite::Transaction<'_>,
+    target_bytes: u64,
+    now: i64,
+) -> Result<(), MailboxError> {
+    let mut stmt = tx.prepare(
+        "SELECT deposit_id, LENGTH(ciphertext) FROM deposits \
+         WHERE expires_at < ?1 ORDER BY deposited_at ASC",
+    )?;
+    let candidates: Vec<(Vec<u8>, i64)> = stmt
+        .query_map(params![now], |r| {
+            Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+    let mut freed: u64 = 0;
+    for (id, bytes) in candidates {
+        tx.execute("DELETE FROM deposits WHERE deposit_id = ?1", params![id])?;
+        freed = freed.saturating_add(u64::try_from(bytes).unwrap_or(0));
+        if freed >= target_bytes {
+            break;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -261,7 +345,7 @@ mod tests {
     fn insert_and_fetch_round_trip() {
         let s = Store::in_memory().unwrap();
         let id = s
-            .insert(REC_A, vec![1, 2, 3], 100, 200, ONE_GB, 50)
+            .insert(REC_A, vec![1, 2, 3], 100, 200, ONE_GB, ONE_GB, 100, 50)
             .unwrap();
         let rows = s.fetch(REC_A, 150).unwrap();
         assert_eq!(rows.len(), 1);
@@ -273,23 +357,30 @@ mod tests {
     #[test]
     fn fetch_skips_expired_rows() {
         let s = Store::in_memory().unwrap();
-        s.insert(REC_A, vec![9], 100, 110, ONE_GB, 50).unwrap();
+        s.insert(REC_A, vec![9], 100, 110, ONE_GB, ONE_GB, 100, 50)
+            .unwrap();
         assert_eq!(s.fetch(REC_A, 200).unwrap().len(), 0);
     }
 
     #[test]
     fn fetch_is_per_recipient() {
         let s = Store::in_memory().unwrap();
-        s.insert(REC_A, vec![1], 100, 999_999, ONE_GB, 50).unwrap();
-        s.insert(REC_B, vec![2], 100, 999_999, ONE_GB, 50).unwrap();
+        s.insert(REC_A, vec![1], 100, 999_999, ONE_GB, ONE_GB, 100, 50)
+            .unwrap();
+        s.insert(REC_B, vec![2], 100, 999_999, ONE_GB, ONE_GB, 100, 50)
+            .unwrap();
         assert_eq!(s.fetch(REC_A, 150).unwrap().len(), 1);
     }
 
     #[test]
     fn delete_returns_counts_and_is_recipient_scoped() {
         let s = Store::in_memory().unwrap();
-        let id_a = s.insert(REC_A, vec![1; 4], 100, 200, ONE_GB, 50).unwrap();
-        let id_b = s.insert(REC_B, vec![2; 4], 100, 200, ONE_GB, 50).unwrap();
+        let id_a = s
+            .insert(REC_A, vec![1; 4], 100, 200, ONE_GB, ONE_GB, 100, 50)
+            .unwrap();
+        let id_b = s
+            .insert(REC_B, vec![2; 4], 100, 200, ONE_GB, ONE_GB, 100, 50)
+            .unwrap();
         // Try to delete id_b with REC_A's hash: should not match, count as not_found.
         let (deleted, not_found) = s.delete(REC_A, &[id_a, id_b]).unwrap();
         assert_eq!(deleted, 1);
@@ -299,8 +390,10 @@ mod tests {
     #[test]
     fn expire_sweep_removes_only_expired() {
         let s = Store::in_memory().unwrap();
-        s.insert(REC_A, vec![1], 100, 110, ONE_GB, 50).unwrap();
-        s.insert(REC_A, vec![2], 100, 999_999, ONE_GB, 50).unwrap();
+        s.insert(REC_A, vec![1], 100, 110, ONE_GB, ONE_GB, 100, 50)
+            .unwrap();
+        s.insert(REC_A, vec![2], 100, 999_999, ONE_GB, ONE_GB, 100, 50)
+            .unwrap();
         let n = s.expire_sweep(200).unwrap();
         assert_eq!(n, 1);
         assert_eq!(s.fetch(REC_A, 200).unwrap().len(), 1);
@@ -310,10 +403,12 @@ mod tests {
     fn cap_overflow_returns_recipient_full_when_no_evictable_rows() {
         let s = Store::in_memory().unwrap();
         // Two existing non-expired deposits filling the 8-byte cap.
-        s.insert(REC_A, vec![1; 4], 100, 999_999, 8, 50).unwrap();
-        s.insert(REC_A, vec![2; 4], 100, 999_999, 8, 50).unwrap();
+        s.insert(REC_A, vec![1; 4], 100, 999_999, 8, ONE_GB, 100, 50)
+            .unwrap();
+        s.insert(REC_A, vec![2; 4], 100, 999_999, 8, ONE_GB, 100, 50)
+            .unwrap();
         let err = s
-            .insert(REC_A, vec![3; 4], 200, 999_999, 8, 50)
+            .insert(REC_A, vec![3; 4], 200, 999_999, 8, ONE_GB, 100, 50)
             .expect_err("must reject");
         assert!(matches!(
             err,
@@ -325,10 +420,13 @@ mod tests {
     fn cap_overflow_evicts_expired_rows_first() {
         let s = Store::in_memory().unwrap();
         // First deposit expires at 110; cap = 8 bytes.
-        s.insert(REC_A, vec![1; 4], 100, 110, 8, 50).unwrap();
-        s.insert(REC_A, vec![2; 4], 100, 999_999, 8, 50).unwrap();
+        s.insert(REC_A, vec![1; 4], 100, 110, 8, ONE_GB, 100, 50)
+            .unwrap();
+        s.insert(REC_A, vec![2; 4], 100, 999_999, 8, ONE_GB, 100, 50)
+            .unwrap();
         // now=200: first row is expired and gets evicted to make room.
-        s.insert(REC_A, vec![3; 4], 200, 999_999, 8, 200).unwrap();
+        s.insert(REC_A, vec![3; 4], 200, 999_999, 8, ONE_GB, 100, 200)
+            .unwrap();
         let rows = s.fetch(REC_A, 250).unwrap();
         assert_eq!(rows.len(), 2);
         // Surviving rows: the second (pending) and the third (just inserted).
@@ -339,10 +437,49 @@ mod tests {
         let s = Store::in_memory().unwrap();
         assert_eq!(s.storage_bytes().unwrap(), 0);
         let id = s
-            .insert(REC_A, vec![1; 100], 100, 999_999, ONE_GB, 50)
+            .insert(REC_A, vec![1; 100], 100, 999_999, ONE_GB, ONE_GB, 100, 50)
             .unwrap();
         assert_eq!(s.storage_bytes().unwrap(), 100);
         s.delete(REC_A, &[id]).unwrap();
         assert_eq!(s.storage_bytes().unwrap(), 0);
+    }
+
+    #[test]
+    fn global_cap_rejects_after_evicting_expired() {
+        let s = Store::in_memory().unwrap();
+        // global cap = 8 bytes; recipient cap huge so only the global cap bites.
+        s.insert(REC_A, vec![1; 4], 100, 110, ONE_GB, 8, 100, 50)
+            .unwrap();
+        s.insert(REC_B, vec![2; 4], 100, 999_999, ONE_GB, 8, 100, 50)
+            .unwrap();
+        // now=200: REC_A's row is expired → evicted globally to make room.
+        s.insert(REC_A, vec![3; 4], 200, 999_999, ONE_GB, 8, 100, 200)
+            .unwrap();
+        // No expired rows left to evict → ServerFull.
+        let err = s
+            .insert(REC_A, vec![4; 4], 300, 999_999, ONE_GB, 8, 100, 300)
+            .expect_err("must reject");
+        assert!(matches!(
+            err,
+            MailboxError::Policy(PolicyErrorKind::ServerFull)
+        ));
+    }
+
+    #[test]
+    fn recipient_count_cap_rejects_new_recipient() {
+        let s = Store::in_memory().unwrap();
+        // max_recipients = 1: REC_A allowed; REC_B (new distinct recipient) rejected;
+        // a second deposit to EXISTING REC_A still allowed.
+        s.insert(REC_A, vec![1], 100, 999_999, ONE_GB, ONE_GB, 1, 50)
+            .unwrap();
+        let err = s
+            .insert(REC_B, vec![2], 100, 999_999, ONE_GB, ONE_GB, 1, 50)
+            .expect_err("new recipient must be rejected at the limit");
+        assert!(matches!(
+            err,
+            MailboxError::Policy(PolicyErrorKind::RecipientLimit)
+        ));
+        s.insert(REC_A, vec![3], 100, 999_999, ONE_GB, ONE_GB, 1, 50)
+            .unwrap();
     }
 }
