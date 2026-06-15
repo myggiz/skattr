@@ -29,15 +29,69 @@ pub(crate) const ACTIVE_HOLD: Duration = Duration::from_secs(5 * 60);
 /// `Unreachable` and emitting a status change.
 pub(crate) const FAILURE_THRESHOLD: u32 = 5;
 
+/// Per-actor poll cadence (Idle/Active base intervals, Unreachable
+/// ceiling, and Active-hold window).
+///
+/// Production always uses [`PollCadence::default`] — the locked 60 s
+/// Idle / 15 s Active / 5 min ceiling cadence. The only non-default
+/// instance is [`PollCadence::fast`], wired exclusively through the
+/// `test-harness` entrypoint `run_loopback_with_mailbox` so the
+/// end-to-end offline-fallback guardrail does not have to wait a full
+/// 45–75 s idle tick for the recipient to poll. Nothing on the
+/// production path can construct a non-default cadence.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PollCadence {
+    /// Base interval while a mailbox is in the Active (hot) state.
+    pub active_base: Duration,
+    /// Base interval while a mailbox is Idle (cold).
+    pub idle_base: Duration,
+    /// Locked interval while a mailbox is `Unreachable`.
+    pub idle_ceiling: Duration,
+    /// How long a deposit-bearing tick holds the actor in Active.
+    pub active_hold: Duration,
+}
+
+impl Default for PollCadence {
+    fn default() -> Self {
+        Self {
+            active_base: ACTIVE_BASE,
+            idle_base: IDLE_BASE,
+            idle_ceiling: IDLE_CEILING,
+            active_hold: ACTIVE_HOLD,
+        }
+    }
+}
+
+impl PollCadence {
+    /// Test-only fast cadence (sub-second polling) so the cross-crate
+    /// offline-fallback guardrail converges in a few seconds instead of
+    /// a full Idle tick. NEVER reachable from a production build path.
+    #[cfg(feature = "test-harness")]
+    #[must_use]
+    pub fn fast() -> Self {
+        Self {
+            active_base: Duration::from_millis(250),
+            idle_base: Duration::from_millis(250),
+            idle_ceiling: Duration::from_millis(500),
+            active_hold: Duration::from_secs(30),
+        }
+    }
+}
+
 /// Compute the next sleep before the per-mailbox actor's next tick.
 ///
 /// Pure function — Task 14 wraps the per-mailbox actor around it.
 #[must_use]
-pub(crate) fn next_interval(active: bool, unreachable: bool, rng: &mut impl Rng) -> Duration {
+pub(crate) fn next_interval(
+    active: bool,
+    unreachable: bool,
+    cadence: &PollCadence,
+    rng: &mut impl Rng,
+) -> Duration {
     let base = match (active, unreachable) {
-        (_, true) => IDLE_CEILING,
-        (true, false) => ACTIVE_BASE,
-        (false, false) => IDLE_BASE,
+        (_, true) => cadence.idle_ceiling,
+        (true, false) => cadence.active_base,
+        (false, false) => cadence.idle_base,
     };
     let nanos = base.as_nanos() as i128;
     let jitter_range: i128 = nanos / 4; // ±25 %
@@ -193,6 +247,7 @@ impl PollScheduler {
         events: broadcast::Sender<Event>,
         connect_factory: Arc<dyn MailboxConnectFactory>,
         inbound: Option<Arc<dyn crate::delivery::peer::InboundDispatch>>,
+        cadence: PollCadence,
     ) -> Self {
         let (ctrl_tx, ctrl_rx) = mpsc::channel::<PollerCtrl>(16);
         let handle = tokio::spawn(supervisor(
@@ -201,6 +256,7 @@ impl PollScheduler {
             events,
             connect_factory,
             inbound,
+            cadence,
             ctrl_rx,
         ));
         Self {
@@ -227,6 +283,7 @@ async fn supervisor(
     events: broadcast::Sender<Event>,
     connect_factory: Arc<dyn MailboxConnectFactory>,
     inbound: Option<Arc<dyn crate::delivery::peer::InboundDispatch>>,
+    cadence: PollCadence,
     mut ctrl_rx: mpsc::Receiver<PollerCtrl>,
 ) {
     let mut actors: HashMap<i64, ActorEntry> = HashMap::new();
@@ -272,6 +329,7 @@ async fn supervisor(
             events.clone(),
             connect_factory.clone(),
             inbound.clone(),
+            cadence,
         );
         actors.insert(id, entry);
     }
@@ -288,6 +346,7 @@ async fn supervisor(
                         events.clone(),
                         connect_factory.clone(),
                         inbound.clone(),
+                        cadence,
                     );
                     slot.insert(entry);
                 }
@@ -335,6 +394,7 @@ fn spawn_actor(
     events: broadcast::Sender<Event>,
     connect_factory: Arc<dyn MailboxConnectFactory>,
     inbound: Option<Arc<dyn crate::delivery::peer::InboundDispatch>>,
+    cadence: PollCadence,
 ) -> ActorEntry {
     // 4-slot signal mailbox: BumpActive / Shutdown. A small buffer
     // prevents transient backpressure from blocking the supervisor.
@@ -346,6 +406,7 @@ fn spawn_actor(
         events,
         connect_factory,
         inbound,
+        cadence,
         sig_rx,
     ));
     ActorEntry {
@@ -369,6 +430,7 @@ struct ActorEntry {
 ///    / Active-hold timer, hand each fetched deposit to the inbound
 ///    MLS dispatcher.
 /// 3. Status events fire **only on transition**, not every tick.
+#[allow(clippy::too_many_arguments)]
 async fn actor_loop(
     id: i64,
     pool: Arc<Pool>,
@@ -376,6 +438,7 @@ async fn actor_loop(
     events: broadcast::Sender<Event>,
     connect_factory: Arc<dyn MailboxConnectFactory>,
     inbound: Option<Arc<dyn crate::delivery::peer::InboundDispatch>>,
+    cadence: PollCadence,
     mut signal_rx: mpsc::Receiver<ActorSignal>,
 ) {
     use rand::SeedableRng;
@@ -427,7 +490,7 @@ async fn actor_loop(
             .map(|deadline| tokio::time::Instant::now() < deadline)
             .unwrap_or(false);
         let unreachable = matches!(last_status, MailboxStatus::Unreachable);
-        let sleep_for = next_interval(active, unreachable, &mut rng);
+        let sleep_for = next_interval(active, unreachable, &cadence, &mut rng);
 
         tokio::select! {
             biased;
@@ -435,7 +498,7 @@ async fn actor_loop(
                 match sig {
                     Some(ActorSignal::Shutdown) | None => return,
                     Some(ActorSignal::BumpActive) => {
-                        active_until = Some(tokio::time::Instant::now() + ACTIVE_HOLD);
+                        active_until = Some(tokio::time::Instant::now() + cadence.active_hold);
                         // Loop back to recompute sleep with the new
                         // active state without firing an extra tick.
                         continue;
@@ -483,7 +546,7 @@ async fn actor_loop(
                 // fetched. Deposits that fetch but never dispatch (e.g. the
                 // deferred ts-replay poison case) should not keep us hot.
                 if dispatched > 0 {
-                    active_until = Some(tokio::time::Instant::now() + ACTIVE_HOLD);
+                    active_until = Some(tokio::time::Instant::now() + cadence.active_hold);
                 }
                 if !matches!(last_status, MailboxStatus::Reachable) {
                     let _ = MailboxRepo::new(&pool).mark_status(id, MailboxStatus::Reachable);
@@ -565,7 +628,7 @@ mod tests {
     fn active_interval_within_active_band() {
         let mut rng = StdRng::seed_from_u64(7);
         for _ in 0..1000 {
-            let d = next_interval(true, false, &mut rng);
+            let d = next_interval(true, false, &PollCadence::default(), &mut rng);
             assert!(
                 d >= Duration::from_millis(11_250) && d <= Duration::from_millis(18_750),
                 "active out of band: {d:?}"
@@ -577,7 +640,7 @@ mod tests {
     fn idle_interval_within_idle_band() {
         let mut rng = StdRng::seed_from_u64(7);
         for _ in 0..1000 {
-            let d = next_interval(false, false, &mut rng);
+            let d = next_interval(false, false, &PollCadence::default(), &mut rng);
             assert!(
                 d >= Duration::from_millis(45_000) && d <= Duration::from_millis(75_000),
                 "idle out of band: {d:?}"
@@ -589,7 +652,7 @@ mod tests {
     fn unreachable_interval_locks_to_idle_ceiling() {
         let mut rng = StdRng::seed_from_u64(7);
         for _ in 0..100 {
-            let d = next_interval(false, true, &mut rng);
+            let d = next_interval(false, true, &PollCadence::default(), &mut rng);
             assert!(d >= Duration::from_millis(225_000) && d <= Duration::from_millis(375_000));
         }
     }
@@ -599,7 +662,7 @@ mod tests {
         // Even with `active=true`, if the actor is `unreachable=true` the ceiling wins.
         let mut rng = StdRng::seed_from_u64(7);
         for _ in 0..100 {
-            let d = next_interval(true, true, &mut rng);
+            let d = next_interval(true, true, &PollCadence::default(), &mut rng);
             assert!(d >= Duration::from_millis(225_000));
         }
     }
@@ -949,6 +1012,7 @@ mod tests {
             events_tx.clone(),
             factory.clone(),
             None,
+            PollCadence::default(),
         );
 
         // Wait for the event with auto-advancing virtual time. Idle
@@ -997,6 +1061,7 @@ mod tests {
             events_tx.clone(),
             factory.clone(),
             None,
+            PollCadence::default(),
         );
 
         // We need at least FAILURE_THRESHOLD ticks. Each idle tick is
@@ -1050,6 +1115,7 @@ mod tests {
             events_tx.clone(),
             factory.clone(),
             None,
+            PollCadence::default(),
         );
         // Sanity: ctrl sender clone-able.
         let _c = scheduler.ctrl();

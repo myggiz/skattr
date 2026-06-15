@@ -1277,6 +1277,103 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dispatch_mailbox_accepts_old_ts_and_dedups_replays() {
+        // ts-poison guardrail (Phase 2.C Task 2 + Task 7): a mailbox deposit
+        // whose envelope `ts` is far older than the ±1h direct-path replay
+        // window must NOT be rejected (store-and-forward deposits are
+        // legitimately old), and a second dispatch of the SAME ciphertext must
+        // be a dedup no-op — neither re-decryptable nor re-persisted.
+        use crate::contact::Contact;
+        use crate::mls::key_package::KeyPackage;
+        use crate::storage::key_packages::KeyPackageRepo;
+        use crate::storage::{ContactRepo, MessageRepo, MlsGroupRepo};
+
+        let pool = Arc::new(Pool::in_memory());
+        let (events_tx, mut rx) = broadcast::channel::<Event>(16);
+
+        let alice_id =
+            crate::identity::IdentityKey::from_seed(&crate::identity::Seed::generate().unwrap())
+                .unwrap();
+        let bob_id =
+            crate::identity::IdentityKey::from_seed(&crate::identity::Seed::generate().unwrap())
+                .unwrap();
+        let bob_pk = bob_id.public();
+
+        let bob_provider = MlsProvider::new();
+        let kp_repo = KeyPackageRepo::new(&pool);
+        let bob_kp = KeyPackage::generate(&bob_id, &bob_provider, &kp_repo).unwrap();
+        let mut alice_group =
+            crate::mls::Group::create_solo(&alice_id, None, None, MlsProvider::new()).unwrap();
+        let (welcome, _commit) = alice_group.add_member(&bob_kp, None, None).unwrap();
+        let group_id_bytes = alice_group.id().0.clone();
+        let mut bob_group =
+            crate::mls::Group::join_from_welcome(&bob_id, &welcome, None, None, bob_provider)
+                .unwrap();
+        alice_group.save(&MlsGroupRepo::new(&pool)).unwrap();
+
+        let contacts = ContactRepo::new(&pool);
+        contacts
+            .upsert(&Contact {
+                identity: bob_pk,
+                display_name: Some("bob".into()),
+                added_at: 0,
+                card: None,
+                muted: false,
+            })
+            .unwrap();
+        contacts.set_group_id(&bob_pk, &group_id_bytes).unwrap();
+
+        // Bob encrypts with a deliberately OLD ts: 24h before now, far outside
+        // the ±1h window the direct path enforces.
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let old_ts = now_ms - 24 * 3600 * 1000;
+        let env = crate::envelope::Envelope {
+            v: 1,
+            id: MessageId::generate(),
+            ts: old_ts,
+            reply_to: None,
+            kind: Kind::Text {
+                body: "stale-but-valid".into(),
+            },
+        };
+        let expected_id = env.id;
+        let ciphertext = bob_group.encrypt(&env).unwrap();
+
+        let inbound = DaemonInbound::new(pool.clone(), events_tx.clone());
+
+        // First dispatch: old ts is NOT rejected — returns the id + persists.
+        let first = inbound.dispatch_mailbox(&ciphertext);
+        assert_eq!(
+            first,
+            Some(expected_id),
+            "old-ts mailbox deposit must dispatch (ts-window exempt)"
+        );
+        match tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv()).await {
+            Ok(Ok(Event::MessageReceived { contact, record })) => {
+                assert_eq!(contact, bob_pk);
+                assert!(matches!(&record.kind, Kind::Text { body } if body == "stale-but-valid"));
+            }
+            other => panic!("expected MessageReceived, got {other:?}"),
+        }
+
+        // Second dispatch of the SAME ciphertext: dedup no-op (the MLS ratchet
+        // generation is already consumed, so trial-decrypt no longer matches).
+        let second = inbound.dispatch_mailbox(&ciphertext);
+        assert_eq!(second, None, "replayed deposit must be a dedup no-op");
+        match tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await {
+            Err(_timeout) => {} // expected: no second event
+            Ok(other) => panic!("replay must not emit a second event: {other:?}"),
+        }
+
+        // Persisted exactly once across both dispatches.
+        let rows = MessageRepo::new(&pool).recent(&group_id_bytes, 10).unwrap();
+        assert_eq!(rows.len(), 1, "replay must not add a second row");
+    }
+
+    #[tokio::test]
     async fn dispatch_mailbox_trial_decrypts_attributes_sender_and_persists() {
         use crate::contact::Contact;
         use crate::mls::key_package::KeyPackage;
