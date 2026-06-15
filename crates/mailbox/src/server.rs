@@ -12,6 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use futures::{SinkExt, StreamExt};
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::Semaphore;
 use tokio_util::codec::Framed;
 use tracing::{debug, warn};
 
@@ -33,6 +34,7 @@ pub struct MailboxServer {
     policy: Policy,
     challenges: Arc<Mutex<Challenges>>,
     global_rl: GlobalRateLimiter,
+    conn_sem: Arc<Semaphore>,
 }
 
 impl MailboxServer {
@@ -46,6 +48,7 @@ impl MailboxServer {
             policy: policy.clone(),
             challenges: Arc::new(Mutex::new(Challenges::default())),
             global_rl: GlobalRateLimiter::from_policy(&policy, now_secs_f),
+            conn_sem: Arc::new(Semaphore::new(policy.max_connections as usize)),
         }
     }
 
@@ -59,6 +62,31 @@ impl MailboxServer {
     #[must_use]
     pub fn challenges(&self) -> Arc<Mutex<Challenges>> {
         self.challenges.clone()
+    }
+
+    /// Acquire a connection permit (load-shedding) and run [`accept_loop`].
+    /// If the server is at `max_connections`, the connection is shed: the
+    /// stream is dropped (closed) and `Ok(())` returned without serving.
+    pub async fn serve_connection<S>(&self, stream: S) -> Result<(), MailboxError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send,
+    {
+        let _permit = match self.conn_sem.clone().try_acquire_owned() {
+            Ok(p) => p,
+            Err(_) => {
+                debug!("connection shed: server at max_connections");
+                return Ok(());
+            }
+        };
+        self.accept_loop(stream).await
+        // `_permit` released here on return.
+    }
+
+    /// Test-only: take one connection permit so a test can drive the
+    /// at-capacity (shed) path deterministically.
+    #[cfg(test)]
+    pub(crate) fn acquire_permit_for_test(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        self.conn_sem.clone().try_acquire_owned().ok()
     }
 
     /// Drive one client stream until it closes or errors. Per the spec
@@ -168,7 +196,7 @@ fn wall_clock_secs_f() -> f64 {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::panic)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use bytes::BytesMut;
@@ -272,6 +300,36 @@ mod tests {
             Err(_) => panic!("server did not close the idle connection within 5s"),
         }
         let _ = server_task.await;
+    }
+
+    #[tokio::test]
+    async fn serve_connection_sheds_when_at_capacity() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let mut policy = Policy::recommended();
+        policy.max_connections = 1;
+        let mb = MailboxServer::new(store, policy);
+
+        // Hold the only permit so the server is "at capacity".
+        let permit = mb.acquire_permit_for_test().expect("one permit available");
+
+        // A new connection must be shed: serve_connection returns Ok immediately
+        // and drops the stream (client sees EOF) WITHOUT serving frames.
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            mb.serve_connection(server),
+        )
+        .await
+        .expect("serve_connection must return promptly when shedding")
+        .expect("shed path returns Ok");
+
+        let mut framed = Framed::new(client, MailboxFrameCodec::new());
+        assert!(
+            framed.next().await.is_none(),
+            "shed connection must be closed"
+        );
+
+        drop(permit);
     }
 
     #[tokio::test]
