@@ -86,6 +86,7 @@ impl MailboxError {
             MailboxError::Policy(PolicyErrorKind::RecipientFull) => ErrorCode::RecipientFull,
             MailboxError::Policy(PolicyErrorKind::ServerFull) => ErrorCode::RecipientFull,
             MailboxError::Policy(PolicyErrorKind::RecipientLimit) => ErrorCode::RecipientFull,
+            MailboxError::Policy(PolicyErrorKind::TooManyDeleteIds) => ErrorCode::MalformedRequest,
             MailboxError::Storage(StorageErrorKind::NotFound) => ErrorCode::NotFound,
             MailboxError::Transport(TransportErrorKind::DecodeFailed(_)) => {
                 ErrorCode::MalformedRequest
@@ -174,6 +175,9 @@ pub enum PolicyErrorKind {
     /// Rate-limiter mutex was poisoned by a panicking thread.
     #[error("rate limiter mutex poisoned")]
     Poisoned,
+    /// `Delete.deposit_ids` longer than `max_delete_ids`.
+    #[error("too many delete ids")]
+    TooManyDeleteIds,
 }
 
 /// Wire-level failures (codec, framing).
@@ -275,6 +279,10 @@ mod tests {
             (
                 MailboxError::Policy(PolicyErrorKind::RecipientLimit),
                 ErrorCode::RecipientFull,
+            ),
+            (
+                MailboxError::Policy(PolicyErrorKind::TooManyDeleteIds),
+                ErrorCode::MalformedRequest,
             ),
             (
                 MailboxError::Storage(StorageErrorKind::NotFound),
