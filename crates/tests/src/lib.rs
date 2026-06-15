@@ -48,6 +48,8 @@ mod mailbox_codec_parity;
 #[cfg(test)]
 mod mailbox_failover;
 #[cfg(test)]
+mod mailbox_flood;
+#[cfg(test)]
 mod mailbox_harness;
 #[cfg(test)]
 mod mailbox_offline_delivery;
