@@ -13,7 +13,7 @@ use crate::delivery::backoff::backoff;
 use crate::envelope::MessageId;
 use crate::error::Result;
 use crate::identity::PublicKey;
-use crate::storage::outbox::{OutboxRepo, OutboxRow};
+use crate::storage::outbox::{OutboxRepo, OutboxRow, OutboxTargetKind};
 use crate::storage::Pool;
 
 /// A pending outbound delivery.
@@ -29,6 +29,10 @@ pub struct OutboxEntry {
     pub message_id: MessageId,
     /// Retry attempt count (0 on first enqueue).
     pub attempts: u32,
+    /// Whether this row delivers directly to the peer or via a mailbox.
+    pub target_kind: OutboxTargetKind,
+    /// Mailbox row id when `target_kind == Mailbox`; `0` for direct rows.
+    pub mailbox_id: i64,
 }
 
 /// Borrowed view over the outbox backed by a `Pool`.
@@ -96,6 +100,8 @@ fn row_to_entry(row: OutboxRow) -> OutboxEntry {
         payload: row.payload,
         message_id: MessageId(row.message_id),
         attempts: row.attempts,
+        target_kind: row.target_kind,
+        mailbox_id: row.mailbox_id,
     }
 }
 
@@ -146,6 +152,24 @@ mod tests {
         ob.enqueue(&pk(0xAA), mid(0x01), b"p", 100).unwrap();
         assert!(ob.ack(&pk(0xAA), mid(0x01)).unwrap());
         assert!(ob.due(999, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn due_entry_carries_target_kind_and_mailbox_id() {
+        use crate::storage::outbox::{OutboxRepo, OutboxTargetKind};
+        let pool = Pool::in_memory();
+        let repo = OutboxRepo::new(&pool);
+        repo.insert_direct(&[1u8; 32], &[0xAA; 16], b"d", 100)
+            .unwrap();
+        repo.insert_for_mailbox(&[1u8; 32], &[0xBB; 16], 42, b"m", 100)
+            .unwrap();
+        let ob = Outbox::new(&pool);
+        let mut entries = ob.due(200, 10).unwrap();
+        entries.sort_by_key(|e| e.message_id.0);
+        assert_eq!(entries[0].target_kind, OutboxTargetKind::Direct);
+        assert_eq!(entries[0].mailbox_id, 0);
+        assert_eq!(entries[1].target_kind, OutboxTargetKind::Mailbox);
+        assert_eq!(entries[1].mailbox_id, 42);
     }
 
     #[test]

@@ -171,6 +171,26 @@ pub mod test_exports {
     // two-daemon guardrail.
     pub use crate::daemon::state::run_loopback;
 
+    // Phase 2.C Task 7: loopback twin that additionally wires a REAL in-process
+    // mailbox factory + fast poll cadence, for the end-to-end offline-fallback
+    // guardrail (peer offline → direct timeout → mailbox deposit → poll →
+    // receive). Pair an `Arc<dyn TestMailboxFactory>` through
+    // [`mailbox_connect_factory_from_test`] to obtain the
+    // `MailboxConnectFactory` argument.
+    pub use crate::daemon::state::run_loopback_with_mailbox;
+
+    /// Adapt a cross-crate [`TestMailboxFactory`] into the crate-private
+    /// `MailboxConnectFactory` the daemon assembly consumes, so the
+    /// offline-fallback guardrail can hand its in-process mailbox factory to
+    /// [`run_loopback_with_mailbox`]. Wraps the existing [`TestFactoryBridge`].
+    #[must_use]
+    #[allow(private_interfaces)]
+    pub fn mailbox_connect_factory_from_test(
+        factory: std::sync::Arc<dyn TestMailboxFactory>,
+    ) -> std::sync::Arc<dyn crate::mailbox::poll::MailboxConnectFactory> {
+        std::sync::Arc::new(TestFactoryBridge::new(factory))
+    }
+
     /// Phase 1B Task 10: seed two on-disk vaults as *already-established*
     /// mutual contacts so the bidirectional-delivery guardrail can skip the
     /// (deferred-to-1C) invite→add→Welcome handshake and exercise the
@@ -278,6 +298,121 @@ pub mod test_exports {
         drop(pool_a);
         drop(pool_b);
         Ok(())
+    }
+
+    /// Phase 2.C Task 7: seed two on-disk vaults as established contacts for
+    /// the offline-fallback guardrail. Mirrors [`seed_established_pair`] but
+    /// makes Bob DIRECT-UNREACHABLE from Alice while leaving his mailbox
+    /// poll path alive:
+    ///
+    /// - Alice's `ContactCard` for Bob advertises `bob_direct_onion`
+    ///   (deliberately NOT registered on the `LoopbackNet`, so every direct
+    ///   dial fails) AND `mailbox_onion` in its mailbox list (so the
+    ///   per-peer fallback trigger has somewhere to deposit).
+    /// - Bob's `ContactCard` for Alice advertises `alice_onion` (registered),
+    ///   so Bob→Alice direct delivery would work (unused here, but keeps the
+    ///   pair symmetric and the seeding honest).
+    /// - Bob gets a `'mine'` mailbox row pointing at `mailbox_onion`, flipped
+    ///   `Reachable`, so his `PollScheduler` spawns an actor at boot.
+    ///
+    /// Returns `(alice_pub, bob_pub)` for the test's send/subscribe wiring.
+    #[allow(clippy::missing_panics_doc, clippy::too_many_arguments)]
+    pub fn seed_offline_pair(
+        data_dir_a: &std::path::Path,
+        data_dir_b: &std::path::Path,
+        passphrase: &zeroize::Zeroizing<String>,
+        alice_onion: &str,
+        bob_direct_onion: &str,
+        mailbox_onion: &str,
+    ) -> crate::error::Result<(crate::identity::PublicKey, crate::identity::PublicKey)> {
+        use crate::contact::{Contact, ContactCard};
+        use crate::identity::derive::derive_storage_seed;
+        use crate::identity::vault::Vault;
+        use crate::mls::{Group, KeyPackage, MlsProvider};
+        use crate::storage::{
+            ContactRepo, KeyPackageRepo, MailboxRepo, MailboxStatus, MlsGroupRepo, Pool,
+        };
+
+        let vault_path_a = data_dir_a.join("identity.vault");
+        let vault_path_b = data_dir_b.join("identity.vault");
+
+        let (_va_seed, id_a_for_seed) = Vault::open(&vault_path_a, passphrase.as_str())?;
+        let seed_a = derive_storage_seed(id_a_for_seed)?;
+        let (_va, alice_id) = Vault::open(&vault_path_a, passphrase.as_str())?;
+
+        let (_vb_seed, id_b_for_seed) = Vault::open(&vault_path_b, passphrase.as_str())?;
+        let seed_b = derive_storage_seed(id_b_for_seed)?;
+        let (_vb, bob_id) = Vault::open(&vault_path_b, passphrase.as_str())?;
+
+        let alice_pub = alice_id.public();
+        let bob_pub = bob_id.public();
+
+        let pool_a = Pool::open(data_dir_a, &seed_a)?;
+        let pool_b = Pool::open(data_dir_b, &seed_b)?;
+
+        // Shared 2-member MLS group with the REAL identities.
+        let bob_provider = MlsProvider::new();
+        let bob_kp = KeyPackage::generate(&bob_id, &bob_provider, &KeyPackageRepo::new(&pool_b))?;
+        let mut alice_group = Group::create_solo(&alice_id, None, None, MlsProvider::new())?;
+        let (welcome, _commit) = alice_group.add_member(&bob_kp, None, None)?;
+        let gid = alice_group.id().0.clone();
+        let bob_group = Group::join_from_welcome(&bob_id, &welcome, None, None, bob_provider)?;
+        alice_group.save(&MlsGroupRepo::new(&pool_a))?;
+        bob_group.save(&MlsGroupRepo::new(&pool_b))?;
+
+        let now = crate::daemon::clock::now_unix_seconds();
+
+        // Mutual contact rows + group link.
+        let contacts_a = ContactRepo::new(&pool_a);
+        contacts_a.upsert(&Contact {
+            identity: bob_pub,
+            display_name: Some("Bob".to_string()),
+            added_at: now,
+            card: None,
+            muted: false,
+        })?;
+        contacts_a.set_group_id(&bob_pub, &gid)?;
+
+        let contacts_b = ContactRepo::new(&pool_b);
+        contacts_b.upsert(&Contact {
+            identity: alice_pub,
+            display_name: Some("Alice".to_string()),
+            added_at: now,
+            card: None,
+            muted: false,
+        })?;
+        contacts_b.set_group_id(&alice_pub, &gid)?;
+
+        // Bob's card (in Alice's pool): UNREACHABLE direct onion + a mailbox.
+        let bob_card = ContactCard::sign(
+            &bob_id,
+            bob_direct_onion.to_string(),
+            vec![mailbox_onion.to_string()],
+            1,
+            86_400,
+            now,
+        )?;
+        contacts_a.put_card(&bob_card)?;
+
+        // Alice's card (in Bob's pool): reachable onion, no mailbox.
+        let alice_card = ContactCard::sign(
+            &alice_id,
+            alice_onion.to_string(),
+            Vec::new(),
+            1,
+            86_400,
+            now,
+        )?;
+        contacts_b.put_card(&alice_card)?;
+
+        // Bob owns the mailbox: seed a 'mine' row so his PollScheduler polls it.
+        let mb_repo = MailboxRepo::new(&pool_b);
+        let mb_id = mb_repo.add_mine(mailbox_onion, now)?;
+        mb_repo.mark_status(mb_id, MailboxStatus::Reachable)?;
+
+        drop(pool_a);
+        drop(pool_b);
+        Ok((alice_pub, bob_pub))
     }
 
     // Phase 1.G additions:
@@ -538,6 +673,35 @@ pub mod test_exports {
             pool, hub, identity, events_tx, bridge, priv_tx,
         );
         (std::sync::Arc::new(handle), pub_observer_rx)
+    }
+
+    /// Test-only constructor for a production `DaemonInbound` (the real
+    /// MLS decrypt + persist + emit dispatcher) as an
+    /// `Arc<dyn InboundDispatch>`, with the recipient identity wired so
+    /// `dispatch_mailbox` can trial-decrypt + persist held deposits. Used
+    /// by the RemoveMailbox-drain integration test (Task 22.5).
+    #[must_use]
+    pub fn daemon_inbound_dispatch(
+        pool: std::sync::Arc<crate::storage::Pool>,
+        identity: std::sync::Arc<crate::identity::IdentityKey>,
+        events_tx: tokio::sync::broadcast::Sender<crate::daemon::events::Event>,
+    ) -> std::sync::Arc<dyn crate::delivery::InboundDispatch> {
+        let inbound = crate::daemon::inbound::DaemonInbound::new(pool, events_tx);
+        inbound.set_identity(identity);
+        std::sync::Arc::new(inbound)
+    }
+
+    /// Test-only setter that injects a shared inbound dispatcher into a
+    /// `DaemonHandle`, mirroring the `handle.set_inbound(...)` call made
+    /// in `Daemon::run`. Lets the RemoveMailbox-drain integration test
+    /// give the handle a real dispatcher (Task 22.5).
+    pub fn daemon_handle_set_inbound<S>(
+        handle: &mut crate::daemon::handle::DaemonHandle<S>,
+        inbound: std::sync::Arc<dyn crate::delivery::InboundDispatch>,
+    ) where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        handle.set_inbound(inbound);
     }
 
     /// Public mirror of the crate-private `PollerCtrl` enum. The

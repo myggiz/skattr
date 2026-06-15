@@ -70,8 +70,9 @@ pub(crate) fn receive_in_tx(
     ts_daemon_recv: i64,
     seen: &SeenMessagesRepo<'_>,
     messages: &MessageRepo<'_>,
+    enforce_ts_window: bool,
 ) -> Result<ReceiveOutcome> {
-    if envelope.ts.saturating_sub(now_ms).saturating_abs() > REPLAY_WINDOW_MS {
+    if enforce_ts_window && envelope.ts.saturating_sub(now_ms).saturating_abs() > REPLAY_WINDOW_MS {
         return Ok(ReceiveOutcome::Rejected(format!(
             "ts outside ±1h window: envelope ts={}, now={}",
             envelope.ts, now_ms
@@ -122,6 +123,11 @@ pub(crate) fn receive_in_tx(
 ///   **seconds** since the UNIX epoch. Persisted on the messages row
 ///   and surfaced on the wire in `MessageRecord`; used for retention
 ///   sweeps and diagnostics.
+/// - `enforce_ts_window`: when `true`, reject envelopes whose `ts` falls
+///   outside the ±1h replay window. The live direct path passes `true`;
+///   the mailbox store-and-forward path passes `false` (deposits are
+///   legitimately old, and replay resistance comes from the
+///   `(sender, envelope_id)` dedup + MLS generation + server delete).
 #[allow(clippy::too_many_arguments)]
 pub fn receive(
     sender: &PublicKey,
@@ -132,6 +138,7 @@ pub fn receive(
     ts_daemon_recv: i64,
     seen: &SeenMessagesRepo<'_>,
     messages: &MessageRepo<'_>,
+    enforce_ts_window: bool,
 ) -> Result<ReceiveOutcome> {
     seen.pool().transaction(|tx| {
         receive_in_tx(
@@ -144,6 +151,7 @@ pub fn receive(
             ts_daemon_recv,
             seen,
             messages,
+            enforce_ts_window,
         )
     })
 }
@@ -188,6 +196,7 @@ mod tests {
             1000,
             &seen,
             &msgs,
+            true,
         )
         .unwrap();
         assert!(matches!(out, ReceiveOutcome::New { .. }));
@@ -201,8 +210,19 @@ mod tests {
         let msgs = MessageRepo::new(&pool);
         let sender = PublicKey([0xAA; 32]);
         let e = env(0x01, 1000);
-        receive(&sender, &[0x01; 32], e.clone(), 1000, 0, 1000, &seen, &msgs).unwrap();
-        let out = receive(&sender, &[0x01; 32], e, 1000, 0, 1000, &seen, &msgs).unwrap();
+        receive(
+            &sender,
+            &[0x01; 32],
+            e.clone(),
+            1000,
+            0,
+            1000,
+            &seen,
+            &msgs,
+            true,
+        )
+        .unwrap();
+        let out = receive(&sender, &[0x01; 32], e, 1000, 0, 1000, &seen, &msgs, true).unwrap();
         assert!(matches!(out, ReceiveOutcome::Duplicate));
         let rows = msgs.recent(&[0x01; 32], 10).unwrap();
         assert_eq!(rows.len(), 1, "dup must not insert a second messages row");
@@ -225,6 +245,7 @@ mod tests {
             now,
             &seen,
             &msgs,
+            true,
         )
         .unwrap();
         assert!(matches!(out, ReceiveOutcome::Rejected(_)));
@@ -248,9 +269,38 @@ mod tests {
             now,
             &seen,
             &msgs,
+            true,
         )
         .unwrap();
         assert!(matches!(out, ReceiveOutcome::Rejected(_)));
+    }
+
+    #[test]
+    fn out_of_window_accepted_when_enforcement_disabled() {
+        let pool = Pool::in_memory();
+        let seen = SeenMessagesRepo::new(&pool);
+        let msgs = MessageRepo::new(&pool);
+        let sender = PublicKey([0xAA; 32]);
+        let now = 10_000_000i64;
+        // A legitimately-old store-and-forward deposit: > 1h in the past.
+        let old = now - (REPLAY_WINDOW_MS + 1);
+        let out = receive(
+            &sender,
+            &[0x01; 32],
+            env(0x01, old),
+            now,
+            0,
+            now,
+            &seen,
+            &msgs,
+            false, // mailbox path: ts-window exempt
+        )
+        .unwrap();
+        assert!(
+            matches!(out, ReceiveOutcome::New { .. }),
+            "out-of-window deposit must be accepted when enforcement disabled"
+        );
+        assert!(seen.contains(&sender.0, &[0x01; 16]).unwrap());
     }
 
     #[test]
@@ -275,6 +325,7 @@ mod tests {
             1_700_000_777, // ts_daemon_recv (seconds, local clock)
             &seen,
             &msgs,
+            true,
         )
         .unwrap();
 

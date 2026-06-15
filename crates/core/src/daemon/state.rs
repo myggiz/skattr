@@ -206,6 +206,7 @@ impl Daemon {
             config_arc,
             events_tx,
             mailbox_factory,
+            crate::mailbox::poll::PollCadence::default(),
             resolved_sink,
             sweep_shutdown_tx,
             sweep_handle,
@@ -272,6 +273,7 @@ pub async fn run_with_transport<T>(
     config_arc: Arc<tokio::sync::RwLock<Config>>,
     events_tx: broadcast::Sender<Event>,
     mailbox_factory: Arc<dyn crate::mailbox::poll::MailboxConnectFactory>,
+    poll_cadence: crate::mailbox::poll::PollCadence,
     log_sink: LogSink,
     sweep_shutdown_tx: tokio::sync::watch::Sender<bool>,
     sweep_handle: tokio::task::JoinHandle<()>,
@@ -319,11 +321,19 @@ where
         transport_identity.clone(),
         pool.clone(),
     ));
-    let hub: Arc<DeliveryHub<T::Stream>> = Arc::new(DeliveryHub::new_with_inbound_and_dialer(
-        pool.clone(),
-        inbound.clone(),
-        dialer,
-    ));
+    let fallback_shared = std::sync::Arc::new(crate::delivery::hub::MailboxFallbackShared {
+        factory: mailbox_factory.clone(),
+        events: events_tx.clone(),
+        identity: transport_identity.clone(),
+    });
+    let hub: Arc<DeliveryHub<T::Stream>> =
+        Arc::new(DeliveryHub::new_with_inbound_dialer_and_fallback(
+            pool.clone(),
+            inbound.clone(),
+            dialer,
+            fallback_shared.clone(),
+            std::time::Duration::from_secs(u64::from(config.delivery.direct_timeout_secs)),
+        ));
 
     // Step 4: inbound accept loop — handshake (responder) + resolve + ingest.
     let accept_task = tokio::spawn(crate::daemon::accept::run_accept_loop(
@@ -343,8 +353,30 @@ where
         events_tx.clone(),
         mailbox_factory.clone(),
         Some(inbound.clone()),
+        poll_cadence,
     );
     let poller_ctrl = scheduler.ctrl();
+
+    // Mailbox-outbox sweeper: the single deposit/retry engine for offline
+    // delivery — re-deposits due mailbox-kind outbox rows with failover+backoff.
+    let sweeper_pool = pool.clone();
+    let sweeper_shared = fallback_shared.clone();
+    let mailbox_sweeper_task = tokio::spawn(async move {
+        const SWEEP_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
+        let mut t = tokio::time::interval(SWEEP_EVERY);
+        t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            t.tick().await;
+            let now = crate::daemon::clock::now_unix_millis();
+            crate::delivery::mailbox_sweeper::run_mailbox_sweep(
+                &sweeper_pool,
+                &sweeper_shared,
+                now,
+                32,
+            )
+            .await;
+        }
+    });
 
     // Step 6: DaemonHandle — inject the shared config_arc so SetConfig writes
     // propagate to the retention sweep on the next tick.
@@ -362,6 +394,10 @@ where
     // Share the SAME group-lock registry with the inbound dispatcher (T1-3) so
     // a send and a receive on one group serialize on the same lock.
     handle.set_group_locks(group_locks);
+    // Give the handle the shared inbound dispatcher so the RemoveMailbox drain
+    // can dispatch held deposits into local storage before finalizing removal
+    // (Task 22.5).
+    handle.set_inbound(inbound.clone());
 
     // Log tap: forward every record from the ring buffer's broadcast channel
     // onto the daemon event bus so `EventFilter::Logs` subscribers receive
@@ -444,6 +480,10 @@ where
     // for ArtiTransport), so an in-flight accept can't race the teardown.
     accept_task.abort();
     let _ = accept_task.await;
+    // Stop the mailbox-outbox sweeper before tearing down the transport, for
+    // parity with the accept loop (an in-flight deposit must not race teardown).
+    mailbox_sweeper_task.abort();
+    let _ = mailbox_sweeper_task.await;
     transport.shutdown().await?;
     // Server::drop removes the socket file automatically.
     Ok(())
@@ -530,6 +570,103 @@ pub async fn run_loopback(
         config_arc,
         events_tx,
         mailbox_factory,
+        crate::mailbox::poll::PollCadence::default(),
+        LogSink::default(),
+        sweep_shutdown_tx,
+        sweep_handle,
+        ready,
+        shutdown,
+    )
+    .await
+}
+
+/// Like [`run_loopback`], but wires a REAL `MailboxConnectFactory` (an
+/// in-process mailbox server, supplied by the cross-crate harness) and a
+/// FAST [`PollCadence`](crate::mailbox::poll::PollCadence) so the
+/// end-to-end offline-fallback guardrail (Phase 2.C Task 7) converges in
+/// a few seconds instead of waiting a full 45–75 s production idle tick.
+///
+/// The same `factory` backs BOTH the recipient's `PollScheduler` (fetch)
+/// and the sender's `MailboxFallbackShared` (deposit), exactly as
+/// `run_with_transport` wires the production `ArtiMailboxFactory`. Drives
+/// the unmodified production assembly: per-peer direct-timeout trigger →
+/// `run_mailbox_fallback` deposit → recipient poll → `dispatch_mailbox`.
+///
+/// Production never reaches this entrypoint or `PollCadence::fast` — both
+/// are gated on `feature = "test-harness"`.
+#[cfg(feature = "test-harness")]
+#[allow(clippy::too_many_arguments)]
+pub async fn run_loopback_with_mailbox(
+    data_dir: &Path,
+    passphrase: &zeroize::Zeroizing<String>,
+    config: Config,
+    config_path: std::path::PathBuf,
+    net: crate::transport::LoopbackNet,
+    my_onion: String,
+    test_factory: Arc<dyn crate::test_exports::TestMailboxFactory>,
+    ready: oneshot::Sender<Ready>,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<()> {
+    use crate::storage::Pool;
+
+    // Bridge the public test factory to the crate-private MailboxConnectFactory
+    // the daemon assembly consumes (same adapter `delivery_hub_with_mailbox`
+    // uses). The test crate cannot name the private trait, so the bridge stays
+    // on this side of the boundary.
+    let mailbox_factory: Arc<dyn crate::mailbox::poll::MailboxConnectFactory> =
+        crate::test_exports::mailbox_connect_factory_from_test(test_factory);
+
+    std::fs::create_dir_all(data_dir)?;
+
+    let vault_path = data_dir.join("identity.vault");
+    let (_vault, identity_for_seed) = Vault::open(&vault_path, passphrase.as_str())?;
+    let seed = derive_storage_seed(identity_for_seed)?;
+    let (_vault2, identity) = Vault::open(&vault_path, passphrase.as_str())?;
+    let (_vault3, identity_for_poller) = Vault::open(&vault_path, passphrase.as_str())?;
+    let (_vault4, identity_for_inbound) = Vault::open(&vault_path, passphrase.as_str())?;
+    let (_vault5, identity_for_transport) = Vault::open(&vault_path, passphrase.as_str())?;
+
+    let pool = Arc::new(Pool::open(data_dir, &seed)?);
+
+    match crate::storage::MessageRepo::new(&pool).backfill_body_text() {
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "body_text backfill failed"),
+    }
+    let n = crate::storage::MessageRepo::new(&pool).backfill_envelope_id()?;
+    if n > 0 {
+        tracing::info!(rows = n, "backfilled envelope_id for pre-1.H rows");
+    }
+
+    let config_arc = std::sync::Arc::new(tokio::sync::RwLock::new(config.clone()));
+
+    let (sweep_shutdown_tx, sweep_shutdown_rx) = tokio::sync::watch::channel(false);
+    let sweep_handle = crate::daemon::retention::spawn_sweep(
+        pool.clone(),
+        config_arc.clone(),
+        std::time::Duration::from_secs(3600),
+        sweep_shutdown_rx,
+    );
+
+    let (events_tx, _) = broadcast::channel::<Event>(EVENT_CHANNEL_CAPACITY);
+
+    let transport = Arc::new(crate::transport::LoopbackTransport::new(net, my_onion));
+    let transport_identity = Arc::new(identity_for_transport);
+
+    run_with_transport(
+        transport,
+        pool,
+        identity,
+        identity_for_poller,
+        identity_for_inbound,
+        transport_identity,
+        seed,
+        data_dir,
+        config,
+        config_path,
+        config_arc,
+        events_tx,
+        mailbox_factory,
+        crate::mailbox::poll::PollCadence::fast(),
         LogSink::default(),
         sweep_shutdown_tx,
         sweep_handle,

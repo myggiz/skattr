@@ -56,6 +56,8 @@ mod mailbox_real_tor;
 #[cfg(test)]
 mod mls_pair;
 #[cfg(test)]
+mod offline_fallback;
+#[cfg(test)]
 mod remove_mailbox_drains;
 #[cfg(test)]
 mod rotate_onion_during_offline;

@@ -165,6 +165,7 @@ impl PeerConnection {
     /// provides job + control channels plus an optional inbound-MLS
     /// dispatcher. The actor starts receiving a fresh conn via
     /// `PeerCtrl::ReplaceConn` sent by the hub immediately after spawn.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn spawn<S>(
         peer: PublicKey,
         jobs: mpsc::Receiver<DeliveryJob>,
@@ -173,13 +174,26 @@ impl PeerConnection {
         pool: std::sync::Arc<crate::storage::Pool>,
         inbound: Option<std::sync::Arc<dyn InboundDispatch>>,
         dialer: Option<std::sync::Arc<dyn crate::delivery::dial::OutboundDial<S>>>,
+        direct_timeout: std::time::Duration,
+        fallback: Option<std::sync::Arc<crate::delivery::hub::MailboxFallbackShared>>,
     ) -> PeerHandle
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         tokio::spawn(async move {
-            let _ =
-                full_run::<S>(peer, None, jobs, welcome_jobs, ctrl, pool, inbound, dialer).await;
+            let _ = full_run::<S>(
+                peer,
+                None,
+                jobs,
+                welcome_jobs,
+                ctrl,
+                pool,
+                inbound,
+                dialer,
+                direct_timeout,
+                fallback,
+            )
+            .await;
         })
     }
 
@@ -209,6 +223,8 @@ impl PeerConnection {
                 ctrl_rx,
                 pool,
                 inbound,
+                None,
+                std::time::Duration::from_secs(0),
                 None,
             )
             .await;
@@ -280,12 +296,6 @@ const KEEPALIVE_PERIOD: std::time::Duration = std::time::Duration::from_secs(60)
 const PONG_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 const IDLE_CLOSE: std::time::Duration = std::time::Duration::from_secs(180);
 
-// TODO Task 20.5: wire `direct_timeout_secs` trigger from `PeerConnection`
-// into `DeliveryHub::ensure_mailbox_fallback`. The orchestrator itself ships
-// in Task 20 as a `pub(crate)` API; the timer-driven trigger that fires it
-// after sustained direct-delivery failure is deferred to a follow-up so the
-// orchestrator can be exercised in isolation by Tasks 25/26 first.
-
 /// Full actor (Tasks 8+). `conn` starts as `Some(...)` once the
 /// handshake is complete and may become `None` after an error; the
 /// retry tick is responsible for redialing via the hub in production.
@@ -301,6 +311,8 @@ async fn full_run<S>(
     pool: std::sync::Arc<crate::storage::Pool>,
     inbound: Option<std::sync::Arc<dyn InboundDispatch>>,
     dialer: Option<std::sync::Arc<dyn crate::delivery::dial::OutboundDial<S>>>,
+    direct_timeout: std::time::Duration,
+    fallback: Option<std::sync::Arc<crate::delivery::hub::MailboxFallbackShared>>,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -319,6 +331,13 @@ where
     );
     let mut last_traffic = tokio::time::Instant::now();
     let mut awaiting_pong_since: Option<tokio::time::Instant> = None;
+    // Sustained-direct-failure timer (Task 20.5): armed on the first
+    // failure, cleared on any success. When it has been armed for at least
+    // `direct_timeout`, the retry tick hands the peer's pending direct rows
+    // to the mailbox fallback. Inert when `fallback` is `None` or
+    // `direct_timeout == 0`, so all existing call sites are unaffected.
+    let mut first_failure_at: Option<tokio::time::Instant> = None;
+    let fallback_enabled = fallback.is_some() && direct_timeout > std::time::Duration::ZERO;
 
     loop {
         tokio::select! {
@@ -329,40 +348,48 @@ where
                 // leaves the row in the outbox for the retry tick.
                 if !ensure_conn::<S>(peer, &mut conn, &dialer).await {
                     let _ = job.ack_tx.send(Err(()));
+                    arm_failure(&mut first_failure_at);
                     continue;
                 }
                 let Some(c) = conn.as_mut() else {
                     let _ = job.ack_tx.send(Err(()));
+                    arm_failure(&mut first_failure_at);
                     continue;
                 };
                 if c.send(Frame::MlsApp(job.ciphertext)).await.is_err() {
                     let _ = job.ack_tx.send(Err(()));
                     conn = None;
                     drain_pending(&mut pending);
+                    arm_failure(&mut first_failure_at);
                     continue;
                 }
                 pending.insert(job.message_id, job.ack_tx);
                 last_traffic = tokio::time::Instant::now();
+                first_failure_at = None;
             }
             wj = welcome_jobs.recv() => {
                 let Some(wj) = wj else { break; };
                 let synthetic_id = welcome_msg_id(&wj.welcome_bytes);
                 if !ensure_conn::<S>(peer, &mut conn, &dialer).await {
                     let _ = wj.ack_tx.send(Err(()));
+                    arm_failure(&mut first_failure_at);
                     continue;
                 }
                 let Some(c) = conn.as_mut() else {
                     let _ = wj.ack_tx.send(Err(()));
+                    arm_failure(&mut first_failure_at);
                     continue;
                 };
                 if c.send(Frame::MlsWelcome(wj.welcome_bytes)).await.is_err() {
                     let _ = wj.ack_tx.send(Err(()));
                     conn = None;
                     drain_pending(&mut pending);
+                    arm_failure(&mut first_failure_at);
                     continue;
                 }
                 pending.insert(synthetic_id, wj.ack_tx);
                 last_traffic = tokio::time::Instant::now();
+                first_failure_at = None;
             }
             _ = retry_tick.tick() => {
                 // dial-on-demand happens on the next job send; timer-driven redial is Phase-2 fallback work.
@@ -372,16 +399,52 @@ where
                 for entry in due {
                     if pending.contains_key(&entry.message_id) { continue; }
                     if entry.target != peer { continue; }
+                    if entry.target_kind == crate::storage::outbox::OutboxTargetKind::Mailbox {
+                        continue;
+                    }
                     let Some(c) = conn.as_mut() else { break; };
                     if c.send(Frame::MlsApp(entry.payload.clone())).await.is_err() {
                         conn = None;
                         drain_pending(&mut pending);
+                        arm_failure(&mut first_failure_at);
                         break;
                     }
                     let (tx, _rx) = oneshot::channel::<std::result::Result<(), ()>>();
                     pending.insert(entry.message_id, tx);
                     let _ = ob.reschedule(entry.id, entry.attempts, now);
                     last_traffic = tokio::time::Instant::now();
+                    first_failure_at = None;
+                }
+                // Task 20.5: after sustained UNBROKEN direct failure, hand the
+                // peer's pending direct rows to the mailbox fallback (which
+                // retargets them to a mailbox + attempts the first deposit).
+                // The sweeper owns all subsequent retries, so we disarm here.
+                // No lock guard is held across the `.await` below.
+                if fallback_enabled
+                    && first_failure_at
+                        .map(|t| t.elapsed() >= direct_timeout)
+                        .unwrap_or(false)
+                {
+                    if let Some(shared) = fallback.as_ref() {
+                        // `pending` is empty here: the timer is armed only while sends
+                        // are failing (every successful send clears it; failures drain
+                        // pending), so no in-flight row can be double-handled.
+                        let ob = Outbox::new(&pool);
+                        let now = now_ms();
+                        if let Ok(due) = ob.due(now, 32) {
+                            for e in due.into_iter().filter(|e| {
+                                e.target == peer
+                                    && e.target_kind
+                                        == crate::storage::outbox::OutboxTargetKind::Direct
+                            }) {
+                                crate::delivery::hub::run_mailbox_fallback(
+                                    &pool, shared, peer, e.message_id, e.payload,
+                                )
+                                .await;
+                            }
+                        }
+                    }
+                    first_failure_at = None; // disarm; sweeper owns subsequent retries
                 }
             }
             _ = keepalive_tick.tick() => {
@@ -416,6 +479,10 @@ where
                         conn = Some(*new_conn);
                         last_traffic = tokio::time::Instant::now();
                         awaiting_pong_since = None;
+                        // A fresh conn arrived: the next send may succeed, so
+                        // do not let stale failures from the old conn fire the
+                        // fallback. (Re-armed on the next failure if it recurs.)
+                        first_failure_at = None;
                     }
                     Some(PeerCtrl::Shutdown) | None => break,
                 }
@@ -540,6 +607,14 @@ where
 fn drain_pending(pending: &mut HashMap<MessageId, oneshot::Sender<std::result::Result<(), ()>>>) {
     for (_, tx) in pending.drain() {
         let _ = tx.send(Err(()));
+    }
+}
+
+/// Arm the sustained-direct-failure timer on the first failure of a run of
+/// failures. Idempotent: only records the first failure instant until cleared.
+fn arm_failure(first_failure_at: &mut Option<tokio::time::Instant>) {
+    if first_failure_at.is_none() {
+        *first_failure_at = Some(tokio::time::Instant::now());
     }
 }
 
@@ -821,6 +896,8 @@ mod tests {
                 pool,
                 None,
                 None,
+                std::time::Duration::from_secs(0),
+                None,
             )
             .await;
         });
@@ -849,5 +926,224 @@ mod tests {
             Ok(Ok(Ok(()))) => {}
             other => panic!("expected ACK, got {other:?}"),
         }
+    }
+
+    /// The direct retry tick must skip `target_kind='mailbox'` outbox
+    /// rows: those are routed via the mailbox fallback path, never sent
+    /// as `Frame::MlsApp` over the direct peer connection.
+    /// Task 20.5: sustained UNBROKEN direct-delivery failure must hand the
+    /// peer's pending DIRECT outbox rows to the mailbox fallback, which
+    /// retargets them to a mailbox and deposits. We construct `full_run`
+    /// with NO conn and NO dialer (every send fails → timer arms), a short
+    /// `direct_timeout`, and a `MailboxFallbackShared` whose factory accepts
+    /// the deposit. After the timeout the direct row is no longer Direct
+    /// (either deleted = deposited, or flipped to Mailbox).
+    #[tokio::test]
+    async fn sustained_failure_triggers_mailbox_fallback() {
+        use crate::contact::card::{ContactCard, ContactCardBody};
+        use crate::contact::Contact;
+        use crate::identity::Signature;
+        use crate::mailbox::client::MailboxClient;
+        use crate::mailbox::codec::{MailboxFrame, MailboxFrameCodec};
+        use crate::mailbox::poll::{MailboxConnectFactory, MailboxStream};
+        use crate::mailbox::protocol::DepositOk;
+        use crate::storage::outbox::{OutboxRepo, OutboxTargetKind};
+        use crate::storage::ContactRepo;
+        use futures::{SinkExt, StreamExt};
+        use std::sync::Mutex as StdMutex;
+        use tokio_util::codec::Framed;
+
+        // Inline mailbox server: accept one Deposit, reply DepositOk.
+        async fn deposit_ok_server(server: tokio::io::DuplexStream) {
+            let mut framed = Framed::new(server, MailboxFrameCodec::new());
+            if let Some(Ok(MailboxFrame::Deposit(_))) = framed.next().await {
+                let _ = framed
+                    .send(MailboxFrame::DepositOk(DepositOk {
+                        deposit_id: [0xAB; 16],
+                        expires_at: 9_999,
+                    }))
+                    .await;
+            }
+        }
+
+        // Stub factory: hands out one pre-seeded duplex per onion.
+        struct StubFactory {
+            slots: StdMutex<Vec<tokio::io::DuplexStream>>,
+        }
+        #[async_trait::async_trait]
+        impl MailboxConnectFactory for StubFactory {
+            async fn connect(&self, onion: &str) -> Result<MailboxClient<Box<dyn MailboxStream>>> {
+                let s = self.slots.lock().unwrap().pop();
+                match s {
+                    Some(s) => {
+                        let boxed: Box<dyn MailboxStream> = Box::new(s);
+                        Ok(MailboxClient::from_stream(onion.to_string(), boxed))
+                    }
+                    None => Err(crate::error::CoreError::MailboxClient(
+                        crate::error::MailboxClientErrorKind::Unreachable,
+                    )),
+                }
+            }
+        }
+
+        let pool = std::sync::Arc::new(Pool::in_memory());
+        let peer = PublicKey([0x42; 32]);
+        let mid = [0x11u8; 16];
+
+        // Link a 'theirs' mailbox to the peer via a contact card listing it,
+        // so MailboxRepo::list_for_contact(&peer) returns the onion.
+        let contacts = ContactRepo::new(&pool);
+        contacts
+            .upsert(&Contact {
+                identity: peer,
+                display_name: None,
+                added_at: 0,
+                card: None,
+                muted: false,
+            })
+            .unwrap();
+        contacts
+            .put_card(&ContactCard {
+                body: ContactCardBody {
+                    identity: peer,
+                    onion: "self.onion".into(),
+                    mailboxes: vec!["mb1.onion".into()],
+                    version: 1,
+                    expires_at: 9_999_999_999,
+                },
+                signature: Signature([0u8; 64]),
+            })
+            .unwrap();
+
+        // Seed a due DIRECT outbox row for the peer.
+        OutboxRepo::new(&pool)
+            .insert_direct(&peer.0, &mid, b"ct", 0)
+            .unwrap();
+
+        // Factory that accepts one deposit on mb1.onion.
+        let (client_side, server_side) = tokio::io::duplex(64 * 1024);
+        let server_task = tokio::spawn(deposit_ok_server(server_side));
+        let factory = std::sync::Arc::new(StubFactory {
+            slots: StdMutex::new(vec![client_side]),
+        });
+        let (events_tx, _events_rx) =
+            tokio::sync::broadcast::channel::<crate::daemon::events::Event>(8);
+        let identity = std::sync::Arc::new(IdentityKey::generate().unwrap());
+        let shared = std::sync::Arc::new(crate::delivery::hub::MailboxFallbackShared {
+            factory: factory.clone(),
+            events: events_tx,
+            identity,
+        });
+
+        // Spawn full_run directly: no conn, no dialer → every send fails.
+        let (job_tx, job_rx) = mpsc::channel::<DeliveryJob>(4);
+        let (_welcome_tx, welcome_rx) = mpsc::channel::<WelcomeJob>(4);
+        let (_ctrl_tx, ctrl_rx) = mpsc::channel::<PeerCtrl<tokio::io::DuplexStream>>(4);
+        let run_pool = pool.clone();
+        let handle = tokio::spawn(async move {
+            let _ = super::full_run::<tokio::io::DuplexStream>(
+                peer,
+                None,
+                job_rx,
+                welcome_rx,
+                ctrl_rx,
+                run_pool,
+                None,
+                None,
+                std::time::Duration::from_millis(150),
+                Some(shared),
+            )
+            .await;
+        });
+
+        // Submit a job so the failure timer arms (no conn → ack Err, arm).
+        let (ack_tx, ack_rx) = oneshot::channel::<std::result::Result<(), ()>>();
+        job_tx
+            .send(DeliveryJob {
+                message_id: crate::envelope::MessageId(mid),
+                ciphertext: vec![0xCC],
+                ack_tx,
+            })
+            .await
+            .unwrap();
+        // Job must NACK (no conn).
+        assert!(ack_rx.await.unwrap().is_err());
+
+        // Poll: within ~3s the direct row must no longer be Direct.
+        let mut flipped = false;
+        for _ in 0..30 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let still_direct = OutboxRepo::new(&pool)
+                .find_direct_id(&peer.0, &mid)
+                .unwrap()
+                .is_some();
+            if !still_direct {
+                flipped = true;
+                break;
+            }
+        }
+        assert!(
+            flipped,
+            "sustained direct failure must retarget the direct row via mailbox fallback"
+        );
+
+        handle.abort();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), server_task).await;
+        drop(job_tx);
+    }
+
+    #[tokio::test]
+    async fn retry_tick_skips_mailbox_rows() {
+        use crate::storage::outbox::OutboxRepo;
+
+        let actor_id = IdentityKey::generate().unwrap();
+        let responder_id = IdentityKey::generate().unwrap();
+        let responder_static = responder_id.noise_static_public();
+        let peer = PublicKey(responder_id.public().0);
+
+        let (client_stream, server_stream) = tokio::io::duplex(64 * 1024);
+
+        // Handshakes run concurrently; keep the responder end to read from.
+        let responder_task = tokio::spawn(async move {
+            handshake_responder(server_stream, &responder_id, None)
+                .await
+                .unwrap()
+        });
+        let (actor_conn, _) =
+            handshake_initiator(client_stream, &actor_id, &responder_static, None)
+                .await
+                .unwrap();
+        let (mut responder_conn, _) = responder_task.await.unwrap();
+
+        // Seed a DUE mailbox-kind outbox row targeting the peer.
+        let pool = std::sync::Arc::new(Pool::in_memory());
+        OutboxRepo::new(&pool)
+            .insert_for_mailbox(&peer.0, &[0x01; 16], 7, b"ct", 0)
+            .unwrap();
+
+        let (_job_tx, job_rx) = mpsc::channel::<DeliveryJob>(4);
+        let handle = PeerConnection::spawn_full_for_test(
+            peer,
+            Box::new(actor_conn),
+            job_rx,
+            pool.clone(),
+            None,
+        );
+
+        // Read for longer than one retry tick (1 s). No MlsApp must arrive.
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(1_500),
+            responder_conn.recv(),
+        )
+        .await
+        {
+            Err(_) => { /* timeout: no frame arrived — correct */ }
+            Ok(Ok(Some(Frame::MlsApp(_)))) => {
+                panic!("mailbox-kind row must NOT be sent as direct MlsApp")
+            }
+            Ok(other) => panic!("unexpected frame: {other:?}"),
+        }
+
+        handle.abort();
     }
 }

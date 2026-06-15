@@ -300,6 +300,36 @@ impl<'p> OutboxRepo<'p> {
         })
     }
 
+    /// Due rows with `target_kind='mailbox'`, oldest first, up to `limit`.
+    ///
+    /// `now` and the `next_retry_at` column are in milliseconds — the same
+    /// domain as [`due`]/[`list_due`] (per-peer retry tick + sweeper).
+    pub(crate) fn due_mailbox(&self, now: i64, limit: usize) -> Result<Vec<OutboxRow>> {
+        self.pool.with(|c| {
+            let mut stmt = c
+                .prepare(
+                    "SELECT id, target, payload, message_id, attempts, target_kind, mailbox_id \
+                     FROM outbox WHERE next_retry_at <= ?1 AND target_kind='mailbox' \
+                     ORDER BY next_retry_at LIMIT ?2",
+                )
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!("prepare due_mailbox: {e}")))
+                })?;
+            let rows = stmt
+                .query_map(
+                    rusqlite::params![now, i64::try_from(limit).unwrap_or(i64::MAX)],
+                    Self::map_row,
+                )
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!("query due_mailbox: {e}")))
+                })?;
+            let out: std::result::Result<Vec<_>, _> = rows.collect();
+            out.map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!("collect due_mailbox: {e}")))
+            })
+        })
+    }
+
     // ── mutations ─────────────────────────────────────────────────────────────
 
     /// Look up the row id for an existing direct-delivery row keyed by
@@ -558,6 +588,20 @@ mod tests {
             }
             other => panic!("expected Storage(Other), got {other:?}"),
         }
+    }
+
+    #[test]
+    fn due_mailbox_returns_only_mailbox_kind() {
+        let pool = Pool::in_memory();
+        let repo = OutboxRepo::new(&pool);
+        repo.insert_direct(&[1u8; 32], &[0xAA; 16], b"d", 100)
+            .unwrap();
+        repo.insert_for_mailbox(&[1u8; 32], &[0xBB; 16], 9, b"m", 100)
+            .unwrap();
+        let rows = repo.due_mailbox(200, 10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].target_kind, OutboxTargetKind::Mailbox);
+        assert_eq!(rows[0].mailbox_id, 9);
     }
 
     #[test]
