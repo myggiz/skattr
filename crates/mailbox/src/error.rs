@@ -84,6 +84,8 @@ impl MailboxError {
             MailboxError::Policy(PolicyErrorKind::TtlTooShort) => ErrorCode::TtlTooShort,
             MailboxError::Policy(PolicyErrorKind::RateLimited) => ErrorCode::RateLimited,
             MailboxError::Policy(PolicyErrorKind::RecipientFull) => ErrorCode::RecipientFull,
+            MailboxError::Policy(PolicyErrorKind::ServerFull) => ErrorCode::RecipientFull,
+            MailboxError::Policy(PolicyErrorKind::RecipientLimit) => ErrorCode::RecipientFull,
             MailboxError::Storage(StorageErrorKind::NotFound) => ErrorCode::NotFound,
             MailboxError::Transport(TransportErrorKind::DecodeFailed(_)) => {
                 ErrorCode::MalformedRequest
@@ -163,6 +165,12 @@ pub enum PolicyErrorKind {
     /// Recipient cap reached, no expired rows available to evict.
     #[error("recipient full")]
     RecipientFull,
+    /// Global storage cap reached, no expired rows available to evict.
+    #[error("server full")]
+    ServerFull,
+    /// Distinct-recipient count cap reached (new recipient rejected).
+    #[error("recipient limit")]
+    RecipientLimit,
     /// Rate-limiter mutex was poisoned by a panicking thread.
     #[error("rate limiter mutex poisoned")]
     Poisoned,
@@ -258,6 +266,14 @@ mod tests {
             ),
             (
                 MailboxError::Policy(PolicyErrorKind::RecipientFull),
+                ErrorCode::RecipientFull,
+            ),
+            (
+                MailboxError::Policy(PolicyErrorKind::ServerFull),
+                ErrorCode::RecipientFull,
+            ),
+            (
+                MailboxError::Policy(PolicyErrorKind::RecipientLimit),
                 ErrorCode::RecipientFull,
             ),
             (

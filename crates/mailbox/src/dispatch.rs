@@ -68,6 +68,8 @@ pub fn error_frame(err: &MailboxError) -> MailboxFrame {
         MailboxError::Policy(PolicyErrorKind::TtlTooShort) => "ttl too short".to_string(),
         MailboxError::Policy(PolicyErrorKind::RateLimited) => "rate limited".to_string(),
         MailboxError::Policy(PolicyErrorKind::RecipientFull) => "recipient full".to_string(),
+        MailboxError::Policy(PolicyErrorKind::ServerFull) => "server full".to_string(),
+        MailboxError::Policy(PolicyErrorKind::RecipientLimit) => "recipient limit".to_string(),
         MailboxError::Transport(TransportErrorKind::UnsupportedVersion) => {
             "unsupported version".to_string()
         }
@@ -109,6 +111,8 @@ pub fn handle_deposit(
         now,
         expires_at,
         ctx.policy.recipient_cap_bytes,
+        ctx.policy.global_storage_cap_bytes,
+        ctx.policy.max_recipients,
         now,
     )?;
 
@@ -377,6 +381,8 @@ mod tests {
                 100,
                 999_999,
                 policy.recipient_cap_bytes,
+                policy.global_storage_cap_bytes,
+                policy.max_recipients,
                 100,
             )
             .unwrap();

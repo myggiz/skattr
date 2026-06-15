@@ -14,7 +14,16 @@ async fn concurrent_delete_yields_consistent_counts() {
     let mut ids = Vec::new();
     for _ in 0..50 {
         let id = store
-            .insert(recipient, vec![1, 2, 3], 100, 999_999, 1 << 30, 50)
+            .insert(
+                recipient,
+                vec![1, 2, 3],
+                100,
+                999_999,
+                1 << 30,
+                1 << 30,
+                100,
+                50,
+            )
             .unwrap();
         ids.push(id);
     }
@@ -37,17 +46,17 @@ fn cap_eviction_evicts_oldest_expired_first() {
     let recipient = [0xAB; 32];
     // Two expired rows (oldest first) + one fresh.
     let _id1 = store
-        .insert(recipient, vec![1; 4], 100, 110, 16, 50)
+        .insert(recipient, vec![1; 4], 100, 110, 16, 1 << 30, 100, 50)
         .unwrap(); // oldest expired
     let _id2 = store
-        .insert(recipient, vec![2; 4], 200, 210, 16, 150)
+        .insert(recipient, vec![2; 4], 200, 210, 16, 1 << 30, 100, 150)
         .unwrap(); // newer expired
     let id3 = store
-        .insert(recipient, vec![3; 4], 300, 999_999, 16, 250)
+        .insert(recipient, vec![3; 4], 300, 999_999, 16, 1 << 30, 100, 250)
         .unwrap(); // pending
                    // Now insert a new row; expecting eviction of id1 first.
     let id4 = store
-        .insert(recipient, vec![4; 4], 400, 999_999, 16, 400)
+        .insert(recipient, vec![4; 4], 400, 999_999, 16, 1 << 30, 100, 400)
         .unwrap();
     let rows = store.fetch(recipient, 500).unwrap();
     let surviving: std::collections::HashSet<[u8; 16]> =
