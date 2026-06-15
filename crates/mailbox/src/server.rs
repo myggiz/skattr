@@ -74,10 +74,18 @@ impl MailboxServer {
             wall_clock_secs_f(),
         ));
 
+        let idle = std::time::Duration::from_secs(u64::from(self.policy.idle_timeout_secs));
         loop {
-            let next = match framed.next().await {
-                Some(item) => item,
-                None => return Ok(()),
+            // Bounds the silence *between* frames (not connection lifetime): the
+            // protocol is request/reply, so a client with no reason to pause past
+            // `idle_timeout_secs` is shed. Re-armed each read.
+            let next = match tokio::time::timeout(idle, framed.next()).await {
+                Ok(Some(item)) => item,
+                Ok(None) => return Ok(()),
+                Err(_elapsed) => {
+                    debug!("closing idle connection (idle_timeout)");
+                    return Ok(());
+                }
             };
             let frame = match next {
                 Ok(f) => f,
@@ -160,7 +168,7 @@ fn wall_clock_secs_f() -> f64 {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
     use bytes::BytesMut;
@@ -243,6 +251,27 @@ mod tests {
 
         drop(framed);
         server_task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn idle_connection_is_closed_after_timeout() {
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let store = Arc::new(Store::in_memory().unwrap());
+        let mut policy = Policy::recommended();
+        policy.idle_timeout_secs = 1; // close after 1s of silence
+        let mb = MailboxServer::new(store, policy);
+        let server_task = tokio::spawn(async move { mb.accept_loop(server).await });
+
+        // Client sends nothing. The idle timeout must fire and close the conn.
+        // Reading the client side should observe EOF within a few seconds.
+        let mut framed = Framed::new(client, MailboxFrameCodec::new());
+        let next = tokio::time::timeout(std::time::Duration::from_secs(5), framed.next()).await;
+        match next {
+            Ok(None) => {} // server closed (EOF) — pass
+            Ok(Some(_)) => panic!("unexpected frame from idle server"),
+            Err(_) => panic!("server did not close the idle connection within 5s"),
+        }
+        let _ = server_task.await;
     }
 
     #[tokio::test]
