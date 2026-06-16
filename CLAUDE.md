@@ -147,11 +147,37 @@ plan → subagent-driven execution → live guardrail → merge.
     `clean_shutdown_leaves_only_encrypted_db` (no plaintext/sidecars/sentinel
     after a clean shutdown).
 
-#### Phase 3 — Attachments — ⬜ not started
+#### Phase 3 — Attachments — 🟧 in progress (3.A done; 3.B next)
 
 File attachments (send / receive / preview) with metadata stripping; a new
 `envelope::kinds` attachment variant; chunking/transfer over the hardened
-transport + mailbox path. Depends on Phase 2 being closed (it is).
+transport + mailbox path. Depends on Phase 2 being closed (it is). Decomposed
+into 3.A → 3.B → 3.C → 3.D.
+
+- **3.A — attachment core** (merge `9a132d1`; final whole-branch review "Ready
+  to merge", gate green — core 636/0, skattr-tests 39/0, cargo-deny ok): the
+  local, transport-free pipeline. The manifest rides in MLS via `Kind::File`;
+  chunk blobs are opaque AEAD ciphertext keyed from the manifest. New
+  `crates/core/src/attachment/` (`chunker`, `manifest`, `reassembler`, `store`
+  (`ChunkStore` stage), `strip` (metadata stripping), `error_kind`),
+  `storage::attachments` (`AttachmentRepo` per-chunk receipt state, migration
+  `0015_attachments`). Local round-trip validated without transport.
+- **3.B — direct attachment transfer** — ⬜ **next, not started**. Online,
+  both-peers-reachable path: an additive transport `Frame` (free `FrameType`
+  bytes `0x0A+`) carrying `{attachment_id, index, ciphertext}` (Noise-encrypted
+  by the channel, **not** MLS-wrapped); `Command::SendFile { contact, path }`
+  (strip → chunk → stage → persist manifest → send `Kind::File` manifest → drive
+  chunk delivery via the per-peer `delivery::peer` actor); receive path
+  reassembles on completion and emits `Event::AttachmentReceived`; in-session
+  resume re-requests missing indices. Needs ADR + spec; the first open design
+  question is push vs. pull chunk delivery (recommended: pull/request-driven).
+  Guardrail: two loopback daemons round-trip a multi-chunk file end-to-end
+  through the real `run_with_transport`, byte-identical, metadata stripped.
+- **3.C — offline transfer** — ⬜ not started. Chunk blobs via the mailbox path
+  (reuse frozen `Deposit` vs. extend ADR 0006 — decide in 3.C's spec),
+  inheriting Phase 2 caps; cross-session resume. In v1.0 scope.
+- **3.D — UI** — ⬜ not started. Tauri attach / send / download / inline
+  preview / progress / size limits.
 
 #### Phase 4 — Release integrity, docs, signing — ⬜ not started
 
@@ -193,7 +219,8 @@ peer}` (the sustained-failure timer), `mls::group` (two-PSK genesis +
 `can_receive`), `mailbox::{client, codec, poll, auth}` (the v1-protocol client),
 and `storage::{pool (Option<Connection> + WAL-safe close + Drop +
 sentinel/re-encrypt-on-boot), passphrase_audit, outstanding_invites,
-read_state}`. Migrations run through `0014`. ADRs 0007 (first-contact Welcome
+read_state}`. Migrations run through `0015` (`0015_attachments`, added in
+Phase 3.A). ADRs 0007 (first-contact Welcome
 carve-out), 0008 (invite embeds ContactCard), and 0009 (`h_transport`↔MLS
 binding) anchor the audit-era protocol decisions.
 
