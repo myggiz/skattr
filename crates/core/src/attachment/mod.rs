@@ -9,6 +9,7 @@ pub(crate) mod chunker;
 pub(crate) mod error_kind;
 pub(crate) mod manifest;
 pub(crate) mod reassembler;
+pub(crate) mod strip;
 
 pub(crate) use error_kind::AttachmentErrorKind;
 pub(crate) use manifest::{AttachmentManifest, ChunkRef};
