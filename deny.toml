@@ -21,11 +21,16 @@ yanked = "deny"
 #     rsa transitively; we never construct RSA private keys ourselves.
 #   - RUSTSEC-2026-0104: `rustls-webpki` CRL-parsing panic. Arti
 #     transitive; we do not feed attacker-controlled CRLs.
+#   - RUSTSEC-2026-0173: `proc-macro-error2` unmaintained (the maintained
+#     fork of proc-macro-error, itself RUSTSEC-2024-0370). Build-time
+#     proc-macro dep via `getset → tor-dircommon → arti-client`; not in the
+#     shipped artifact. No fix until Arti drops getset. Pre-existing on master.
 ignore = [
     "RUSTSEC-2024-0436",
     "RUSTSEC-2026-0097",
     "RUSTSEC-2023-0071",
     "RUSTSEC-2026-0104",
+    "RUSTSEC-2026-0173",
     # The next block is Tauri 2.x transitive — gtk-rs GTK3 bindings on
     # Linux + a handful of other crates that ship with the WebKit2GTK
     # backend. All are "unmaintained" advisories rather than active

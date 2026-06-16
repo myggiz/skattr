@@ -40,6 +40,7 @@ pub mod identity;
 pub mod invite;
 pub mod prelude;
 
+pub(crate) mod attachment;
 pub(crate) mod delivery;
 pub mod mailbox;
 pub(crate) mod mls;

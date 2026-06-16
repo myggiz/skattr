@@ -3338,6 +3338,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "img-parts"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6b4e24cfdc6f897b582508e3c382eaf5378076898f80500a80d10d761ae85e90"
+dependencies = [
+ "bytes",
+ "crc32fast",
+ "miniz_oxide",
+]
+
+[[package]]
 name = "indexmap"
 version = "1.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6343,6 +6354,7 @@ dependencies = [
  "futures",
  "hex",
  "hkdf",
+ "img-parts",
  "libc",
  "openmls",
  "openmls_basic_credential",
