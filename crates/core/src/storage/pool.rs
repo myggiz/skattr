@@ -61,9 +61,16 @@ impl Pool {
         std::fs::create_dir_all(data_dir)?;
         let encrypted_path = data_dir.join("skattr.sqlite.age");
         let working_path = data_dir.join("skattr.sqlite");
+        let sentinel_path = data_dir.join("skattr.sqlite.open");
 
         let storage_key = hkdf_expand::<32>(seed.as_bytes(), INFO_STORAGE_V1)?;
         let passphrase = Zeroizing::new(hex::encode(storage_key.as_ref()));
+
+        // Crash residue: plaintext present before we touch anything. The clean
+        // path is `.age` present + `.sqlite` absent, so a pre-existing `.sqlite`
+        // means the prior run did not close cleanly. Computed BEFORE decrypt so
+        // the clean path (which creates `.sqlite`) is never misclassified.
+        let residue = working_path.exists();
 
         // Decrypt .age → .sqlite if needed.
         if encrypted_path.exists() && !working_path.exists() {
@@ -77,11 +84,27 @@ impl Pool {
         apply_pragmas(&conn)?;
         crate::storage::migrations::apply(&mut conn)?;
 
+        // Re-encrypt-on-boot: a current `.age` always exists after a crash. The
+        // plaintext stays live for this session (re-encrypted again at close).
+        if residue {
+            conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!("boot checkpoint: {e}")))
+                })?;
+            encrypt_db(&working_path, &encrypted_path, &passphrase)?;
+            tracing::warn!("recovered crash residue: re-encrypted storage DB on boot");
+        }
+
+        // Mark the plaintext DB live (removed by close / Drop).
+        std::fs::write(&sentinel_path, b"").map_err(|e| {
+            CoreError::Storage(StorageErrorKind::Other(format!("write sentinel: {e}")))
+        })?;
+
         Ok(Self {
             conn: Mutex::new(Some(conn)),
             encrypted_path,
             working_path,
-            sentinel_path: data_dir.join("skattr.sqlite.open"),
+            sentinel_path,
             persistent: true,
             passphrase,
         })
@@ -398,6 +421,76 @@ mod tests {
             .unwrap();
         assert_eq!(pub_len, 32);
         assert_eq!(ts, 12345);
+        pool.close().unwrap();
+    }
+
+    #[test]
+    fn crash_residue_is_reencrypted_on_open_and_sentinel_tracks_live_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let seed = Seed::generate().unwrap();
+
+        // First clean session: sentinel exists while live; close removes it.
+        // `seen_messages` is an unconstrained multi-row table (`identity` is a
+        // singleton via `CHECK (id = 1)`, so it cannot hold two rows).
+        let pool = Pool::open(tmp.path(), &seed).unwrap();
+        assert!(tmp.path().join("skattr.sqlite.open").exists());
+        pool.with_mut(|c| {
+            c.execute(
+                "INSERT INTO seen_messages (sender, message_id, seen_at) VALUES (?1, ?2, ?3)",
+                rusqlite::params![&[0xBBu8; 32][..], &[0x01u8; 16][..], 11i64],
+            )
+            .map_err(|e| CoreError::Storage(StorageErrorKind::Other(e.to_string())))?;
+            Ok(())
+        })
+        .unwrap();
+        pool.close().unwrap();
+        assert!(
+            !tmp.path().join("skattr.sqlite.open").exists(),
+            "sentinel removed on clean close"
+        );
+
+        // Simulate a crash mid-session: open, write more, then mem::forget so no
+        // close + no Drop runs — plaintext + sentinel are left on disk.
+        {
+            let pool = Pool::open(tmp.path(), &seed).unwrap();
+            pool.with_mut(|c| {
+                c.execute(
+                    "INSERT INTO seen_messages (sender, message_id, seen_at) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![&[0xCCu8; 32][..], &[0x02u8; 16][..], 22i64],
+                )
+                .map_err(|e| CoreError::Storage(StorageErrorKind::Other(e.to_string())))?;
+                c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+                    .map_err(|e| CoreError::Storage(StorageErrorKind::Other(e.to_string())))?;
+                Ok(())
+            })
+            .unwrap();
+            std::mem::forget(pool);
+        }
+        assert!(
+            tmp.path().join("skattr.sqlite").exists(),
+            "crash left plaintext residue"
+        );
+
+        // Next boot: open detects residue and re-encrypts to .age; both rows survive.
+        let pool = Pool::open(tmp.path(), &seed).unwrap();
+        let n: i64 = pool
+            .with(|c| {
+                c.query_row("SELECT COUNT(*) FROM seen_messages", [], |r| r.get(0))
+                    .map_err(|e| CoreError::Storage(StorageErrorKind::Other(e.to_string())))
+            })
+            .unwrap();
+        assert_eq!(n, 2, "both rows survive crash + re-encrypt-on-boot");
+        pool.close().unwrap();
+
+        // The reopened+closed .age reflects both rows.
+        let pool = Pool::open(tmp.path(), &seed).unwrap();
+        let n: i64 = pool
+            .with(|c| {
+                c.query_row("SELECT COUNT(*) FROM seen_messages", [], |r| r.get(0))
+                    .map_err(|e| CoreError::Storage(StorageErrorKind::Other(e.to_string())))
+            })
+            .unwrap();
+        assert_eq!(n, 2);
         pool.close().unwrap();
     }
 
