@@ -15,14 +15,18 @@
 //!    - Run migrations.
 //!    - Wrap the Connection in a `Mutex`.
 //! 2. Queries via `pool.with(|c| { ... })` or `pool.transaction(|tx| { ... })`.
-//! 3. `Pool::close(self)`: `wal_checkpoint(TRUNCATE)` to fold the WAL into
+//! 3. `Pool::close(&self)`: `wal_checkpoint(TRUNCATE)` to fold the WAL into
 //!    the main file, drop the Connection, encrypt plaintext → .age, then
 //!    remove the plaintext DB, its `-wal`/`-shm` sidecars, and the sentinel.
+//!    Idempotent + guarded, so it can run through a shared `Arc` at daemon
+//!    teardown and a `Drop` backstop calls it for abnormal exits.
 //!
-//! Crash model: if the process dies without `Pool::close`, the plaintext
-//! `skattr.sqlite` remains on disk. Next startup re-opens it directly
-//! (skipping decrypt) and continues — no data loss, but the at-rest
-//! window is wider.
+//! Crash model: a `skattr.sqlite.open` sentinel is written while the
+//! plaintext DB is live and removed on clean close. If the process dies
+//! without closing, the plaintext `skattr.sqlite` remains on disk; the next
+//! `Pool::open` detects the residue (plaintext present before decrypt) and
+//! re-encrypts it to `.age` on boot, then continues on the live plaintext —
+//! no data loss, and a current encrypted copy always exists after boot.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -167,6 +171,10 @@ impl Pool {
             return Ok(());
         }
         // Already closed (plaintext removed by a prior close) → nothing to do.
+        // This guard is checked without holding a lock; it is safe because the
+        // daemon teardown closes the pool from a single thread, and every other
+        // `Arc<Pool>` clone is dropped sequentially after that (so a clone's
+        // `Drop`-driven close only ever runs once the plaintext is already gone).
         if !self.working_path.exists() {
             return Ok(());
         }
