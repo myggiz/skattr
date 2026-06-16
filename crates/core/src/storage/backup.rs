@@ -226,6 +226,47 @@ mod tests {
     }
 
     #[test]
+    fn export_import_roundtrip_through_real_pool() {
+        use crate::storage::Pool;
+
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+        let seed = Seed::generate().unwrap();
+
+        // Real Pool: open, write, close → produces a real skattr.sqlite.age.
+        let pool = Pool::open(src.path(), &seed).unwrap();
+        pool.with_mut(|c| {
+            c.execute(
+                "INSERT INTO seen_messages (sender, message_id, seen_at) VALUES (?1, ?2, ?3)",
+                rusqlite::params![&[0xEEu8; 32][..], &[0x01u8; 16][..], 55i64],
+            )
+            .map_err(|e| CoreError::Storage(StorageErrorKind::Other(e.to_string())))?;
+            Ok(())
+        })
+        .unwrap();
+        pool.close().unwrap();
+
+        // The other two backup inputs must exist for export to succeed.
+        std::fs::write(src.path().join("identity.vault"), b"vault").unwrap();
+        std::fs::write(src.path().join("hs.key.age"), b"hskey").unwrap();
+
+        let archive = src.path().join("backup.age");
+        export_backup(src.path(), &archive, &seed).unwrap();
+        import_backup(&archive, dst.path(), &seed).unwrap();
+
+        // The restored DB reopens with the seed and reads the row back.
+        let pool = Pool::open(dst.path(), &seed).unwrap();
+        let n: i64 = pool
+            .with(|c| {
+                c.query_row("SELECT COUNT(*) FROM seen_messages", [], |r| r.get(0))
+                    .map_err(|e| CoreError::Storage(StorageErrorKind::Other(e.to_string())))
+            })
+            .unwrap();
+        assert_eq!(n, 1);
+        pool.close().unwrap();
+    }
+
+    #[test]
     fn import_fails_with_wrong_seed() {
         let tmp_src = tempfile::tempdir().unwrap();
         let tmp_dst = tempfile::tempdir().unwrap();
