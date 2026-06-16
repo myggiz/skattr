@@ -17,6 +17,7 @@
 mod error_kind;
 pub(crate) use error_kind::StorageErrorKind;
 
+pub(crate) mod attachments;
 pub(crate) mod backup;
 pub(crate) mod contacts;
 pub(crate) mod groups;
@@ -35,6 +36,8 @@ pub(crate) mod seen_messages;
 // can re-export them. The `storage` module itself is `pub(crate)`, so these
 // `pub use` items are still invisible outside the crate — the effective
 // visibility is capped by the module. This is intentional.
+#[cfg(not(feature = "test-harness"))]
+pub(crate) use attachments::{AttachmentRepo, AttachmentRow};
 #[cfg(not(feature = "test-harness"))]
 pub(crate) use contacts::ContactRepo;
 #[cfg(not(feature = "test-harness"))]
@@ -56,6 +59,8 @@ pub(crate) use read_state::ReadStateRepo;
 #[cfg(not(feature = "test-harness"))]
 pub(crate) use seen_messages::SeenMessagesRepo;
 
+#[cfg(feature = "test-harness")]
+pub use attachments::{AttachmentRepo, AttachmentRow};
 #[cfg(feature = "test-harness")]
 pub use contacts::ContactRepo;
 #[cfg(feature = "test-harness")]

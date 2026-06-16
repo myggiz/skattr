@@ -79,6 +79,10 @@ const ALL_MIGRATIONS: &[Migration] = &[
         version: 14,
         sql: include_str!("migrations/0014_passphrase_audit.sql"),
     },
+    Migration {
+        version: 15,
+        sql: include_str!("migrations/0015_attachments.sql"),
+    },
 ];
 
 /// Apply all pending migrations in order. Idempotent — re-running does
