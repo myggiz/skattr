@@ -1,17 +1,12 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
     inputs:
-      dry_run:
-        description: 'Build + smoke only; skip the GitHub Release step'
-        required: false
-        default: 'true'
-        type: choice
-        options: ['true', 'false']
+      tag:
+        description: 'Version tag (e.g. v0.2.0)'
+        required: true
+        type: string
 
 env:
   CARGO_TERM_COLOR: always
@@ -30,6 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          ref: ${{ inputs.tag }}
           fetch-depth: 0
 
       - name: Compute SOURCE_DATE_EPOCH from the tag commit
@@ -235,11 +231,12 @@ jobs:
     name: release
     needs: smoke
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag }}
 
       - name: Download all bundle artefacts
         uses: actions/download-artifact@v8
@@ -291,7 +288,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          TAG="${GITHUB_REF#refs/tags/}"
+          TAG="${{ inputs.tag }}"
           # Extract the section for the current tag from CHANGELOG.md.
           # Convention: each release header is "## [TAG] — DATE" (em dash) or
           # "## [TAG] - DATE" (hyphen). Stop at the next "## [" header.
@@ -310,6 +307,7 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ inputs.tag }}
           files: |
             dist/*.deb
             dist/*.AppImage
