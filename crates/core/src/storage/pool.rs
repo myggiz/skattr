@@ -157,7 +157,19 @@ impl Pool {
     /// Graceful shutdown: checkpoint the WAL into the main DB, close the
     /// connection, encrypt plaintext → ciphertext, and remove the plaintext
     /// DB, its WAL/SHM sidecars, and the sentinel.
-    pub fn close(self) -> Result<()> {
+    ///
+    /// Takes `&self` and is idempotent: it can be called through a shared
+    /// `Arc<Pool>` at daemon teardown (sole ownership is NOT required), and a
+    /// second call (or the `Drop` backstop) is a no-op once the plaintext is
+    /// gone. In-memory pools (`persistent == false`) are a no-op.
+    pub fn close(&self) -> Result<()> {
+        if !self.persistent {
+            return Ok(());
+        }
+        // Already closed (plaintext removed by a prior close) → nothing to do.
+        if !self.working_path.exists() {
+            return Ok(());
+        }
         {
             let mut guard = self.conn.lock().map_err(|_| {
                 CoreError::Storage(StorageErrorKind::Other(
@@ -170,7 +182,7 @@ impl Pool {
                         CoreError::Storage(StorageErrorKind::Other(format!("wal_checkpoint: {e}")))
                     })?;
             }
-            let _ = guard.take(); // drop the connection
+            let _ = guard.take(); // drop the connection so SQLite releases the files
         }
         encrypt_db(&self.working_path, &self.encrypted_path, &self.passphrase)?;
         remove_plaintext_artifacts(&self.working_path, &self.sentinel_path);
@@ -219,6 +231,17 @@ impl Pool {
     pub(crate) fn take_conn_for_test(&self) {
         if let Ok(mut g) = self.conn.lock() {
             let _ = g.take();
+        }
+    }
+}
+
+impl Drop for Pool {
+    fn drop(&mut self) {
+        // Best-effort backstop for an abnormal exit / a clone that outlived an
+        // explicit close. `close` is guarded (in-memory + already-closed → no-op)
+        // and idempotent; errors can't be returned from Drop, so log + swallow.
+        if let Err(e) = self.close() {
+            tracing::warn!(error = %e, "Pool::drop close failed; plaintext may remain");
         }
     }
 }
@@ -492,6 +515,63 @@ mod tests {
             .unwrap();
         assert_eq!(n, 2);
         pool.close().unwrap();
+    }
+
+    #[test]
+    fn drop_without_close_encrypts_persistent_pool() {
+        let tmp = tempfile::tempdir().unwrap();
+        let seed = Seed::generate().unwrap();
+        {
+            let pool = Pool::open(tmp.path(), &seed).unwrap();
+            pool.with_mut(|c| {
+                c.execute(
+                    "INSERT INTO seen_messages (sender, message_id, seen_at) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![&[0xDDu8; 32][..], &[0x01u8; 16][..], 33i64],
+                )
+                .map_err(|e| CoreError::Storage(StorageErrorKind::Other(e.to_string())))?;
+                Ok(())
+            })
+            .unwrap();
+            // No close(): pool drops at end of scope → Drop safety-net runs.
+        }
+        assert!(
+            !tmp.path().join("skattr.sqlite").exists(),
+            "Drop removed plaintext"
+        );
+        assert!(
+            !tmp.path().join("skattr.sqlite.open").exists(),
+            "Drop removed sentinel"
+        );
+        assert!(
+            tmp.path().join("skattr.sqlite.age").exists(),
+            "Drop encrypted to .age"
+        );
+        let pool = Pool::open(tmp.path(), &seed).unwrap();
+        let n: i64 = pool
+            .with(|c| {
+                c.query_row("SELECT COUNT(*) FROM seen_messages", [], |r| r.get(0))
+                    .map_err(|e| CoreError::Storage(StorageErrorKind::Other(e.to_string())))
+            })
+            .unwrap();
+        assert_eq!(n, 1);
+        pool.close().unwrap();
+    }
+
+    #[test]
+    fn drop_after_close_is_noop_no_double_encrypt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let seed = Seed::generate().unwrap();
+        let pool = Pool::open(tmp.path(), &seed).unwrap();
+        pool.close().unwrap(); // removes working_path; self drops → Drop sees it gone.
+        assert!(tmp.path().join("skattr.sqlite.age").exists());
+        // Reopen still works (the .age wasn't corrupted by a double-encrypt).
+        Pool::open(tmp.path(), &seed).unwrap().close().unwrap();
+    }
+
+    #[test]
+    fn in_memory_drop_is_noop() {
+        let pool = Pool::in_memory();
+        drop(pool); // must not panic / must not touch /dev/null
     }
 
     #[test]
