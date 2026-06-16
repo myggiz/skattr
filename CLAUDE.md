@@ -4,314 +4,212 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository state
 
-**Phase 0 is complete; Phase 1 is complete (1.H merged 2026-04-24);
-Phase 2.A (mailbox server) is complete; Phase 2.B (mailbox client +
-ContactCard rotation) is complete (merged 2026-05-01); Phase 2.C
-(UI bootstrap, read-only conversation MVP) is complete (merged
-2026-05-02); Phase 2.D (conversation view) is complete (merged
-2026-05-02); Phase 2.E (invite & contact UX) is complete (merged
-2026-05-03); Phase 2.F (settings & history) is complete (merged
-2026-05-04); Phase 2.G (packaging & distribution) is complete
-(merged 2026-05-04) on Linux + macOS; Phase 2.H (Windows
-port) is complete (merged 2026-05-06); Phase 2 is fully closed.** Phase 0 shipped all five workstreams (0.A scaffold,
-0.B identity & crypto, 0.C Arti integration, 0.D storage layer, 0.E
-documentation baseline). Phase 1.A added `transport::frame::FrameCodec`.
-Phase 1.B added `transport::noise::handshake_{initiator,responder}`
-+ the stateful `AuthenticatedConnection<S>` wrapper, plus the
-Ed25519 → X25519 bridge on `IdentityKey`. Phase 1.C added `mls::Group`
-(2-member only), `MlsProvider` checkpoint-snapshot persistence,
-`KeyPackage` newtype + `KeyPackageRepo`, and migration 0002. Phase
-1.D added `invite::InviteLink` (skattr://invite/v1# URL with
-fragment-only params, canonical-CBOR Ed25519 signature, Zeroizing
-PSK guard, single-use tracking via `KeyPackageRepo.consumed`),
-`contact::ContactCard::{sign, verify}` with monotonic-version
-persistence in a new `contact_cards` table (migration 0003), and
-`IdentityKey::{sign_cbor, verify_cbor}` helpers.
-Phase 1.E added `delivery::hub::DeliveryHub<S>` (per-daemon router), per-peer `delivery::peer::PeerConnection` actors (1 s retry tick, 60 s keepalive, 180 s idle close, `PeerCtrl::ReplaceConn` for concurrent-dial races), `delivery::outbox::Outbox` over `OutboxRepo` with `(target, message_id)` idempotency (migration 0004), `delivery::receiver::receive()` for ts-window + dedup + persist, a `pub(crate) trait InboundDispatch` injection point for MLS decrypt, and `delivery::kill_stream::{KillSwitch, KillableStream}` under `feature = "test-harness"`. A CI integration test (`delivery_kill_mid_message.rs`) proves kill-mid-message → reconnect → exactly-once delivery; `delivery_real_tor.rs` (`#[ignore]`-gated) exercises the same stack over real Arti.
-Phase 1.F added the `skattr daemon` IPC server + `IpcClient`, expanded
-`Daemon::run` to own `Pool` + `DeliveryHub` + IPC, introduced
-`DaemonHandle` + `dispatch::execute_command`, migration 0005
-(`contacts.group_id`), `DaemonInbound` (MLS decrypt + persist + emit
-`Event::MessageReceived`), `/dev/tty` passphrase prompts (rpassword),
-`--passphrase-file` automation, `--qr` invite rendering,
-`--fail-on-timeout` on `send`, and three integration tests
-(`cli_ipc_roundtrip`, `cli_two_daemons`, `cli_real_tor` `#[ignore]`-gated).
-Phase 1.G added FTS5 wiring (triggers off a new `body_text` mirror
-column, `messages_fts` recreated to reference it), persisted
-`mls_generation` and `ts_daemon_recv` on `messages` (replacing 1.F's
-placeholders), `MessageRepo::{search, unread_count, mark_read,
-export_page, prune_before, prune_keep_last, backfill_body_text}`,
-`ReadStateRepo` for per-group last-read cursors, `daemon::retention`
-(hourly sweep + `[history] retention_days`), and IPC for
-`SearchMessages` / `MarkRead` / `PruneHistory` / `ExportHistory` plus
-`Event::MessageReceived` (reshaped to `{ contact, record }`) and
-`EventFilter::Messages`. `daemon::dispatch::send_message` now persists
-sender-side rows. CLI gained `search` / `export` / `prune`;
-`tail --follow` subscribes to the event stream. Migration 0006 lands
-the schema. The 100k-row benchmark (`crates/core/tests/fts_search_p95.rs`,
-`#[ignore]`-gated) asserts search p95 < 50 ms.
-Phase 1.H closes the 11 items surfaced in 1.G review threads: migration
-0007 adds `messages.envelope_id` + `(group_id, envelope_id)` unique
-index + idempotent startup backfill; send + receive persistence runs
-under one `pool.transaction` via `Group::save_in_tx` +
-`MessageRepo::insert_in_tx` + `OutboxRepo::insert_in_tx` (and
-`receive_in_tx` on the inbound side). `CoreError::kind()` is a pure
-structural match over six subsystem sub-enums (`StorageErrorKind`,
-`ContactErrorKind`, `InviteErrorKind`, `MlsErrorKind`,
-`DeliveryErrorKind`, `TransportErrorKind`); a build-time guard test
-enforces zero `str::contains` in `kind()`.
-`DaemonErrorKind::InvalidArgument` + CLI exit code 2 give operators a
-clean signal for argument-validation errors. `MessageRecord.row_id`
-surfaces the SQLite id for UI correlation;
-`ContactRepo::contact_for_group` fixes unscoped-search outgoing-hit
-contact resolution. `daemon::clock::now_unix_seconds` replaces five
-duplicates; `ReceiveOutcome::New.group_id: [u8; 32]` (group IDs are
-now generated as 32 random bytes at `create_solo`);
-`backfill_body_text` runs in one transaction; the socket-path Mutex is
-replaced by `serial_test`.
-Phase 2.A added `crates/mailbox/` as a `[lib] + [bin]` AGPLv3 crate:
-`MailboxServer::accept_loop` per-stream FSM over the shared wire
-layout (length+type+CBOR; type bytes 0x82–0x8F), `Store` with
-transactional cap-eviction insert, `Challenges` (single-use 30 s
-nonces), `Policy` + per-conn / global token buckets, three
-background tasks (expiry / challenge sweep / metrics), a UDS
-healthcheck at `${data_dir}/health.sock`, and Arti glue feature-
-gated as `bin`. `core::mailbox::protocol` is frozen (ADR 0006); the
-auth digest input is a positional CBOR tuple after a Task 16
-property tripwire revealed `ciborium`'s serde-derive non-canonical
-field ordering. `core::mailbox::client` and `scheduler` stay stubs
-for 2.B. Operational artefacts: `packaging/systemd/skattr-mailbox.service`,
-`packaging/Dockerfile` (distroless cc + nonroot),
-`docs/operations/mailbox-setup.md` (≤ 30 min target).
+There are **two eras** in this project's history. Read them as: *(1) a
+feature-complete-looking original build that the v1.0 readiness audit found
+had a "dead production path", then (2) the audit-driven re-phasing that is the
+current, authoritative story.*
 
-`crates/core/src/identity/` is fully implemented (Ed25519, BIP39,
-Argon2id + XChaCha20-Poly1305 vault, HKDF). `crates/core/src/transport/{tor,
-hs_key, listener}.rs` wire `arti-client` 0.41 + `tor-hsservice` 0.41
-end-to-end. `crates/core/src/storage/` has a real `rusqlite` + `age`
-`Pool`, a migrations runner, seven typed repos, transactions wrapper,
-and portable backup export/import. `docs/` has a v0 threat model,
-an operations guide, and refreshed ARCHITECTURE.md with a
-"send one message" data-flow trace.
+### Era 1 — the original build (history; complete)
 
-The daemon is driven by `Daemon::run(data_dir, &Zeroizing<String>,
-ready_tx, shutdown_fut)` — the CLI is a thin wrapper. `transport`
-and `storage` are both `pub(crate)`; integration tests reach
-internals via `skattr_core::test_exports` gated on the `test-harness`
-feature. All four crates compile, `cargo clippy -D warnings` / `cargo
-test` / `cargo fmt --check` are green — 77+ unit + integration tests
-passing. Phase 0 exit criterion (two daemons echo bytes over Tor)
-is exercised by `crates/tests/src/arti_echo.rs`, `#[ignore]`-gated
-(run with `cargo test -p skattr-tests --release -- --ignored`).
+The original implementation plan ran phases **0 → 2.H** and is **done**. In
+order: 0.A scaffold, 0.B identity & crypto, 0.C Arti transport, 0.D storage,
+0.E docs; 1.A frame codec, 1.B Noise_XK handshake, 1.C MLS groups (2-member),
+1.D invite + ContactCard, 1.E delivery hub/outbox/receiver, 1.F daemon IPC +
+CLI, 1.G message storage + FTS5 search + retention, 1.H hardening; then the
+old "Phase 2" UI track — 2.A mailbox server, 2.B mailbox client + ContactCard
+rotation, 2.C UI bootstrap, 2.D conversation view, 2.E invite/contact UX, 2.F
+settings & history, 2.G packaging (Linux `.deb`/AppImage/Flatpak + macOS
+`.dmg`), 2.H Windows port (Named Pipes IPC + `.msi`). This produced all four
+`core`/`mailbox`/`cli`/`tests` crates plus the Tauri 2 + SvelteKit `ui` crate,
+the frozen mailbox wire protocol (ADR 0006), the `age`-encrypted storage layer,
+and the release CI matrix. These old-phase labels are **retired** — do not use
+"Phase 2.x" to mean the UI track anymore; it now means the audit's security
+workstream (below).
 
-Phase 2.B (mailbox client + ContactCard rotation) merged at the head
-of `phase-2b-mailbox-client`. `core::mailbox::{client, codec, poll,
-auth}` ship the v1-protocol client (long-lived per-`'mine'` mailbox,
-on-demand for deposits), an Idle/Active/Unreachable per-mailbox
-`PollScheduler` with ±25 % jitter, the `DeliveryHub` direct→mailbox
-fallback (`ensure_mailbox_fallback`, pick-one + sequential failover
-via BLAKE2s), and the `RotateOnion` / `AddMailbox` / `RemoveMailbox` /
-`ListMailboxes` daemon commands. Migration 0008 adds status tracking
-to `mailboxes` and `target_kind`/`mailbox_id` to `outbox` (composite
-unique index `idx_outbox_target_message_kind_mailbox`); migration
-0009 adds the `self_card_state` singleton for monotonic version
-bumps. ContactCard updates ride MLS app messages as
-`Envelope::Kind::ContactCardUpdate { card: Box<ContactCard> }`, so
-rotation reuses the same direct→mailbox fallback path as ordinary
-messages. New events: `MailboxStatusChanged`, `ContactCardReceived`;
-new filters: `EventFilter::{Mailboxes, Delivery}`.
+### The v1.0 readiness audit (2026-06-12)
 
-Three TODOs in code track follow-up work that didn't fit the 2.B
-freeze: **Task 20.5** wires the per-peer direct-timeout trigger from
-`PeerConnection` to `DeliveryHub::ensure_mailbox_fallback`; **Task
-22.5** routes `RemoveMailbox`'s final-drain ciphertexts through
-`DaemonInbound::dispatch`; **Task 23.5** is real HS key rotation —
-`Command::RotateOnion` today bumps the self-card version and
-republishes the current onion (the address itself does not change),
-so contacts see `ContactCardReceived` with a new version but route
-to the same onion until 23.5 lands.
+An eight-domain audit (`docs/V1.0-READINESS-AUDIT.md`, scope locked in
+`docs/superpowers/specs/2026-06-12-v1.0-roadmap.md`) found **"green tests, dead
+production path"**: the messenger UI and two-daemon flows passed only because
+tests hand-wired the transport via `skattr_core::test_exports`; **nothing wired
+the inbound/outbound transport into `Daemon::run`**. The audit re-phased all
+remaining work toward a shippable v1.0 (a 1:1 / 2-member, attachment-capable,
+Tor-only messenger) with a strict dependency chain **Phase 1 → 2 → 3 → 4** and
+one cross-cutting rule: **every phase must prove its behavior through the real
+`Daemon::run` (`run_with_transport`) assembly over loopback — not via
+`test_exports`.** That live guardrail is introduced in Phase 1 and extended in
+every later phase.
 
-Phase 2.C added a new `crates/ui/` crate (GPLv3): Tauri 2 +
-SvelteKit shell that boots an in-process `Daemon::run`, walks
-first-run users through a four-step wizard (welcome → passphrase
-with zxcvbn ≥3 → 24-word BIP39 seed type-back → Tor bootstrap),
-and renders a read-only contact list + open conversation with
-live-append on `Event::MessageReceived`. Two-phase Tauri command
-surface: pre-daemon `vault_exists` / `identity_init` / `vault_unlock`
-(restricted to three by lint test), post-daemon `ipc_request` /
-`ipc_subscribe` / `start_in_process_cmd` over the daemon's existing
-Unix IPC socket so the CLI keeps working unchanged. New wire
-surface (additive only): `Command::DaemonInfo`, `ContactSummary`
-projection fields (`unread_count`, `last_message_preview`,
-`last_ts_recv`, all `#[serde(default)]`), and a filter-gated
-`TorStatusChanged` replay on the `Subscribe` ack backed by
-`DaemonHandle::latest_tor_status` plus a tap task spawned in
-`Daemon::run`. `ts-rs` emits TS bindings for every wire type into
-`crates/ui/src-svelte/src/lib/ipc/types/` (gitignored per spec
-decision 13; regenerated on `cargo test -p skattr-core`). Locked
-design tokens (6 colours / 4-step spacing / 3-step type, dark-first
-with `prefers-color-scheme: light`) and bundled Inter (OFL 1.1)
-ship in `crates/ui/src-svelte/src/lib/`. Virtualised message list
-uses `@tanstack/svelte-virtual` (substituted for the unmaintained
-`svelte-virtual-list`). 2.C closes the window by quitting the
-daemon — 2.F replaces this with hide-to-tray. Mailbox CRUD wire
-surface from 2.B is consumed unchanged; UI rendering of mailbox
-state lands in 2.F. Tests: 16 Vitest specs + 4 Playwright e2e
-specs (first-run + unlock paths, headless Tauri mock); new
-`crates/tests/src/ui_first_run.rs` `#[ignore]`-gated real-Tor
-integration test.
+### Era 2 — the audit phases (current)
 
-Phase 2.D (conversation view) merged at the head of
-`phase-2d-conversation-view`. The composer (Enter-to-send,
-Shift+Enter newline, paste-as-plaintext, IME-safe), per-message
-delivery state icons (clock → check → check-check → !), and
-scroll-back pagination (50 rows/page, `before_id` cursor, 5
-skeleton bubbles during loads) round out the conversation pane.
-Wire-format additions are strictly additive: `Command::Recent
-Messages` gains `before_id: Option<i64>` + `paged: bool` (both
-`#[serde(default)]`); new `CommandResult::MessagesPage { records,
-next_before_id }` variant alongside the unchanged `Messages(Vec)`;
-`MessageSent` gains `record: Option<MessageRecord>`;
-`ContactSummary` gains `group_state: Option<MlsGroupStateLabel>`
-+ `last_read_row_id: Option<i64>`. New storage method
-`MessageRepo::recent_before` powers pagination. The frozen "Unread"
-separator anchors to `ContactSummary.last_read_row_id` at
-conversation-open and never advances live. Mark-read fires on both
-conversation-open and bottom-of-list intersection (debounced
-500 ms, scroll-proximity ≤ 100 px). Optimistic send: UI appends a
-placeholder bubble with a `__tempId`, awaits `MessageSent.record`,
-reconciles in place. New wire-format snapshot test
-(`crates/core/tests/wire_format_append_only.rs`) makes adding or
-reshaping a `Command`/`CommandResult` variant a deliberate edit.
+#### Phase 1 — Make messaging work (T0 functional) — ✅ complete
 
-E2e harness work surfaced three production bugs fixed in 2.D:
-`refreshContacts()` not called on direct `/` navigation;
-`delivery_status_changed` events silently dropped from the
-subscribe stream; `.shell` CSS missing `grid-template-rows:
-100vh; overflow: hidden` causing the virtualizer to collapse.
+Two real daemons exchange messages in both directions through production wiring.
 
-Known 2.D limitation: the `AddContact` dispatcher creates the
-MLS group only on the consumer side and does not propagate the
-Welcome message to the inviter. The inviter cannot decrypt
-messages from the new contact until this is wired up. Tracked as
-a follow-up beyond 2.D's exit criterion; the
-`ui_send_roundtrip` `#[ignore]`-gated test documents it.
+- **1A — inbound correctness** (merge `4936b1e`): the T0 inbound fixes — the
+  onion accept loop resolves `peer_x25519 → Ed25519 → ContactCard` and rejects
+  any unknown/unauthenticated peer before `DeliveryHub::ingest`; decrypt →
+  persist → emit is made correct. Extracted `poll_dispatch_once`
+  (fetch → dispatch → delete-only-dispatched) so a transient failure can't drop
+  a deposit.
+- **1B — direct P2P transport** (merge `b12f7ea`): the production seam.
+  `daemon::state::run_with_transport<T: Transport>` owns `Pool` + `DeliveryHub`
+  + accept loop + IPC; `transport::{Transport, arti_transport::ArtiTransport,
+  loopback::LoopbackTransport}` and `delivery::dial::OutboundDial`
+  (`TransportDial`) wire dialing into `Daemon::run`. Direct-only guardrail:
+  `two_daemons_exchange_messages_both_directions_over_loopback` drives the real
+  assembly.
+- **1C — first contact** (merge `5c0b827`): invite → add → Welcome →
+  bidirectional between *previously unknown* peers. The invite embeds the
+  inviter's signed `ContactCard` so the consumer learns the onion (ADR 0008);
+  the accept loop has a first-contact `Welcome` carve-out (ADR 0007) that
+  authenticates + binds the derived identity before join. Guardrail:
+  `first_contact_invite_add_then_bidirectional_over_loopback`. Followed by a
+  shared-harness cleanup (`c70a511`, `crates/tests/src/loopback_harness.rs`).
 
-Phase 2.E added invite-generate / add-contact dialogs, an inline
-ContactDetailsPanel with rename + archive, and the daemon-side
-Welcome-propagation fix. Migration `0010` adds an `outstanding_invites`
-table for inviter-side PSK persistence; migration `0011` adds
-`contacts.hidden` for soft-delete; migration `0012` adds
-`outstanding_invites.provider_snapshot` so the MlsProvider's KP init
-key survives the create_invite → dispatch_welcome boundary.
-`Frame::MlsWelcome` (codec slot 0x03, reserved since 1.A) is now
-load-bearing: `DeliveryHub::send_welcome` + a new peer-actor send/read
-arm + `InboundDispatch::dispatch_welcome` turn Bob's `AddContact`
-Welcome into Alice's `Group::join_from_welcome`, so Alice's group
-transitions `PendingJoin → Active` and she can decrypt Bob's first
-message. Wire-format is strictly additive: three new `Command`
-variants (`RenameContact`, `RemoveContact`, `ListContactsWithFilter`),
-no new `CommandResult` variants, no new `Event` variants (rename /
-archive reuse `ContactUpdated`). The `key_package_id` returned in
-`CommandResult::InviteCreated` is now the canonical MLS
-`KeyPackageRef` (was plain SHA-256 in 1.D — same shape on the wire).
+#### Phase 2 — Critical security & data-integrity (T1 + named T2) — ✅ complete
 
-One TODO tracks follow-up work deferred from 2.E: **Task 2.E.5** is
-mailbox fallback for Welcome propagation — direct-only Welcome ships
-in 2.E; mailbox fallback is deferred because it would touch the 2.B
-mailbox protocol freeze (ADR 0006).
+Decomposed in `docs/superpowers/specs/2026-06-13-phase-2-decomposition.md` into
+four independent sub-projects, each spec → ADR (where protocol/auth changed) →
+plan → subagent-driven execution → live guardrail → merge.
 
-Phase 2.F (settings & history) merged at the head of
-`phase-2f-settings-history`. Migrations `0013` (`contacts.muted`) and
-`0014` (`passphrase_audit`) land alongside seven new `Command`
-variants (`GetConfig`, `SetConfig`, `ChangePassphrase`,
-`SetContactMuted`, `TailLogs`, `GetPassphraseAuditLatest`,
-`WipeAllData`), four new `CommandResult` variants (`Config`,
-`PassphraseChanged`, `Logs`, `PassphraseAudit`), `Event::LogRecord`
-+ `EventFilter::Logs`, and two additive fields on `ContactSummary`
-(`muted`, `peer_mailboxes`). `ChangePassphrase` wraps the existing
-`Vault::change_passphrase` (single-file atomic rewrite via
-sidecar + rename) — the spec's original "stage-then-rename two-file
-journal" design was simplified after discovering that the SQLite
-age key is derived from the BIP39 seed via HKDF and isn't re-keyed
-by passphrase changes. New core modules: `core::daemon::logs`
-(in-memory ring buffer + redacting tracing layer + IPC tail) and
-`core::storage::passphrase_audit`. UI side: settings sidebar
-layout under `routes/settings/<section>/`, ChangePassphraseDialog,
-LogsViewer, SearchPalette (Cmd/Ctrl-K modal + inline reuse),
-contact mute toggle + peer_mailboxes rendering, Tauri 2 tray,
-focus-aware `notify-rust` notifications, close-to-tray hide,
-"Delete all data and quit" Danger Zone. The persist-logs-to-disk
-toggle currently requires a daemon restart to take effect (the
-`tracing_subscriber::reload` plumbing across the layered
-subscriber is tracked as a follow-up). Closes Phase 2's user-facing
-chrome; the next workstream is Phase 2.G (packaging).
+- **2.A — MLS ratchet & binding integrity** (merge `bc71f32`; spec
+  `2026-06-13-phase-2a-mls-integrity-design.md`, ADR 0009):
+  - **T1-1** `h_transport = HKDF(noise_handshake_hash, "skattr-binding-v1")`
+    is now injected as an external MLS PSK on the genesis commit, **active and
+    mandatory**, via a *dial-first two-PSK construction* (the invitee dials the
+    inviter, captures `h_transport`, injects both the invite PSK and the
+    `h_transport` PSK into the `add_member` genesis commit; the responder
+    derives the identical transcript value and registers it before
+    `join_from_welcome`).
+  - **T1-3** per-group ratchet serialization — a `group_id`-keyed
+    `std::sync::Mutex` registry (`GroupLockRegistry`) shared by one `Arc` across
+    send (`DaemonHandle`) and receive (`DaemonInbound`); guard dropped before
+    any `.await`.
+  - **T2-2** inbound-Commit tolerance — `Group::decrypt` returns
+    `Result<Option<Envelope>>` and merges a `StagedCommit` (advances epoch)
+    instead of erroring; `can_receive` split from `can_send`.
+  - **T2-8** per-invite PSK uniqueness — ids/nonces derived from the invite's
+    `KeyPackageRef`.
+  - **T2-1** single-use atomicity — `add_contact` is one `pool.transaction`
+    with an in-txn `is_consumed` re-check; dial-by-onion-from-invite means a
+    dial failure leaves zero writes for a clean retry.
 
-Phase 2.G (packaging & distribution) merged at the head of
-`phase-2g-packaging`. New `core::daemon::smoke` module (run_smoke
-+ SmokeConfig + SmokeError); `skattr-ui --smoke-test` argv branch
-that boots the daemon without opening Tauri's webview; CLI escape
-hatch on `skattr daemon --smoke-test`. CI release flow at
-`.github/workflows/release.yml` triggered on `v*` tags: matrix
-build on ubuntu-latest + macos-latest → per-platform smoke
-(`/usr/bin/skattr-ui --smoke-test` after `dpkg -i`; AppImage
-extract-and-run; `.app` from mounted `.dmg`) → `SHA256SUMS` +
-`SHA256SUMS.minisig` (minisign secret in repo secrets) → GitHub
-Release. Bundle metadata locked: `net.myggiz.skattr` identifier,
-six PNG icon sizes, `skattr://` URL scheme via
-`tauri-plugin-deep-link` + `tauri-plugin-single-instance`, Tauri
-updater explicitly disabled. Linux `.deb` + AppImage + Flatpak
-(build-from-source); macOS `.dmg` (ARM64 only). Install docs at
-`docs/install/{README,linux,macos}.md`; reproducible-build recipe
-at `docs/build/reproducible.md`. Tauri Rust pinned to `=2.11.0`;
-`@tauri-apps/api` matched at `2.0.0`; `rust-toolchain.toml` gains
-explicit `version = "1.95.0"`. Wire-format-NEUTRAL by design — no
-new `Command` / `CommandResult` / `Event` variants. **Windows is
-carved out to Phase 2.H** (Named Pipes + DACL port of
-`core::daemon::ipc`; `.msi` bundle); 2.H lands before any "v0.2"
-tag. Maintainer prerequisite before tagging v0.1.0:
-generate the real minisign keypair (placeholder at
-`docs/install/minisign.pub` until then) and set GitHub Actions
-secrets `MINISIGN_SECRET_KEY` + `MINISIGN_PASSWORD`; the
-maintainer-only procedure is documented at
-`docs/install/README-MAINTAINER-MINISIGN.md`.
+- **2.C — offline delivery: fallback + drain** (merge `18b7f36`; spec
+  `2026-06-14-phase-2c-offline-delivery-design.md`):
+  - **T1-6** direct→mailbox fallback wired into production: the non-generic
+    `delivery::hub::MailboxFallbackShared` (built in `run_with_transport`), a
+    per-peer **sustained-failure timer** in `delivery::peer` that fires
+    `run_mailbox_fallback` after `direct_timeout_secs` of unbroken failure
+    (this closes the old **Task 20.5**), and a dedicated
+    `delivery::mailbox_sweeper` that re-deposits due mailbox-kind outbox rows
+    with per-mailbox failover + backoff. `OutboxEntry`/`OutboxRow` now carry
+    `target_kind`/`mailbox_id`, and the direct retry tick skips mailbox-kind
+    rows.
+  - **T1-4** `RemoveMailbox` drains held deposits through
+    `InboundDispatch::dispatch_mailbox` (via `poll_dispatch_once`,
+    delete-only-dispatched) before finalizing removal — closes the old **Task
+    22.5**.
+  - **ts-replay poison fix** — the mailbox delivery path is exempt from the
+    ±1h `Envelope.ts` window (legitimately-delayed deposits surface);
+    replay resistance comes from `(sender, envelope_id)` dedup + MLS generation
+    + server delete. The direct path keeps the ±1h window.
+  - Guardrail: `offline_peer_receives_via_mailbox_fallback` (peer offline →
+    mailbox → poll → receive, through the real assembly).
 
-Phase 2.H (Windows port) merged at the head of `phase-2h-windows-port`.
-`crates/core/src/daemon/ipc/{server,client}` now have per-platform
-submodules: `unix.rs` (AF_UNIX, unchanged) and `windows.rs` (Tokio
-Named Pipes + owner-SID DACL + post-accept SID equality check).
-New cross-platform aliases in `core::daemon::ipc::mod.rs`:
-`IpcStream` (UnixStream / NamedPipeClient), `PeerId` (u32 / Vec<u8>
-SID), `ENDPOINT_FILENAME` (`ipc.sock` / `ipc.endpoint`). Discovery
-file at `<data_dir>\ipc.endpoint` carries the random per-daemon
-pipe name `\\.\pipe\skattr-<24-hex>`. CI's `windows-latest` matrix
-entry is now non-optional: `cargo test --workspace --exclude
-skattr-ui --features test-harness` and `cargo clippy --workspace
---exclude skattr-ui --all-targets --all-features` both run on
-`windows-latest`. The `release.yml` matrix produces a `.msi`
-artifact via Tauri's WiX template; the smoke step installs via
-`msiexec /qn` and runs `skattr-ui --smoke-test`. New install doc
-at `docs/install/windows.md`. Workspace `unsafe_code = "deny"`
-(was `"forbid"`) so the single Windows-FFI module
-(`crates/core/src/daemon/ipc/server/windows.rs`) can opt in with
-`#![allow(unsafe_code)]`. Wire-format-NEUTRAL — no `Command` /
-`CommandResult` / `Event` variant additions. Phase 2 is now fully
-closed; v0.2 can drop the "Windows deferred" disclaimer.
+- **2.D — resource hardening (anti-flood)** (merge `2a38ed8`; spec
+  `2026-06-15-phase-2d-resource-hardening-design.md`):
+  - **T1-5** mailbox-server caps (AGPLv3 crate) — five operator-tunable
+    `Policy` knobs: `global_storage_cap_bytes`, `max_recipients`,
+    `idle_timeout_secs`, `max_connections`, `max_delete_ids`. Global byte cap +
+    recipient-count cap enforced atomically in `Store::insert`
+    (**reject-after-expired** — never evicts an accepted, non-expired message);
+    idle-connection timeout in `accept_loop`; a load-shedding connection
+    semaphore on `MailboxServer::serve_connection`; bounded `Delete.deposit_ids`.
+  - **accept-loop spawn bound** — the daemon's inbound accept loop bounds
+    concurrent handshakes with a `Semaphore` (backpressure) and drains in-flight
+    tasks via a `JoinSet` on shutdown.
+  - Wire-format neutral: new internal `PolicyErrorKind` variants map to
+    existing `ErrorCode`s (ADR 0006 frozen). Guardrail: `mailbox_flood`.
 
-Phase 1 is complete (1.H merged 2026-04-24); Phase 2.A (mailbox
-server) merged at the head of `phase-2a-mailbox-server`; Phase 2.B
-is complete (merged 2026-05-01); Phase 2.C is complete (merged
-2026-05-02); Phase 2.D is complete (merged 2026-05-02); Phase 2.E
-is complete (merged 2026-05-03); Phase 2.F is complete (merged
-2026-05-04); Phase 2.G is complete (merged 2026-05-04); Phase 2.H
-is complete (merged 2026-05-06); Phase 2 is fully closed. See
-`docs/superpowers/specs/2026-04-26-phase-2-ui-decomposition.md`
-for the Phase 2 decomposition,
-`docs/superpowers/specs/2026-05-02-phase-2d-conversation-view-design.md`
-for the 2.D internals, and
-`docs/adr/0006-mailbox-protocol-v1.md` for the wire freeze 2.B
-develops against. The bootstrap prompt remains
-authoritative for file layout, module boundaries, type signatures,
-and visibility rules — match it exactly.
+- **2.B — at-rest encryption lifecycle** (merge `65baf87`; spec
+  `2026-06-15-phase-2b-at-rest-encryption-design.md`):
+  - **T1-2** the `age`-encrypt-on-shutdown path is now actually reached.
+    `Pool.conn` → `Mutex<Option<Connection>>` so an explicit close and a `Drop`
+    backstop can both `take()` it. `Pool::close(&self)` is idempotent +
+    guarded: `wal_checkpoint(TRUNCATE)` → drop conn → encrypt → remove the
+    plaintext DB + `-wal`/`-shm` sidecars + sentinel. `run_with_transport`
+    teardown calls `pool.close()` **deterministically** through the retained
+    `Arc` (no `try_unwrap` race); `Drop` is the backstop for abnormal exits.
+    `Pool::open` writes a `skattr.sqlite.open` sentinel and re-encrypts crash
+    residue on boot, so a current `.age` always exists. `export_backup` now
+    works (it depended on a real `.age`). Guardrail:
+    `clean_shutdown_leaves_only_encrypted_db` (no plaintext/sidecars/sentinel
+    after a clean shutdown).
+
+#### Phase 3 — Attachments — ⬜ not started
+
+File attachments (send / receive / preview) with metadata stripping; a new
+`envelope::kinds` attachment variant; chunking/transfer over the hardened
+transport + mailbox path. Depends on Phase 2 being closed (it is).
+
+#### Phase 4 — Release integrity, docs, signing — ⬜ not started
+
+Honest, accurate user-facing docs (close the audit's documentation-truthfulness
+gaps), a working download-verification chain, and **real signing keys**: the
+minisign keypair is a committed **placeholder** (`docs/install/minisign.pub`,
+"PLACEHOLDER — REPLACE BEFORE TAGGING v0.1.0"; maintainer procedure in
+`docs/install/README-MAINTAINER-MINISIGN.md`) and the `SECURITY.md` PGP key is
+also a placeholder — both must be real before Phase 4 ships.
+
+### Deferred / known-limitation status
+
+- **Task 20.5** (per-peer direct-timeout → mailbox fallback) — ✅ done in 2.C.
+- **Task 22.5** (`RemoveMailbox` final-drain dispatch) — ✅ done in 2.C.
+- **Task 23.5** (real onion-key rotation) — ❌ still deferred (v1.1).
+  `Command::RotateOnion` bumps the self-card version and republishes the
+  *current* onion; contacts see a new `ContactCardReceived` version but route
+  to the same address. See the `dispatch.rs` doc-comment.
+- **First-contact `Welcome` is direct-only** — there is no mailbox fallback for
+  the first-contact `Welcome` frame (old Task 2.E.5); if the inviter is offline
+  when the joiner sends the Welcome, first contact stalls. Deferred (touching it
+  would extend the ADR 0006 freeze). Ordinary messages and ContactCard updates
+  do have mailbox fallback (2.C).
+- **v1.1+ deferrals** (must be disclosed as absent in the v1.0 threat model):
+  third-party security audit; metadata-minimization (message-size padding,
+  send-timing jitter, cover traffic / cover polling); multi-member groups (>2);
+  real onion-key rotation; reactions / edit / delete-for-everyone / typing /
+  read receipts (the `Kind` placeholders stay inert); multi-device.
+
+### Module landmarks (audit-era additions)
+
+`crates/core/src` now includes, beyond the original tree:
+`daemon::state::run_with_transport` (the production assembly + deterministic
+pool-close teardown), `daemon::accept` (bounded accept loop),
+`daemon::{logs, retention, smoke, clock}`, the per-platform
+`daemon::ipc::{client,server}::{unix,windows}` (Named Pipes + DACL + SID),
+`delivery::{dial::OutboundDial, mailbox_sweeper, hub::MailboxFallbackShared,
+peer}` (the sustained-failure timer), `mls::group` (two-PSK genesis +
+`can_receive`), `mailbox::{client, codec, poll, auth}` (the v1-protocol client),
+and `storage::{pool (Option<Connection> + WAL-safe close + Drop +
+sentinel/re-encrypt-on-boot), passphrase_audit, outstanding_invites,
+read_state}`. Migrations run through `0014`. ADRs 0007 (first-contact Welcome
+carve-out), 0008 (invite embeds ContactCard), and 0009 (`h_transport`↔MLS
+binding) anchor the audit-era protocol decisions.
+
+### Conventions, invariants, build state
+
+`crates/core/src/identity/` is fully implemented (Ed25519, BIP39, Argon2id +
+XChaCha20-Poly1305 vault, HKDF). The daemon is driven by `Daemon::run` →
+`run_with_transport`; the CLI is a thin wrapper. `transport`, `storage`, `mls`,
+`mailbox`, `delivery` are `pub(crate)`; integration tests reach internals via
+`skattr_core::test_exports` gated on the `test-harness` feature, but **every
+audit-phase behavior is also proven through a live `run_with_transport`
+guardrail** (the audit's defining rule). `cargo clippy -D warnings` / `cargo
+test` / `cargo fmt --check` are green across the workspace; the CI matrix runs
+`ubuntu-latest` / `macos-latest` / `windows-latest` plus a `ui` job. The
+bootstrap prompt remains authoritative for file layout, module boundaries, and
+type signatures — match it exactly.
 
 ## Authoritative docs (read these first)
 
@@ -337,6 +235,31 @@ Use the `superpowers` skills by default for every development task — they are 
 - **2+ independent tasks** → `superpowers:dispatching-parallel-agents`.
 
 The `using-superpowers` skill itself enforces "invoke relevant skills BEFORE any response or action" — treat that as binding, not advisory.
+
+## Model routing
+
+The Superpowers skills (notably `subagent-driven-development` and
+`dispatching-parallel-agents`) describe model tiers in abstract terms — "most
+capable model", "standard model", "cheap model". This section is the
+**authoritative mapping** of those tiers to concrete models for this repo:
+
+| Abstract tier (Superpowers) | Concrete model | Use for |
+|---|---|---|
+| **most capable model** | **opus** (`claude-opus-4-8`) | architecture, design, brainstorming, planning, spec/quality/whole-branch review, complex reasoning, anything touching crypto/protocol/auth |
+| **standard model** | **sonnet-4-6** (`claude-sonnet-4-6`) | integration, multi-file coordination, debugging, most implementation tasks once the plan is well-specified |
+| **cheap model** | **haiku-4-5** (`claude-haiku-4-5`) | mechanical implementation touching 1–2 files against a complete spec |
+
+Routing rules:
+
+- **Subagents spawned via `superpowers:dispatching-parallel-agents` default to
+  sonnet-4-6**, unless the task is explicitly architectural (design / review /
+  cross-cutting reasoning) — those go to opus.
+- In `subagent-driven-development`, pick the lowest tier that fits the task's
+  complexity signals (1–2 files + complete spec → haiku-4-5; multi-file /
+  integration → sonnet-4-6; design/review → opus). Reviews (spec compliance,
+  code quality, final whole-branch) are judgment work — prefer opus.
+- When unsure, round **up** a tier: a wrong cheap-model result costs more than
+  the model-tier savings.
 
 ## What Skattr is
 
