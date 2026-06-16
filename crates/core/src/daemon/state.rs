@@ -381,7 +381,7 @@ where
     // Step 6: DaemonHandle — inject the shared config_arc so SetConfig writes
     // propagate to the retention sweep on the next tick.
     let mut handle = DaemonHandle::<T::Stream>::new_with_mailbox(
-        pool,
+        pool.clone(),
         hub,
         identity,
         events_tx.clone(),
@@ -486,6 +486,15 @@ where
     let _ = mailbox_sweeper_task.await;
     transport.shutdown().await?;
     // Server::drop removes the socket file automatically.
+
+    // At-rest encryption (2.B): close the pool deterministically through the
+    // retained Arc. `close` takes `&self`, so sole ownership is NOT required —
+    // background tasks still holding a clone observe a closed pool and their
+    // own Drop no-ops (close is idempotent). This runs BEFORE the function
+    // returns, so a clean shutdown leaves no plaintext on disk.
+    if let Err(e) = pool.close() {
+        tracing::warn!(error = %e, "pool close at shutdown failed");
+    }
     Ok(())
 }
 

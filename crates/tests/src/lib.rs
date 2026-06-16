@@ -16,6 +16,8 @@ mod add_mailbox_validates;
 #[cfg(test)]
 mod arti_echo;
 #[cfg(test)]
+mod at_rest_shutdown;
+#[cfg(test)]
 mod cli_export;
 #[cfg(test)]
 mod cli_ipc_roundtrip;
