@@ -87,6 +87,10 @@ pub enum CoreError {
     #[error("{0}")]
     Delivery(#[from] crate::delivery::DeliveryErrorKind),
 
+    /// Attachment (Phase 3) chunking / manifest / metadata problem.
+    #[error("{0}")]
+    Attachment(#[from] crate::attachment::AttachmentErrorKind),
+
     /// Storage / migration / serialization problem.
     #[error("{0}")]
     Storage(#[from] crate::storage::StorageErrorKind),
