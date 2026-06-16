@@ -5,6 +5,7 @@
 //! metadata stripping. Pure/local — no transport. The manifest rides inside
 //! MLS via `envelope::kinds::Kind::File`.
 
+pub(crate) mod chunker;
 pub(crate) mod error_kind;
 pub(crate) mod manifest;
 
