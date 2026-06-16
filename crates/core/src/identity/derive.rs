@@ -41,6 +41,11 @@ pub const INFO_STORAGE_SEED_V1: &[u8] = b"skattr-storage-seed-v1";
 /// `HKDF(storage_seed, "skattr-backup-v1")`.
 pub const INFO_BACKUP_V1: &[u8] = b"skattr-backup-v1";
 
+/// Attachment per-chunk key derivation:
+/// `HKDF(file_key, "skattr-attach-v1" || u32_be(chunk_index))` → 56 bytes
+/// (32-byte XChaCha20-Poly1305 key ‖ 24-byte XNonce).
+pub const INFO_ATTACH_V1: &[u8] = b"skattr-attach-v1";
+
 /// Expand `ikm` into `OUT` bytes of output, bound to `info`.
 ///
 /// Uses HKDF-SHA256 with an empty salt (inputs are already high-entropy).
@@ -50,6 +55,16 @@ pub fn hkdf_expand<const OUT: usize>(ikm: &[u8], info: &[u8]) -> Result<Zeroizin
     hk.expand(info, okm.as_mut())
         .map_err(|e| CoreError::Identity(format!("hkdf expand: {e}")))?;
     Ok(okm)
+}
+
+/// Derive a chunk's 32-byte AEAD key + 24-byte nonce from the manifest
+/// `file_key` and the chunk index. Returns 56 bytes: `[0..32]` key,
+/// `[32..56]` nonce.
+pub fn chunk_key_material(file_key: &[u8; 32], index: u32) -> Result<Zeroizing<[u8; 56]>> {
+    let mut info = Vec::with_capacity(INFO_ATTACH_V1.len() + 4);
+    info.extend_from_slice(INFO_ATTACH_V1);
+    info.extend_from_slice(&index.to_be_bytes());
+    hkdf_expand::<56>(file_key, &info)
 }
 
 /// Derive the daemon storage seed from an identity key via HKDF.
@@ -81,6 +96,21 @@ mod tests {
 
         let c: [u8; 32] = *hkdf_expand::<32>(ikm, INFO_STORAGE_V1).unwrap();
         assert_ne!(a, c, "different info labels must produce different outputs");
+    }
+
+    #[test]
+    fn chunk_key_material_is_deterministic_and_per_index() {
+        let fk = [0x42u8; 32];
+        let a = chunk_key_material(&fk, 0).unwrap();
+        let b = chunk_key_material(&fk, 0).unwrap();
+        assert_eq!(*a, *b, "same (file_key, index) → same material");
+        let c = chunk_key_material(&fk, 1).unwrap();
+        assert_ne!(*a, *c, "different index → different material");
+        // The key region (0..32) and nonce region (32..56) come from distinct
+        // stretches of the HKDF stream: compare equal-length windows by content
+        // (the key's first 24 bytes vs the 24-byte nonce) to catch a degenerate
+        // repeating derivation.
+        assert_ne!(&a[..24], &a[32..56]);
     }
 
     #[test]
