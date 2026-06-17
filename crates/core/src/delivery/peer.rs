@@ -1489,6 +1489,266 @@ mod tests {
         drop(job_tx);
     }
 
+    /// Actor-level in-session resume (Phase 3.B). Drives `full_run` directly as
+    /// the RECEIVER with real Noise conns. Proves the core resume invariant:
+    /// after a `PeerCtrl::ReplaceConn` mid-transfer, the actor re-issues its
+    /// outstanding chunk requests over the FRESH conn (`rx.reissue()`), then
+    /// completes the transfer and reassembles the byte-identical plaintext.
+    ///
+    /// The full-stack guardrail (a real dropped conn mid-transfer) is infeasible
+    /// over loopback — no public action deterministically severs a connection
+    /// mid-stream — so we inject the reconnect via `ReplaceConn` directly.
+    #[tokio::test]
+    async fn resume_reissues_chunk_requests_and_completes_after_replace_conn() {
+        use crate::attachment::store::ChunkStore;
+        use std::sync::Arc;
+        use std::sync::Mutex as StdMutex;
+        use std::time::Duration;
+        use tokio::io::DuplexStream;
+
+        // --- Build a real 3-chunk attachment we will play the SENDER for. ---
+        let payload = vec![0x5Au8; crate::attachment::CHUNK_SIZE * 2 + 100];
+        let (manifest, ciphertexts) = crate::attachment::chunker::chunk_plaintext(
+            &payload,
+            "f.bin",
+            "application/octet-stream",
+        )
+        .unwrap();
+        assert_eq!(manifest.chunks.len(), 3, "expected a 3-chunk attachment");
+        let aid = manifest.attachment_id;
+
+        // --- Stub InboundDispatch: yields exactly one AttachmentBegin and
+        // records completion / failure. ---
+        type Received = Arc<StdMutex<Option<([u8; 16], String)>>>;
+        struct Stub {
+            begin: StdMutex<Option<crate::delivery::chunk_transfer::AttachmentBegin>>,
+            received: Received,
+            failed: Arc<StdMutex<Option<String>>>,
+        }
+        impl InboundDispatch for Stub {
+            fn dispatch(&self, _peer: PublicKey, _ct: &[u8]) -> Option<MessageId> {
+                // Represents the manifest MlsApp "decrypting" → actor ACKs it.
+                Some(MessageId::generate())
+            }
+            #[allow(private_interfaces)]
+            fn take_begin_attachment(
+                &self,
+                _peer: PublicKey,
+            ) -> Option<crate::delivery::chunk_transfer::AttachmentBegin> {
+                self.begin.lock().unwrap().take()
+            }
+            fn attachment_received(
+                &self,
+                _peer: PublicKey,
+                aid: [u8; 16],
+                _filename: &str,
+                _mime: &str,
+                _size: u64,
+                path: &str,
+            ) {
+                *self.received.lock().unwrap() = Some((aid, path.to_string()));
+            }
+            fn attachment_failed(&self, _aid: [u8; 16], reason: &str) {
+                *self.failed.lock().unwrap() = Some(reason.to_string());
+            }
+        }
+
+        let received: Received = Arc::new(StdMutex::new(None));
+        let failed: Arc<StdMutex<Option<String>>> = Arc::new(StdMutex::new(None));
+        let stub = Arc::new(Stub {
+            begin: StdMutex::new(Some(crate::delivery::chunk_transfer::AttachmentBegin {
+                attachment_id: aid,
+                manifest: manifest.clone(),
+            })),
+            received: received.clone(),
+            failed: failed.clone(),
+        });
+
+        // --- Receiver-side state: pool, chunk store, download dir. ---
+        let pool = std::sync::Arc::new(Pool::in_memory());
+        let tmp = tempfile::tempdir().unwrap();
+        let chunk_store = Arc::new(ChunkStore::new(tmp.path()));
+        let download_dir = tmp.path().to_path_buf();
+
+        // --- Noise handshake #1: conn1 (actor initiator) + peer_conn1 (test). ---
+        let actor_id = IdentityKey::generate().unwrap();
+        let responder_id = IdentityKey::generate().unwrap();
+        let responder_static = responder_id.noise_static_public();
+        // The actor (receiver) is the Noise initiator; the peer (test) is the
+        // responder. `peer` is the responder's identity PublicKey.
+        let peer = PublicKey(responder_id.public().0);
+
+        async fn dial(
+            actor_id: &IdentityKey,
+            responder_id: IdentityKey,
+            responder_static: [u8; 32],
+        ) -> (
+            AuthenticatedConnection<DuplexStream>,
+            AuthenticatedConnection<DuplexStream>,
+        ) {
+            let (client_stream, server_stream) = tokio::io::duplex(256 * 1024);
+            let responder_task = tokio::spawn(async move {
+                handshake_responder(server_stream, &responder_id, None)
+                    .await
+                    .unwrap()
+            });
+            let (actor_conn, _) =
+                handshake_initiator(client_stream, actor_id, &responder_static, None)
+                    .await
+                    .unwrap();
+            let (peer_conn, _) = responder_task.await.unwrap();
+            (actor_conn, peer_conn)
+        }
+
+        let (conn1, mut peer_conn1) =
+            dial(&actor_id, responder_id, responder_static).await;
+
+        // --- Spawn the receiver actor driving full_run directly. ---
+        let (_jobs_tx, jobs_rx) = mpsc::channel::<DeliveryJob>(4);
+        let (_welcome_tx, welcome_rx) = mpsc::channel::<WelcomeJob>(4);
+        let (ctrl_tx, ctrl_rx) = mpsc::channel::<PeerCtrl<DuplexStream>>(4);
+        let run_pool = pool.clone();
+        let run_stub: std::sync::Arc<dyn InboundDispatch> = stub.clone();
+        let run_store = chunk_store.clone();
+        let run_dir = download_dir.clone();
+        let actor = tokio::spawn(async move {
+            let _ = super::full_run::<DuplexStream>(
+                peer,
+                Some(conn1),
+                jobs_rx,
+                welcome_rx,
+                ctrl_rx,
+                run_pool,
+                Some(run_stub),
+                None,
+                Duration::ZERO,
+                None,
+                Some(run_store),
+                Some(run_dir),
+            )
+            .await;
+        });
+
+        // --- Kick off the transfer: send the "manifest" as an MlsApp frame. ---
+        peer_conn1
+            .send(Frame::MlsApp(b"manifest".to_vec()))
+            .await
+            .unwrap();
+
+        // Collect frames from conn1: the actor ACKs the manifest, then sends a
+        // ChunkRequest window for the 3 missing indices (window 8 > 3).
+        async fn collect_requests(
+            conn: &mut AuthenticatedConnection<DuplexStream>,
+            want: usize,
+        ) -> Vec<u32> {
+            let mut got = Vec::new();
+            while got.len() < want {
+                let frame =
+                    tokio::time::timeout(Duration::from_secs(3), conn.recv())
+                        .await
+                        .expect("recv must not time out")
+                        .unwrap()
+                        .expect("conn must not EOF");
+                match frame {
+                    Frame::Ack(_) => { /* manifest ACK — drain */ }
+                    Frame::ChunkRequest { index, .. } => got.push(index),
+                    other => panic!("unexpected frame while collecting requests: {other:?}"),
+                }
+            }
+            got
+        }
+
+        let mut reqs1 = collect_requests(&mut peer_conn1, 3).await;
+        reqs1.sort_unstable();
+        assert_eq!(reqs1, vec![0, 1, 2], "first window must request all 3 indices");
+
+        // --- Simulate reconnect: hand the actor a FRESH conn via ReplaceConn. ---
+        // Re-create handshake material for conn2. (responder_id was moved into
+        // dial #1, so generate a fresh peer identity for the reconnect; `peer`
+        // stays the same — the actor only uses the PublicKey it was spawned
+        // with for dispatch, not the conn's handshake identity.)
+        let responder_id2 = IdentityKey::generate().unwrap();
+        let responder_static2 = responder_id2.noise_static_public();
+        let (conn2, mut peer_conn2) =
+            dial(&actor_id, responder_id2, responder_static2).await;
+
+        ctrl_tx
+            .send(PeerCtrl::ReplaceConn(Box::new(conn2)))
+            .await
+            .unwrap();
+
+        // --- CORE RESUME ASSERTION: the SAME outstanding indices must be
+        // re-issued as ChunkRequests over the FRESH conn2. ---
+        let mut reqs2 = collect_requests(&mut peer_conn2, 3).await;
+        reqs2.sort_unstable();
+        assert_eq!(
+            reqs2,
+            vec![0, 1, 2],
+            "after ReplaceConn the actor must re-issue ALL outstanding chunk \
+             requests over the fresh conn (this is the resume proof)"
+        );
+
+        // --- Complete the transfer over conn2: serve each requested chunk. The
+        // actor verifies + stores each, refilling the window as needed. Since
+        // all 3 were requested up front, serving all 3 completes it. ---
+        for &index in &reqs2 {
+            peer_conn2
+                .send(Frame::Chunk {
+                    attachment_id: aid,
+                    index,
+                    ciphertext: ciphertexts[index as usize].clone(),
+                })
+                .await
+                .unwrap();
+        }
+
+        // The actor reassembles on completion and sends AttachmentComplete. Drain
+        // any trailing frames (AttachmentComplete / further ChunkRequests) so the
+        // conn stays alive while we poll for completion.
+        let drain = tokio::spawn(async move {
+            loop {
+                match tokio::time::timeout(Duration::from_millis(200), peer_conn2.recv()).await {
+                    Ok(Ok(Some(Frame::Chunk { attachment_id, index, ciphertext }))) => {
+                        // (Shouldn't happen — receiver doesn't request from us
+                        // again — but keep the loop honest.)
+                        let _ = (attachment_id, index, ciphertext);
+                    }
+                    Ok(Ok(Some(_))) => {}
+                    _ => break,
+                }
+            }
+        });
+
+        // --- Assert completion within a timeout. ---
+        let mut done: Option<([u8; 16], String)> = None;
+        for _ in 0..50 {
+            if let Some(rec) = received.lock().unwrap().clone() {
+                done = Some(rec);
+                break;
+            }
+            assert!(
+                failed.lock().unwrap().is_none(),
+                "transfer must not fail: {:?}",
+                failed.lock().unwrap()
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let (got_aid, got_path) = done.expect("attachment_received must fire within 5s");
+        assert_eq!(got_aid, aid, "completed attachment id must match the manifest");
+        assert!(failed.lock().unwrap().is_none(), "attachment_failed must never fire");
+
+        // --- Reassembled file is byte-identical to the ORIGINAL plaintext. ---
+        let on_disk = std::fs::read(&got_path).unwrap();
+        assert_eq!(
+            on_disk, payload,
+            "reassembled file must be byte-identical to the original plaintext"
+        );
+
+        drop(ctrl_tx);
+        actor.abort();
+        drain.abort();
+    }
+
     #[tokio::test]
     async fn retry_tick_skips_mailbox_rows() {
         use crate::storage::outbox::OutboxRepo;
