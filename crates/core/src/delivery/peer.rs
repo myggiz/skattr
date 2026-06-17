@@ -77,6 +77,123 @@ pub(crate) fn welcome_msg_id(bytes: &[u8]) -> MessageId {
     MessageId(id)
 }
 
+/// Send `Frame::ChunkRequest` for each index over `conn`. Returns `false` if the
+/// send failed (caller should drop the conn).
+async fn send_chunk_requests<S>(
+    conn: &mut Option<AuthenticatedConnection<S>>,
+    attachment_id: [u8; 16],
+    indices: &[u32],
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let Some(c) = conn.as_mut() else { return false };
+    for &index in indices {
+        if c.send(Frame::ChunkRequest { attachment_id, index })
+            .await
+            .is_err()
+        {
+            return false;
+        }
+    }
+    true
+}
+
+/// Begin the next queued inbound attachment if none is active. Sends the first
+/// request window. Returns the new `active_rx` (or `None` if nothing to start /
+/// send failed). The caller assigns the result to its `active_rx`.
+async fn maybe_start_next_rx<S>(
+    conn: &mut Option<AuthenticatedConnection<S>>,
+    pool: &std::sync::Arc<crate::storage::Pool>,
+    rx_queue: &mut std::collections::VecDeque<crate::delivery::chunk_transfer::AttachmentBegin>,
+) -> Option<crate::delivery::chunk_transfer::ChunkRx>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let begin = rx_queue.pop_front()?;
+    let repo = crate::storage::attachments::AttachmentRepo::new(pool);
+    let already = repo
+        .received_indices(&begin.attachment_id)
+        .unwrap_or_default();
+    let mut rx = crate::delivery::chunk_transfer::ChunkRx::new(begin.manifest, &already);
+    if rx.is_complete() {
+        // Already had everything (resume edge): caller will finalize on next tick.
+        return Some(rx);
+    }
+    let reqs = rx.next_requests();
+    let aid = rx.attachment_id();
+    let _ = send_chunk_requests(conn, aid, &reqs).await;
+    Some(rx)
+}
+
+/// Reassemble a completed inbound attachment to the download dir and emit
+/// `Event::AttachmentReceived` + send `AttachmentComplete` to the sender.
+#[allow(clippy::too_many_arguments)]
+async fn finalize_rx<S>(
+    conn: &mut Option<AuthenticatedConnection<S>>,
+    pool: &std::sync::Arc<crate::storage::Pool>,
+    inbound: &Option<std::sync::Arc<dyn InboundDispatch>>,
+    chunk_store: &Option<std::sync::Arc<crate::attachment::store::ChunkStore>>,
+    download_dir: &Option<std::path::PathBuf>,
+    peer: PublicKey,
+    rx: &crate::delivery::chunk_transfer::ChunkRx,
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let manifest = rx.manifest();
+    let aid = manifest.attachment_id;
+    let Some(dir) = download_dir.as_ref() else {
+        return;
+    };
+    let Some(store) = chunk_store.as_ref() else {
+        return;
+    };
+    let _ = std::fs::create_dir_all(dir);
+    let source = crate::attachment::store::StoreSource::new(store, aid);
+    let safe_name = crate::delivery::chunk_transfer::sanitize_filename(&manifest.filename);
+    let out_path = crate::delivery::chunk_transfer::unique_download_path(dir, &safe_name);
+    match crate::attachment::reassembler::reassemble(manifest, &source, &out_path) {
+        Ok(()) => {
+            let repo = crate::storage::attachments::AttachmentRepo::new(pool);
+            let _ = repo.set_status(&aid, "complete");
+            if let Some(d) = inbound.as_ref() {
+                d.attachment_received(
+                    peer,
+                    aid,
+                    &safe_name,
+                    &manifest.mime,
+                    manifest.total_size,
+                    &out_path.to_string_lossy(),
+                );
+            }
+            if let Some(c) = conn.as_mut() {
+                let _ = c
+                    .send(Frame::AttachmentComplete { attachment_id: aid })
+                    .await;
+            }
+        }
+        Err(e) => {
+            tracing::warn!(err = %e, "inbound: reassembly failed");
+            fail_rx(pool, inbound, rx, "reassembly failed").await;
+        }
+    }
+}
+
+/// Mark an inbound transfer failed and emit `Event::AttachmentFailed`.
+async fn fail_rx(
+    pool: &std::sync::Arc<crate::storage::Pool>,
+    inbound: &Option<std::sync::Arc<dyn InboundDispatch>>,
+    rx: &crate::delivery::chunk_transfer::ChunkRx,
+    reason: &str,
+) {
+    let aid = rx.attachment_id();
+    let repo = crate::storage::attachments::AttachmentRepo::new(pool);
+    let _ = repo.set_status(&aid, "failed");
+    if let Some(d) = inbound.as_ref() {
+        d.attachment_failed(aid, reason);
+    }
+}
+
 /// Inbound-MLS dispatch strategy, injected per peer actor. See Task 8
 /// preamble for the rationale — keeps `openmls` out of the actor
 /// and keeps tests that don't need real MLS trivially easy to write.
@@ -205,6 +322,8 @@ impl PeerConnection {
         dialer: Option<std::sync::Arc<dyn crate::delivery::dial::OutboundDial<S>>>,
         direct_timeout: std::time::Duration,
         fallback: Option<std::sync::Arc<crate::delivery::hub::MailboxFallbackShared>>,
+        chunk_store: Option<std::sync::Arc<crate::attachment::store::ChunkStore>>,
+        download_dir: Option<std::path::PathBuf>,
     ) -> PeerHandle
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -221,6 +340,8 @@ impl PeerConnection {
                 dialer,
                 direct_timeout,
                 fallback,
+                chunk_store,
+                download_dir,
             )
             .await;
         })
@@ -254,6 +375,8 @@ impl PeerConnection {
                 inbound,
                 None,
                 std::time::Duration::from_secs(0),
+                None,
+                None,
                 None,
             )
             .await;
@@ -342,6 +465,8 @@ async fn full_run<S>(
     dialer: Option<std::sync::Arc<dyn crate::delivery::dial::OutboundDial<S>>>,
     direct_timeout: std::time::Duration,
     fallback: Option<std::sync::Arc<crate::delivery::hub::MailboxFallbackShared>>,
+    chunk_store: Option<std::sync::Arc<crate::attachment::store::ChunkStore>>,
+    download_dir: Option<std::path::PathBuf>,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -367,6 +492,15 @@ where
     // `direct_timeout == 0`, so all existing call sites are unaffected.
     let mut first_failure_at: Option<tokio::time::Instant> = None;
     let fallback_enabled = fallback.is_some() && direct_timeout > std::time::Duration::ZERO;
+
+    // 3.B inbound chunk-transfer state: at most one active inbound attachment
+    // per peer; later begins queue FIFO. `None` chunk_store/download_dir
+    // (test constructors) disables all chunk handling.
+    let mut active_rx: Option<crate::delivery::chunk_transfer::ChunkRx> = None;
+    let mut rx_queue: std::collections::VecDeque<
+        crate::delivery::chunk_transfer::AttachmentBegin,
+    > = std::collections::VecDeque::new();
+    let chunk_enabled = chunk_store.is_some() && download_dir.is_some();
 
     loop {
         tokio::select! {
@@ -475,6 +609,30 @@ where
                     }
                     first_failure_at = None; // disarm; sweeper owns subsequent retries
                 }
+                if chunk_enabled {
+                    // Compute the timeout action (and the aid) under a short-lived
+                    // mutable borrow, then release it before any `active_rx.take()`.
+                    let timeout = active_rx
+                        .as_mut()
+                        .map(|rx| (rx.attachment_id(), rx.timed_out(std::time::Instant::now())));
+                    if let Some((aid, action)) = timeout {
+                        match action {
+                            crate::delivery::chunk_transfer::ChunkAction::Request(idxs)
+                                if !idxs.is_empty() =>
+                            {
+                                let _ = send_chunk_requests(&mut conn, aid, &idxs).await;
+                            }
+                            crate::delivery::chunk_transfer::ChunkAction::Fail => {
+                                if let Some(rx) = active_rx.take() {
+                                    fail_rx(&pool, &inbound, &rx, "request timeout").await;
+                                }
+                                active_rx =
+                                    maybe_start_next_rx(&mut conn, &pool, &mut rx_queue).await;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
             }
             _ = keepalive_tick.tick() => {
                 if conn.is_some() {
@@ -512,6 +670,13 @@ where
                         // do not let stale failures from the old conn fire the
                         // fallback. (Re-armed on the next failure if it recurs.)
                         first_failure_at = None;
+                        // 3.B: resume an in-flight inbound transfer on reconnect by
+                        // re-issuing its outstanding requests over the fresh conn.
+                        if let Some(rx) = active_rx.as_ref() {
+                            let aid = rx.attachment_id();
+                            let reqs = rx.reissue();
+                            let _ = send_chunk_requests(&mut conn, aid, &reqs).await;
+                        }
                     }
                     Some(PeerCtrl::Shutdown) | None => break,
                 }
@@ -552,6 +717,16 @@ where
                                 }
                             }
                             // None => rejected frame, do not ACK.
+                            // 3.B: a Kind::File manifest may have queued a begin.
+                            if chunk_enabled {
+                                while let Some(begin) = d.take_begin_attachment(peer) {
+                                    rx_queue.push_back(begin);
+                                }
+                                if active_rx.is_none() {
+                                    active_rx =
+                                        maybe_start_next_rx(&mut conn, &pool, &mut rx_queue).await;
+                                }
+                            }
                         } else {
                             tracing::warn!(
                                 "peer: inbound MlsApp received but no InboundDispatch configured"
@@ -573,6 +748,141 @@ where
                                 "peer: inbound MlsWelcome received but no \
                                  InboundDispatch configured"
                             );
+                        }
+                    }
+                    Ok(Some(Frame::ChunkRequest { attachment_id, index })) => {
+                        last_traffic = tokio::time::Instant::now();
+                        if let Some(store) = chunk_store.as_ref() {
+                            let row = crate::storage::attachments::AttachmentRepo::new(&pool)
+                                .get(&attachment_id)
+                                .ok()
+                                .flatten();
+                            let total = row.as_ref().map(|r| r.total_chunks as u32).unwrap_or(0);
+                            let reply = if row.is_none() {
+                                Frame::ChunkNack {
+                                    attachment_id,
+                                    index,
+                                    reason: crate::delivery::chunk_transfer::NACK_UNKNOWN_ATTACHMENT,
+                                }
+                            } else {
+                                crate::delivery::chunk_transfer::serve_chunk_request(
+                                    store,
+                                    &attachment_id,
+                                    index,
+                                    total,
+                                )
+                            };
+                            if let Some(c) = conn.as_mut() {
+                                if c.send(reply).await.is_err() {
+                                    conn = None;
+                                    drain_pending(&mut pending);
+                                }
+                            }
+                        }
+                    }
+                    Ok(Some(Frame::Chunk { attachment_id, index, ciphertext })) => {
+                        last_traffic = tokio::time::Instant::now();
+                        if chunk_enabled {
+                            let matches = active_rx.as_ref().map(|r| r.attachment_id())
+                                == Some(attachment_id);
+                            // Borrow split: take rx out only when it matches (so a
+                            // non-matching active transfer is never dropped), operate,
+                            // put back.
+                            if let Some(mut rx) = if matches { active_rx.take() } else { None } {
+                                if rx.verify(index, &ciphertext) {
+                                    if let Some(store) = chunk_store.as_ref() {
+                                        let _ = store.put(&attachment_id, index, &ciphertext);
+                                    }
+                                    let repo =
+                                        crate::storage::attachments::AttachmentRepo::new(&pool);
+                                    let _ = repo.mark_received(&attachment_id, index);
+                                    rx.on_received(index);
+                                    let (recv, total) = rx.progress();
+                                    if let Some(d) = inbound.as_ref() {
+                                        // Throttle: every 8th chunk or on completion.
+                                        if recv % 8 == 0 || recv == total {
+                                            d.attachment_progress(attachment_id, recv, total);
+                                        }
+                                    }
+                                    if rx.is_complete() {
+                                        finalize_rx(
+                                            &mut conn,
+                                            &pool,
+                                            &inbound,
+                                            &chunk_store,
+                                            &download_dir,
+                                            peer,
+                                            &rx,
+                                        )
+                                        .await;
+                                        active_rx = maybe_start_next_rx(
+                                            &mut conn,
+                                            &pool,
+                                            &mut rx_queue,
+                                        )
+                                        .await;
+                                    } else {
+                                        let reqs = rx.next_requests();
+                                        let aid = rx.attachment_id();
+                                        let _ =
+                                            send_chunk_requests(&mut conn, aid, &reqs).await;
+                                        active_rx = Some(rx);
+                                    }
+                                } else {
+                                    // Hash mismatch → retry or fail.
+                                    match rx.on_bad(index) {
+                                        crate::delivery::chunk_transfer::ChunkAction::Request(
+                                            idxs,
+                                        ) => {
+                                            let aid = rx.attachment_id();
+                                            let _ = send_chunk_requests(&mut conn, aid, &idxs)
+                                                .await;
+                                            active_rx = Some(rx);
+                                        }
+                                        crate::delivery::chunk_transfer::ChunkAction::Fail => {
+                                            fail_rx(&pool, &inbound, &rx, "chunk hash mismatch")
+                                                .await;
+                                            active_rx = maybe_start_next_rx(
+                                                &mut conn,
+                                                &pool,
+                                                &mut rx_queue,
+                                            )
+                                            .await;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Ok(Some(Frame::ChunkNack { attachment_id, index: _, reason })) => {
+                        last_traffic = tokio::time::Instant::now();
+                        let nack_matches = chunk_enabled
+                            && active_rx.as_ref().map(|r| r.attachment_id())
+                                == Some(attachment_id);
+                        if let Some(rx) = if nack_matches { active_rx.take() } else { None } {
+                            fail_rx(
+                                &pool,
+                                &inbound,
+                                &rx,
+                                &format!("sender nack reason {reason}"),
+                            )
+                            .await;
+                            active_rx = maybe_start_next_rx(&mut conn, &pool, &mut rx_queue).await;
+                        }
+                    }
+                    Ok(Some(Frame::AttachmentComplete { attachment_id })) => {
+                        last_traffic = tokio::time::Instant::now();
+                        // Sender side: receiver confirmed receipt → finalize the out row + GC.
+                        let repo = crate::storage::attachments::AttachmentRepo::new(&pool);
+                        let _ = repo.set_status(&attachment_id, "complete");
+                        if let Some(store) = chunk_store.as_ref() {
+                            let _ = store.remove(&attachment_id);
+                        }
+                        if let Some(d) = inbound.as_ref() {
+                            if let Ok(Some(row)) = repo.get(&attachment_id) {
+                                let t = row.total_chunks as u32;
+                                d.attachment_progress(attachment_id, t, t);
+                            }
                         }
                     }
                     Ok(Some(other)) => {
@@ -927,6 +1237,8 @@ mod tests {
                 None,
                 std::time::Duration::from_secs(0),
                 None,
+                None,
+                None,
             )
             .await;
         });
@@ -1081,6 +1393,8 @@ mod tests {
                 None,
                 std::time::Duration::from_millis(150),
                 Some(shared),
+                None,
+                None,
             )
             .await;
         });

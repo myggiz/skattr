@@ -258,6 +258,9 @@ where
             self.dialer.clone(),
             self.direct_timeout,
             self.fallback_shared(),
+            // 3.B chunk transfer: wired with real values in Task 6 (hub plumbing).
+            None,
+            None,
         );
         let channels = PeerChannels {
             jobs: jobs_tx,
