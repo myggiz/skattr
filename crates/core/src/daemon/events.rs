@@ -92,6 +92,37 @@ pub enum Event {
     /// One redacted log record. Streamed only when the subscriber's
     /// filter includes `EventFilter::Logs`.
     LogRecord(crate::daemon::commands::LogRecord),
+    /// An inbound attachment finished downloading + reassembling.
+    AttachmentReceived {
+        /// Sending peer.
+        contact: PublicKey,
+        /// 16-byte attachment id.
+        attachment_id: crate::daemon::hex::Hex16,
+        /// Sanitized filename as written to disk.
+        filename: String,
+        /// Effective MIME type (post-strip).
+        mime: String,
+        /// File size in bytes.
+        size: u64,
+        /// Absolute path of the written file.
+        path: String,
+    },
+    /// Incremental attachment transfer progress (throttled).
+    AttachmentProgress {
+        /// 16-byte attachment id.
+        attachment_id: crate::daemon::hex::Hex16,
+        /// Chunks received so far.
+        received: u32,
+        /// Total chunks.
+        total: u32,
+    },
+    /// An attachment transfer failed (retry budget exhausted, hard nack).
+    AttachmentFailed {
+        /// 16-byte attachment id.
+        attachment_id: crate::daemon::hex::Hex16,
+        /// Human-readable, non-sensitive reason.
+        reason: String,
+    },
 }
 
 #[cfg(test)]

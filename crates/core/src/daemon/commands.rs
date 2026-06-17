@@ -111,6 +111,10 @@ pub struct ConfigPatch {
     /// If `Some`, update whether to persist logs to disk.
     #[serde(default)]
     pub persist_logs_to_disk: Option<bool>,
+    /// If `Some`, set the attachment download directory. New in 3.B.
+    #[serde(default)]
+    #[ts(type = "string")]
+    pub download_dir: Option<std::path::PathBuf>,
 }
 
 /// Request sent into the daemon.
