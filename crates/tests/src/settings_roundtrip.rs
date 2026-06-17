@@ -79,6 +79,7 @@ async fn settings_round_trip_persists_and_reloads() {
         close_to_tray: Some(false),
         start_minimised: Some(true),
         persist_logs_to_disk: Some(true),
+        download_dir: None,
     };
     let result = send(&handle, Command::SetConfig { patch }).await.unwrap();
     assert!(

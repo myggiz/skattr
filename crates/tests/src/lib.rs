@@ -18,6 +18,8 @@ mod arti_echo;
 #[cfg(test)]
 mod at_rest_shutdown;
 #[cfg(test)]
+mod attachment_transfer_direct;
+#[cfg(test)]
 mod cli_export;
 #[cfg(test)]
 mod cli_ipc_roundtrip;
