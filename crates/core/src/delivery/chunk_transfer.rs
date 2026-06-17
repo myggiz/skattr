@@ -179,8 +179,10 @@ pub(crate) fn serve_chunk_request(
     }
 }
 
-/// Strip path separators, traversal, and control chars from an
-/// attacker-controlled manifest filename; cap length; never empty.
+/// Strip path separators, traversal, control chars, AND Unicode
+/// bidi/format-control characters (the RTL-override display-spoofing vector,
+/// e.g. U+202E) from an attacker-controlled manifest filename; cap length;
+/// never empty.
 pub(crate) fn sanitize_filename(name: &str) -> String {
     let base = name
         .rsplit(['/', '\\'])
@@ -188,11 +190,28 @@ pub(crate) fn sanitize_filename(name: &str) -> String {
         .unwrap_or("file");
     let cleaned: String = base
         .chars()
-        .filter(|c| !c.is_control() && *c != '/' && *c != '\\')
+        .filter(|c| {
+            !c.is_control()
+                && !is_bidi_or_format_control(*c)
+                && *c != '/'
+                && *c != '\\'
+        })
         .collect();
     let trimmed = cleaned.trim().trim_matches('.');
     let result = if trimmed.is_empty() { "file" } else { trimmed };
     result.chars().take(200).collect()
+}
+
+/// Unicode bidi/format controls that `char::is_control` (C0/C1 only) misses
+/// but which enable filename-display spoofing. Mirrors the same check in
+/// `attachment::manifest`. Covers bidi overrides/embeddings (U+202A–202E),
+/// isolates (U+2066–2069), and LRM/RLM (U+200E/200F).
+fn is_bidi_or_format_control(c: char) -> bool {
+    matches!(c,
+        '\u{200E}' | '\u{200F}'
+        | '\u{202A}'..='\u{202E}'
+        | '\u{2066}'..='\u{2069}'
+    )
 }
 
 /// Return a non-colliding path under `dir` for `filename`, suffixing
@@ -292,6 +311,24 @@ mod tests {
         assert_eq!(sanitize_filename("  ..  "), "file");
         assert_eq!(sanitize_filename(""), "file");
         assert_eq!(sanitize_filename("clean.jpg"), "clean.jpg");
+    }
+
+    #[test]
+    fn sanitize_strips_bidi_rtl_override() {
+        // U+202E RIGHT-TO-LEFT OVERRIDE is the classic display-spoofing char
+        // (e.g. "invoice\u{202E}cod.exe" renders as "invoiceexe.doc").
+        let tricky = "invoice\u{202E}cod.exe";
+        let result = sanitize_filename(tricky);
+        assert!(
+            !result.contains('\u{202E}'),
+            "RTL override U+202E must be stripped; got: {result:?}"
+        );
+        // Other bidi controls must be stripped too.
+        for ch in ['\u{200E}', '\u{200F}', '\u{202A}', '\u{2066}', '\u{2069}'] {
+            let s = format!("file{ch}name.txt");
+            let r = sanitize_filename(&s);
+            assert!(!r.contains(ch), "bidi char U+{:04X} must be stripped; got: {r:?}", ch as u32);
+        }
     }
 
     #[test]
