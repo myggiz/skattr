@@ -144,6 +144,15 @@ pub enum Command {
         /// Envelope payload.
         kind: Kind,
     },
+    /// Send a file attachment to a contact. Strips metadata, chunks, stages,
+    /// persists the manifest, and announces it via a `Kind::File` MLS message;
+    /// chunk bytes transfer pull-driven over the direct transport (3.B).
+    SendFile {
+        /// Recipient identity pubkey.
+        contact: PublicKey,
+        /// Local filesystem path of the file to send.
+        path: String,
+    },
     /// Return recent persisted messages, optionally filtered by contact.
     RecentMessages {
         /// If `Some`, only messages with this peer (either direction).
@@ -499,6 +508,15 @@ pub enum CommandResult {
         /// placeholder reconciles to `Some(record)` when present.
         #[serde(default)]
         record: Option<MessageRecord>,
+    },
+    /// A file attachment was staged + its manifest announced.
+    FileQueued {
+        /// Message id of the `Kind::File` manifest message.
+        message_id: Hex16,
+        /// 16-byte attachment id.
+        attachment_id: Hex16,
+        /// Number of chunks staged.
+        total_chunks: u32,
     },
     /// [`Command::RecentMessages`] completed. Most-recent first.
     Messages(Vec<MessageRecord>),
