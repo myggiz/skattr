@@ -102,28 +102,44 @@ where
 /// Begin the next queued inbound attachment if none is active. Sends the first
 /// request window. Returns the new `active_rx` (or `None` if nothing to start /
 /// send failed). The caller assigns the result to its `active_rx`.
+///
+/// If a dequeued begin is *already complete* — every chunk was previously
+/// received and persisted (the resume / duplicate-manifest edge) — it is
+/// finalized in place (emitting `Event::AttachmentReceived`) and the loop
+/// advances to the next queue entry rather than installing a stuck-complete
+/// `active_rx` that nothing would ever finalize.
+#[allow(clippy::too_many_arguments)]
 async fn maybe_start_next_rx<S>(
     conn: &mut Option<AuthenticatedConnection<S>>,
     pool: &std::sync::Arc<crate::storage::Pool>,
+    inbound: &Option<std::sync::Arc<dyn InboundDispatch>>,
+    chunk_store: &Option<std::sync::Arc<crate::attachment::store::ChunkStore>>,
+    download_dir: &Option<std::path::PathBuf>,
+    peer: PublicKey,
     rx_queue: &mut std::collections::VecDeque<crate::delivery::chunk_transfer::AttachmentBegin>,
 ) -> Option<crate::delivery::chunk_transfer::ChunkRx>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let begin = rx_queue.pop_front()?;
-    let repo = crate::storage::attachments::AttachmentRepo::new(pool);
-    let already = repo
-        .received_indices(&begin.attachment_id)
-        .unwrap_or_default();
-    let mut rx = crate::delivery::chunk_transfer::ChunkRx::new(begin.manifest, &already);
-    if rx.is_complete() {
-        // Already had everything (resume edge): caller will finalize on next tick.
+    loop {
+        let begin = rx_queue.pop_front()?;
+        let repo = crate::storage::attachments::AttachmentRepo::new(pool);
+        let already = repo
+            .received_indices(&begin.attachment_id)
+            .unwrap_or_default();
+        let mut rx = crate::delivery::chunk_transfer::ChunkRx::new(begin.manifest, &already);
+        if rx.is_complete() {
+            // Already had everything (resume / duplicate-manifest edge): finalize
+            // now and advance, rather than blocking the FIFO head with an rx that
+            // no Chunk frame would ever complete.
+            finalize_rx(conn, pool, inbound, chunk_store, download_dir, peer, &rx).await;
+            continue;
+        }
+        let reqs = rx.next_requests();
+        let aid = rx.attachment_id();
+        let _ = send_chunk_requests(conn, aid, &reqs).await;
         return Some(rx);
     }
-    let reqs = rx.next_requests();
-    let aid = rx.attachment_id();
-    let _ = send_chunk_requests(conn, aid, &reqs).await;
-    Some(rx)
 }
 
 /// Reassemble a completed inbound attachment to the download dir and emit
@@ -626,8 +642,16 @@ where
                                 if let Some(rx) = active_rx.take() {
                                     fail_rx(&pool, &inbound, &rx, "request timeout").await;
                                 }
-                                active_rx =
-                                    maybe_start_next_rx(&mut conn, &pool, &mut rx_queue).await;
+                                active_rx = maybe_start_next_rx(
+                                    &mut conn,
+                                    &pool,
+                                    &inbound,
+                                    &chunk_store,
+                                    &download_dir,
+                                    peer,
+                                    &mut rx_queue,
+                                )
+                                .await;
                             }
                             _ => {}
                         }
@@ -723,8 +747,16 @@ where
                                     rx_queue.push_back(begin);
                                 }
                                 if active_rx.is_none() {
-                                    active_rx =
-                                        maybe_start_next_rx(&mut conn, &pool, &mut rx_queue).await;
+                                    active_rx = maybe_start_next_rx(
+                                        &mut conn,
+                                        &pool,
+                                        &inbound,
+                                        &chunk_store,
+                                        &download_dir,
+                                        peer,
+                                        &mut rx_queue,
+                                    )
+                                    .await;
                                 }
                             }
                         } else {
@@ -818,6 +850,10 @@ where
                                         active_rx = maybe_start_next_rx(
                                             &mut conn,
                                             &pool,
+                                            &inbound,
+                                            &chunk_store,
+                                            &download_dir,
+                                            peer,
                                             &mut rx_queue,
                                         )
                                         .await;
@@ -845,6 +881,10 @@ where
                                             active_rx = maybe_start_next_rx(
                                                 &mut conn,
                                                 &pool,
+                                                &inbound,
+                                                &chunk_store,
+                                                &download_dir,
+                                                peer,
                                                 &mut rx_queue,
                                             )
                                             .await;
@@ -867,7 +907,16 @@ where
                                 &format!("sender nack reason {reason}"),
                             )
                             .await;
-                            active_rx = maybe_start_next_rx(&mut conn, &pool, &mut rx_queue).await;
+                            active_rx = maybe_start_next_rx(
+                                &mut conn,
+                                &pool,
+                                &inbound,
+                                &chunk_store,
+                                &download_dir,
+                                peer,
+                                &mut rx_queue,
+                            )
+                            .await;
                         }
                     }
                     Ok(Some(Frame::AttachmentComplete { attachment_id })) => {
