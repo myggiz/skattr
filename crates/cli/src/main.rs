@@ -1131,6 +1131,10 @@ async fn tail_follow(
                     record.ts_unix_ms, record.level, record.target, record.message
                 );
             }
+            // 3.B attachment events — full CLI integration in Task 7.
+            Event::AttachmentReceived { .. }
+            | Event::AttachmentProgress { .. }
+            | Event::AttachmentFailed { .. } => {}
         }
     }
     Ok(())
