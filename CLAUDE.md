@@ -147,7 +147,7 @@ plan → subagent-driven execution → live guardrail → merge.
     `clean_shutdown_leaves_only_encrypted_db` (no plaintext/sidecars/sentinel
     after a clean shutdown).
 
-#### Phase 3 — Attachments — 🟧 in progress (3.A done; 3.B next)
+#### Phase 3 — Attachments — 🟧 in progress (3.A, 3.B done; 3.C next)
 
 File attachments (send / receive / preview) with metadata stripping; a new
 `envelope::kinds` attachment variant; chunking/transfer over the hardened
@@ -162,17 +162,34 @@ into 3.A → 3.B → 3.C → 3.D.
   (`ChunkStore` stage), `strip` (metadata stripping), `error_kind`),
   `storage::attachments` (`AttachmentRepo` per-chunk receipt state, migration
   `0015_attachments`). Local round-trip validated without transport.
-- **3.B — direct attachment transfer** — ⬜ **next, not started**. Online,
-  both-peers-reachable path: an additive transport `Frame` (free `FrameType`
-  bytes `0x0A+`) carrying `{attachment_id, index, ciphertext}` (Noise-encrypted
-  by the channel, **not** MLS-wrapped); `Command::SendFile { contact, path }`
-  (strip → chunk → stage → persist manifest → send `Kind::File` manifest → drive
-  chunk delivery via the per-peer `delivery::peer` actor); receive path
-  reassembles on completion and emits `Event::AttachmentReceived`; in-session
-  resume re-requests missing indices. Needs ADR + spec; the first open design
-  question is push vs. pull chunk delivery (recommended: pull/request-driven).
-  Guardrail: two loopback daemons round-trip a multi-chunk file end-to-end
-  through the real `run_with_transport`, byte-identical, metadata stripped.
+- **3.B — direct attachment transfer** — ✅ done (branch
+  `phase-3b-direct-attachment-transfer`; final whole-branch review "Ready to
+  merge"; gate green — core lib 655/0, skattr-tests pass incl. the loopback
+  guardrail; spec `2026-06-17-phase-3b-direct-attachment-transfer-design.md`,
+  ADR 0010). The online, both-peers-reachable path, **pull/request-driven**:
+  four additive transport `FrameType`s `0x0B`–`0x0E` (the free bytes start at
+  `0x0B` — `0x0A` is `Error`) — `ChunkRequest`/`Chunk`/`ChunkNack`/
+  `AttachmentComplete` carrying opaque, Noise-encrypted (**not** MLS-wrapped)
+  chunk ciphertext, sha256-verified against the manifest before storage.
+  `Command::SendFile { contact, path }` (strip → chunk → stage in `ChunkStore`
+  → persist `AttachmentRepo` `out` row → announce the manifest as a `Kind::File`
+  MLS message). New `delivery::chunk_transfer` (`ChunkRx` window/retry state
+  machine, `serve_chunk_request`, `sanitize_filename`, `unique_download_path`)
+  is driven inside the per-peer `delivery::peer` actor (serve / windowed-fetch
+  N=8 / one-attachment-per-peer FIFO / in-session resume via `ReplaceConn` →
+  `reissue` / 30 s request timeout). Receiver auto-fetches → reassembles to a
+  config `download_dir` (default `<data_dir>/downloads`) → emits
+  `Event::{AttachmentReceived,AttachmentProgress,AttachmentFailed}`.
+  **`CHUNK_SIZE` is 48 KiB** (reduced from 3.A's 256 KiB so one chunk fits one
+  Noise message — `connection::send` caps inner frames at 65 519 B; a regression
+  guard `chunk_frame_worst_case_fits_noise_max_outer` locks it). No new
+  migration (3.A's `0015` covers receiver receipt state; sender uses `ChunkStore`
+  + the `out` row). Guardrails: `attachment_roundtrip_multichunk_over_loopback`
+  (real `run_with_transport`, byte-identical multi-chunk + EXIF stripped) and an
+  actor-level in-session-resume test (a full-stack reconnect could not be
+  deterministically triggered). Deferred hardening: scope `serve_chunk_request`
+  to `direction='out'` (done as a final guard), offline-manifest/online-chunks
+  gap is 3.C.
 - **3.C — offline transfer** — ⬜ not started. Chunk blobs via the mailbox path
   (reuse frozen `Deposit` vs. extend ADR 0006 — decide in 3.C's spec),
   inheriting Phase 2 caps; cross-session resume. In v1.0 scope.
@@ -215,7 +232,8 @@ pool-close teardown), `daemon::accept` (bounded accept loop),
 `daemon::{logs, retention, smoke, clock}`, the per-platform
 `daemon::ipc::{client,server}::{unix,windows}` (Named Pipes + DACL + SID),
 `delivery::{dial::OutboundDial, mailbox_sweeper, hub::MailboxFallbackShared,
-peer}` (the sustained-failure timer), `mls::group` (two-PSK genesis +
+peer, chunk_transfer}` (the sustained-failure timer; `chunk_transfer` =
+3.B's pull `ChunkRx` + serve), `mls::group` (two-PSK genesis +
 `can_receive`), `mailbox::{client, codec, poll, auth}` (the v1-protocol client),
 and `storage::{pool (Option<Connection> + WAL-safe close + Drop +
 sentinel/re-encrypt-on-boot), passphrase_audit, outstanding_invites,

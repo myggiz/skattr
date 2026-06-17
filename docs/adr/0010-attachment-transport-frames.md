@@ -1,6 +1,6 @@
 # ADR 0010 — Additive transport frame types for direct attachment chunk transfer
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-06-17
 **Context:** Phase 3.B (direct attachment transfer). Adds the wire movement of
 attachment chunks over the existing Noise channel, pull/request-driven, between
@@ -97,9 +97,14 @@ connection or task is introduced.
 - **The frozen mailbox protocol (ADR 0006) is untouched.** Offline chunk
   transfer (3.C) will make its own decision (reuse `Deposit` vs. extend
   ADR 0006) in that phase's spec.
-- **Chunk size on the wire** is bounded by the codec's existing 16 MiB frame cap;
-  3.A's 256 KiB chunk size sits far under it, leaving headroom for the CBOR
-  envelope.
+- **Chunk size on the wire** must fit one Noise message: `connection::send`
+  rejects any inner frame over **65 519 B** (Noise 65 535 minus the ChaChaPoly
+  tag). 3.A's original 256 KiB chunk size was **4× over** this cap — a `Chunk`
+  frame would never send — so implementation reduced `CHUNK_SIZE` to **48 KiB**
+  (`49 152`), leaving ~16 KiB headroom for the AEAD tag + CBOR envelope. A
+  regression guard (`chunk_frame_worst_case_fits_noise_max_outer`) encodes a
+  worst-case `Chunk` and asserts it stays ≤ 65 519 B, the exact value
+  `connection::send` enforces. The other three frames are tiny.
 - The decoder's unknown-type rejection now starts at `0x0F`.
 
 ## Alternatives considered

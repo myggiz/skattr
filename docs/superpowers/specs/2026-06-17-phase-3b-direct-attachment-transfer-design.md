@@ -33,8 +33,10 @@ send/receive orchestration inside the per-peer `delivery::peer` actor.
 3. **Reassembled files land in a config-driven `download_dir`**, default
    `<data_dir>/downloads/`, with filename collision suffixing and filename
    sanitization (the manifest filename is attacker-controlled).
-4. **Windowed flow control, N = 8** chunk requests in flight (≈2 MiB at the
-   256 KiB chunk size); **one active attachment per peer at a time**, FIFO queue
+4. **Windowed flow control, N = 8** chunk requests in flight (≈0.4 MiB at the
+   48 KiB chunk size — `CHUNK_SIZE` was reduced from 3.A's 256 KiB so one chunk
+   fits one Noise message, ≤ 65 519 B); **one active attachment per peer at a
+   time**, FIFO queue
    for the rest. Chat is never starved — chunk work only fills idle capacity in
    the actor's `select!` loop.
 5. **In-session resume only.** A dropped/replaced connection within the session
@@ -221,7 +223,7 @@ Primary guardrail (in `crates/tests/`, real `run_with_transport` over
 `LoopbackTransport`, mirroring `first_contact_direct.rs`):
 
 - **`attachment_roundtrip_multichunk_over_loopback`** — Alice `SendFile`s a
-  multi-chunk file (> 256 KiB, e.g. ~700 KiB → 3 chunks) carrying real EXIF;
+  multi-chunk file (~700 KiB → ~15 chunks at 48 KiB) carrying real EXIF;
   Bob auto-fetches; assert `Event::AttachmentReceived`, the file at Bob's
   `download_dir` is **byte-identical to the stripped bytes**, and metadata is
   gone (EXIF absent).

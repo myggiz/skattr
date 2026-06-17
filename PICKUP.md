@@ -1,4 +1,4 @@
-# PICKUP — resume state (2026-06-16, post 3.A merge)
+# PICKUP — resume state (2026-06-17, post 3.B implementation)
 
 Scratch/handoff doc to resume work after an environment update/reboot.
 Authoritative project state lives in `CLAUDE.md` (Repository state) and the
@@ -7,16 +7,30 @@ specs/plans under `docs/superpowers/`.
 ## TL;DR — where we are
 
 - **Phases 1, 2 (2.A–2.D), and 3.A: complete and merged to local `master`.**
-  3.A merged at `9a132d1` (final whole-branch review: "Ready to merge", full
-  gate green — core 636/0, skattr-tests 39/0, cargo-deny ok, CLI builds).
-- **Next workstream: Phase 3.B (direct attachment transfer).** Not started.
-- `master` is **local-only** (not pushed — see "Push state"). The pre-merge
-  history is backed up on `origin/phase-3a-attachment-core`.
+  3.A merged at `9a132d1`.
+- **Phase 3.B (direct attachment transfer): IMPLEMENTED on branch
+  `phase-3b-direct-attachment-transfer`** (not yet merged). Final whole-branch
+  review "Ready to merge"; gate green for everything 3.B touches — `fmt`/`clippy
+  --all-features -D warnings`/`test --features test-harness` all pass on
+  core/mailbox/cli/tests; loopback guardrail + actor-level resume green; zero
+  new deps. (`cargo-deny` not installed locally; `skattr-ui` clippy hits a local
+  `sda3` filesystem `os error 74` in the Tauri build script — env only, ui job
+  is separate in CI and the branch doesn't touch `crates/ui`.)
+- **Next workstream: Phase 3.C (offline transfer)** — chunk blobs via the
+  mailbox path; cross-session resume. Not started.
+- `master` is **local-only** (not pushed). 3.A pre-merge history backed up on
+  `origin/phase-3a-attachment-core`.
 
 ## IMMEDIATE NEXT ACTION (resume here)
 
-Start the **Phase 3.B design pass** (`superpowers:brainstorming` → spec → ADR →
+Decide how to integrate `phase-3b-direct-attachment-transfer` (merge to local
+`master` vs. PR) via `superpowers:finishing-a-development-branch`. Then start the
+**Phase 3.C design pass** (`superpowers:brainstorming` → spec → ADR? →
 `writing-plans` → subagent-driven execution → finishing-branch).
+
+The section below is the original 3.B design sketch — now realized in
+`docs/superpowers/specs/2026-06-17-phase-3b-direct-attachment-transfer-design.md`
++ ADR 0010; kept only as historical context (delete once 3.C is underway).
 
 3.B = **direct attachment transfer (online, both peers reachable)**. 3.A already
 provides: the manifest rides in MLS via `Kind::File`; chunk blobs are opaque
