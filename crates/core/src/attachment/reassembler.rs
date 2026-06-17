@@ -97,7 +97,7 @@ mod tests {
 
     #[test]
     fn round_trips_byte_identical() {
-        let plaintext = vec![9u8; 262_144 + 7];
+        let plaintext = vec![9u8; crate::attachment::CHUNK_SIZE + 7];
         let (manifest, chunks) =
             crate::attachment::chunker::chunk_plaintext(&plaintext, "f", "m").unwrap();
         let src = mem_source(chunks);

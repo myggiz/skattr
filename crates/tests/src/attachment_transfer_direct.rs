@@ -11,7 +11,7 @@
 //! `attachment_id`:
 //!
 //!   1. **Byte-identical multi-chunk** — a deterministic ~700 KiB `.bin`
-//!      payload (≥3 chunks at the 256 KiB `CHUNK_SIZE`). A `.bin` file is a
+//!      payload (≥3 chunks at the 48 KiB `CHUNK_SIZE`). A `.bin` file is a
 //!      non-image, so `strip_metadata` is an identity passthrough; the
 //!      reassembled file MUST be byte-for-byte equal to the source. This is
 //!      the strongest integrity guarantee: every byte across ≥3 chunks,
@@ -139,24 +139,10 @@ async fn wait_for_attachment(
 /// criterion — it proves the chunk transfer + reassembly engine composes
 /// into the production assembly, not the `test_exports` shortcut.
 ///
-/// **BLOCKED (ignored) — Phase 3.B transport defect.** This guardrail is
-/// complete and correct, but currently fails because the chunk transfer is
-/// non-functional over the real Noise transport: `CHUNK_SIZE` is 256 KiB
-/// (`attachment::CHUNK_SIZE = 262_144`), but
-/// `transport::connection::AuthenticatedConnection::send` rejects any inner
-/// frame larger than `NOISE_MAX_OUTER = 65_519` bytes (`snow` caps a single
-/// Noise message at 65_535 bytes, minus the 16-byte ChaChaPoly tag) with no
-/// fragmentation. A `Frame::Chunk` carrying one 256 KiB chunk is ~262 KB —
-/// 4x over the cap — so the sender's chunk reply errors and no `Chunk` frame
-/// ever reaches the receiver; the transfer stalls forever. The fix lives in
-/// Tasks 1/2/5 (the transport send path needs a chunked/fragmented Noise
-/// send, or `CHUNK_SIZE` must drop to ≤ ~64 KiB minus framing overhead), NOT
-/// in this guardrail. Remove `#[ignore]` once the defect is closed; the test
-/// asserts byte-identical multi-chunk transfer + end-to-end metadata strip.
-#[ignore = "Phase 3.B transport defect: 256 KiB chunk frame exceeds the \
-            65 519-byte single-Noise-message cap in \
-            transport::connection::send; chunk transfer is dead over the \
-            real Noise transport. See test doc-comment. Fix in Tasks 1/2/5."]
+/// `CHUNK_SIZE` was reduced from 256 KiB to 48 KiB so each `Frame::Chunk`
+/// fits inside the Noise single-message cap (`NOISE_MAX_OUTER = 65_519`
+/// bytes). See `transport::connection::AuthenticatedConnection::send` and
+/// `crates/core/src/attachment/mod.rs` for details.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn attachment_roundtrip_multichunk_over_loopback() {
     let tmp_a = tempfile::tempdir().unwrap();

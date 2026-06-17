@@ -15,10 +15,14 @@ pub(crate) mod strip;
 pub(crate) use error_kind::AttachmentErrorKind;
 pub(crate) use manifest::{AttachmentManifest, ChunkRef};
 
-/// Plaintext bytes per chunk (256 KiB). Sits under the mailbox 1 MiB
-/// `max_deposit_size` (with AEAD + framing headroom) so a 3.C offline chunk
-/// fits one `Deposit`.
-pub(crate) const CHUNK_SIZE: usize = 262_144;
+/// Plaintext bytes per chunk (48 KiB). Must stay under the Noise single-message
+/// cap: `NOISE_MAX_OUTER = 65_519` bytes (65_535 − 16-byte ChaChaPoly tag).
+/// A `Frame::Chunk` carrying `CHUNK_SIZE` plaintext + 16-byte AEAD tag encodes
+/// to ~49 KiB CBOR, comfortably below 65_519. See
+/// `transport::connection::AuthenticatedConnection::send` for the enforcement
+/// point. The 3.C offline path (mailbox `Deposit`) has a 1 MiB cap which is
+/// also satisfied.
+pub(crate) const CHUNK_SIZE: usize = 49_152;
 
 /// Maximum total plaintext attachment size (100 MiB), rejected up front.
 pub(crate) const MAX_ATTACHMENT_BYTES: u64 = 100 * 1024 * 1024;

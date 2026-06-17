@@ -757,4 +757,31 @@ mod tests {
         let buf = enc(Frame::ChunkRequest { attachment_id: [0; 16], index: 0 });
         assert_eq!(buf[4], 0x0B);
     }
+
+    /// Regression guard: a worst-case `Frame::Chunk` (CHUNK_SIZE plaintext +
+    /// 16-byte AEAD tag = CHUNK_SIZE + 16 ciphertext bytes) must encode to at
+    /// most `NOISE_MAX_OUTER = 65_519` bytes so that
+    /// `transport::connection::AuthenticatedConnection::send` never rejects it.
+    /// 65_519 = 65_535 (Noise payload cap) − 16 (ChaChaPoly tag).
+    /// See `transport::connection` for the enforcement point.
+    #[test]
+    fn chunk_frame_worst_case_fits_noise_max_outer() {
+        // CHUNK_SIZE plaintext + 16-byte AEAD tag = the ciphertext field size.
+        let ciphertext = vec![0u8; crate::attachment::CHUNK_SIZE + 16];
+        let frame = Frame::Chunk {
+            attachment_id: [0u8; 16],
+            index: 0,
+            ciphertext,
+        };
+        let encoded = enc(frame);
+        // NOISE_MAX_OUTER as defined in transport::connection::AuthenticatedConnection::send
+        const NOISE_MAX_OUTER: usize = 65_519;
+        assert!(
+            encoded.len() <= NOISE_MAX_OUTER,
+            "Frame::Chunk encoded to {} bytes, exceeds NOISE_MAX_OUTER={} — \
+             reduce CHUNK_SIZE in crates/core/src/attachment/mod.rs",
+            encoded.len(),
+            NOISE_MAX_OUTER
+        );
+    }
 }

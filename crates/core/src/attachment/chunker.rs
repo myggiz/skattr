@@ -87,7 +87,7 @@ mod tests {
 
     #[test]
     fn chunks_plaintext_into_manifest_and_ciphertext() {
-        let plaintext = vec![7u8; 262_144 * 2 + 100]; // 2 full chunks + a partial
+        let plaintext = vec![7u8; CHUNK_SIZE * 2 + 100]; // 2 full chunks + a partial
         let (manifest, chunks) =
             chunk_plaintext(&plaintext, "f.bin", "application/octet-stream").unwrap();
         assert_eq!(
