@@ -275,6 +275,11 @@ pub trait InboundDispatch: Send + Sync + 'static {
     /// `Kind::File` manifest was decrypted in `dispatch`. The actor calls this
     /// immediately after `dispatch` returns to learn it should start fetching.
     /// Default returns `None`.
+    // `AttachmentBegin` is intentionally `pub(crate)` (module-visibility
+    // discipline); this trait is `pub` only because it is re-exported for the
+    // `test-harness` integration tests, so the private_interfaces lint is a
+    // false positive here.
+    #[allow(private_interfaces)]
     fn take_begin_attachment(
         &self,
         _peer: PublicKey,
