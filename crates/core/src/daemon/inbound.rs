@@ -49,6 +49,11 @@ pub(crate) struct DaemonInbound {
     /// serialize on the same lock. Defaults to a private registry (used by unit
     /// tests that exercise only the inbound path).
     group_locks: crate::daemon::handle::GroupLockRegistry,
+    /// Per-peer queue of inbound attachments whose manifest just arrived,
+    /// awaiting the peer actor's `take_begin_attachment` drain.
+    begins: std::sync::Mutex<
+        std::collections::HashMap<PublicKey, std::collections::VecDeque<crate::delivery::chunk_transfer::AttachmentBegin>>,
+    >,
 }
 
 impl DaemonInbound {
@@ -62,6 +67,7 @@ impl DaemonInbound {
             events_tx,
             identity: std::sync::RwLock::new(None),
             group_locks: crate::daemon::handle::new_group_lock_registry(),
+            begins: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -181,6 +187,40 @@ impl DaemonInbound {
             // No message row, no MessageReceived. Returning the envelope's
             // message id keeps the caller's ACK contract clean.
             return Ok(envelope.id);
+        }
+
+        // --- Kind::File: stage the manifest + queue the chunk fetch (3.B). ---
+        // The manifest message ALSO falls through to the normal persist below so
+        // it appears in history and emits Event::MessageReceived; this block only
+        // adds the attachment side-effects.
+        if let crate::envelope::Kind::File { manifest: manifest_bytes } = &envelope.kind {
+            match crate::attachment::manifest::AttachmentManifest::from_cbor(manifest_bytes) {
+                Ok(m) if m.total_size <= crate::attachment::MAX_ATTACHMENT_BYTES
+                    && !m.chunks.is_empty() =>
+                {
+                    let repo = crate::storage::attachments::AttachmentRepo::new(&self.pool);
+                    let total_chunks = m.chunks.len() as i64;
+                    if let Err(e) = repo.insert(
+                        &m.attachment_id,
+                        "in",
+                        manifest_bytes,
+                        total_chunks,
+                        now_unix_seconds(),
+                    ) {
+                        tracing::warn!(err = %e, "inbound: attachment manifest insert failed");
+                    } else {
+                        let begin = crate::delivery::chunk_transfer::AttachmentBegin {
+                            attachment_id: m.attachment_id,
+                            manifest: m,
+                        };
+                        if let Ok(mut map) = self.begins.lock() {
+                            map.entry(from).or_default().push_back(begin);
+                        }
+                    }
+                }
+                Ok(_) => tracing::warn!("inbound: rejecting oversize/empty attachment manifest"),
+                Err(e) => tracing::warn!(err = %e, "inbound: bad attachment manifest, skipping fetch"),
+            }
         }
 
         // MLS generation is captured *after* decrypt so the broadcast
@@ -577,6 +617,47 @@ impl InboundDispatch for DaemonInbound {
                 None
             }
         }
+    }
+
+    fn take_begin_attachment(
+        &self,
+        peer: PublicKey,
+    ) -> Option<crate::delivery::chunk_transfer::AttachmentBegin> {
+        self.begins.lock().ok()?.get_mut(&peer)?.pop_front()
+    }
+
+    fn attachment_received(
+        &self,
+        contact: PublicKey,
+        attachment_id: [u8; 16],
+        filename: &str,
+        mime: &str,
+        size: u64,
+        path: &str,
+    ) {
+        let _ = self.events_tx.send(Event::AttachmentReceived {
+            contact,
+            attachment_id: crate::daemon::hex::Hex16::from(attachment_id),
+            filename: filename.to_string(),
+            mime: mime.to_string(),
+            size,
+            path: path.to_string(),
+        });
+    }
+
+    fn attachment_progress(&self, attachment_id: [u8; 16], received: u32, total: u32) {
+        let _ = self.events_tx.send(Event::AttachmentProgress {
+            attachment_id: crate::daemon::hex::Hex16::from(attachment_id),
+            received,
+            total,
+        });
+    }
+
+    fn attachment_failed(&self, attachment_id: [u8; 16], reason: &str) {
+        let _ = self.events_tx.send(Event::AttachmentFailed {
+            attachment_id: crate::daemon::hex::Hex16::from(attachment_id),
+            reason: reason.to_string(),
+        });
     }
 }
 

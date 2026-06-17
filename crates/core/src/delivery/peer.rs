@@ -137,6 +137,35 @@ pub trait InboundDispatch: Send + Sync + 'static {
     ) -> Option<PublicKey> {
         None
     }
+
+    /// Pop a queued inbound-attachment begin-request for `peer`, stashed when a
+    /// `Kind::File` manifest was decrypted in `dispatch`. The actor calls this
+    /// immediately after `dispatch` returns to learn it should start fetching.
+    /// Default returns `None`.
+    fn take_begin_attachment(
+        &self,
+        _peer: PublicKey,
+    ) -> Option<crate::delivery::chunk_transfer::AttachmentBegin> {
+        None
+    }
+
+    /// Emit `Event::AttachmentReceived`. Default no-op.
+    fn attachment_received(
+        &self,
+        _peer: PublicKey,
+        _attachment_id: [u8; 16],
+        _filename: &str,
+        _mime: &str,
+        _size: u64,
+        _path: &str,
+    ) {
+    }
+
+    /// Emit `Event::AttachmentProgress`. Default no-op.
+    fn attachment_progress(&self, _attachment_id: [u8; 16], _received: u32, _total: u32) {}
+
+    /// Emit `Event::AttachmentFailed`. Default no-op.
+    fn attachment_failed(&self, _attachment_id: [u8; 16], _reason: &str) {}
 }
 
 /// Per-peer actor. Owns an `Option<AuthenticatedConnection<S>>`, a
