@@ -797,7 +797,7 @@ where
                                 .ok()
                                 .flatten();
                             let total = row.as_ref().map(|r| r.total_chunks as u32).unwrap_or(0);
-                            let reply = if row.is_none() {
+                            let reply = if row.as_ref().map_or(true, |r| r.direction != "out") {
                                 Frame::ChunkNack {
                                     attachment_id,
                                     index,
