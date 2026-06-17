@@ -89,9 +89,12 @@ where
 {
     let Some(c) = conn.as_mut() else { return false };
     for &index in indices {
-        if c.send(Frame::ChunkRequest { attachment_id, index })
-            .await
-            .is_err()
+        if c.send(Frame::ChunkRequest {
+            attachment_id,
+            index,
+        })
+        .await
+        .is_err()
         {
             return false;
         }
@@ -518,9 +521,8 @@ where
     // per peer; later begins queue FIFO. `None` chunk_store/download_dir
     // (test constructors) disables all chunk handling.
     let mut active_rx: Option<crate::delivery::chunk_transfer::ChunkRx> = None;
-    let mut rx_queue: std::collections::VecDeque<
-        crate::delivery::chunk_transfer::AttachmentBegin,
-    > = std::collections::VecDeque::new();
+    let mut rx_queue: std::collections::VecDeque<crate::delivery::chunk_transfer::AttachmentBegin> =
+        std::collections::VecDeque::new();
     let chunk_enabled = chunk_store.is_some() && download_dir.is_some();
 
     loop {
@@ -1600,8 +1602,7 @@ mod tests {
             (actor_conn, peer_conn)
         }
 
-        let (conn1, mut peer_conn1) =
-            dial(&actor_id, responder_id, responder_static).await;
+        let (conn1, mut peer_conn1) = dial(&actor_id, responder_id, responder_static).await;
 
         // --- Spawn the receiver actor driving full_run directly. ---
         let (_jobs_tx, jobs_rx) = mpsc::channel::<DeliveryJob>(4);
@@ -1643,12 +1644,11 @@ mod tests {
         ) -> Vec<u32> {
             let mut got = Vec::new();
             while got.len() < want {
-                let frame =
-                    tokio::time::timeout(Duration::from_secs(3), conn.recv())
-                        .await
-                        .expect("recv must not time out")
-                        .unwrap()
-                        .expect("conn must not EOF");
+                let frame = tokio::time::timeout(Duration::from_secs(3), conn.recv())
+                    .await
+                    .expect("recv must not time out")
+                    .unwrap()
+                    .expect("conn must not EOF");
                 match frame {
                     Frame::Ack(_) => { /* manifest ACK — drain */ }
                     Frame::ChunkRequest { index, .. } => got.push(index),
@@ -1660,7 +1660,11 @@ mod tests {
 
         let mut reqs1 = collect_requests(&mut peer_conn1, 3).await;
         reqs1.sort_unstable();
-        assert_eq!(reqs1, vec![0, 1, 2], "first window must request all 3 indices");
+        assert_eq!(
+            reqs1,
+            vec![0, 1, 2],
+            "first window must request all 3 indices"
+        );
 
         // --- Simulate reconnect: hand the actor a FRESH conn via ReplaceConn. ---
         // Re-create handshake material for conn2. (responder_id was moved into
@@ -1669,8 +1673,7 @@ mod tests {
         // with for dispatch, not the conn's handshake identity.)
         let responder_id2 = IdentityKey::generate().unwrap();
         let responder_static2 = responder_id2.noise_static_public();
-        let (conn2, mut peer_conn2) =
-            dial(&actor_id, responder_id2, responder_static2).await;
+        let (conn2, mut peer_conn2) = dial(&actor_id, responder_id2, responder_static2).await;
 
         ctrl_tx
             .send(PeerCtrl::ReplaceConn(Box::new(conn2)))
@@ -1708,7 +1711,11 @@ mod tests {
         let drain = tokio::spawn(async move {
             loop {
                 match tokio::time::timeout(Duration::from_millis(200), peer_conn2.recv()).await {
-                    Ok(Ok(Some(Frame::Chunk { attachment_id, index, ciphertext }))) => {
+                    Ok(Ok(Some(Frame::Chunk {
+                        attachment_id,
+                        index,
+                        ciphertext,
+                    }))) => {
                         // (Shouldn't happen — receiver doesn't request from us
                         // again — but keep the loop honest.)
                         let _ = (attachment_id, index, ciphertext);
@@ -1734,8 +1741,14 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         let (got_aid, got_path) = done.expect("attachment_received must fire within 5s");
-        assert_eq!(got_aid, aid, "completed attachment id must match the manifest");
-        assert!(failed.lock().unwrap().is_none(), "attachment_failed must never fire");
+        assert_eq!(
+            got_aid, aid,
+            "completed attachment id must match the manifest"
+        );
+        assert!(
+            failed.lock().unwrap().is_none(),
+            "attachment_failed must never fire"
+        );
 
         // --- Reassembled file is byte-identical to the ORIGINAL plaintext. ---
         let on_disk = std::fs::read(&got_path).unwrap();

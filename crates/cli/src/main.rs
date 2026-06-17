@@ -361,7 +361,9 @@ async fn main() -> Result<()> {
             text,
             fail_on_timeout,
         } => send(&contact, &text, fail_on_timeout, socket.as_deref(), json).await,
-        Command::SendFile { contact, path } => send_file_cmd(&contact, &path, socket.as_deref()).await,
+        Command::SendFile { contact, path } => {
+            send_file_cmd(&contact, &path, socket.as_deref()).await
+        }
         Command::Tail {
             contact,
             limit,

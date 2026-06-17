@@ -264,22 +264,35 @@ impl Decoder for FrameCodec {
             0x0B => {
                 let p: ChunkRequestPayload = ciborium::from_reader(&payload[..])
                     .map_err(|e| CoreError::Frame(format!("ChunkRequest CBOR: {e}")))?;
-                Frame::ChunkRequest { attachment_id: p.attachment_id, index: p.index }
+                Frame::ChunkRequest {
+                    attachment_id: p.attachment_id,
+                    index: p.index,
+                }
             }
             0x0C => {
                 let p: ChunkPayload = ciborium::from_reader(&payload[..])
                     .map_err(|e| CoreError::Frame(format!("Chunk CBOR: {e}")))?;
-                Frame::Chunk { attachment_id: p.attachment_id, index: p.index, ciphertext: p.ciphertext }
+                Frame::Chunk {
+                    attachment_id: p.attachment_id,
+                    index: p.index,
+                    ciphertext: p.ciphertext,
+                }
             }
             0x0D => {
                 let p: ChunkNackPayload = ciborium::from_reader(&payload[..])
                     .map_err(|e| CoreError::Frame(format!("ChunkNack CBOR: {e}")))?;
-                Frame::ChunkNack { attachment_id: p.attachment_id, index: p.index, reason: p.reason }
+                Frame::ChunkNack {
+                    attachment_id: p.attachment_id,
+                    index: p.index,
+                    reason: p.reason,
+                }
             }
             0x0E => {
                 let p: AttachmentCompletePayload = ciborium::from_reader(&payload[..])
                     .map_err(|e| CoreError::Frame(format!("AttachmentComplete CBOR: {e}")))?;
-                Frame::AttachmentComplete { attachment_id: p.attachment_id }
+                Frame::AttachmentComplete {
+                    attachment_id: p.attachment_id,
+                }
             }
             other => {
                 return Err(CoreError::Frame(format!(
@@ -314,22 +327,53 @@ impl Encoder<Frame> for FrameCodec {
                     .map_err(|e| CoreError::Frame(format!("encode Error: {e}")))?;
                 (0x0A, buf)
             }
-            Frame::ChunkRequest { attachment_id, index } => {
+            Frame::ChunkRequest {
+                attachment_id,
+                index,
+            } => {
                 let mut buf = Vec::new();
-                ciborium::into_writer(&ChunkRequestPayload { attachment_id, index }, &mut buf)
-                    .map_err(|e| CoreError::Frame(format!("encode ChunkRequest: {e}")))?;
+                ciborium::into_writer(
+                    &ChunkRequestPayload {
+                        attachment_id,
+                        index,
+                    },
+                    &mut buf,
+                )
+                .map_err(|e| CoreError::Frame(format!("encode ChunkRequest: {e}")))?;
                 (0x0B, buf)
             }
-            Frame::Chunk { attachment_id, index, ciphertext } => {
+            Frame::Chunk {
+                attachment_id,
+                index,
+                ciphertext,
+            } => {
                 let mut buf = Vec::new();
-                ciborium::into_writer(&ChunkPayload { attachment_id, index, ciphertext }, &mut buf)
-                    .map_err(|e| CoreError::Frame(format!("encode Chunk: {e}")))?;
+                ciborium::into_writer(
+                    &ChunkPayload {
+                        attachment_id,
+                        index,
+                        ciphertext,
+                    },
+                    &mut buf,
+                )
+                .map_err(|e| CoreError::Frame(format!("encode Chunk: {e}")))?;
                 (0x0C, buf)
             }
-            Frame::ChunkNack { attachment_id, index, reason } => {
+            Frame::ChunkNack {
+                attachment_id,
+                index,
+                reason,
+            } => {
                 let mut buf = Vec::new();
-                ciborium::into_writer(&ChunkNackPayload { attachment_id, index, reason }, &mut buf)
-                    .map_err(|e| CoreError::Frame(format!("encode ChunkNack: {e}")))?;
+                ciborium::into_writer(
+                    &ChunkNackPayload {
+                        attachment_id,
+                        index,
+                        reason,
+                    },
+                    &mut buf,
+                )
+                .map_err(|e| CoreError::Frame(format!("encode ChunkNack: {e}")))?;
                 (0x0D, buf)
             }
             Frame::AttachmentComplete { attachment_id } => {
@@ -707,9 +751,15 @@ mod tests {
 
     #[test]
     fn decode_chunk_request_round_trips() {
-        let f = Frame::ChunkRequest { attachment_id: [0x11; 16], index: 7 };
+        let f = Frame::ChunkRequest {
+            attachment_id: [0x11; 16],
+            index: 7,
+        };
         match round_trip(f) {
-            Frame::ChunkRequest { attachment_id, index } => {
+            Frame::ChunkRequest {
+                attachment_id,
+                index,
+            } => {
                 assert_eq!(attachment_id, [0x11; 16]);
                 assert_eq!(index, 7);
             }
@@ -719,9 +769,17 @@ mod tests {
 
     #[test]
     fn decode_chunk_round_trips() {
-        let f = Frame::Chunk { attachment_id: [0x22; 16], index: 3, ciphertext: vec![0xAB; 500] };
+        let f = Frame::Chunk {
+            attachment_id: [0x22; 16],
+            index: 3,
+            ciphertext: vec![0xAB; 500],
+        };
         match round_trip(f) {
-            Frame::Chunk { attachment_id, index, ciphertext } => {
+            Frame::Chunk {
+                attachment_id,
+                index,
+                ciphertext,
+            } => {
                 assert_eq!(attachment_id, [0x22; 16]);
                 assert_eq!(index, 3);
                 assert_eq!(ciphertext, vec![0xAB; 500]);
@@ -732,9 +790,17 @@ mod tests {
 
     #[test]
     fn decode_chunk_nack_round_trips() {
-        let f = Frame::ChunkNack { attachment_id: [0x33; 16], index: 1, reason: 2 };
+        let f = Frame::ChunkNack {
+            attachment_id: [0x33; 16],
+            index: 1,
+            reason: 2,
+        };
         match round_trip(f) {
-            Frame::ChunkNack { attachment_id, index, reason } => {
+            Frame::ChunkNack {
+                attachment_id,
+                index,
+                reason,
+            } => {
                 assert_eq!(attachment_id, [0x33; 16]);
                 assert_eq!(index, 1);
                 assert_eq!(reason, 2);
@@ -745,7 +811,9 @@ mod tests {
 
     #[test]
     fn decode_attachment_complete_round_trips() {
-        let f = Frame::AttachmentComplete { attachment_id: [0x44; 16] };
+        let f = Frame::AttachmentComplete {
+            attachment_id: [0x44; 16],
+        };
         match round_trip(f) {
             Frame::AttachmentComplete { attachment_id } => assert_eq!(attachment_id, [0x44; 16]),
             other => panic!("expected AttachmentComplete, got {other:?}"),
@@ -754,7 +822,10 @@ mod tests {
 
     #[test]
     fn chunk_request_uses_type_0x0b() {
-        let buf = enc(Frame::ChunkRequest { attachment_id: [0; 16], index: 0 });
+        let buf = enc(Frame::ChunkRequest {
+            attachment_id: [0; 16],
+            index: 0,
+        });
         assert_eq!(buf[4], 0x0B);
     }
 

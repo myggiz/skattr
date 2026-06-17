@@ -133,7 +133,15 @@ where
     /// No mailbox-fallback orchestrator: callers wanting fallback must
     /// use [`DeliveryHub::new_with_mailbox_fallback`].
     pub fn new_with_inbound(pool: Arc<Pool>, dispatch: Arc<dyn InboundDispatch>) -> Self {
-        Self::new_inner(pool, Some(dispatch), None, None, DEFAULT_DIRECT_TIMEOUT, None, None)
+        Self::new_inner(
+            pool,
+            Some(dispatch),
+            None,
+            None,
+            DEFAULT_DIRECT_TIMEOUT,
+            None,
+            None,
+        )
     }
 
     /// Construct a hub that decrypts inbound `Frame::MlsApp` AND owns an
@@ -167,7 +175,9 @@ where
         data_dir: &std::path::Path,
         download_dir: std::path::PathBuf,
     ) -> Self {
-        let chunk_store = Some(Arc::new(crate::attachment::store::ChunkStore::new(data_dir)));
+        let chunk_store = Some(Arc::new(crate::attachment::store::ChunkStore::new(
+            data_dir,
+        )));
         Self::new_inner(
             pool,
             Some(dispatch),
@@ -187,7 +197,15 @@ where
         pool: Arc<Pool>,
         dialer: Arc<dyn crate::delivery::dial::OutboundDial<S>>,
     ) -> Self {
-        Self::new_inner(pool, None, None, Some(dialer), DEFAULT_DIRECT_TIMEOUT, None, None)
+        Self::new_inner(
+            pool,
+            None,
+            None,
+            Some(dialer),
+            DEFAULT_DIRECT_TIMEOUT,
+            None,
+            None,
+        )
     }
 
     /// Construct a hub that owns the direct → mailbox fallback

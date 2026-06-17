@@ -126,9 +126,9 @@ async fn wait_for_attachment(
             }
             Ok(Ok(_)) => {}
             Ok(Err(e)) => panic!("subscribe stream error: {e:?}"),
-            Err(_) => panic!(
-                "AttachmentReceived(id={want_id}) from {sender:?} not seen in {timeout:?}"
-            ),
+            Err(_) => {
+                panic!("AttachmentReceived(id={want_id}) from {sender:?} not seen in {timeout:?}")
+            }
         }
     }
 }
@@ -262,8 +262,13 @@ async fn attachment_roundtrip_multichunk_over_loopback() {
     // --- Await both completions (correlated by attachment_id) ---
     let bin_path =
         wait_for_attachment(&mut bob_sub, alice_pubkey, &bin_id, Duration::from_secs(60)).await;
-    let jpeg_path =
-        wait_for_attachment(&mut bob_sub, alice_pubkey, &jpeg_id, Duration::from_secs(60)).await;
+    let jpeg_path = wait_for_attachment(
+        &mut bob_sub,
+        alice_pubkey,
+        &jpeg_id,
+        Duration::from_secs(60),
+    )
+    .await;
 
     // --- Assert 1: byte-identical multi-chunk transfer ---
     let got_bin = std::fs::read(&bin_path).unwrap();

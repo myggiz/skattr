@@ -73,7 +73,13 @@ impl ChunkRx {
             .filter(|i| !have.contains(i))
             .collect();
         let received = total - needed.len() as u32;
-        Self { manifest, needed, inflight: HashMap::new(), received, total }
+        Self {
+            manifest,
+            needed,
+            inflight: HashMap::new(),
+            received,
+            total,
+        }
     }
 
     pub(crate) fn attachment_id(&self) -> [u8; 16] {
@@ -89,8 +95,16 @@ impl ChunkRx {
     pub(crate) fn next_requests(&mut self) -> Vec<u32> {
         let mut out = Vec::new();
         while self.inflight.len() < CHUNK_WINDOW {
-            let Some(idx) = self.needed.pop_front() else { break };
-            self.inflight.insert(idx, InFlight { attempts: 1, sent_at: Instant::now() });
+            let Some(idx) = self.needed.pop_front() else {
+                break;
+            };
+            self.inflight.insert(
+                idx,
+                InFlight {
+                    attempts: 1,
+                    sent_at: Instant::now(),
+                },
+            );
             out.push(idx);
         }
         out
@@ -174,8 +188,16 @@ pub(crate) fn serve_chunk_request(
         };
     }
     match store.get_chunk(attachment_id, index) {
-        Ok(ct) => Frame::Chunk { attachment_id: *attachment_id, index, ciphertext: ct },
-        Err(_) => Frame::ChunkNack { attachment_id: *attachment_id, index, reason: NACK_STORE_READ },
+        Ok(ct) => Frame::Chunk {
+            attachment_id: *attachment_id,
+            index,
+            ciphertext: ct,
+        },
+        Err(_) => Frame::ChunkNack {
+            attachment_id: *attachment_id,
+            index,
+            reason: NACK_STORE_READ,
+        },
     }
 }
 
@@ -184,18 +206,10 @@ pub(crate) fn serve_chunk_request(
 /// e.g. U+202E) from an attacker-controlled manifest filename; cap length;
 /// never empty.
 pub(crate) fn sanitize_filename(name: &str) -> String {
-    let base = name
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or("file");
+    let base = name.rsplit(['/', '\\']).next().unwrap_or("file");
     let cleaned: String = base
         .chars()
-        .filter(|c| {
-            !c.is_control()
-                && !is_bidi_or_format_control(*c)
-                && *c != '/'
-                && *c != '\\'
-        })
+        .filter(|c| !c.is_control() && !is_bidi_or_format_control(*c) && *c != '/' && *c != '\\')
         .collect();
     let trimmed = cleaned.trim().trim_matches('.');
     let result = if trimmed.is_empty() { "file" } else { trimmed };
@@ -242,7 +256,11 @@ mod tests {
 
     fn manifest_with(n: u32) -> AttachmentManifest {
         let chunks = (0..n)
-            .map(|i| ChunkRef { index: i, ciphertext_hash: [i as u8; 32], len: 10 })
+            .map(|i| ChunkRef {
+                index: i,
+                ciphertext_hash: [i as u8; 32],
+                len: 10,
+            })
             .collect();
         AttachmentManifest {
             manifest_version: 1,
@@ -300,7 +318,9 @@ mod tests {
     fn is_complete_when_all_received() {
         let mut rx = ChunkRx::new(manifest_with(2), &[]);
         let reqs = rx.next_requests();
-        for i in reqs { rx.on_received(i); }
+        for i in reqs {
+            rx.on_received(i);
+        }
         assert!(rx.is_complete());
     }
 
@@ -327,7 +347,11 @@ mod tests {
         for ch in ['\u{200E}', '\u{200F}', '\u{202A}', '\u{2066}', '\u{2069}'] {
             let s = format!("file{ch}name.txt");
             let r = sanitize_filename(&s);
-            assert!(!r.contains(ch), "bidi char U+{:04X} must be stripped; got: {r:?}", ch as u32);
+            assert!(
+                !r.contains(ch),
+                "bidi char U+{:04X} must be stripped; got: {r:?}",
+                ch as u32
+            );
         }
     }
 
@@ -357,7 +381,9 @@ mod tests {
         let store = ChunkStore::new(dir.path());
         store.put(&[0xAA; 16], 0, b"chunk-bytes").unwrap();
         match serve_chunk_request(&store, &[0xAA; 16], 0, 1) {
-            Frame::Chunk { ciphertext, index, .. } => {
+            Frame::Chunk {
+                ciphertext, index, ..
+            } => {
                 assert_eq!(index, 0);
                 assert_eq!(ciphertext, b"chunk-bytes");
             }

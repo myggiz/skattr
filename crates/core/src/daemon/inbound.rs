@@ -52,7 +52,10 @@ pub(crate) struct DaemonInbound {
     /// Per-peer queue of inbound attachments whose manifest just arrived,
     /// awaiting the peer actor's `take_begin_attachment` drain.
     begins: std::sync::Mutex<
-        std::collections::HashMap<PublicKey, std::collections::VecDeque<crate::delivery::chunk_transfer::AttachmentBegin>>,
+        std::collections::HashMap<
+            PublicKey,
+            std::collections::VecDeque<crate::delivery::chunk_transfer::AttachmentBegin>,
+        >,
     >,
 }
 
@@ -193,10 +196,14 @@ impl DaemonInbound {
         // The manifest message ALSO falls through to the normal persist below so
         // it appears in history and emits Event::MessageReceived; this block only
         // adds the attachment side-effects.
-        if let crate::envelope::Kind::File { manifest: manifest_bytes } = &envelope.kind {
+        if let crate::envelope::Kind::File {
+            manifest: manifest_bytes,
+        } = &envelope.kind
+        {
             match crate::attachment::manifest::AttachmentManifest::from_cbor(manifest_bytes) {
-                Ok(m) if m.total_size <= crate::attachment::MAX_ATTACHMENT_BYTES
-                    && !m.chunks.is_empty() =>
+                Ok(m)
+                    if m.total_size <= crate::attachment::MAX_ATTACHMENT_BYTES
+                        && !m.chunks.is_empty() =>
                 {
                     let repo = crate::storage::attachments::AttachmentRepo::new(&self.pool);
                     let total_chunks = m.chunks.len() as i64;
@@ -219,7 +226,9 @@ impl DaemonInbound {
                     }
                 }
                 Ok(_) => tracing::warn!("inbound: rejecting oversize/empty attachment manifest"),
-                Err(e) => tracing::warn!(err = %e, "inbound: bad attachment manifest, skipping fetch"),
+                Err(e) => {
+                    tracing::warn!(err = %e, "inbound: bad attachment manifest, skipping fetch")
+                }
             }
         }
 

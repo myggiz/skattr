@@ -571,7 +571,10 @@ mod tests {
     fn download_dir_defaults_under_data_dir() {
         let mut c = Config::defaults().unwrap();
         c.data_dir = std::path::PathBuf::from("/tmp/skattr-x");
-        assert_eq!(c.resolved_download_dir(), std::path::PathBuf::from("/tmp/skattr-x/downloads"));
+        assert_eq!(
+            c.resolved_download_dir(),
+            std::path::PathBuf::from("/tmp/skattr-x/downloads")
+        );
     }
 
     #[test]
