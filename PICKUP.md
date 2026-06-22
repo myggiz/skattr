@@ -1,4 +1,4 @@
-# PICKUP — resume state (2026-06-17, post 3.B implementation)
+# PICKUP — resume state (2026-06-23, post 3.C implementation)
 
 Scratch/handoff doc to resume work after an environment update/reboot.
 Authoritative project state lives in `CLAUDE.md` (Repository state) and the
@@ -6,31 +6,43 @@ specs/plans under `docs/superpowers/`.
 
 ## TL;DR — where we are
 
-- **Phases 1, 2 (2.A–2.D), and 3.A: complete and merged to local `master`.**
-  3.A merged at `9a132d1`.
-- **Phase 3.B (direct attachment transfer): IMPLEMENTED on branch
-  `phase-3b-direct-attachment-transfer`** (not yet merged). Final whole-branch
-  review "Ready to merge"; gate green for everything 3.B touches — `fmt`/`clippy
-  --all-features -D warnings`/`test --features test-harness` all pass on
-  core/mailbox/cli/tests; loopback guardrail + actor-level resume green; zero
-  new deps. (`cargo-deny` not installed locally; `skattr-ui` clippy hits a local
-  `sda3` filesystem `os error 74` in the Tauri build script — env only, ui job
-  is separate in CI and the branch doesn't touch `crates/ui`.)
-- **Next workstream: Phase 3.C (offline transfer)** — chunk blobs via the
-  mailbox path; cross-session resume. Not started.
-- `master` is **local-only** (not pushed). 3.A pre-merge history backed up on
-  `origin/phase-3a-attachment-core`.
+- **Phases 1, 2 (2.A–2.D), 3.A, and 3.B: complete and merged to local `master`.**
+  3.A `9a132d1`; 3.B merged (final review "Ready to merge", gate green).
+- **Phase 3.C (offline attachment transfer): IMPLEMENTED on branch
+  `phase-3c-offline-attachment-transfer`** (merge pending). Final whole-branch
+  review "Ready to merge"; full CI gate green (`fmt` / `clippy --workspace
+  --exclude skattr-ui --all-features -D warnings` / `test --workspace --exclude
+  skattr-ui --features test-harness`); two offline guardrails
+  (`offline_attachment_via_mailbox`, `offline_attachment_cross_session_resume`)
+  pass; zero new deps; frozen ADR 0006 untouched. Spec
+  `docs/superpowers/specs/2026-06-22-phase-3c-offline-attachment-transfer-design.md`,
+  plan `…/plans/2026-06-22-phase-3c-offline-attachment-transfer.md`.
+- **Next workstream: Phase 3.D (Tauri UI)** — attach / send / download / inline
+  preview / progress / size limits. Not started. (Then Phase 4 — release
+  integrity, docs, real signing keys.)
+- `master` is **local-only** (not pushed). (`cargo-deny` not installed locally;
+  `skattr-ui` clippy hits a local `sda3` `os error 74` in the Tauri build script
+  — env only, separate CI ui job covers it; branches don't touch `crates/ui`.)
 
 ## IMMEDIATE NEXT ACTION (resume here)
 
-Decide how to integrate `phase-3b-direct-attachment-transfer` (merge to local
-`master` vs. PR) via `superpowers:finishing-a-development-branch`. Then start the
-**Phase 3.C design pass** (`superpowers:brainstorming` → spec → ADR? →
-`writing-plans` → subagent-driven execution → finishing-branch).
+Integrate `phase-3c-offline-attachment-transfer` (merge to local `master`) via
+`superpowers:finishing-a-development-branch`. Then start the **Phase 3.D design
+pass** (`superpowers:brainstorming` → spec → `writing-plans` → subagent-driven
+execution → finishing-branch). 3.D is the first UI-touching phase since the
+audit re-phasing — it consumes the `Command::SendFile` + `Event::Attachment*`
+surface 3.B/3.C built; no new core protocol.
 
-The section below is the original 3.B design sketch — now realized in
+3.C v1.1 follow-ups (deferred, in CLAUDE.md): atomic cross-lane completion gate
+(possible duplicate `AttachmentReceived` under simultaneous direct+offline
+completion — event-level only); `warn!` on swallowed `chunk_sweep`/
+`finalize_offline` prune writes.
+
+---
+
+Everything below is the ORIGINAL 3.B design sketch — now realized in
 `docs/superpowers/specs/2026-06-17-phase-3b-direct-attachment-transfer-design.md`
-+ ADR 0010; kept only as historical context (delete once 3.C is underway).
++ ADR 0010, and merged. Stale; safe to delete.
 
 3.B = **direct attachment transfer (online, both peers reachable)**. 3.A already
 provides: the manifest rides in MLS via `Kind::File`; chunk blobs are opaque
