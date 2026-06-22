@@ -726,8 +726,7 @@ impl InboundDispatch for DaemonInbound {
                     Ok(m) => m,
                     Err(_) => continue,
                 };
-            let Some(chunk_ref) = manifest.chunks.iter().find(|c| c.ciphertext_hash == hash)
-            else {
+            let Some(chunk_ref) = manifest.chunks.iter().find(|c| c.ciphertext_hash == hash) else {
                 continue;
             };
             let index = chunk_ref.index;
@@ -750,11 +749,13 @@ impl InboundDispatch for DaemonInbound {
             if now >= manifest.chunks.len() as i64 {
                 self.finalize_offline(&attachment_id, &manifest, &store);
             } else if now % 8 == 0 {
-                let _ = self.events_tx.send(crate::daemon::events::Event::AttachmentProgress {
-                    attachment_id: crate::daemon::hex::Hex16::from(attachment_id),
-                    received: now as u32,
-                    total: manifest.chunks.len() as u32,
-                });
+                let _ = self
+                    .events_tx
+                    .send(crate::daemon::events::Event::AttachmentProgress {
+                        attachment_id: crate::daemon::hex::Hex16::from(attachment_id),
+                        received: now as u32,
+                        total: manifest.chunks.len() as u32,
+                    });
             }
             return true;
         }

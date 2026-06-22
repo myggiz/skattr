@@ -82,7 +82,10 @@ pub(crate) async fn run_chunk_sweep(
         }
 
         // If that was the last pending chunk, prune + clean staging + finalize 'out'.
-        if deposit_repo.all_deposited(&row.attachment_id).unwrap_or(false) {
+        if deposit_repo
+            .all_deposited(&row.attachment_id)
+            .unwrap_or(false)
+        {
             let _ = deposit_repo.delete_for_attachment(&row.attachment_id);
             let _ = chunk_store.remove(&row.attachment_id);
             let _ = AttachmentRepo::new(pool).set_status(&row.attachment_id, "complete");
@@ -138,7 +141,10 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl MailboxConnectFactory for StubFactory {
-        async fn connect(&self, onion: &str) -> crate::error::Result<MailboxClient<Box<dyn MailboxStream>>> {
+        async fn connect(
+            &self,
+            onion: &str,
+        ) -> crate::error::Result<MailboxClient<Box<dyn MailboxStream>>> {
             let s = self.slots.lock().unwrap().pop();
             match s {
                 Some(s) => {
@@ -222,9 +228,7 @@ mod tests {
                 .unwrap(),
             "chunk must be marked deposited"
         );
-        let still_due = AttachmentDepositRepo::new(&pool)
-            .due(10_000, 10)
-            .unwrap();
+        let still_due = AttachmentDepositRepo::new(&pool).due(10_000, 10).unwrap();
         assert!(
             still_due.is_empty(),
             "deposit row must be pruned after all-deposited"

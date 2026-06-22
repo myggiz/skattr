@@ -14,8 +14,11 @@ use crate::error::{CoreError, Result};
 /// Per-chunk descriptor: content address + length of the chunk ciphertext.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChunkRef {
+    /// Zero-based position of this chunk in the file.
     pub index: u32,
+    /// SHA-256 of the chunk's AEAD ciphertext (its content address).
     pub ciphertext_hash: [u8; 32],
+    /// Length in bytes of the chunk ciphertext.
     pub len: u32,
 }
 
@@ -24,13 +27,21 @@ pub struct ChunkRef {
 /// per-chunk keys are derived (HKDF), so chunk blobs are opaque ciphertext.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttachmentManifest {
+    /// Manifest format version (rejected on decode if unknown).
     pub manifest_version: u8,
+    /// Random 16-byte id correlating manifest, chunks, and events.
     pub attachment_id: [u8; 16],
+    /// Original (sanitized) filename.
     pub filename: String,
+    /// MIME type after metadata stripping.
     pub mime: String,
+    /// Total plaintext size in bytes.
     pub total_size: u64,
+    /// Plaintext bytes per chunk.
     pub chunk_size: u32,
+    /// Root key from which per-chunk AEAD keys are derived (HKDF).
     pub file_key: [u8; 32],
+    /// Per-chunk content-address descriptors, in order.
     pub chunks: Vec<ChunkRef>,
 }
 

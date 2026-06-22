@@ -268,6 +268,7 @@ pub struct AttachmentDepositRepo<'p> {
 }
 
 impl<'p> AttachmentDepositRepo<'p> {
+    /// Bind a deposit-row repository to `pool`.
     pub fn new(pool: &'p Pool) -> Self {
         Self { pool }
     }
@@ -360,6 +361,7 @@ impl<'p> AttachmentDepositRepo<'p> {
         })
     }
 
+    /// Mark one chunk row `deposited` (the chunk reached a mailbox).
     pub fn mark_deposited(&self, attachment_id: &[u8; 16], chunk_index: u32) -> Result<()> {
         self.pool.with_mut(|c| {
             c.execute(
@@ -376,6 +378,7 @@ impl<'p> AttachmentDepositRepo<'p> {
         })
     }
 
+    /// Bump a chunk row's `attempts` and set its next retry time (backoff).
     pub fn reschedule(
         &self,
         attachment_id: &[u8; 16],
@@ -418,6 +421,8 @@ impl<'p> AttachmentDepositRepo<'p> {
         })
     }
 
+    /// Delete every deposit row for `attachment_id` (called once all chunks
+    /// are deposited, to prune the sender's offline-delivery state).
     pub fn delete_for_attachment(&self, attachment_id: &[u8; 16]) -> Result<()> {
         self.pool.with_mut(|c| {
             c.execute(

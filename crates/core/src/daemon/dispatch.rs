@@ -681,7 +681,9 @@ where
             .unwrap_or(0);
         let due_at = now_ms + crate::attachment::OFFLINE_FALLBACK_STALL_SECS * 1000;
         let dep_repo = crate::storage::attachments::AttachmentDepositRepo::new(&handle.pool);
-        if let Err(e) = dep_repo.enqueue_all(&manifest.attachment_id, &contact.0, total_chunks, due_at) {
+        if let Err(e) =
+            dep_repo.enqueue_all(&manifest.attachment_id, &contact.0, total_chunks, due_at)
+        {
             tracing::warn!(err = %e, "send_file: enqueue offline deposits failed");
         }
     }
