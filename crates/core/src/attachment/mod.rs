@@ -38,6 +38,9 @@ pub(crate) const OFFLINE_FALLBACK_STALL_SECS: i64 = 90;
 /// Current manifest version. An unknown version is rejected on decode.
 pub(crate) const MANIFEST_VERSION: u8 = 1;
 
+/// Max chunk deposits attempted per sweep tick (≤ per_conn_deposits_per_min).
+pub(crate) const CHUNK_SWEEP_BATCH: usize = 30;
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]

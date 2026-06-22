@@ -312,6 +312,9 @@ where
     let mut inbound_impl = DaemonInbound::new(pool.clone(), events_tx.clone());
     inbound_impl.set_identity(Arc::new(identity_for_inbound));
     inbound_impl.set_group_locks(group_locks.clone());
+    let chunk_store = std::sync::Arc::new(crate::attachment::store::ChunkStore::new(data_dir));
+    inbound_impl.set_chunk_store(chunk_store.clone());
+    inbound_impl.set_download_dir(config.resolved_download_dir());
     let inbound = Arc::new(inbound_impl) as Arc<dyn InboundDispatch>;
 
     // Step 3: DeliveryHub with the injected on-demand dialer. The dialer and
@@ -375,6 +378,27 @@ where
                 &sweeper_shared,
                 now,
                 32,
+            )
+            .await;
+        }
+    });
+
+    let chunk_sweep_pool = pool.clone();
+    let chunk_sweep_shared = fallback_shared.clone();
+    let chunk_sweep_store = chunk_store.clone();
+    let chunk_sweep_task = tokio::spawn(async move {
+        const SWEEP_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
+        let mut t = tokio::time::interval(SWEEP_EVERY);
+        t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            t.tick().await;
+            let now = crate::daemon::clock::now_unix_millis();
+            crate::delivery::chunk_sweep::run_chunk_sweep(
+                &chunk_sweep_pool,
+                &chunk_sweep_shared,
+                &chunk_sweep_store,
+                now,
+                crate::attachment::CHUNK_SWEEP_BATCH,
             )
             .await;
         }
@@ -486,6 +510,9 @@ where
     // parity with the accept loop (an in-flight deposit must not race teardown).
     mailbox_sweeper_task.abort();
     let _ = mailbox_sweeper_task.await;
+    // Stop the chunk-sweep task with the same teardown parity.
+    chunk_sweep_task.abort();
+    let _ = chunk_sweep_task.await;
     transport.shutdown().await?;
     // Server::drop removes the socket file automatically.
 
