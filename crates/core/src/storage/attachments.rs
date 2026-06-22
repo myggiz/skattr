@@ -185,6 +185,187 @@ impl<'p> AttachmentRepo<'p> {
     }
 }
 
+/// One due chunk-deposit row (Phase 3.C offline sender state).
+pub struct DepositDue {
+    pub attachment_id: [u8; 16],
+    pub chunk_index: u32,
+    pub recipient: [u8; 32],
+    pub attempts: u32,
+}
+
+/// Sender-side per-chunk mailbox-deposit state. Rows carry no payload; the
+/// chunk bytes are read from the `ChunkStore` at deposit time.
+pub struct AttachmentDepositRepo<'p> {
+    pool: &'p Pool,
+}
+
+impl<'p> AttachmentDepositRepo<'p> {
+    pub fn new(pool: &'p Pool) -> Self {
+        Self { pool }
+    }
+
+    /// Enqueue all chunks `0..total_chunks` for `attachment_id`, due at
+    /// `first_due_at_ms`. Idempotent on the (attachment_id, chunk_index) PK.
+    pub fn enqueue_all(
+        &self,
+        attachment_id: &[u8; 16],
+        recipient: &[u8; 32],
+        total_chunks: u32,
+        first_due_at_ms: i64,
+    ) -> Result<()> {
+        self.pool.transaction(|tx| {
+            let mut stmt = tx
+                .prepare(
+                    "INSERT OR IGNORE INTO attachment_deposits \
+                     (attachment_id, chunk_index, recipient, attempts, next_retry_at, status) \
+                     VALUES (?1, ?2, ?3, 0, ?4, 'pending')",
+                )
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!(
+                        "attachment_deposits enqueue_all prepare: {e}"
+                    )))
+                })?;
+            for i in 0..total_chunks {
+                stmt.execute(rusqlite::params![
+                    &attachment_id[..],
+                    i,
+                    &recipient[..],
+                    first_due_at_ms
+                ])
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!(
+                        "attachment_deposits enqueue_all execute: {e}"
+                    )))
+                })?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Pending rows whose `next_retry_at <= now_ms`, oldest first.
+    pub fn due(&self, now_ms: i64, limit: usize) -> Result<Vec<DepositDue>> {
+        self.pool.with(|c| {
+            let mut stmt = c
+                .prepare(
+                    "SELECT attachment_id, chunk_index, recipient, attempts \
+                     FROM attachment_deposits \
+                     WHERE status = 'pending' AND next_retry_at <= ?1 \
+                     ORDER BY next_retry_at ASC LIMIT ?2",
+                )
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!(
+                        "attachment_deposits due prepare: {e}"
+                    )))
+                })?;
+            let rows = stmt
+                .query_map(rusqlite::params![now_ms, limit as i64], |r| {
+                    let aid: Vec<u8> = r.get(0)?;
+                    let recip: Vec<u8> = r.get(2)?;
+                    Ok((aid, r.get::<_, i64>(1)?, recip, r.get::<_, i64>(3)?))
+                })
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!(
+                        "attachment_deposits due query: {e}"
+                    )))
+                })?;
+            let mut out = Vec::new();
+            for row in rows {
+                let (aid, idx, recip, attempts) = row.map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!(
+                        "attachment_deposits due row: {e}"
+                    )))
+                })?;
+                let mut attachment_id = [0u8; 16];
+                let mut recipient = [0u8; 32];
+                if aid.len() == 16 && recip.len() == 32 {
+                    attachment_id.copy_from_slice(&aid);
+                    recipient.copy_from_slice(&recip);
+                    out.push(DepositDue {
+                        attachment_id,
+                        chunk_index: idx as u32,
+                        recipient,
+                        attempts: attempts as u32,
+                    });
+                }
+            }
+            Ok(out)
+        })
+    }
+
+    pub fn mark_deposited(&self, attachment_id: &[u8; 16], chunk_index: u32) -> Result<()> {
+        self.pool.with_mut(|c| {
+            c.execute(
+                "UPDATE attachment_deposits SET status = 'deposited' \
+                 WHERE attachment_id = ?1 AND chunk_index = ?2",
+                rusqlite::params![&attachment_id[..], chunk_index],
+            )
+            .map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!(
+                    "attachment_deposits mark_deposited: {e}"
+                )))
+            })?;
+            Ok(())
+        })
+    }
+
+    pub fn reschedule(
+        &self,
+        attachment_id: &[u8; 16],
+        chunk_index: u32,
+        attempts: u32,
+        next_retry_at_ms: i64,
+    ) -> Result<()> {
+        self.pool.with_mut(|c| {
+            c.execute(
+                "UPDATE attachment_deposits SET attempts = ?3, next_retry_at = ?4 \
+                 WHERE attachment_id = ?1 AND chunk_index = ?2",
+                rusqlite::params![&attachment_id[..], chunk_index, attempts, next_retry_at_ms],
+            )
+            .map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!(
+                    "attachment_deposits reschedule: {e}"
+                )))
+            })?;
+            Ok(())
+        })
+    }
+
+    /// True if no `pending` rows remain for the attachment (all deposited, or
+    /// none were ever enqueued).
+    pub fn all_deposited(&self, attachment_id: &[u8; 16]) -> Result<bool> {
+        self.pool.with(|c| {
+            let n: i64 = c
+                .query_row(
+                    "SELECT COUNT(*) FROM attachment_deposits \
+                     WHERE attachment_id = ?1 AND status = 'pending'",
+                    rusqlite::params![&attachment_id[..]],
+                    |r| r.get(0),
+                )
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!(
+                        "attachment_deposits all_deposited: {e}"
+                    )))
+                })?;
+            Ok(n == 0)
+        })
+    }
+
+    pub fn delete_for_attachment(&self, attachment_id: &[u8; 16]) -> Result<()> {
+        self.pool.with_mut(|c| {
+            c.execute(
+                "DELETE FROM attachment_deposits WHERE attachment_id = ?1",
+                rusqlite::params![&attachment_id[..]],
+            )
+            .map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!(
+                    "attachment_deposits delete_for_attachment: {e}"
+                )))
+            })?;
+            Ok(())
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,5 +391,53 @@ mod tests {
         repo.set_status(&[0x11; 16], "complete").unwrap();
         assert_eq!(repo.get(&[0x11; 16]).unwrap().unwrap().status, "complete");
         assert!(repo.get(&[0x99; 16]).unwrap().is_none());
+    }
+
+    #[test]
+    fn enqueue_due_mark_and_all_deposited() {
+        let pool = Pool::in_memory();
+        let repo = AttachmentDepositRepo::new(&pool);
+        let aid = [0xAB; 16];
+        let recip = [0xCD; 32];
+        // Enqueue 3 chunks due at t=1000ms.
+        repo.enqueue_all(&aid, &recip, 3, 1000).unwrap();
+        // Not due before 1000.
+        assert!(repo.due(999, 10).unwrap().is_empty());
+        // Due at/after 1000.
+        let due = repo.due(1000, 10).unwrap();
+        assert_eq!(due.len(), 3);
+        assert_eq!(due[0].recipient, recip);
+        assert!(!repo.all_deposited(&aid).unwrap());
+        // Mark all deposited.
+        for d in &due {
+            repo.mark_deposited(&aid, d.chunk_index).unwrap();
+        }
+        assert!(repo.all_deposited(&aid).unwrap());
+        // Deposited rows are no longer due.
+        assert!(repo.due(2000, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn reschedule_defers_and_bumps_attempts() {
+        let pool = Pool::in_memory();
+        let repo = AttachmentDepositRepo::new(&pool);
+        let aid = [0x11; 16];
+        repo.enqueue_all(&aid, &[0; 32], 1, 0).unwrap();
+        repo.reschedule(&aid, 0, 1, 5000).unwrap();
+        assert!(repo.due(4999, 10).unwrap().is_empty());
+        let due = repo.due(5000, 10).unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].attempts, 1);
+    }
+
+    #[test]
+    fn delete_for_attachment_clears_rows() {
+        let pool = Pool::in_memory();
+        let repo = AttachmentDepositRepo::new(&pool);
+        let aid = [0x22; 16];
+        repo.enqueue_all(&aid, &[0; 32], 2, 0).unwrap();
+        repo.delete_for_attachment(&aid).unwrap();
+        assert!(repo.due(10_000, 10).unwrap().is_empty());
+        assert!(repo.all_deposited(&aid).unwrap()); // vacuously true: no pending rows
     }
 }
