@@ -946,6 +946,9 @@ where
                         if let Some(store) = chunk_store.as_ref() {
                             let _ = store.remove(&attachment_id);
                         }
+                        // 3.C: a direct completion cancels the offline lane.
+                        let _ = crate::storage::attachments::AttachmentDepositRepo::new(&pool)
+                            .delete_for_attachment(&attachment_id);
                         if let Some(d) = inbound.as_ref() {
                             if let Ok(Some(row)) = repo.get(&attachment_id) {
                                 let t = row.total_chunks as u32;

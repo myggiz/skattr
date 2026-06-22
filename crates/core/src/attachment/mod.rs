@@ -27,6 +27,14 @@ pub(crate) const CHUNK_SIZE: usize = 49_152;
 /// Maximum total plaintext attachment size (100 MiB), rejected up front.
 pub(crate) const MAX_ATTACHMENT_BYTES: u64 = 100 * 1024 * 1024;
 
+/// Files at/under this size may use the offline (mailbox) lane; larger files
+/// are direct-only (3.B) — if the peer is offline they wait for both online.
+pub(crate) const MAX_OFFLINE_ATTACHMENT_BYTES: u64 = 10 * 1024 * 1024;
+
+/// How long after send the offline deposit rows become due — a head start for
+/// the direct 3.B lane to complete first (and be pruned).
+pub(crate) const OFFLINE_FALLBACK_STALL_SECS: i64 = 90;
+
 /// Current manifest version. An unknown version is rejected on decode.
 pub(crate) const MANIFEST_VERSION: u8 = 1;
 

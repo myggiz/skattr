@@ -670,6 +670,22 @@ where
         other => return Ok(other),
     };
 
+    // Phase 3.C: if the file is within the offline cap, eagerly enqueue deferred
+    // chunk-deposit rows. They become due after OFFLINE_FALLBACK_STALL_SECS, by
+    // which time a successful direct (3.B) transfer will have pruned them (on
+    // AttachmentComplete). If the peer is/was offline, chunk_sweep deposits them.
+    if manifest.total_size <= crate::attachment::MAX_OFFLINE_ATTACHMENT_BYTES {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let due_at = now_ms + crate::attachment::OFFLINE_FALLBACK_STALL_SECS * 1000;
+        let dep_repo = crate::storage::attachments::AttachmentDepositRepo::new(&handle.pool);
+        if let Err(e) = dep_repo.enqueue_all(&manifest.attachment_id, &contact.0, total_chunks, due_at) {
+            tracing::warn!(err = %e, "send_file: enqueue offline deposits failed");
+        }
+    }
+
     Ok(CommandResult::FileQueued {
         message_id,
         attachment_id: Hex16::from(manifest.attachment_id),
