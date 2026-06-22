@@ -13,3 +13,8 @@ CREATE TABLE IF NOT EXISTS attachment_deposits (
 
 CREATE INDEX IF NOT EXISTS idx_attachment_deposits_due
     ON attachment_deposits (status, next_retry_at);
+
+-- Phase 3.C receiver: store the inbound sender's pubkey alongside the
+-- manifest so finalize_offline can populate Event::AttachmentReceived.contact
+-- without joining the messages table. NULL for outbound ('out') rows.
+ALTER TABLE attachments ADD COLUMN peer BLOB;

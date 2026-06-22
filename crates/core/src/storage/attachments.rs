@@ -161,6 +161,74 @@ impl<'p> AttachmentRepo<'p> {
         })
     }
 
+    /// `(attachment_id, manifest_bytes)` for every `direction='in'`,
+    /// `status='pending'` attachment — the offline receiver's match set.
+    pub fn list_pending_in(&self) -> Result<Vec<([u8; 16], Vec<u8>)>> {
+        self.pool.with(|c| {
+            let mut stmt = c.prepare(
+                "SELECT attachment_id, manifest FROM attachments \
+                 WHERE direction = 'in' AND status = 'pending'",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                let aid: Vec<u8> = r.get(0)?;
+                let m: Vec<u8> = r.get(1)?;
+                Ok((aid, m))
+            })?;
+            let mut out = Vec::new();
+            for row in rows {
+                let (aid, m) = row?;
+                if aid.len() == 16 {
+                    let mut id = [0u8; 16];
+                    id.copy_from_slice(&aid);
+                    out.push((id, m));
+                }
+            }
+            Ok(out)
+        })
+    }
+
+    /// Store the sender's pubkey (`peer`) alongside the manifest row so
+    /// `finalize_offline` can populate `Event::AttachmentReceived.contact`.
+    /// Silently ignored if the row does not exist.
+    pub fn set_peer(&self, attachment_id: &[u8; 16], peer: &[u8; 32]) -> Result<()> {
+        self.pool.with_mut(|c| {
+            c.execute(
+                "UPDATE attachments SET peer = ?2 WHERE attachment_id = ?1",
+                rusqlite::params![&attachment_id[..], &peer[..]],
+            )
+            .map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!(
+                    "attachments set_peer: {e}"
+                )))
+            })?;
+            Ok(())
+        })
+    }
+
+    /// Retrieve the stored sender pubkey for `attachment_id`.
+    /// Returns `None` if the row is absent, the column is NULL, or the
+    /// stored BLOB is not exactly 32 bytes.
+    pub fn peer_for(&self, attachment_id: &[u8; 16]) -> Result<Option<[u8; 32]>> {
+        self.pool.with(|c| {
+            match c.query_row(
+                "SELECT peer FROM attachments WHERE attachment_id = ?1",
+                rusqlite::params![&attachment_id[..]],
+                |r| r.get::<_, Option<Vec<u8>>>(0),
+            ) {
+                Ok(Some(b)) if b.len() == 32 => {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&b);
+                    Ok(Some(arr))
+                }
+                Ok(_) => Ok(None),
+                Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+                Err(e) => Err(CoreError::Storage(StorageErrorKind::Other(format!(
+                    "attachments peer_for: {e}"
+                )))),
+            }
+        })
+    }
+
     /// Delete the attachment row and its chunk bitmap.
     pub fn delete(&self, attachment_id: &[u8; 16]) -> Result<()> {
         self.pool.with_mut(|c| {

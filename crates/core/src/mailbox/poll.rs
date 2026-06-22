@@ -143,7 +143,9 @@ where
     }
     let mut dispatched: Vec<[u8; 16]> = Vec::new();
     for dep in &resp.deposits {
-        if inbound.dispatch_mailbox(&dep.ciphertext).is_some() {
+        if inbound.dispatch_attachment_chunk(&dep.ciphertext)
+            || inbound.dispatch_mailbox(&dep.ciphertext).is_some()
+        {
             dispatched.push(dep.deposit_id);
         }
     }

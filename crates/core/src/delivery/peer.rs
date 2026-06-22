@@ -248,6 +248,18 @@ pub trait InboundDispatch: Send + Sync + 'static {
         None
     }
 
+    /// Try to interpret an inbound mailbox deposit as an attachment chunk
+    /// (Phase 3.C offline lane): match `sha256(ciphertext)` against the chunk
+    /// hashes of pending `direction='in'` manifests; on a match, store + mark
+    /// received (and reassemble on completion). Returns `true` if the deposit
+    /// was a (recognized) chunk and should be deleted from the mailbox server
+    /// — including the dedup case where the chunk was already held. Returns
+    /// `false` if it is not a chunk (caller falls through to MLS dispatch).
+    /// Default `false` so non-attachment impls are unaffected.
+    fn dispatch_attachment_chunk(&self, _ciphertext: &[u8]) -> bool {
+        false
+    }
+
     /// Authenticate + join a first-contact Welcome from a peer not yet known,
     /// deriving + binding the invitee's identity (ADR 0007). The Welcome is
     /// validated against `outstanding_invites` (peer-independent), the invitee
