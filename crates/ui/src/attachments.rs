@@ -4,7 +4,10 @@
 //! Phase 3.D attachment UI-shell commands: manifest decode, file stat,
 //! and open/reveal of received files. Presentation-only — no protocol.
 
+use std::path::PathBuf;
+
 use serde::Serialize;
+use tauri_plugin_opener::OpenerExt;
 
 use skattr_core::AttachmentManifest;
 
@@ -35,6 +38,38 @@ pub async fn decode_attachment_manifest(manifest: Vec<u8>) -> Result<ManifestSum
         mime: m.mime,
         total_size: m.total_size,
     })
+}
+
+/// Canonicalize a UI-supplied path and assert it points at an existing
+/// regular file. Defense-in-depth: received-file paths are always
+/// daemon-authored (from `Event::AttachmentReceived`), but validate anyway.
+fn validate_openable(path: &str) -> Result<PathBuf, String> {
+    let canon =
+        std::fs::canonicalize(path).map_err(|e| format!("canonicalize {path}: {e}"))?;
+    let meta =
+        std::fs::metadata(&canon).map_err(|e| format!("{path}: not found: {e}"))?;
+    if !meta.is_file() {
+        return Err(format!("{path}: not a regular file"));
+    }
+    Ok(canon)
+}
+
+/// Open a received file with the OS default handler.
+#[tauri::command]
+pub async fn open_file(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    let canon = validate_openable(&path)?;
+    app.opener()
+        .open_path(canon.to_string_lossy().to_string(), None::<&str>)
+        .map_err(|e| format!("open_file: {e}"))
+}
+
+/// Reveal a received file in the OS file manager.
+#[tauri::command]
+pub async fn reveal_in_folder(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    let canon = validate_openable(&path)?;
+    app.opener()
+        .reveal_item_in_dir(canon)
+        .map_err(|e| format!("reveal_in_folder: {e}"))
 }
 
 /// Stat a local file and return its byte length. Used by the pre-send size
@@ -102,6 +137,28 @@ mod tests {
     async fn file_size_errors_on_directory() {
         let dir = tempfile::tempdir().unwrap();
         let err = file_size(dir.path().to_string_lossy().to_string()).await.unwrap_err();
+        assert!(err.contains("not a regular file"));
+    }
+
+    #[test]
+    fn validate_existing_regular_file_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("f.txt");
+        std::fs::write(&p, b"hi").unwrap();
+        let got = validate_openable(&p.to_string_lossy()).unwrap();
+        assert!(got.is_absolute());
+    }
+
+    #[test]
+    fn validate_missing_file_errs() {
+        let err = validate_openable("/no/such/zzz").unwrap_err();
+        assert!(err.contains("not found") || err.contains("canonicalize"));
+    }
+
+    #[test]
+    fn validate_directory_errs() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = validate_openable(&dir.path().to_string_lossy()).unwrap_err();
         assert!(err.contains("not a regular file"));
     }
 }
