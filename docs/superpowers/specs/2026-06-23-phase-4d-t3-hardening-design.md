@@ -176,11 +176,20 @@ tests stay green.
   new transport behavior; the audit's live-guardrail rule applies to new
   behaviors. Coverage = targeted unit tests + **all existing Phase-3 guardrails
   staying green** (the regression net, especially for items 4 and P2).
-- **Gates (all must pass before each push):**
-  `cargo fmt --all --check` **(run locally — this was the CI miss in 3.D)**,
-  `cargo clippy -p skattr-core -p skattr-ui --all-targets --all-features -- -D
-  warnings`, `cargo test -p skattr-core -p skattr-ui`, `pnpm test`, and
-  `pnpm check` (under pinned 1.95.0 for Rust).
+- **Local pre-push gates (run by the developer before each push; Rust under
+  pinned 1.95.0):** `cargo fmt --all --check` **(run locally — this was the CI
+  miss in 3.D)**, `cargo clippy -p skattr-core -p skattr-ui --all-targets
+  --all-features -- -D warnings`, `cargo test -p skattr-core -p skattr-ui`,
+  `pnpm test`, and `pnpm check`. **`pnpm check` stays a local gate in 4.D — it
+  is deliberately NOT added to CI here.** Wiring `pnpm check` (and Playwright)
+  into the CI `ui` job is **Phase 4.A's scope (T2-3)**, and it is blocked on
+  first fixing the 4 pre-existing `ConfigPatch.download_dir` svelte-check errors
+  in the settings pages (out of 4.D scope). 4.D's only `pnpm check` obligation is
+  to **introduce no new** svelte-check errors in the files it touches (P1, P5).
+- **CI gates (the existing `ui` + workspace jobs):** the merge-gating CI is
+  unchanged by 4.D — `cargo fmt`/clippy/test on the workspace and `pnpm build` +
+  `pnpm test` in the `ui` job (the Vitest gate landed in 3.D). 4.D adds no CI
+  steps.
 - **Review tiers** (subagent-driven): security/auth-sensitive items —
   **1, 2, 5, P1, P2 → opus review** (CLAUDE.md "crypto/protocol/auth → second
   reviewer," read broadly to include info-leak / secret-handling / auth-boundary
