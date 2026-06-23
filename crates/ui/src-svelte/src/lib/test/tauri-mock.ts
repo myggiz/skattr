@@ -38,6 +38,16 @@ const _fixtureAttachments =
   typeof window !== "undefined" &&
   new URLSearchParams(window.location.search).get("fixture") === "attachments";
 
+// When ?pick=huge the dialog picker returns a huge path so the size gate fires.
+const _pickHuge =
+  typeof window !== "undefined" &&
+  new URLSearchParams(window.location.search).get("pick") === "huge";
+
+// When ?fail=1 the send_file arm emits attachment_failed instead of received.
+const _failAttachment =
+  typeof window !== "undefined" &&
+  new URLSearchParams(window.location.search).get("fail") === "1";
+
 let _vault = _preseeded || _fixtureSeeded || _fixture200Msgs || _fixtureInviteFlow || _fixtureAddContactFlow || _fixtureAttachments;
 
 // Active subscribe channel — used by fixture to emit delivery_status_changed.
@@ -309,6 +319,7 @@ export async function invoke<T = unknown>(
         const fileCmd = cmdObj as { cmd: string; contact: string; path: string };
         // Emit an incoming Kind::File message + progress + received so the
         // e2e can assert the receive path too (sender-side has no progress).
+        // When ?fail=1 emit attachment_failed instead of progress+received.
         setTimeout(() => {
           if (!_subscribeChannel) return;
           _subscribeChannel._emit({
@@ -323,16 +334,23 @@ export async function invoke<T = unknown>(
               },
             },
           });
-          _subscribeChannel._emit({
-            event: "attachment_progress", data: { attachment_id: "ab".repeat(16), received: 1, total: 2 },
-          });
-          _subscribeChannel._emit({
-            event: "attachment_received",
-            data: {
-              attachment_id: "ab".repeat(16), contact: fileCmd.contact,
-              filename: "photo.jpg", mime: "image/jpeg", size: 2048, path: "/dl/photo.jpg",
-            },
-          });
+          if (_failAttachment) {
+            _subscribeChannel._emit({
+              event: "attachment_failed",
+              data: { attachment_id: "ab".repeat(16), reason: "transfer failed" },
+            });
+          } else {
+            _subscribeChannel._emit({
+              event: "attachment_progress", data: { attachment_id: "ab".repeat(16), received: 1, total: 2 },
+            });
+            _subscribeChannel._emit({
+              event: "attachment_received",
+              data: {
+                attachment_id: "ab".repeat(16), contact: fileCmd.contact,
+                filename: "photo.jpg", mime: "image/jpeg", size: 2048, path: "/dl/photo.jpg",
+              },
+            });
+          }
         }, 100);
         return {
           resp: "ok",
@@ -378,7 +396,8 @@ export async function invoke<T = unknown>(
       return undefined as unknown as T;
     case "plugin:dialog|open": {
       // @tauri-apps/plugin-dialog open() routes through invoke under this id.
-      return "/picked/photo.jpg" as unknown as T;
+      // When ?pick=huge the picker returns a path the file_size arm maps to 200 MiB.
+      return (_pickHuge ? "/picked/huge.bin" : "/picked/photo.jpg") as unknown as T;
     }
 
     default:
