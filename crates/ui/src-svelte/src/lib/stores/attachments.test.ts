@@ -1,0 +1,60 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Myggiz AB
+import { describe, expect, test, beforeEach } from "vitest";
+import { get } from "svelte/store";
+import {
+  attachments,
+  markQueued,
+  applyManifest,
+  applyProgress,
+  applyReceived,
+  applyFailed,
+  attachmentFor,
+} from "./attachments";
+
+describe("attachments store", () => {
+  beforeEach(() => attachments.set(new Map()));
+
+  test("markQueued seeds a queued entry", () => {
+    markQueued("aa", { filename: "f.bin", size: 10, total: 3 });
+    expect(attachmentFor("aa")).toEqual({
+      status: "queued", received: 0, total: 3, filename: "f.bin", size: 10,
+    });
+  });
+
+  test("applyManifest fills static fields without clobbering progress", () => {
+    applyProgress("bb", 2, 5);
+    applyManifest("bb", { filename: "p.jpg", mime: "image/jpeg", size: 99, total: 5 });
+    const s = attachmentFor("bb")!;
+    expect(s.received).toBe(2);
+    expect(s.filename).toBe("p.jpg");
+    expect(s.mime).toBe("image/jpeg");
+    expect(s.status).toBe("receiving");
+  });
+
+  test("applyProgress sets receiving + counts", () => {
+    applyProgress("cc", 1, 4);
+    expect(attachmentFor("cc")).toMatchObject({ status: "receiving", received: 1, total: 4 });
+  });
+
+  test("applyReceived marks complete with path", () => {
+    applyProgress("dd", 4, 4);
+    applyReceived("dd", { filename: "x.png", mime: "image/png", size: 5, path: "/d/x.png" });
+    expect(attachmentFor("dd")).toMatchObject({
+      status: "complete", path: "/d/x.png", filename: "x.png", mime: "image/png", size: 5,
+    });
+  });
+
+  test("applyFailed marks failed with reason", () => {
+    applyProgress("ee", 1, 4);
+    applyFailed("ee", "timeout");
+    expect(attachmentFor("ee")).toMatchObject({ status: "failed", reason: "timeout" });
+  });
+
+  test("updates are immutable (new Map each time)", () => {
+    markQueued("ff", { total: 1 });
+    const first = get(attachments);
+    applyProgress("ff", 1, 1);
+    expect(get(attachments)).not.toBe(first);
+  });
+});

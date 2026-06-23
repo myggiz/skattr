@@ -147,11 +147,112 @@ plan → subagent-driven execution → live guardrail → merge.
     `clean_shutdown_leaves_only_encrypted_db` (no plaintext/sidecars/sentinel
     after a clean shutdown).
 
-#### Phase 3 — Attachments — ⬜ not started
+#### Phase 3 — Attachments — ✅ complete (3.A, 3.B, 3.C, 3.D done)
 
 File attachments (send / receive / preview) with metadata stripping; a new
 `envelope::kinds` attachment variant; chunking/transfer over the hardened
-transport + mailbox path. Depends on Phase 2 being closed (it is).
+transport + mailbox path. Depends on Phase 2 being closed (it is). Decomposed
+into 3.A → 3.B → 3.C → 3.D.
+
+- **3.A — attachment core** (merge `9a132d1`; final whole-branch review "Ready
+  to merge", gate green — core 636/0, skattr-tests 39/0, cargo-deny ok): the
+  local, transport-free pipeline. The manifest rides in MLS via `Kind::File`;
+  chunk blobs are opaque AEAD ciphertext keyed from the manifest. New
+  `crates/core/src/attachment/` (`chunker`, `manifest`, `reassembler`, `store`
+  (`ChunkStore` stage), `strip` (metadata stripping), `error_kind`),
+  `storage::attachments` (`AttachmentRepo` per-chunk receipt state, migration
+  `0015_attachments`). Local round-trip validated without transport.
+- **3.B — direct attachment transfer** — ✅ done (branch
+  `phase-3b-direct-attachment-transfer`; final whole-branch review "Ready to
+  merge"; gate green — core lib 655/0, skattr-tests pass incl. the loopback
+  guardrail; spec `2026-06-17-phase-3b-direct-attachment-transfer-design.md`,
+  ADR 0010). The online, both-peers-reachable path, **pull/request-driven**:
+  four additive transport `FrameType`s `0x0B`–`0x0E` (the free bytes start at
+  `0x0B` — `0x0A` is `Error`) — `ChunkRequest`/`Chunk`/`ChunkNack`/
+  `AttachmentComplete` carrying opaque, Noise-encrypted (**not** MLS-wrapped)
+  chunk ciphertext, sha256-verified against the manifest before storage.
+  `Command::SendFile { contact, path }` (strip → chunk → stage in `ChunkStore`
+  → persist `AttachmentRepo` `out` row → announce the manifest as a `Kind::File`
+  MLS message). New `delivery::chunk_transfer` (`ChunkRx` window/retry state
+  machine, `serve_chunk_request`, `sanitize_filename`, `unique_download_path`)
+  is driven inside the per-peer `delivery::peer` actor (serve / windowed-fetch
+  N=8 / one-attachment-per-peer FIFO / in-session resume via `ReplaceConn` →
+  `reissue` / 30 s request timeout). Receiver auto-fetches → reassembles to a
+  config `download_dir` (default `<data_dir>/downloads`) → emits
+  `Event::{AttachmentReceived,AttachmentProgress,AttachmentFailed}`.
+  **`CHUNK_SIZE` is 48 KiB** (reduced from 3.A's 256 KiB so one chunk fits one
+  Noise message — `connection::send` caps inner frames at 65 519 B; a regression
+  guard `chunk_frame_worst_case_fits_noise_max_outer` locks it). No new
+  migration (3.A's `0015` covers receiver receipt state; sender uses `ChunkStore`
+  + the `out` row). Guardrails: `attachment_roundtrip_multichunk_over_loopback`
+  (real `run_with_transport`, byte-identical multi-chunk + EXIF stripped) and an
+  actor-level in-session-resume test (a full-stack reconnect could not be
+  deterministically triggered). Deferred hardening: scope `serve_chunk_request`
+  to `direction='out'` (done as a final guard), offline-manifest/online-chunks
+  gap is 3.C.
+- **3.C — offline transfer** — ✅ done (branch
+  `phase-3c-offline-attachment-transfer`; final whole-branch review "Ready to
+  merge"; gate green — core lib + skattr-tests pass incl. two offline
+  guardrails; spec `2026-06-22-phase-3c-offline-attachment-transfer-design.md`;
+  **no ADR** — reuses frozen ADR 0006 `Deposit` unchanged). Chunks reach an
+  offline peer via the mailbox: each chunk is deposited as the raw 3.A AEAD blob
+  (opaque, addressed to `recipient_hash = sha256(pubkey)`, `ttl=0`) — **no wire
+  metadata**. The receiver identifies a fetched deposit by `sha256`-matching it
+  against pending `direction='in'` manifests (the match *is* the integrity
+  check), in `DaemonInbound::dispatch_attachment_chunk` (tried before
+  `dispatch_mailbox` in `poll_dispatch_once`); a non-match is left on the server.
+  Sender durable state: new `attachment_deposits` table (migration `0016`, +
+  an `attachments.peer` column) + `AttachmentDepositRepo`; `SendFile` eagerly
+  enqueues **deferred** deposit rows (`next_retry_at = now + 90 s` stall window;
+  a direct 3.B `AttachmentComplete` prunes them first). `delivery::chunk_sweep`
+  (sibling to `mailbox_sweeper`, spawned in `run_with_transport`) deposits due
+  chunks from `ChunkStore` with per-mailbox failover + bounded backoff, pruning
+  on all-deposited. Offline files are capped at **`MAX_OFFLINE_ATTACHMENT_BYTES`
+  = 10 MiB** (larger → direct-only, wait for both online); deposit-all + the
+  receiver's `received_indices` dedup makes the offline and 3.B direct lanes
+  compose idempotently. Cross-session resume: sender via `attachment_deposits`
+  (`chunk_sweep` re-queries `due()` on boot), receiver via `attachment_chunks`.
+  A stalled inbound stays `pending` (no janitor — deferred with 3.B's
+  partial-GC). Guardrails (component-level vs a real `InProcessMailbox`, matching
+  2.C's offline pattern; full `run_with_transport` offline is impractical):
+  `offline_attachment_via_mailbox` (byte-identical multi-chunk + EXIF stripped
+  through real `run_chunk_sweep`/`poll_dispatch_once`/`dispatch_attachment_chunk`/
+  `reassemble`) and `offline_attachment_cross_session_resume` (receiver restart
+  mid-transfer resumes from durable state).
+- **3.D — UI** — ✅ done (branch `phase-3d-attachment-ui`; final whole-branch
+  review "Ready to merge"; gate green — `skattr-ui` clippy clean + 14/14 Rust
+  tests, vitest 111/111, e2e 13/13; spec
+  `2026-06-23-phase-3d-attachment-ui-design.md`, plan
+  `2026-06-23-phase-3d-attachment-ui.md`; **no ADR, no core/protocol change** —
+  presentation + IPC wiring only). Surfaces the 3.A/B/C core in the Tauri 2 +
+  SvelteKit UI. Four UI-shell `#[tauri::command]`s in `crates/ui/src/attachments.rs`
+  (`decode_attachment_manifest` → canonical `AttachmentManifest::from_cbor` via a
+  minimal `pub use` re-export; `file_size`; `open_file`/`reveal_in_folder` via the
+  `opener` plugin with canonicalize+regular-file validation). New SvelteKit units:
+  `stores/attachments.ts` (global session-scoped transfer store keyed by hex
+  `attachment_id`, mirrors `delivery.ts`), `lib/attachments.ts` (formatBytes /
+  mime helpers / `decodeManifest` wrapper + per-message memo),
+  `components/FileAttachmentBubble.svelte` (sender card + delivery status /
+  receiver progress / inline image preview via the Tauri asset protocol /
+  Open-Reveal / failed / decode-unavailable). Wiring: `Composer.svelte` paperclip
+  → `@tauri-apps/plugin-dialog` picker → pre-send size gate (>100 MiB block,
+  10–100 MiB soft-warn; daemon's `MAX_ATTACHMENT_BYTES` stays authoritative) →
+  optimistic `Kind::File` bubble + `SendFile`; `MessageBubble.svelte` switches
+  `kind==="file"` → the file bubble; `+page.svelte` gains 3 dispatcher arms for
+  `Event::Attachment{Progress,Received,Failed}`. **The `Kind::File.manifest` is a
+  runtime byte array** (serde_json number array; the ts-rs `string` type is a
+  `#[ts(type="string")]` annotation) — the UI passes it straight to the Rust
+  decoder, never base64. Tauri config: `dialog`+`opener` plugins, `protocol-asset`
+  feature, an asset-protocol scope confined at runtime to `<data_dir>/downloads`,
+  `img-src` CSP gains `asset: http://asset.localhost`, minimal
+  `capabilities/default.json`. CI: `pnpm test` (vitest) added as a hard gate to
+  the `ui` job. Deferred to v1.1 (see limitations): confine
+  `open_file`/`reveal_in_folder` to the downloads dir (currently safe-by-context —
+  paths are daemon-authored from `AttachmentReceived` + `script-src 'self'`); a
+  unit test for the indeterminate "Downloading…" (≤8-chunk) bubble branch; plus
+  the design's own deferrals — post-restart received-attachment state
+  (session-scoped store), configurable download folder, in-UI retry, sender-side
+  download progress, concurrent attachments per peer.
 
 #### Phase 4 — Release integrity, docs, signing — ⬜ not started
 
@@ -175,6 +276,23 @@ also a placeholder — both must be real before Phase 4 ships.
   when the joiner sends the Welcome, first contact stalls. Deferred (touching it
   would extend the ADR 0006 freeze). Ordinary messages and ContactCard updates
   do have mailbox fallback (2.C).
+- **3.C completion is not atomic across lanes** — ❌ deferred (v1.1). The
+  attachment-complete check (`received_indices().len() >= total` → reassemble +
+  emit `AttachmentReceived` → `set_status('complete')`) is not atomic with the
+  status flip, and the direct (3.B `finalize_rx`) and offline (3.C
+  `finalize_offline`) lanes run in separate tasks. Under *simultaneous*
+  direct+offline completion a duplicate `AttachmentReceived` event can fire —
+  event-level only (no corruption; `unique_download_path` writes distinct files;
+  UI keys on `attachment_id`). Fix: a compare-and-set status gate
+  (`UPDATE … WHERE status='pending'`, rows-affected as the fire gate). Also v1.1:
+  add `warn!` on the `chunk_sweep` prune writes + `finalize_offline`
+  post-reassemble status writes (currently swallowed with `let _ =`).
+- **3.C offline transfer is best-effort** — a deposited-but-never-fetched
+  attachment is lost after the mailbox TTL (~7 days; the sender gets no fetch
+  feedback so it never re-deposits), and a stalled inbound stays `pending`
+  forever (no auto-fail/partial-GC janitor — shared deferral with 3.B). Large
+  files (>10 MiB) cannot transfer while a peer is offline. All disclosed in the
+  v1.0 limitations.
 - **v1.1+ deferrals** (must be disclosed as absent in the v1.0 threat model):
   third-party security audit; metadata-minimization (message-size padding,
   send-timing jitter, cover traffic / cover polling); multi-member groups (>2);
@@ -189,11 +307,14 @@ pool-close teardown), `daemon::accept` (bounded accept loop),
 `daemon::{logs, retention, smoke, clock}`, the per-platform
 `daemon::ipc::{client,server}::{unix,windows}` (Named Pipes + DACL + SID),
 `delivery::{dial::OutboundDial, mailbox_sweeper, hub::MailboxFallbackShared,
-peer}` (the sustained-failure timer), `mls::group` (two-PSK genesis +
+peer, chunk_transfer, chunk_sweep}` (the sustained-failure timer;
+`chunk_transfer` = 3.B's pull `ChunkRx` + serve; `chunk_sweep` = 3.C's offline
+chunk-deposit sweeper), `mls::group` (two-PSK genesis +
 `can_receive`), `mailbox::{client, codec, poll, auth}` (the v1-protocol client),
 and `storage::{pool (Option<Connection> + WAL-safe close + Drop +
 sentinel/re-encrypt-on-boot), passphrase_audit, outstanding_invites,
-read_state}`. Migrations run through `0014`. ADRs 0007 (first-contact Welcome
+read_state}`. Migrations run through `0016` (`0015_attachments` in Phase 3.A;
+`0016_attachment_deposits` + the `attachments.peer` column in Phase 3.C). ADRs 0007 (first-contact Welcome
 carve-out), 0008 (invite embeds ContactCard), and 0009 (`h_transport`↔MLS
 binding) anchor the audit-era protocol decisions.
 

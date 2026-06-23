@@ -106,6 +106,10 @@ where
     /// failure before handing the peer's pending direct rows to the
     /// mailbox fallback. Passed to each spawned actor.
     direct_timeout: Duration,
+    /// Staged-chunk store for attachment transfer (3.B). `None` disables.
+    chunk_store: Option<Arc<crate::attachment::store::ChunkStore>>,
+    /// Where reassembled inbound attachments are written. `None` disables.
+    download_dir: Option<std::path::PathBuf>,
 }
 
 impl<S> DeliveryHub<S>
@@ -118,7 +122,7 @@ where
     /// [`DeliveryHub::new_with_inbound`] or
     /// [`DeliveryHub::new_with_mailbox_fallback`] instead.
     pub fn new(pool: Arc<Pool>) -> Self {
-        Self::new_inner(pool, None, None, None, DEFAULT_DIRECT_TIMEOUT)
+        Self::new_inner(pool, None, None, None, DEFAULT_DIRECT_TIMEOUT, None, None)
     }
 
     /// Construct a hub that decrypts inbound `Frame::MlsApp` through
@@ -129,7 +133,15 @@ where
     /// No mailbox-fallback orchestrator: callers wanting fallback must
     /// use [`DeliveryHub::new_with_mailbox_fallback`].
     pub fn new_with_inbound(pool: Arc<Pool>, dispatch: Arc<dyn InboundDispatch>) -> Self {
-        Self::new_inner(pool, Some(dispatch), None, None, DEFAULT_DIRECT_TIMEOUT)
+        Self::new_inner(
+            pool,
+            Some(dispatch),
+            None,
+            None,
+            DEFAULT_DIRECT_TIMEOUT,
+            None,
+            None,
+        )
     }
 
     /// Construct a hub that decrypts inbound `Frame::MlsApp` AND owns an
@@ -147,6 +159,8 @@ where
             None,
             Some(dialer),
             DEFAULT_DIRECT_TIMEOUT,
+            None,
+            None,
         )
     }
 
@@ -158,13 +172,20 @@ where
         dialer: Arc<dyn crate::delivery::dial::OutboundDial<S>>,
         fallback: Arc<MailboxFallbackShared>,
         direct_timeout: Duration,
+        data_dir: &std::path::Path,
+        download_dir: std::path::PathBuf,
     ) -> Self {
+        let chunk_store = Some(Arc::new(crate::attachment::store::ChunkStore::new(
+            data_dir,
+        )));
         Self::new_inner(
             pool,
             Some(dispatch),
             Some(fallback),
             Some(dialer),
             direct_timeout,
+            chunk_store,
+            Some(download_dir),
         )
     }
 
@@ -176,7 +197,15 @@ where
         pool: Arc<Pool>,
         dialer: Arc<dyn crate::delivery::dial::OutboundDial<S>>,
     ) -> Self {
-        Self::new_inner(pool, None, None, Some(dialer), DEFAULT_DIRECT_TIMEOUT)
+        Self::new_inner(
+            pool,
+            None,
+            None,
+            Some(dialer),
+            DEFAULT_DIRECT_TIMEOUT,
+            None,
+            None,
+        )
     }
 
     /// Construct a hub that owns the direct → mailbox fallback
@@ -203,6 +232,8 @@ where
             })),
             None,
             DEFAULT_DIRECT_TIMEOUT,
+            None,
+            None,
         )
     }
 
@@ -212,6 +243,8 @@ where
         fallback: Option<Arc<MailboxFallbackShared>>,
         dialer: Option<Arc<dyn crate::delivery::dial::OutboundDial<S>>>,
         direct_timeout: Duration,
+        chunk_store: Option<Arc<crate::attachment::store::ChunkStore>>,
+        download_dir: Option<std::path::PathBuf>,
     ) -> Self {
         let sweep_pool = pool.clone();
         let sweep = tokio::spawn(async move {
@@ -233,6 +266,8 @@ where
             fallback,
             dialer,
             direct_timeout,
+            chunk_store,
+            download_dir,
         }
     }
 
@@ -258,6 +293,8 @@ where
             self.dialer.clone(),
             self.direct_timeout,
             self.fallback_shared(),
+            self.chunk_store.clone(),
+            self.download_dir.clone(),
         );
         let channels = PeerChannels {
             jobs: jobs_tx,

@@ -33,7 +33,22 @@ const _fixtureAddContactFlow =
   typeof window !== "undefined" &&
   new URLSearchParams(window.location.search).get("fixture") === "add-contact-flow";
 
-let _vault = _preseeded || _fixtureSeeded || _fixture200Msgs || _fixtureInviteFlow || _fixtureAddContactFlow;
+// Activate attachment mock when ?fixture=attachments.
+const _fixtureAttachments =
+  typeof window !== "undefined" &&
+  new URLSearchParams(window.location.search).get("fixture") === "attachments";
+
+// When ?pick=huge the dialog picker returns a huge path so the size gate fires.
+const _pickHuge =
+  typeof window !== "undefined" &&
+  new URLSearchParams(window.location.search).get("pick") === "huge";
+
+// When ?fail=1 the send_file arm emits attachment_failed instead of received.
+const _failAttachment =
+  typeof window !== "undefined" &&
+  new URLSearchParams(window.location.search).get("fail") === "1";
+
+let _vault = _preseeded || _fixtureSeeded || _fixture200Msgs || _fixtureInviteFlow || _fixtureAddContactFlow || _fixtureAttachments;
 
 // Active subscribe channel — used by fixture to emit delivery_status_changed.
 let _subscribeChannel: Channel<unknown> | null = null;
@@ -169,6 +184,21 @@ export async function invoke<T = unknown>(
               last_read_row_id: null,
             },
           ];
+        } else if (_fixtureAttachments) {
+          contactList = [
+            {
+              pubkey: FIXTURE_PEER_PUBKEY,
+              nickname: "attach peer",
+              onion: "attachonion.onion",
+              card_version: 1,
+              added_at: 0,
+              unread_count: 0,
+              last_message_preview: null,
+              last_ts_recv: null,
+              group_state: "active",
+              last_read_row_id: null,
+            },
+          ];
         }
         return {
           resp: "ok",
@@ -285,6 +315,48 @@ export async function invoke<T = unknown>(
       if (cmdObj.cmd === "remove_contact") {
         return { resp: "ok", data: { result: "ok", data: null } } as unknown as T;
       }
+      if (cmdObj.cmd === "send_file") {
+        const fileCmd = cmdObj as { cmd: string; contact: string; path: string };
+        // Emit an incoming Kind::File message + progress + received so the
+        // e2e can assert the receive path too (sender-side has no progress).
+        // When ?fail=1 emit attachment_failed instead of progress+received.
+        setTimeout(() => {
+          if (!_subscribeChannel) return;
+          _subscribeChannel._emit({
+            event: "message_received",
+            data: {
+              contact: fileCmd.contact,
+              record: {
+                row_id: 2, message_id: "11".repeat(16), contact: fileCmd.contact,
+                direction: "incoming", kind: { kind: "file", manifest: [1, 2, 3] },
+                mls_generation: 1, ts_daemon_recv: Math.floor(Date.now() / 1000),
+                ts_envelope: Date.now(),
+              },
+            },
+          });
+          if (_failAttachment) {
+            _subscribeChannel._emit({
+              event: "attachment_failed",
+              data: { attachment_id: "ab".repeat(16), reason: "transfer failed" },
+            });
+          } else {
+            _subscribeChannel._emit({
+              event: "attachment_progress", data: { attachment_id: "ab".repeat(16), received: 1, total: 2 },
+            });
+            _subscribeChannel._emit({
+              event: "attachment_received",
+              data: {
+                attachment_id: "ab".repeat(16), contact: fileCmd.contact,
+                filename: "photo.jpg", mime: "image/jpeg", size: 2048, path: "/dl/photo.jpg",
+              },
+            });
+          }
+        }, 100);
+        return {
+          resp: "ok",
+          data: { result: "file_queued", data: { message_id: "22".repeat(16), attachment_id: "ab".repeat(16), total_chunks: 2 } },
+        } as unknown as T;
+      }
       throw new Error(`ipc_request: no mock for cmd=${cmdObj.cmd}`);
     }
 
@@ -304,7 +376,35 @@ export async function invoke<T = unknown>(
     case "render_invite_qr":
       return "<svg xmlns='http://www.w3.org/2000/svg' width='100' height='100'><rect width='100' height='100' fill='black'/></svg>" as unknown as T;
 
+    case "file_size": {
+      // Drive size-gate branches by filename convention.
+      const p = String(args?.path ?? "");
+      if (p.includes("huge")) return (200 * 1024 * 1024) as unknown as T;
+      if (p.includes("big")) return (50 * 1024 * 1024) as unknown as T;
+      return 2048 as unknown as T;
+    }
+    case "decode_attachment_manifest": {
+      return {
+        attachment_id: "ab".repeat(16),
+        filename: "photo.jpg",
+        mime: "image/jpeg",
+        total_size: 2048,
+      } as unknown as T;
+    }
+    case "open_file":
+    case "reveal_in_folder":
+      return undefined as unknown as T;
+    case "plugin:dialog|open": {
+      // @tauri-apps/plugin-dialog open() routes through invoke under this id.
+      // When ?pick=huge the picker returns a path the file_size arm maps to 200 MiB.
+      return (_pickHuge ? "/picked/huge.bin" : "/picked/photo.jpg") as unknown as T;
+    }
+
     default:
       throw new Error(`tauri-mock: unhandled invoke cmd="${cmd}"`);
   }
+}
+
+export function convertFileSrc(path: string): string {
+  return `asset://localhost/${path}`;
 }

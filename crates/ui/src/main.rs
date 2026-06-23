@@ -6,6 +6,7 @@
 //! Boots the Tauri runtime with two-phase Tauri command surfaces:
 //! pre-daemon (`bootstrap`) and post-daemon (`ipc_bridge` + `events`).
 
+mod attachments;
 mod bootstrap;
 mod daemon;
 mod events;
@@ -170,6 +171,8 @@ fn main() {
             tracing::debug!(?argv, "single-instance: forwarded launch");
         }))
         .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             bootstrap::vault_exists,
             bootstrap::identity_init,
@@ -181,6 +184,10 @@ fn main() {
             notifications::notify,
             notifications::focus_window_and_open_conversation,
             set_close_to_tray,
+            attachments::decode_attachment_manifest,
+            attachments::file_size,
+            attachments::open_file,
+            attachments::reveal_in_folder,
         ])
         .setup(|app| {
             // Resolve data_dir once and stash it. `app_data_dir` only fails
@@ -193,7 +200,19 @@ fn main() {
                 .join("skattr");
             std::fs::create_dir_all(&data_dir).ok();
             let state: tauri::State<daemon::AppState> = app.state();
+            // Clone before moving data_dir into managed state, so the
+            // asset-protocol scope grant (below) can derive the downloads path.
+            let downloads = data_dir.join("downloads");
             *state.data_dir.write() = Some(data_dir);
+
+            // Scope the asset protocol to the daemon's downloads dir so the
+            // webview can lazily stream received images via convertFileSrc.
+            // The dir is created lazily by the daemon on first receive; create
+            // it now so the scope grant targets an existing path.
+            std::fs::create_dir_all(&downloads).ok();
+            app.asset_protocol_scope()
+                .allow_directory(&downloads, true)
+                .map_err(|e| format!("asset scope: {e}"))?;
 
             // Read the on-disk config to pick up ui.close_to_tray and
             // ui.start_minimised before the daemon is fully started.

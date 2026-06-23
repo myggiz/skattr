@@ -15,16 +15,31 @@ pub(crate) mod strip;
 pub(crate) use error_kind::AttachmentErrorKind;
 pub(crate) use manifest::{AttachmentManifest, ChunkRef};
 
-/// Plaintext bytes per chunk (256 KiB). Sits under the mailbox 1 MiB
-/// `max_deposit_size` (with AEAD + framing headroom) so a 3.C offline chunk
-/// fits one `Deposit`.
-pub(crate) const CHUNK_SIZE: usize = 262_144;
+/// Plaintext bytes per chunk (48 KiB). Must stay under the Noise single-message
+/// cap: `NOISE_MAX_OUTER = 65_519` bytes (65_535 − 16-byte ChaChaPoly tag).
+/// A `Frame::Chunk` carrying `CHUNK_SIZE` plaintext + 16-byte AEAD tag encodes
+/// to ~49 KiB CBOR, comfortably below 65_519. See
+/// `transport::connection::AuthenticatedConnection::send` for the enforcement
+/// point. The 3.C offline path (mailbox `Deposit`) has a 1 MiB cap which is
+/// also satisfied.
+pub(crate) const CHUNK_SIZE: usize = 49_152;
 
 /// Maximum total plaintext attachment size (100 MiB), rejected up front.
 pub(crate) const MAX_ATTACHMENT_BYTES: u64 = 100 * 1024 * 1024;
 
+/// Files at/under this size may use the offline (mailbox) lane; larger files
+/// are direct-only (3.B) — if the peer is offline they wait for both online.
+pub(crate) const MAX_OFFLINE_ATTACHMENT_BYTES: u64 = 10 * 1024 * 1024;
+
+/// How long after send the offline deposit rows become due — a head start for
+/// the direct 3.B lane to complete first (and be pruned).
+pub(crate) const OFFLINE_FALLBACK_STALL_SECS: i64 = 90;
+
 /// Current manifest version. An unknown version is rejected on decode.
 pub(crate) const MANIFEST_VERSION: u8 = 1;
+
+/// Max chunk deposits attempted per sweep tick (≤ per_conn_deposits_per_min).
+pub(crate) const CHUNK_SWEEP_BATCH: usize = 30;
 
 #[cfg(test)]
 mod tests {

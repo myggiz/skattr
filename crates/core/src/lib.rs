@@ -42,6 +42,11 @@ pub mod prelude;
 
 pub(crate) mod attachment;
 pub(crate) mod delivery;
+
+/// Public re-export of the attachment manifest type for Phase 3.D UI shell.
+/// Allows `skattr-ui` to decode `Kind::File` manifests without widening the
+/// `attachment` module's overall `pub(crate)` visibility.
+pub use attachment::manifest::AttachmentManifest;
 pub mod mailbox;
 pub(crate) mod mls;
 pub(crate) mod storage;
@@ -757,5 +762,159 @@ pub mod test_exports {
                 received_at: d.received_at,
             })
             .collect())
+    }
+
+    // ── Phase 3.C offline-attachment integration surface (Task 3C-6/7) ──
+    //
+    // The crate-private attachment pipeline (strip → chunk → stage →
+    // enqueue) and its offline sweep / receive functions are exposed here
+    // through thin wrappers so the cross-crate guardrail drives the SAME
+    // production functions `Command::SendFile` + `run_with_transport`'s
+    // sweep loop + the mailbox poll path do, without widening any
+    // production visibility.
+
+    // The attachment storage repos + manifest are already `pub`, but their
+    // containing modules are `pub(crate)`; re-export the concrete types.
+    pub use crate::attachment::manifest::AttachmentManifest;
+    pub use crate::storage::attachments::{AttachmentDepositRepo, AttachmentRepo};
+
+    /// Test-only opaque handle around a real `attachment::store::ChunkStore`.
+    /// Wraps the `pub(crate)` store so the guardrail can stage + read chunk
+    /// blobs without widening the store's visibility.
+    pub struct TestChunkStore {
+        pub(crate) inner: std::sync::Arc<crate::attachment::store::ChunkStore>,
+    }
+
+    impl TestChunkStore {
+        /// Open a `ChunkStore` rooted at `data_dir` (mirrors the production
+        /// `ChunkStore::new(data_dir)` used by the hub + chunk sweep).
+        #[must_use]
+        pub fn new(data_dir: &std::path::Path) -> Self {
+            Self {
+                inner: std::sync::Arc::new(crate::attachment::store::ChunkStore::new(data_dir)),
+            }
+        }
+    }
+
+    /// Run the REAL sender pipeline `Command::SendFile` uses: strip metadata
+    /// → chunk into AEAD ciphertext → stage every chunk in `store` → persist
+    /// the `'out'` attachment row → enqueue all chunk deposits **due at
+    /// `first_due_at_ms`** (pass `0` to make them due immediately, the
+    /// deterministic substitute for the 90 s direct→offline stall window).
+    ///
+    /// Returns the produced `AttachmentManifest` (its CBOR is what the
+    /// recipient persists as the pending `'in'` row, exactly as the
+    /// `Kind::File` manifest carries it on the wire).
+    #[allow(clippy::missing_panics_doc)]
+    pub fn attachment_stage_outbound(
+        pool: &crate::storage::Pool,
+        store: &TestChunkStore,
+        recipient: &crate::identity::PublicKey,
+        plaintext: &[u8],
+        filename: &str,
+        mime: &str,
+        first_due_at_ms: i64,
+    ) -> crate::error::Result<AttachmentManifest> {
+        // 1. Strip metadata (identity passthrough for non-images).
+        let (stripped, out_mime) = crate::attachment::strip::strip_metadata(plaintext, mime)?;
+        // 2. Chunk into per-chunk AEAD ciphertext + manifest.
+        let (manifest, chunks) =
+            crate::attachment::chunker::chunk_plaintext(&stripped, filename, &out_mime)?;
+        // 3. Stage every ciphertext chunk in the sender's ChunkStore.
+        for (i, ct) in chunks.iter().enumerate() {
+            let index = u32::try_from(i).map_err(|_| {
+                crate::error::CoreError::Storage(crate::storage::StorageErrorKind::Other(
+                    "attachment_stage_outbound: chunk index overflow".into(),
+                ))
+            })?;
+            store.inner.put(&manifest.attachment_id, index, ct)?;
+        }
+        // 4. Persist the 'out' attachment row.
+        let total_chunks = i64::try_from(manifest.chunks.len()).unwrap_or(i64::MAX);
+        AttachmentRepo::new(pool).insert(
+            &manifest.attachment_id,
+            "out",
+            &manifest.to_cbor()?,
+            total_chunks,
+            0,
+        )?;
+        // 5. Enqueue all chunk deposits (due at `first_due_at_ms`).
+        AttachmentDepositRepo::new(pool).enqueue_all(
+            &manifest.attachment_id,
+            &recipient.0,
+            u32::try_from(manifest.chunks.len()).unwrap_or(u32::MAX),
+            first_due_at_ms,
+        )?;
+        Ok(manifest)
+    }
+
+    /// Drive the REAL `delivery::chunk_sweep::run_chunk_sweep` once: read due
+    /// `attachment_deposits` rows, resolve the recipient's mailboxes, read the
+    /// staged ciphertext from `store`, and deposit each chunk into the mailbox
+    /// reachable through `hub`'s fallback factory. `now_ms` controls which rows
+    /// are due; `batch` caps deposits per call (loop until `all_deposited`).
+    ///
+    /// The `hub` must have been built with mailbox fallback wired in (e.g. via
+    /// [`delivery_hub_with_mailbox`]); its `MailboxFallbackShared` is the exact
+    /// bundle `run_with_transport` hands the production sweep task.
+    #[allow(clippy::missing_panics_doc)]
+    pub async fn attachment_run_chunk_sweep<S>(
+        pool: &crate::storage::Pool,
+        hub: &crate::delivery::DeliveryHub<S>,
+        store: &TestChunkStore,
+        now_ms: i64,
+        batch: usize,
+    ) where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        // `hub` must be built with mailbox fallback wired in (e.g. via
+        // `delivery_hub_with_mailbox`); without it there is nothing to sweep.
+        if let Some(shared) = hub.fallback_shared() {
+            crate::delivery::chunk_sweep::run_chunk_sweep(
+                pool,
+                &shared,
+                &store.inner,
+                now_ms,
+                batch,
+            )
+            .await;
+        }
+    }
+
+    /// Build a real production `DaemonInbound` wired for the offline
+    /// attachment receive path (`chunk_store` + `download_dir` set), returned
+    /// as an `Arc<dyn InboundDispatch>` so the guardrail can drive
+    /// `poll_dispatch_once` (which calls `dispatch_attachment_chunk` then
+    /// `dispatch_mailbox`). This is the SAME dispatcher `run_with_transport`
+    /// installs; `set_chunk_store` / `set_download_dir` mirror its wiring.
+    #[must_use]
+    pub fn daemon_inbound_for_attachments(
+        pool: std::sync::Arc<crate::storage::Pool>,
+        identity: std::sync::Arc<crate::identity::IdentityKey>,
+        events_tx: tokio::sync::broadcast::Sender<crate::daemon::events::Event>,
+        store: &TestChunkStore,
+        download_dir: std::path::PathBuf,
+    ) -> std::sync::Arc<dyn crate::delivery::InboundDispatch> {
+        let inbound = crate::daemon::inbound::DaemonInbound::new(pool, events_tx);
+        inbound.set_identity(identity);
+        inbound.set_chunk_store(store.inner.clone());
+        inbound.set_download_dir(download_dir);
+        std::sync::Arc::new(inbound)
+    }
+
+    /// Drive the REAL `mailbox::poll::poll_dispatch_once` against the mailbox
+    /// at `onion`: fetch pending deposits, hand each ciphertext to `inbound`
+    /// (`dispatch_attachment_chunk` → `dispatch_mailbox`), and server-side
+    /// delete ONLY the deposits that were dispatched. Returns how many were
+    /// dispatched + deleted this tick. This is the exact production receive
+    /// cycle a `PollScheduler` actor runs per tick.
+    pub async fn attachment_poll_dispatch_once(
+        factory: &dyn TestMailboxFactory,
+        onion: &str,
+        signer: &crate::identity::IdentityKey,
+        inbound: &dyn crate::delivery::InboundDispatch,
+    ) -> crate::error::Result<usize> {
+        let mut handle = factory.connect(onion).await?;
+        crate::mailbox::poll::poll_dispatch_once(&mut handle.inner, signer, inbound).await
     }
 }

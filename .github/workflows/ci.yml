@@ -97,6 +97,10 @@ jobs:
         working-directory: crates/ui/src-svelte
         run: pnpm build
 
+      - name: Unit tests (vitest)
+        working-directory: crates/ui/src-svelte
+        run: pnpm test
+
       - name: Clippy (skattr-ui)
         run: cargo clippy -p skattr-ui --all-targets --all-features -- -D warnings
 

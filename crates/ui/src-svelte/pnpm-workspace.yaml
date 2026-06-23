@@ -1,2 +1,5 @@
+allowBuilds:
+  '@sveltejs/kit': true
+  esbuild: true
 patchedDependencies:
   esrap@1.4.9: patches/esrap@1.4.9.patch

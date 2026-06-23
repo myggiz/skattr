@@ -39,6 +39,7 @@ where
         }
         Command::AddContact { invite_url } => add_contact(&handle, invite_url).await,
         Command::SendMessage { contact, kind } => send_message(&handle, contact, kind).await,
+        Command::SendFile { contact, path } => send_file(&handle, contact, path).await,
         Command::RecentMessages {
             contact,
             limit,
@@ -597,6 +598,100 @@ where
         message_id: Hex16::from(message_id.0),
         status,
         record: Some(record),
+    })
+}
+
+async fn send_file<S>(
+    handle: &Arc<DaemonHandle<S>>,
+    contact: crate::identity::PublicKey,
+    path: String,
+) -> std::result::Result<CommandResult, IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    use crate::daemon::error_kind::DaemonErrorKind;
+    use crate::daemon::hex::Hex16;
+
+    // 1. Read the file (cap before chunking happens inside chunk_plaintext).
+    let raw = std::fs::read(&path).map_err(|e| {
+        IpcError::Daemon(DaemonErrorKind::InvalidArgument {
+            message: format!("cannot read file: {e}"),
+        })
+    })?;
+    let filename = std::path::Path::new(&path)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "file".to_string());
+    let guessed_mime = "application/octet-stream";
+
+    // 2. Strip metadata, 3. chunk (chunk_plaintext enforces MAX_ATTACHMENT_BYTES).
+    let (stripped, mime) =
+        crate::attachment::strip::strip_metadata(&raw, guessed_mime).map_err(map_err)?;
+    let (manifest, ciphertexts) =
+        crate::attachment::chunker::chunk_plaintext(&stripped, &filename, &mime)
+            .map_err(map_err)?;
+
+    // 4. Stage every chunk in the ChunkStore.
+    let data_dir = {
+        let cfg = handle.config.read().await;
+        cfg.data_dir.clone()
+    };
+    let store = crate::attachment::store::ChunkStore::new(&data_dir);
+    for (i, ct) in ciphertexts.iter().enumerate() {
+        store
+            .put(&manifest.attachment_id, i as u32, ct)
+            .map_err(map_err)?;
+    }
+
+    // 5. Persist the out-row.
+    let manifest_cbor = manifest.to_cbor().map_err(map_err)?;
+    let total_chunks = manifest.chunks.len() as u32;
+    let repo = crate::storage::attachments::AttachmentRepo::new(&handle.pool);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    repo.insert(
+        &manifest.attachment_id,
+        "out",
+        &manifest_cbor,
+        total_chunks as i64,
+        now,
+    )
+    .map_err(map_err)?;
+
+    // 6. Announce via the existing MLS send path (Kind::File).
+    let kind = crate::envelope::Kind::File {
+        manifest: manifest_cbor,
+    };
+    let sent = send_message(handle, contact, kind).await?;
+    let message_id = match sent {
+        CommandResult::MessageSent { message_id, .. } => message_id,
+        other => return Ok(other),
+    };
+
+    // Phase 3.C: if the file is within the offline cap, eagerly enqueue deferred
+    // chunk-deposit rows. They become due after OFFLINE_FALLBACK_STALL_SECS, by
+    // which time a successful direct (3.B) transfer will have pruned them (on
+    // AttachmentComplete). If the peer is/was offline, chunk_sweep deposits them.
+    if manifest.total_size <= crate::attachment::MAX_OFFLINE_ATTACHMENT_BYTES {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let due_at = now_ms + crate::attachment::OFFLINE_FALLBACK_STALL_SECS * 1000;
+        let dep_repo = crate::storage::attachments::AttachmentDepositRepo::new(&handle.pool);
+        if let Err(e) =
+            dep_repo.enqueue_all(&manifest.attachment_id, &contact.0, total_chunks, due_at)
+        {
+            tracing::warn!(err = %e, "send_file: enqueue offline deposits failed");
+        }
+    }
+
+    Ok(CommandResult::FileQueued {
+        message_id,
+        attachment_id: Hex16::from(manifest.attachment_id),
+        total_chunks,
     })
 }
 

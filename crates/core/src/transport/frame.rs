@@ -25,6 +25,32 @@ struct ErrorPayload {
     message: String,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct ChunkRequestPayload {
+    attachment_id: [u8; 16],
+    index: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ChunkPayload {
+    attachment_id: [u8; 16],
+    index: u32,
+    #[serde(with = "serde_bytes")]
+    ciphertext: Vec<u8>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ChunkNackPayload {
+    attachment_id: [u8; 16],
+    index: u32,
+    reason: u8,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct AttachmentCompletePayload {
+    attachment_id: [u8; 16],
+}
+
 /// Hard cap on frame size (16 MiB).
 pub const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
 
@@ -52,6 +78,14 @@ pub enum FrameType {
     Bye = 0x09,
     /// Typed error; body is CBOR `{ code, message }`.
     Error = 0x0A,
+    /// Receiver→sender request for one attachment chunk by index.
+    ChunkRequest = 0x0B,
+    /// Sender→receiver chunk payload (opaque AEAD ciphertext).
+    Chunk = 0x0C,
+    /// Sender→receiver negative ack: cannot serve this index.
+    ChunkNack = 0x0D,
+    /// Receiver→sender: all chunks received + reassembled.
+    AttachmentComplete = 0x0E,
 }
 
 /// A fully-parsed frame.
@@ -82,6 +116,36 @@ pub enum Frame {
         /// Human-readable description (must be non-sensitive).
         message: String,
     },
+    /// Request one chunk of an attachment by index.
+    ChunkRequest {
+        /// 16-byte attachment id (from the manifest).
+        attachment_id: [u8; 16],
+        /// Zero-based chunk index.
+        index: u32,
+    },
+    /// One attachment chunk: opaque AEAD ciphertext (NOT MLS-wrapped).
+    Chunk {
+        /// 16-byte attachment id.
+        attachment_id: [u8; 16],
+        /// Zero-based chunk index.
+        index: u32,
+        /// Opaque per-chunk ciphertext (verified against the manifest hash).
+        ciphertext: Vec<u8>,
+    },
+    /// Negative ack: the sender cannot serve `index`.
+    ChunkNack {
+        /// 16-byte attachment id.
+        attachment_id: [u8; 16],
+        /// Zero-based chunk index.
+        index: u32,
+        /// Reason code: 0 unknown attachment, 1 index out of range, 2 store read error.
+        reason: u8,
+    },
+    /// The receiver has all chunks and has reassembled the file.
+    AttachmentComplete {
+        /// 16-byte attachment id.
+        attachment_id: [u8; 16],
+    },
 }
 
 impl Frame {
@@ -101,6 +165,10 @@ impl Frame {
             Frame::Pong => FrameType::Pong,
             Frame::Bye => FrameType::Bye,
             Frame::Error { .. } => FrameType::Error,
+            Frame::ChunkRequest { .. } => FrameType::ChunkRequest,
+            Frame::Chunk { .. } => FrameType::Chunk,
+            Frame::ChunkNack { .. } => FrameType::ChunkNack,
+            Frame::AttachmentComplete { .. } => FrameType::AttachmentComplete,
         }
     }
 }
@@ -193,6 +261,39 @@ impl Decoder for FrameCodec {
                 }
                 Frame::Bye
             }
+            0x0B => {
+                let p: ChunkRequestPayload = ciborium::from_reader(&payload[..])
+                    .map_err(|e| CoreError::Frame(format!("ChunkRequest CBOR: {e}")))?;
+                Frame::ChunkRequest {
+                    attachment_id: p.attachment_id,
+                    index: p.index,
+                }
+            }
+            0x0C => {
+                let p: ChunkPayload = ciborium::from_reader(&payload[..])
+                    .map_err(|e| CoreError::Frame(format!("Chunk CBOR: {e}")))?;
+                Frame::Chunk {
+                    attachment_id: p.attachment_id,
+                    index: p.index,
+                    ciphertext: p.ciphertext,
+                }
+            }
+            0x0D => {
+                let p: ChunkNackPayload = ciborium::from_reader(&payload[..])
+                    .map_err(|e| CoreError::Frame(format!("ChunkNack CBOR: {e}")))?;
+                Frame::ChunkNack {
+                    attachment_id: p.attachment_id,
+                    index: p.index,
+                    reason: p.reason,
+                }
+            }
+            0x0E => {
+                let p: AttachmentCompletePayload = ciborium::from_reader(&payload[..])
+                    .map_err(|e| CoreError::Frame(format!("AttachmentComplete CBOR: {e}")))?;
+                Frame::AttachmentComplete {
+                    attachment_id: p.attachment_id,
+                }
+            }
             other => {
                 return Err(CoreError::Frame(format!(
                     "unknown or not-yet-handled frame type 0x{other:02X}"
@@ -225,6 +326,61 @@ impl Encoder<Frame> for FrameCodec {
                 ciborium::into_writer(&ErrorPayload { code, message }, &mut buf)
                     .map_err(|e| CoreError::Frame(format!("encode Error: {e}")))?;
                 (0x0A, buf)
+            }
+            Frame::ChunkRequest {
+                attachment_id,
+                index,
+            } => {
+                let mut buf = Vec::new();
+                ciborium::into_writer(
+                    &ChunkRequestPayload {
+                        attachment_id,
+                        index,
+                    },
+                    &mut buf,
+                )
+                .map_err(|e| CoreError::Frame(format!("encode ChunkRequest: {e}")))?;
+                (0x0B, buf)
+            }
+            Frame::Chunk {
+                attachment_id,
+                index,
+                ciphertext,
+            } => {
+                let mut buf = Vec::new();
+                ciborium::into_writer(
+                    &ChunkPayload {
+                        attachment_id,
+                        index,
+                        ciphertext,
+                    },
+                    &mut buf,
+                )
+                .map_err(|e| CoreError::Frame(format!("encode Chunk: {e}")))?;
+                (0x0C, buf)
+            }
+            Frame::ChunkNack {
+                attachment_id,
+                index,
+                reason,
+            } => {
+                let mut buf = Vec::new();
+                ciborium::into_writer(
+                    &ChunkNackPayload {
+                        attachment_id,
+                        index,
+                        reason,
+                    },
+                    &mut buf,
+                )
+                .map_err(|e| CoreError::Frame(format!("encode ChunkNack: {e}")))?;
+                (0x0D, buf)
+            }
+            Frame::AttachmentComplete { attachment_id } => {
+                let mut buf = Vec::new();
+                ciborium::into_writer(&AttachmentCompletePayload { attachment_id }, &mut buf)
+                    .map_err(|e| CoreError::Frame(format!("encode AttachmentComplete: {e}")))?;
+                (0x0E, buf)
             }
         };
 
@@ -591,5 +747,112 @@ mod tests {
         let frame = codec.decode(&mut staged).unwrap().expect("frame arrives");
         assert!(matches!(frame, Frame::Pong));
         assert!(staged.is_empty());
+    }
+
+    #[test]
+    fn decode_chunk_request_round_trips() {
+        let f = Frame::ChunkRequest {
+            attachment_id: [0x11; 16],
+            index: 7,
+        };
+        match round_trip(f) {
+            Frame::ChunkRequest {
+                attachment_id,
+                index,
+            } => {
+                assert_eq!(attachment_id, [0x11; 16]);
+                assert_eq!(index, 7);
+            }
+            other => panic!("expected ChunkRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_chunk_round_trips() {
+        let f = Frame::Chunk {
+            attachment_id: [0x22; 16],
+            index: 3,
+            ciphertext: vec![0xAB; 500],
+        };
+        match round_trip(f) {
+            Frame::Chunk {
+                attachment_id,
+                index,
+                ciphertext,
+            } => {
+                assert_eq!(attachment_id, [0x22; 16]);
+                assert_eq!(index, 3);
+                assert_eq!(ciphertext, vec![0xAB; 500]);
+            }
+            other => panic!("expected Chunk, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_chunk_nack_round_trips() {
+        let f = Frame::ChunkNack {
+            attachment_id: [0x33; 16],
+            index: 1,
+            reason: 2,
+        };
+        match round_trip(f) {
+            Frame::ChunkNack {
+                attachment_id,
+                index,
+                reason,
+            } => {
+                assert_eq!(attachment_id, [0x33; 16]);
+                assert_eq!(index, 1);
+                assert_eq!(reason, 2);
+            }
+            other => panic!("expected ChunkNack, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_attachment_complete_round_trips() {
+        let f = Frame::AttachmentComplete {
+            attachment_id: [0x44; 16],
+        };
+        match round_trip(f) {
+            Frame::AttachmentComplete { attachment_id } => assert_eq!(attachment_id, [0x44; 16]),
+            other => panic!("expected AttachmentComplete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chunk_request_uses_type_0x0b() {
+        let buf = enc(Frame::ChunkRequest {
+            attachment_id: [0; 16],
+            index: 0,
+        });
+        assert_eq!(buf[4], 0x0B);
+    }
+
+    /// Regression guard: a worst-case `Frame::Chunk` (CHUNK_SIZE plaintext +
+    /// 16-byte AEAD tag = CHUNK_SIZE + 16 ciphertext bytes) must encode to at
+    /// most `NOISE_MAX_OUTER = 65_519` bytes so that
+    /// `transport::connection::AuthenticatedConnection::send` never rejects it.
+    /// 65_519 = 65_535 (Noise payload cap) − 16 (ChaChaPoly tag).
+    /// See `transport::connection` for the enforcement point.
+    #[test]
+    fn chunk_frame_worst_case_fits_noise_max_outer() {
+        // CHUNK_SIZE plaintext + 16-byte AEAD tag = the ciphertext field size.
+        let ciphertext = vec![0u8; crate::attachment::CHUNK_SIZE + 16];
+        let frame = Frame::Chunk {
+            attachment_id: [0u8; 16],
+            index: 0,
+            ciphertext,
+        };
+        let encoded = enc(frame);
+        // NOISE_MAX_OUTER as defined in transport::connection::AuthenticatedConnection::send
+        const NOISE_MAX_OUTER: usize = 65_519;
+        assert!(
+            encoded.len() <= NOISE_MAX_OUTER,
+            "Frame::Chunk encoded to {} bytes, exceeds NOISE_MAX_OUTER={} — \
+             reduce CHUNK_SIZE in crates/core/src/attachment/mod.rs",
+            encoded.len(),
+            NOISE_MAX_OUTER
+        );
     }
 }

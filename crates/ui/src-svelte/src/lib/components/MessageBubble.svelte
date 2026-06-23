@@ -4,6 +4,7 @@
   import type { MessageRecord } from "$lib/ipc/types";
   import type { OptimisticMessage } from "$lib/stores/conversation";
   import DeliveryIcon from "./DeliveryIcon.svelte";
+  import FileAttachmentBubble from "./FileAttachmentBubble.svelte";
   import { delivery, deliveryToIconStatus, hex16ToString } from "$lib/stores/delivery";
 
   let {
@@ -38,15 +39,19 @@
   });
 </script>
 
-<div class="bubble" class:outgoing={isOutgoing} class:focus-highlight={highlighted} data-row-id={record.row_id}>
-  <p class="body">{body}</p>
-  <div class="meta">
-    <time class="ts">{new Date(tsMs).toLocaleTimeString()}</time>
-    {#if isOutgoing && iconStatus}
-      <DeliveryIcon status={iconStatus} title={iconTitle} />
-    {/if}
+{#if record.kind.kind === "file"}
+  <FileAttachmentBubble {record} />
+{:else}
+  <div class="bubble" class:outgoing={isOutgoing} class:focus-highlight={highlighted} data-row-id={record.row_id}>
+    <p class="body">{body}</p>
+    <div class="meta">
+      <time class="ts">{new Date(tsMs).toLocaleTimeString()}</time>
+      {#if isOutgoing && iconStatus}
+        <DeliveryIcon status={iconStatus} title={iconTitle} />
+      {/if}
+    </div>
   </div>
-</div>
+{/if}
 
 <style>
   .bubble {

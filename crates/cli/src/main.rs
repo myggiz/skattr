@@ -158,6 +158,13 @@ enum Command {
         #[arg(long)]
         keep_last: Option<u64>,
     },
+    /// Send a file attachment to a contact.
+    SendFile {
+        /// Contact identifier (display name or hex prefix of identity pubkey).
+        contact: String,
+        /// Path to the local file to send.
+        path: String,
+    },
     /// Full-text search over message history.
     Search {
         /// Query — free-form, tokenize-and-AND on the daemon side.
@@ -354,6 +361,9 @@ async fn main() -> Result<()> {
             text,
             fail_on_timeout,
         } => send(&contact, &text, fail_on_timeout, socket.as_deref(), json).await,
+        Command::SendFile { contact, path } => {
+            send_file_cmd(&contact, &path, socket.as_deref()).await
+        }
         Command::Tail {
             contact,
             limit,
@@ -923,6 +933,57 @@ async fn send(
     Ok(())
 }
 
+async fn send_file_cmd(
+    contact_prefix: &str,
+    path: &str,
+    sock_flag: Option<&std::path::Path>,
+) -> Result<()> {
+    use skattr_core::daemon::{Command as CoreCommand, CommandResult};
+
+    let mut client = connect_or_exit(sock_flag).await?;
+
+    // Resolve prefix via ListContacts (same idiom as `send`).
+    let rows_result = match client.execute(CoreCommand::ListContacts).await {
+        Ok(r) => r,
+        Err(e) => exit_on_ipc_error(e),
+    };
+    let rows = match rows_result {
+        CommandResult::Contacts(rows) => rows,
+        other => anyhow::bail!("unexpected result: {other:?}"),
+    };
+    let pubkey = match resolve_contact(&rows, contact_prefix) {
+        Ok(pk) => pk,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(6);
+        }
+    };
+
+    let result = match client
+        .execute(CoreCommand::SendFile {
+            contact: pubkey,
+            path: path.to_string(),
+        })
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => exit_on_ipc_error(e),
+    };
+    match result {
+        CommandResult::FileQueued {
+            message_id,
+            attachment_id,
+            total_chunks,
+        } => {
+            println!(
+                "{message_id}  file queued  attachment={attachment_id}  chunks={total_chunks}"
+            );
+        }
+        other => anyhow::bail!("unexpected result: {other:?}"),
+    }
+    Ok(())
+}
+
 fn resolve_contact(
     rows: &[skattr_core::daemon::commands::ContactSummary],
     prefix: &str,
@@ -1131,6 +1192,10 @@ async fn tail_follow(
                     record.ts_unix_ms, record.level, record.target, record.message
                 );
             }
+            // 3.B attachment events — full CLI integration in Task 7.
+            Event::AttachmentReceived { .. }
+            | Event::AttachmentProgress { .. }
+            | Event::AttachmentFailed { .. } => {}
         }
     }
     Ok(())

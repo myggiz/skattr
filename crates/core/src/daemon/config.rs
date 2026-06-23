@@ -101,6 +101,10 @@ pub struct Config {
     /// UI / shell settings. New in 2.F.
     #[serde(default)]
     pub ui: UiConfig,
+    /// Directory where received attachments are written. `None` → defaults to
+    /// `<data_dir>/downloads`. New in 3.B.
+    #[serde(default)]
+    pub download_dir: Option<PathBuf>,
 }
 
 fn default_log_filter() -> String {
@@ -127,7 +131,17 @@ impl Config {
             delivery: DeliveryConfig::default(),
             notifications: NotificationsConfig::default(),
             ui: UiConfig::default(),
+            download_dir: None,
         })
+    }
+
+    /// The effective download directory: the configured `download_dir` or
+    /// `<data_dir>/downloads` when unset.
+    #[must_use]
+    pub fn resolved_download_dir(&self) -> PathBuf {
+        self.download_dir
+            .clone()
+            .unwrap_or_else(|| self.data_dir.join("downloads"))
     }
 
     /// Return the configured `ipc_socket` or a platform-appropriate default.
@@ -234,6 +248,7 @@ impl Config {
             delivery: DeliveryConfig::default(),
             notifications: NotificationsConfig::default(),
             ui: UiConfig::default(),
+            download_dir: None,
         }
     }
 
@@ -274,6 +289,9 @@ impl Config {
         }
         if let Some(b) = patch.persist_logs_to_disk {
             self.ui.persist_logs_to_disk = b;
+        }
+        if let Some(d) = &patch.download_dir {
+            self.download_dir = Some(d.clone());
         }
         Ok(())
     }
@@ -547,5 +565,26 @@ mod tests {
         assert!(snap.close_to_tray);
         assert!(!snap.start_minimised);
         assert!(!snap.persist_logs_to_disk);
+    }
+
+    #[test]
+    fn download_dir_defaults_under_data_dir() {
+        let mut c = Config::defaults().unwrap();
+        c.data_dir = std::path::PathBuf::from("/tmp/skattr-x");
+        assert_eq!(
+            c.resolved_download_dir(),
+            std::path::PathBuf::from("/tmp/skattr-x/downloads")
+        );
+    }
+
+    #[test]
+    fn apply_patch_sets_download_dir() {
+        let mut c = Config::defaults().unwrap();
+        let patch = crate::daemon::commands::ConfigPatch {
+            download_dir: Some(std::path::PathBuf::from("/tmp/dl")),
+            ..Default::default()
+        };
+        c.apply_patch(&patch).unwrap();
+        assert_eq!(c.download_dir, Some(std::path::PathBuf::from("/tmp/dl")));
     }
 }

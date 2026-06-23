@@ -49,6 +49,21 @@ pub(crate) struct DaemonInbound {
     /// serialize on the same lock. Defaults to a private registry (used by unit
     /// tests that exercise only the inbound path).
     group_locks: crate::daemon::handle::GroupLockRegistry,
+    /// Per-peer queue of inbound attachments whose manifest just arrived,
+    /// awaiting the peer actor's `take_begin_attachment` drain.
+    begins: std::sync::Mutex<
+        std::collections::HashMap<
+            PublicKey,
+            std::collections::VecDeque<crate::delivery::chunk_transfer::AttachmentBegin>,
+        >,
+    >,
+    /// Chunk blob store for the offline attachment receiver (Phase 3.C).
+    /// `None` until wired by `set_chunk_store`.
+    pub chunk_store:
+        std::sync::RwLock<Option<std::sync::Arc<crate::attachment::store::ChunkStore>>>,
+    /// Directory where reassembled files are written (Phase 3.C).
+    /// `None` until wired by `set_download_dir`.
+    pub download_dir: std::sync::RwLock<Option<std::path::PathBuf>>,
 }
 
 impl DaemonInbound {
@@ -62,6 +77,9 @@ impl DaemonInbound {
             events_tx,
             identity: std::sync::RwLock::new(None),
             group_locks: crate::daemon::handle::new_group_lock_registry(),
+            begins: std::sync::Mutex::new(std::collections::HashMap::new()),
+            chunk_store: std::sync::RwLock::new(None),
+            download_dir: std::sync::RwLock::new(None),
         }
     }
 
@@ -78,6 +96,23 @@ impl DaemonInbound {
     pub(crate) fn set_identity(&self, identity: Arc<IdentityKey>) {
         if let Ok(mut guard) = self.identity.write() {
             *guard = Some(identity);
+        }
+    }
+
+    /// Wire the chunk store for the offline attachment receiver (Phase 3.C).
+    pub(crate) fn set_chunk_store(
+        &self,
+        store: std::sync::Arc<crate::attachment::store::ChunkStore>,
+    ) {
+        if let Ok(mut g) = self.chunk_store.write() {
+            *g = Some(store);
+        }
+    }
+
+    /// Wire the download directory for offline attachment reassembly (Phase 3.C).
+    pub(crate) fn set_download_dir(&self, dir: std::path::PathBuf) {
+        if let Ok(mut g) = self.download_dir.write() {
+            *g = Some(dir);
         }
     }
 
@@ -181,6 +216,49 @@ impl DaemonInbound {
             // No message row, no MessageReceived. Returning the envelope's
             // message id keeps the caller's ACK contract clean.
             return Ok(envelope.id);
+        }
+
+        // --- Kind::File: stage the manifest + queue the chunk fetch (3.B). ---
+        // The manifest message ALSO falls through to the normal persist below so
+        // it appears in history and emits Event::MessageReceived; this block only
+        // adds the attachment side-effects.
+        if let crate::envelope::Kind::File {
+            manifest: manifest_bytes,
+        } = &envelope.kind
+        {
+            match crate::attachment::manifest::AttachmentManifest::from_cbor(manifest_bytes) {
+                Ok(m)
+                    if m.total_size <= crate::attachment::MAX_ATTACHMENT_BYTES
+                        && !m.chunks.is_empty() =>
+                {
+                    let repo = crate::storage::attachments::AttachmentRepo::new(&self.pool);
+                    let total_chunks = m.chunks.len() as i64;
+                    if let Err(e) = repo.insert(
+                        &m.attachment_id,
+                        "in",
+                        manifest_bytes,
+                        total_chunks,
+                        now_unix_seconds(),
+                    ) {
+                        tracing::warn!(err = %e, "inbound: attachment manifest insert failed");
+                    } else {
+                        // Record the sender so the offline path (finalize_offline)
+                        // can populate Event::AttachmentReceived.contact (Phase 3.C).
+                        let _ = repo.set_peer(&m.attachment_id, &from.0);
+                        let begin = crate::delivery::chunk_transfer::AttachmentBegin {
+                            attachment_id: m.attachment_id,
+                            manifest: m,
+                        };
+                        if let Ok(mut map) = self.begins.lock() {
+                            map.entry(from).or_default().push_back(begin);
+                        }
+                    }
+                }
+                Ok(_) => tracing::warn!("inbound: rejecting oversize/empty attachment manifest"),
+                Err(e) => {
+                    tracing::warn!(err = %e, "inbound: bad attachment manifest, skipping fetch")
+                }
+            }
         }
 
         // MLS generation is captured *after* decrypt so the broadcast
@@ -507,6 +585,53 @@ impl DaemonInbound {
         let _ = self.events_tx.send(Event::ContactUpdated(derived));
         Ok(derived)
     }
+
+    /// Reassemble a completed offline attachment (Phase 3.C) to the download
+    /// directory and emit `Event::AttachmentReceived`. The sender's pubkey is
+    /// looked up from the `peer` column written when the manifest was ingested;
+    /// falls back to `PublicKey([0u8; 32])` if unavailable (should not happen
+    /// for well-formed 'in' rows).
+    fn finalize_offline(
+        &self,
+        attachment_id: &[u8; 16],
+        manifest: &crate::attachment::manifest::AttachmentManifest,
+        store: &crate::attachment::store::ChunkStore,
+    ) {
+        let dir = match self.download_dir.read() {
+            Ok(g) => match g.as_ref() {
+                Some(d) => d.clone(),
+                None => return,
+            },
+            Err(_) => return,
+        };
+        let _ = std::fs::create_dir_all(&dir);
+        let source = crate::attachment::store::StoreSource::new(store, *attachment_id);
+        let safe = crate::delivery::chunk_transfer::sanitize_filename(&manifest.filename);
+        let out_path = crate::delivery::chunk_transfer::unique_download_path(&dir, &safe);
+        let repo = crate::storage::attachments::AttachmentRepo::new(&self.pool);
+        // Resolve the sender recorded at manifest-ingest time.
+        let contact = repo
+            .peer_for(attachment_id)
+            .ok()
+            .flatten()
+            .map(PublicKey)
+            .unwrap_or(PublicKey([0u8; 32]));
+        match crate::attachment::reassembler::reassemble(manifest, &source, &out_path) {
+            Ok(()) => {
+                let _ = repo.set_status(attachment_id, "complete");
+                let _ = store.remove(attachment_id);
+                let _ = self.events_tx.send(Event::AttachmentReceived {
+                    contact,
+                    attachment_id: crate::daemon::hex::Hex16::from(*attachment_id),
+                    filename: safe,
+                    mime: manifest.mime.clone(),
+                    size: manifest.total_size,
+                    path: out_path.to_string_lossy().to_string(),
+                });
+            }
+            Err(e) => tracing::warn!(err = %e, "inbound: offline reassembly failed"),
+        }
+    }
 }
 
 impl InboundDispatch for DaemonInbound {
@@ -577,6 +702,105 @@ impl InboundDispatch for DaemonInbound {
                 None
             }
         }
+    }
+
+    fn dispatch_attachment_chunk(&self, ciphertext: &[u8]) -> bool {
+        use sha2::{Digest, Sha256};
+        let store = match self.chunk_store.read() {
+            Ok(g) => match g.as_ref() {
+                Some(s) => s.clone(),
+                None => return false,
+            },
+            Err(_) => return false,
+        };
+        let hash: [u8; 32] = Sha256::digest(ciphertext).into();
+
+        let repo = crate::storage::attachments::AttachmentRepo::new(&self.pool);
+        let pending = match repo.list_pending_in() {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
+        for (attachment_id, manifest_bytes) in pending {
+            let manifest =
+                match crate::attachment::manifest::AttachmentManifest::from_cbor(&manifest_bytes) {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+            let Some(chunk_ref) = manifest.chunks.iter().find(|c| c.ciphertext_hash == hash) else {
+                continue;
+            };
+            let index = chunk_ref.index;
+            // Dedup: already held → report handled (delete from server) without re-storing.
+            let already = repo.received_indices(&attachment_id).unwrap_or_default();
+            if already.contains(&index) {
+                return true;
+            }
+            if store.put(&attachment_id, index, ciphertext).is_err() {
+                return false; // could not store; leave on server for retry
+            }
+            if repo.mark_received(&attachment_id, index).is_err() {
+                return false;
+            }
+            // Completion check.
+            let now = repo
+                .received_indices(&attachment_id)
+                .map(|v| v.len() as i64)
+                .unwrap_or(0);
+            if now >= manifest.chunks.len() as i64 {
+                self.finalize_offline(&attachment_id, &manifest, &store);
+            } else if now % 8 == 0 {
+                let _ = self
+                    .events_tx
+                    .send(crate::daemon::events::Event::AttachmentProgress {
+                        attachment_id: crate::daemon::hex::Hex16::from(attachment_id),
+                        received: now as u32,
+                        total: manifest.chunks.len() as u32,
+                    });
+            }
+            return true;
+        }
+        false
+    }
+
+    fn take_begin_attachment(
+        &self,
+        peer: PublicKey,
+    ) -> Option<crate::delivery::chunk_transfer::AttachmentBegin> {
+        self.begins.lock().ok()?.get_mut(&peer)?.pop_front()
+    }
+
+    fn attachment_received(
+        &self,
+        contact: PublicKey,
+        attachment_id: [u8; 16],
+        filename: &str,
+        mime: &str,
+        size: u64,
+        path: &str,
+    ) {
+        let _ = self.events_tx.send(Event::AttachmentReceived {
+            contact,
+            attachment_id: crate::daemon::hex::Hex16::from(attachment_id),
+            filename: filename.to_string(),
+            mime: mime.to_string(),
+            size,
+            path: path.to_string(),
+        });
+    }
+
+    fn attachment_progress(&self, attachment_id: [u8; 16], received: u32, total: u32) {
+        let _ = self.events_tx.send(Event::AttachmentProgress {
+            attachment_id: crate::daemon::hex::Hex16::from(attachment_id),
+            received,
+            total,
+        });
+    }
+
+    fn attachment_failed(&self, attachment_id: [u8; 16], reason: &str) {
+        let _ = self.events_tx.send(Event::AttachmentFailed {
+            attachment_id: crate::daemon::hex::Hex16::from(attachment_id),
+            reason: reason.to_string(),
+        });
     }
 }
 
@@ -1709,5 +1933,48 @@ mod tests {
             seen_count, 0,
             "rollback must not persist a seen_messages row"
         );
+    }
+
+    #[test]
+    fn dispatch_attachment_chunk_matches_stores_and_dedups() {
+        use crate::attachment::{chunker::chunk_plaintext, store::ChunkStore};
+        use crate::storage::attachments::AttachmentRepo;
+
+        let dir = tempfile::tempdir().unwrap();
+        let pool = std::sync::Arc::new(crate::storage::Pool::in_memory());
+        // Pool::in_memory runs all migrations including 0016 (attachments + peer col).
+        let (events_tx, _rx) = tokio::sync::broadcast::channel(8);
+        let inbound = DaemonInbound::new(pool.clone(), events_tx);
+        let store = std::sync::Arc::new(ChunkStore::new(dir.path()));
+        inbound.set_chunk_store(store.clone());
+        inbound.set_download_dir(dir.path().join("downloads"));
+
+        // Build a 2-chunk attachment.
+        let payload = vec![7u8; crate::attachment::CHUNK_SIZE + 100];
+        let (manifest, cts) =
+            chunk_plaintext(&payload, "f.bin", "application/octet-stream").unwrap();
+        // Persist the manifest as a pending 'in' attachment.
+        AttachmentRepo::new(&pool)
+            .insert(
+                &manifest.attachment_id,
+                "in",
+                &manifest.to_cbor().unwrap(),
+                cts.len() as i64,
+                0,
+            )
+            .unwrap();
+
+        // First chunk: recognized + stored.
+        assert!(inbound.dispatch_attachment_chunk(&cts[0]));
+        // Same chunk again: still recognized (dedup) → true (server-delete) but no double-count.
+        assert!(inbound.dispatch_attachment_chunk(&cts[0]));
+        assert_eq!(
+            AttachmentRepo::new(&pool)
+                .received_indices(&manifest.attachment_id)
+                .unwrap(),
+            vec![0]
+        );
+        // A non-chunk blob: not recognized.
+        assert!(!inbound.dispatch_attachment_chunk(b"not a chunk"));
     }
 }
