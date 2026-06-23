@@ -17,6 +17,7 @@
   import { conversation, openConversationFromSummary, appendMessage } from "$lib/stores/conversation";
   import { torStatus } from "$lib/stores/tor_status";
   import { recordDeliveryStatus, hex16ToString } from "$lib/stores/delivery";
+  import { applyProgress, applyReceived, applyFailed } from "$lib/stores/attachments";
   import { deepLinkInviteUrl } from "$lib/stores/deepLink";
   import { ipcClient } from "$lib/ipc/tauri";
   import type { ContactSummary, PublicKey } from "$lib/ipc/types";
@@ -91,6 +92,17 @@
           appendMessage(e.data.record);
         } else if (e.event === "delivery_status_changed") {
           recordDeliveryStatus(hex16ToString(e.data.message), e.data.status);
+        } else if (e.event === "attachment_progress") {
+          applyProgress(hex16ToString(e.data.attachment_id), e.data.received, e.data.total);
+        } else if (e.event === "attachment_received") {
+          applyReceived(hex16ToString(e.data.attachment_id), {
+            filename: e.data.filename,
+            mime: e.data.mime,
+            size: Number(e.data.size),
+            path: e.data.path,
+          });
+        } else if (e.event === "attachment_failed") {
+          applyFailed(hex16ToString(e.data.attachment_id), e.data.reason);
         }
       });
     })();
