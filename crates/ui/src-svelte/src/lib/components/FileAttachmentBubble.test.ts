@@ -109,4 +109,32 @@ describe("FileAttachmentBubble", () => {
     const { findByText } = render(FileAttachmentBubble, { props: { record: fileRecord("incoming") } });
     expect(await findByText(/unavailable/i)).toBeTruthy();
   });
+
+  test("optimistic outgoing bubble (empty manifest) shows the picked filename, not 'unavailable'", async () => {
+    // Faithful to the real Rust decoder: an empty manifest fails to decode.
+    // The optimistic placeholder must skip decoding and fall through to the
+    // file card carrying the picked filename/size, never the unavailable card.
+    invokeMock.mockImplementation((_cmd: string, args: { manifest: number[] }) =>
+      args.manifest.length === 0
+        ? Promise.reject(new Error("empty manifest"))
+        : Promise.resolve({
+            attachment_id: AID, filename: "photo.jpg", mime: "image/jpeg", total_size: 2048,
+          }),
+    );
+    const optimistic = {
+      ...fileRecord("outgoing"),
+      message_id: "00".repeat(16),
+      kind: { kind: "file", manifest: [] as unknown as string },
+      __attachName: "myfile.pdf",
+      __attachSize: 4096,
+    } as unknown as MessageRecord;
+    const { findByText, queryByText } = render(FileAttachmentBubble, { props: { record: optimistic } });
+    expect(await findByText("myfile.pdf")).toBeTruthy();
+    // Let any decode attempt settle. Without the guard the empty-manifest
+    // decode rejects on the next microtask and flips to the unavailable card.
+    await new Promise((r) => setTimeout(r, 0));
+    await tick();
+    expect(queryByText(/unavailable/i)).toBeNull();
+    expect(queryByText("myfile.pdf")).not.toBeNull();
+  });
 });

@@ -31,6 +31,11 @@
   $effect(() => {
     if (record.kind.kind !== "file") return;
     const fileKind = record.kind;
+    // An optimistic outgoing placeholder carries an empty manifest (the real
+    // bytes are not known until SendFile returns). There is nothing to decode
+    // yet — skip, so the bubble falls through to the file card showing the
+    // picked filename/size rather than the "unavailable" decode-failure card.
+    if ((fileKind.manifest as unknown as number[]).length === 0) return;
     const mid = hex16ToString(record.message_id);
     decodeManifestMemo(mid, fileKind)
       .then((s) => {
@@ -69,7 +74,7 @@
     try {
       await invoke("open_file", { path: xferState.path });
     } catch {
-      toast.show("File not found");
+      toast.show("Failed to open file");
     }
   }
   async function doReveal() {
@@ -77,7 +82,7 @@
     try {
       await invoke("reveal_in_folder", { path: xferState.path });
     } catch {
-      toast.show("File not found");
+      toast.show("Failed to reveal file");
     }
   }
 
