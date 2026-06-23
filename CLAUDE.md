@@ -357,6 +357,8 @@ Use the `superpowers` skills by default for every development task — they are 
 
 The `using-superpowers` skill itself enforces "invoke relevant skills BEFORE any response or action" — treat that as binding, not advisory.
 
+**When a phase or task is complete: push the branch, open a PR, and babysit the CodeRabbit review. Address any findings collaboratively — verify before applying, reject false positives with evidence, and resolve all threads before requesting merge.** CodeRabbit is a second pair of eyes on the whole change set — let it review everything to catch issues overlooked during development, even after local gates and whole-branch review pass.
+
 ## Model routing
 
 The Superpowers skills (notably `subagent-driven-development` and
