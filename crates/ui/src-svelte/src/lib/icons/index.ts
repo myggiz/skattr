@@ -12,6 +12,9 @@ import checkSvg from "./check.svg?raw";
 import checkCheckSvg from "./check-check.svg?raw";
 import alertTriangleSvg from "./alert-triangle.svg?raw";
 import qrCodeSvg from "./qr-code.svg?raw";
+import paperclipSvg from "./paperclip.svg?raw";
+import fileSvg from "./file.svg?raw";
+import imageSvg from "./image.svg?raw";
 
 export const icons = {
   clock: clockSvg,
@@ -19,6 +22,9 @@ export const icons = {
   "check-check": checkCheckSvg,
   "alert-triangle": alertTriangleSvg,
   "qr-code": qrCodeSvg,
+  paperclip: paperclipSvg,
+  file: fileSvg,
+  image: imageSvg,
 } as const;
 
 export type IconName = keyof typeof icons;
