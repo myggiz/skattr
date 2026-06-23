@@ -134,6 +134,10 @@ describe("FileAttachmentBubble", () => {
     // decode rejects on the next microtask and flips to the unavailable card.
     await new Promise((r) => setTimeout(r, 0));
     await tick();
+    // The guard short-circuits before the decode boundary, so invoke() (reached
+    // via decodeManifestMemo -> decodeManifest -> invoke) is never called for an
+    // empty manifest. Without the guard this fires and rejects -> unavailable.
+    expect(invokeMock).not.toHaveBeenCalled();
     expect(queryByText(/unavailable/i)).toBeNull();
     expect(queryByText("myfile.pdf")).not.toBeNull();
   });
