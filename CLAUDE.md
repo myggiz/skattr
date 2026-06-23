@@ -147,7 +147,7 @@ plan → subagent-driven execution → live guardrail → merge.
     `clean_shutdown_leaves_only_encrypted_db` (no plaintext/sidecars/sentinel
     after a clean shutdown).
 
-#### Phase 3 — Attachments — 🟧 in progress (3.A, 3.B, 3.C done; 3.D next)
+#### Phase 3 — Attachments — ✅ complete (3.A, 3.B, 3.C, 3.D done)
 
 File attachments (send / receive / preview) with metadata stripping; a new
 `envelope::kinds` attachment variant; chunking/transfer over the hardened
@@ -219,8 +219,40 @@ into 3.A → 3.B → 3.C → 3.D.
   through real `run_chunk_sweep`/`poll_dispatch_once`/`dispatch_attachment_chunk`/
   `reassemble`) and `offline_attachment_cross_session_resume` (receiver restart
   mid-transfer resumes from durable state).
-- **3.D — UI** — ⬜ not started. Tauri attach / send / download / inline
-  preview / progress / size limits.
+- **3.D — UI** — ✅ done (branch `phase-3d-attachment-ui`; final whole-branch
+  review "Ready to merge"; gate green — `skattr-ui` clippy clean + 14/14 Rust
+  tests, vitest 111/111, e2e 13/13; spec
+  `2026-06-23-phase-3d-attachment-ui-design.md`, plan
+  `2026-06-23-phase-3d-attachment-ui.md`; **no ADR, no core/protocol change** —
+  presentation + IPC wiring only). Surfaces the 3.A/B/C core in the Tauri 2 +
+  SvelteKit UI. Four UI-shell `#[tauri::command]`s in `crates/ui/src/attachments.rs`
+  (`decode_attachment_manifest` → canonical `AttachmentManifest::from_cbor` via a
+  minimal `pub use` re-export; `file_size`; `open_file`/`reveal_in_folder` via the
+  `opener` plugin with canonicalize+regular-file validation). New SvelteKit units:
+  `stores/attachments.ts` (global session-scoped transfer store keyed by hex
+  `attachment_id`, mirrors `delivery.ts`), `lib/attachments.ts` (formatBytes /
+  mime helpers / `decodeManifest` wrapper + per-message memo),
+  `components/FileAttachmentBubble.svelte` (sender card + delivery status /
+  receiver progress / inline image preview via the Tauri asset protocol /
+  Open-Reveal / failed / decode-unavailable). Wiring: `Composer.svelte` paperclip
+  → `@tauri-apps/plugin-dialog` picker → pre-send size gate (>100 MiB block,
+  10–100 MiB soft-warn; daemon's `MAX_ATTACHMENT_BYTES` stays authoritative) →
+  optimistic `Kind::File` bubble + `SendFile`; `MessageBubble.svelte` switches
+  `kind==="file"` → the file bubble; `+page.svelte` gains 3 dispatcher arms for
+  `Event::Attachment{Progress,Received,Failed}`. **The `Kind::File.manifest` is a
+  runtime byte array** (serde_json number array; the ts-rs `string` type is a
+  `#[ts(type="string")]` annotation) — the UI passes it straight to the Rust
+  decoder, never base64. Tauri config: `dialog`+`opener` plugins, `protocol-asset`
+  feature, an asset-protocol scope confined at runtime to `<data_dir>/downloads`,
+  `img-src` CSP gains `asset: http://asset.localhost`, minimal
+  `capabilities/default.json`. CI: `pnpm test` (vitest) added as a hard gate to
+  the `ui` job. Deferred to v1.1 (see limitations): confine
+  `open_file`/`reveal_in_folder` to the downloads dir (currently safe-by-context —
+  paths are daemon-authored from `AttachmentReceived` + `script-src 'self'`); a
+  unit test for the indeterminate "Downloading…" (≤8-chunk) bubble branch; plus
+  the design's own deferrals — post-restart received-attachment state
+  (session-scoped store), configurable download folder, in-UI retry, sender-side
+  download progress, concurrent attachments per peer.
 
 #### Phase 4 — Release integrity, docs, signing — ⬜ not started
 
