@@ -1,7 +1,12 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <!-- Copyright (C) 2026 Myggiz AB -->
 <script lang="ts">
-  import { send } from "$lib/stores/conversation";
+  import { send, sendFile } from "$lib/stores/conversation";
+  import { open as pickFile } from "@tauri-apps/plugin-dialog";
+  import { invoke } from "@tauri-apps/api/core";
+  import { toast } from "$lib/stores/toast";
+  import { MANIFEST_SIZE_HARD, MANIFEST_SIZE_SOFT, formatBytes } from "$lib/attachments";
+  import { icons } from "$lib/icons";
   import type { PublicKey } from "$lib/ipc/types";
 
   let {
@@ -31,6 +36,38 @@
     if (e.isComposing || composing) return;
     e.preventDefault();
     void trySend();
+  }
+
+  async function tryAttach(): Promise<void> {
+    if (disabled) return;
+    let selected: string | string[] | null;
+    try {
+      selected = await pickFile({ multiple: false, directory: false });
+    } catch (e) {
+      toast.show("Could not open file picker");
+      return;
+    }
+    if (selected === null || Array.isArray(selected)) return; // cancelled
+    const path = selected;
+    let size: number;
+    try {
+      size = await invoke<number>("file_size", { path });
+    } catch {
+      toast.show("File is unavailable");
+      return;
+    }
+    if (size > MANIFEST_SIZE_HARD) {
+      toast.show(`File too large (max ${formatBytes(MANIFEST_SIZE_HARD)})`);
+      return;
+    }
+    if (size > MANIFEST_SIZE_SOFT) {
+      const ok = window.confirm(
+        `This file is ${formatBytes(size)}. It will only be delivered while your contact is online. Send anyway?`,
+      );
+      if (!ok) return;
+    }
+    const filename = path.split(/[/\\]/).pop() ?? "attachment";
+    await sendFile(contact, path, filename, size);
   }
 
   function onPaste(e: ClipboardEvent): void {
@@ -63,6 +100,14 @@
     oncompositionend={() => (composing = false)}
     aria-label="Message input"
   ></textarea>
+  <button
+    type="button"
+    class="attach"
+    {disabled}
+    onclick={() => void tryAttach()}
+    aria-label="Attach file"
+    title="Attach file"
+  >{@html icons["paperclip"]}</button>
   <button type="submit" {disabled} aria-label="Send">Send</button>
 </form>
 
@@ -98,4 +143,16 @@
     cursor: pointer;
   }
   button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .attach {
+    display: inline-flex;
+    align-items: center;
+    padding: var(--s-2);
+    background: var(--bg-elevated);
+    color: var(--text);
+    border: 0;
+    border-radius: 8px;
+    cursor: pointer;
+  }
+  .attach :global(svg) { width: 18px; height: 18px; }
+  .attach:disabled { opacity: 0.5; cursor: not-allowed; }
 </style>

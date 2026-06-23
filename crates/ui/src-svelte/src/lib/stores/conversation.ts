@@ -10,6 +10,8 @@ export type OptimisticMessage = MessageRecord & {
   __tempId: string;
   __optimistic: true;
   __failed?: string;
+  __attachName?: string;
+  __attachSize?: number;
 };
 
 interface ConversationState {
@@ -199,6 +201,7 @@ let pendingHighestRowId: bigint = 0n;
 let pendingContact: PublicKey | null = null;
 
 import { recordDeliveryStatus, hex16ToString } from "./delivery";
+import { markQueued } from "./attachments";
 
 export async function send(contact: PublicKey, body: string): Promise<void> {
   const tempId = crypto.randomUUID();
@@ -246,6 +249,64 @@ export async function send(contact: PublicKey, body: string): Promise<void> {
   } catch (e) {
     const cur = get(conversation);
     if (cur.contact !== contact) return;
+    markFailed(tempId, e instanceof Error ? e.message : String(e));
+  }
+}
+
+/**
+ * Optimistically insert an outgoing Kind::File bubble, issue SendFile, and
+ * reconcile on FileQueued. The sender never receives download progress
+ * (pull/deposit model), so we record the manifest message's delivery status
+ * only; the attachments store entry stays "queued".
+ */
+export async function sendFile(
+  contact: PublicKey,
+  path: string,
+  filename: string,
+  size: number,
+): Promise<void> {
+  const tempId = crypto.randomUUID();
+  conversation.update((state) => {
+    if (state.contact === null || !pubkeyEq(state.contact, contact)) return state;
+    const placeholder: OptimisticMessage = {
+      __tempId: tempId,
+      __optimistic: true,
+      __attachName: filename,
+      __attachSize: size,
+      row_id: -1n,
+      message_id: "00000000000000000000000000000000",
+      contact,
+      direction: "outgoing",
+      kind: { kind: "file", manifest: [] as unknown as string },
+      mls_generation: 0n,
+      ts_daemon_recv: BigInt(Math.floor(Date.now() / 1000)),
+      ts_envelope: BigInt(Date.now()),
+    };
+    return { ...state, messages: [...state.messages, placeholder] };
+  });
+  try {
+    const resp = await ipcClient.request({ cmd: "send_file", contact, path });
+    if (get(conversation).contact !== contact) return;
+    const result = unwrapOk(resp);
+    if (result.result !== "file_queued") {
+      markFailed(tempId, "unexpected reply variant");
+      return;
+    }
+    const { message_id, attachment_id, total_chunks } = result.data;
+    markQueued(hex16ToString(attachment_id), { filename, size, total: total_chunks });
+    recordDeliveryStatus(hex16ToString(message_id), "Queued");
+    // Promote the optimistic bubble to non-optimistic; keep the carried
+    // display fields so the bubble still shows name/size until the real
+    // MessageRecord arrives via message_received (if it does).
+    conversation.update((s) => {
+      const idx = s.messages.findIndex((m) => (m as OptimisticMessage).__tempId === tempId);
+      if (idx < 0) return s;
+      const next = [...s.messages];
+      next[idx] = { ...(next[idx] as OptimisticMessage), __optimistic: false } as unknown as OptimisticMessage;
+      return { ...s, messages: next };
+    });
+  } catch (e) {
+    if (get(conversation).contact !== contact) return;
     markFailed(tempId, e instanceof Error ? e.message : String(e));
   }
 }

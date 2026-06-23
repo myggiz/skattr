@@ -8,6 +8,10 @@ import { ipcClient } from "$lib/ipc/tauri";
 import type { PublicKey } from "$lib/ipc/types";
 import { conversation } from "$lib/stores/conversation";
 
+// Mocks for attach button tests (Task 10) — vitest hoists vi.mock to top
+vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+
 const peer: PublicKey = "0707070707070707070707070707070707070707070707070707070707070707";
 
 beforeEach(() => {
@@ -93,6 +97,56 @@ describe("Composer", () => {
       props: { contact: peer, disabled: true, disabledReason: "Daemon not running" },
     });
     expect((getByRole("textbox") as HTMLTextAreaElement).disabled).toBe(true);
-    expect((getByRole("button") as HTMLButtonElement).disabled).toBe(true);
+    expect((getByRole("button", { name: "Send" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((getByRole("button", { name: "Attach file" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+});
+
+// --- attachment attach button (Task 10) ---
+import { open as dialogOpen } from "@tauri-apps/plugin-dialog";
+import { invoke as coreInvoke } from "@tauri-apps/api/core";
+import * as conversationModule from "$lib/stores/conversation";
+
+describe("Composer attach", () => {
+  beforeEach(() => {
+    vi.mocked(dialogOpen).mockReset();
+    vi.mocked(coreInvoke).mockReset();
+  });
+
+  test("picking a ≤10 MiB file calls sendFile", async () => {
+    vi.mocked(dialogOpen).mockResolvedValue("/picked/photo.jpg");
+    vi.mocked(coreInvoke).mockResolvedValue(1024); // file_size
+    const spy = vi.spyOn(conversationModule, "sendFile").mockResolvedValue();
+
+    const { getByLabelText } = render(Composer, {
+      props: { contact: "ab".repeat(32), disabled: false },
+    });
+    await getByLabelText("Attach file").click();
+    await vi.waitFor(() =>
+      expect(spy).toHaveBeenCalledWith("ab".repeat(32), "/picked/photo.jpg", "photo.jpg", 1024),
+    );
+  });
+
+  test("cancelling the picker is a no-op", async () => {
+    vi.mocked(dialogOpen).mockResolvedValue(null);
+    const spy = vi.spyOn(conversationModule, "sendFile").mockResolvedValue();
+    const { getByLabelText } = render(Composer, {
+      props: { contact: "ab".repeat(32), disabled: false },
+    });
+    await getByLabelText("Attach file").click();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  test("a >100 MiB file is blocked", async () => {
+    vi.mocked(dialogOpen).mockResolvedValue("/picked/huge.bin");
+    vi.mocked(coreInvoke).mockResolvedValue(200 * 1024 * 1024);
+    const spy = vi.spyOn(conversationModule, "sendFile").mockResolvedValue();
+    const { getByLabelText } = render(Composer, {
+      props: { contact: "ab".repeat(32), disabled: false },
+    });
+    await getByLabelText("Attach file").click();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(spy).not.toHaveBeenCalled();
   });
 });
