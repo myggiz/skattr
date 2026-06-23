@@ -30,10 +30,14 @@ pub struct ManifestSummary {
 /// manifest versions via the canonical core decoder.
 #[tauri::command]
 pub async fn decode_attachment_manifest(manifest: Vec<u8>) -> Result<ManifestSummary, String> {
-    let m = AttachmentManifest::from_cbor(&manifest)
-        .map_err(|e| format!("decode manifest: {e}"))?;
+    let m =
+        AttachmentManifest::from_cbor(&manifest).map_err(|e| format!("decode manifest: {e}"))?;
     Ok(ManifestSummary {
-        attachment_id: m.attachment_id.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+        attachment_id: m
+            .attachment_id
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>(),
         filename: m.filename,
         mime: m.mime,
         total_size: m.total_size,
@@ -44,10 +48,8 @@ pub async fn decode_attachment_manifest(manifest: Vec<u8>) -> Result<ManifestSum
 /// regular file. Defense-in-depth: received-file paths are always
 /// daemon-authored (from `Event::AttachmentReceived`), but validate anyway.
 fn validate_openable(path: &str) -> Result<PathBuf, String> {
-    let canon =
-        std::fs::canonicalize(path).map_err(|e| format!("canonicalize {path}: {e}"))?;
-    let meta =
-        std::fs::metadata(&canon).map_err(|e| format!("{path}: not found: {e}"))?;
+    let canon = std::fs::canonicalize(path).map_err(|e| format!("canonicalize {path}: {e}"))?;
+    let meta = std::fs::metadata(&canon).map_err(|e| format!("{path}: not found: {e}"))?;
     if !meta.is_file() {
         return Err(format!("{path}: not a regular file"));
     }
@@ -129,14 +131,18 @@ mod tests {
 
     #[tokio::test]
     async fn file_size_errors_on_missing() {
-        let err = file_size("/no/such/file/xyz".to_string()).await.unwrap_err();
+        let err = file_size("/no/such/file/xyz".to_string())
+            .await
+            .unwrap_err();
         assert!(err.contains("file_size"));
     }
 
     #[tokio::test]
     async fn file_size_errors_on_directory() {
         let dir = tempfile::tempdir().unwrap();
-        let err = file_size(dir.path().to_string_lossy().to_string()).await.unwrap_err();
+        let err = file_size(dir.path().to_string_lossy().to_string())
+            .await
+            .unwrap_err();
         assert!(err.contains("not a regular file"));
     }
 
