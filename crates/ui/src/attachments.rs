@@ -37,6 +37,17 @@ pub async fn decode_attachment_manifest(manifest: Vec<u8>) -> Result<ManifestSum
     })
 }
 
+/// Stat a local file and return its byte length. Used by the pre-send size
+/// gate. Rejects non-existent paths and non-regular files (dirs, symdirs).
+#[tauri::command]
+pub async fn file_size(path: String) -> Result<u64, String> {
+    let meta = std::fs::metadata(&path).map_err(|e| format!("file_size {path}: {e}"))?;
+    if !meta.is_file() {
+        return Err(format!("file_size {path}: not a regular file"));
+    }
+    Ok(meta.len())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -70,5 +81,27 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("decode manifest"));
+    }
+
+    #[tokio::test]
+    async fn file_size_reports_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("blob.bin");
+        std::fs::write(&p, vec![7u8; 99]).unwrap();
+        let n = file_size(p.to_string_lossy().to_string()).await.unwrap();
+        assert_eq!(n, 99);
+    }
+
+    #[tokio::test]
+    async fn file_size_errors_on_missing() {
+        let err = file_size("/no/such/file/xyz".to_string()).await.unwrap_err();
+        assert!(err.contains("file_size"));
+    }
+
+    #[tokio::test]
+    async fn file_size_errors_on_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = file_size(dir.path().to_string_lossy().to_string()).await.unwrap_err();
+        assert!(err.contains("not a regular file"));
     }
 }
