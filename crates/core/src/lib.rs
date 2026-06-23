@@ -42,6 +42,11 @@ pub mod prelude;
 
 pub(crate) mod attachment;
 pub(crate) mod delivery;
+
+/// Public re-export of the attachment manifest type for Phase 3.D UI shell.
+/// Allows `skattr-ui` to decode `Kind::File` manifests without widening the
+/// `attachment` module's overall `pub(crate)` visibility.
+pub use attachment::manifest::AttachmentManifest;
 pub mod mailbox;
 pub(crate) mod mls;
 pub(crate) mod storage;

@@ -6,6 +6,7 @@
 //! Boots the Tauri runtime with two-phase Tauri command surfaces:
 //! pre-daemon (`bootstrap`) and post-daemon (`ipc_bridge` + `events`).
 
+mod attachments;
 mod bootstrap;
 mod daemon;
 mod events;
