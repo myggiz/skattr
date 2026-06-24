@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Myggiz AB
 
 #![cfg(unix)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::panic))]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::panic, unsafe_code))]
 
 //! IPC server, Unix half. Binds an AF_UNIX socket with mode `0600`
 //! and a `0700` parent directory; peer-cred-checks every accept.
@@ -89,22 +89,16 @@ impl Drop for Server {
     }
 }
 
-/// Return the effective UID of the current process without using `unsafe`.
+/// Return the real UID of the current process via `libc::getuid()`.
 ///
-/// On Linux we stat `/proc/self`; on other platforms we fall back to
-/// the `$UID` environment variable then `0` (suitable for tests).
+/// `getuid()` is an infallible POSIX syscall, so this is a trivially-safe
+/// `unsafe` call on a security boundary (the IPC peer-cred check). It replaces
+/// the former `/proc/self` → `$UID` → `0` chain, which was fragile on
+/// non-`/proc` Unix (macOS) and could spuriously fall back to root (`0`).
 #[cfg(unix)]
+#[allow(unsafe_code)]
 pub(crate) fn current_uid() -> PeerId {
-    use std::os::unix::fs::MetadataExt;
-    std::fs::metadata("/proc/self")
-        .map(|m| m.uid())
-        .or_else(|_| {
-            std::env::var("UID")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .ok_or(())
-        })
-        .unwrap_or(0)
+    unsafe { libc::getuid() }
 }
 
 /// Check that `peer_uid` matches `expected`. Unit-testable in isolation
@@ -127,6 +121,14 @@ pub(crate) fn check_peer_uid(peer_uid: Option<u32>, expected: u32) -> io::Result
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[cfg(unix)]
+    #[test]
+    fn current_uid_matches_libc_getuid() {
+        // current_uid must equal the kernel's view of the process uid.
+        let expected = unsafe { libc::getuid() };
+        assert_eq!(current_uid(), expected);
+    }
 
     #[test]
     fn check_peer_uid_accepts_matching_uid() {
