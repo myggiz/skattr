@@ -254,7 +254,7 @@ into 3.A → 3.B → 3.C → 3.D.
   (session-scoped store), configurable download folder, in-UI retry, sender-side
   download progress, concurrent attachments per peer.
 
-#### Phase 4 — Release integrity, docs, signing — ⬜ not started
+#### Phase 4 — Release integrity, docs, signing — 🔄 in progress (4.D done)
 
 Honest, accurate user-facing docs (close the audit's documentation-truthfulness
 gaps), a working download-verification chain, and **real signing keys**: the
@@ -262,6 +262,46 @@ minisign keypair is a committed **placeholder** (`docs/install/minisign.pub`,
 "PLACEHOLDER — REPLACE BEFORE TAGGING v0.1.0"; maintainer procedure in
 `docs/install/README-MAINTAINER-MINISIGN.md`) and the `SECURITY.md` PGP key is
 also a placeholder — both must be real before Phase 4 ships.
+
+The loose-end disposition for v1.0 is locked in
+`docs/superpowers/specs/2026-06-23-v1.0-pull-forward-vs-disclose-decisions.md`
+(governing bar: cheap security/correctness fixes pulled into v1.0, real
+protocol/architecture work disclosed as v1.1). The pulled-forward fixes
+(P1/P2/P3/P5) populate **4.D**; disclosures (D1/D2/D3) populate **4.B**; the D1
+client-side mitigation goes in **4.C**.
+
+- **4.D — T3 security hardening** — ✅ done (merge PR #7 `fe4c83b`; spec
+  `2026-06-23-phase-4d-t3-hardening-design.md`, plan
+  `2026-06-23-phase-4d-t3-hardening.md`; **no ADR / no wire-format change** —
+  `SchemaTooNew` reuses the existing `DaemonErrorKind::StorageError`). Nine
+  hardening items, subagent-driven (TDD per task + independent spec/quality
+  review + opus whole-branch review) then babysat through CI + two CodeRabbit
+  rounds: **Item 4** schema-downgrade guard (`migrations::apply` refuses a DB
+  whose `schema_version` exceeds the highest known migration, and propagates a
+  read error rather than masking it as fresh); **P2** attachment-completion CAS
+  fire-gate (`AttachmentRepo::set_status_if_pending`; both finalize lanes now
+  run the CAS *first* and only the winner allocates a `unique_download_path` +
+  reassembles, so a losing/erroring lane writes no orphan and the direct/offline
+  lanes can't race on the same output path — this also closes the old "3.C
+  completion not atomic across lanes" duplicate-event gap at the file level);
+  **Item 1** IPC `map_err` logs only the error category (redaction-bypass fix);
+  **Item 2** `sign_cbor`/`verify_cbor` zeroize their CBOR scratch buffers;
+  **Item 5** `current_uid` uses infallible `libc::getuid()` (drops the
+  `/proc`→`$UID`→`0`-root fallback on the IPC peer-cred boundary); **P1**
+  `open_file`/`reveal_in_folder` confined to `<data_dir>/downloads` (dual-
+  canonicalize + component-wise `starts_with`, Tauri-injected `State`); **Item
+  3** `data_dir` created mode `0700` on unix; **P3** `warn!` on the six
+  swallowed `chunk_sweep` writes; **P5** `PromotedMessage` type removes an
+  unsound `as unknown` cast. The dropped HS-key audit finding has no task (the
+  spec rejected it with evidence). Remaining non-blocking follow-ups tracked for
+  v1.1/4.B: add `warn!` to the CAS no-emit-on-`Err` paths; tighten the
+  `add_contact`/`send_file` log-safety doc-comments re `IpcError::Internal`;
+  let `conversation.ts` `send()` adopt `PromotedMessage`.
+- **4.A / 4.B / 4.C** — ⬜ not started. 4.A: release/CI completeness (Playwright
+  + the indeterminate-progress test P4, Flatpak). 4.B: documentation
+  truthfulness (`THREAT_MODEL.md`/README/first-run disclose exactly D1/D2/D3 +
+  the standing v1.1 list, citing the decision record). 4.C: UI robustness +
+  the D1 first-contact client-side mitigation.
 
 ### Deferred / known-limitation status
 
