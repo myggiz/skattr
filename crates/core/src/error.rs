@@ -162,6 +162,9 @@ impl CoreError {
             CoreError::Storage(crate::storage::StorageErrorKind::DuplicateMessage) => {
                 Some(K::StorageError) // Phase 1.H: no dedicated Daemon variant; storage-level signal only
             }
+            CoreError::Storage(crate::storage::StorageErrorKind::SchemaTooNew { .. }) => {
+                Some(K::StorageError)
+            }
             CoreError::Storage(crate::storage::StorageErrorKind::Other(_))
             | CoreError::Sqlite(_) => Some(K::StorageError),
             _ => None,

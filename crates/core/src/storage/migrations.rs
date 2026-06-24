@@ -111,6 +111,19 @@ pub(crate) fn apply(conn: &mut rusqlite::Connection) -> Result<()> {
         )
         .unwrap_or(0);
 
+    // Schema-downgrade guard: refuse to operate on a DB written by a newer
+    // binary. Silently running an older binary against a future schema risks
+    // corrupting data we don't understand. Projects to StorageError on the wire.
+    let max_known = ALL_MIGRATIONS.iter().map(|m| m.version).max().unwrap_or(0);
+    if current > max_known {
+        return Err(crate::error::CoreError::Storage(
+            crate::storage::StorageErrorKind::SchemaTooNew {
+                found: current,
+                max_known,
+            },
+        ));
+    }
+
     for m in ALL_MIGRATIONS {
         if m.version <= current {
             continue;
@@ -507,6 +520,23 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM passphrase_audit", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 3);
+    }
+
+    #[test]
+    fn refuses_db_newer_than_binary() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        apply(&mut conn).unwrap(); // bring to latest known
+        let max = ALL_MIGRATIONS.iter().map(|m| m.version).max().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO schema_version (version) VALUES (?1)",
+            [max + 1],
+        )
+        .unwrap();
+        let err = apply(&mut conn).unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::CoreError::Storage(crate::storage::StorageErrorKind::SchemaTooNew { .. })
+        ));
     }
 
     #[test]
