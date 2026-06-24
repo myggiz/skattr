@@ -618,17 +618,28 @@ impl DaemonInbound {
             .unwrap_or(PublicKey([0u8; 32]));
         match crate::attachment::reassembler::reassemble(manifest, &source, &out_path) {
             Ok(()) => {
-                let won = repo.set_status_if_pending(attachment_id).unwrap_or(false);
-                let _ = store.remove(attachment_id);
-                if won {
-                    let _ = self.events_tx.send(Event::AttachmentReceived {
-                        contact,
-                        attachment_id: crate::daemon::hex::Hex16::from(*attachment_id),
-                        filename: safe,
-                        mime: manifest.mime.clone(),
-                        size: manifest.total_size,
-                        path: out_path.to_string_lossy().to_string(),
-                    });
+                // Fire-gate. Distinguish a real storage failure from "already
+                // completed by the other lane": on Err, keep the staged chunks
+                // and the pending row so a later poll can retry — do NOT remove.
+                match repo.set_status_if_pending(attachment_id) {
+                    Ok(true) => {
+                        let _ = store.remove(attachment_id);
+                        let _ = self.events_tx.send(Event::AttachmentReceived {
+                            contact,
+                            attachment_id: crate::daemon::hex::Hex16::from(*attachment_id),
+                            filename: safe,
+                            mime: manifest.mime.clone(),
+                            size: manifest.total_size,
+                            path: out_path.to_string_lossy().to_string(),
+                        });
+                    }
+                    Ok(false) => {
+                        // The other lane already finalized — just clean up.
+                        let _ = store.remove(attachment_id);
+                    }
+                    Err(e) => {
+                        tracing::warn!(err = %e, "inbound: failed to mark attachment complete");
+                    }
                 }
             }
             Err(e) => tracing::warn!(err = %e, "inbound: offline reassembly failed"),

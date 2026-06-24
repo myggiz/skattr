@@ -174,8 +174,17 @@ async fn finalize_rx<S>(
     match crate::attachment::reassembler::reassemble(manifest, &source, &out_path) {
         Ok(()) => {
             let repo = crate::storage::attachments::AttachmentRepo::new(pool);
-            // Fire-gate: only the lane that flips pending→complete emits.
-            if repo.set_status_if_pending(&aid).unwrap_or(false) {
+            // Fire-gate: only the lane that flips pending→complete emits. On a
+            // real storage failure, don't ack the peer (so the sender can retry)
+            // and don't emit — the local row stays pending for a later attempt.
+            let won = match repo.set_status_if_pending(&aid) {
+                Ok(won) => won,
+                Err(e) => {
+                    tracing::warn!(err = %e, "inbound: attachment completion CAS failed");
+                    return;
+                }
+            };
+            if won {
                 if let Some(d) = inbound.as_ref() {
                     d.attachment_received(
                         peer,

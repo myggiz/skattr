@@ -103,13 +103,22 @@ pub(crate) fn apply(conn: &mut rusqlite::Connection) -> Result<()> {
         [],
     )?;
 
+    // Propagate a read/conversion failure rather than masking it as 0 — a
+    // hidden error must not bypass the downgrade guard below by looking like a
+    // fresh DB. (`CREATE TABLE IF NOT EXISTS` above guarantees the table exists,
+    // and `COALESCE(MAX(version), 0)` yields 0 for an empty table, so the happy
+    // path still reads 0 on a genuinely fresh DB.)
     let current: u32 = conn
         .query_row(
             "SELECT COALESCE(MAX(version), 0) FROM schema_version",
             [],
             |r| r.get(0),
         )
-        .unwrap_or(0);
+        .map_err(|e| {
+            crate::error::CoreError::Storage(crate::storage::StorageErrorKind::Other(format!(
+                "read schema_version: {e}"
+            )))
+        })?;
 
     // Schema-downgrade guard: refuse to operate on a DB written by a newer
     // binary. Silently running an older binary against a future schema risks
