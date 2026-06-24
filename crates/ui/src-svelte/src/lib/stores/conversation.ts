@@ -14,6 +14,16 @@ export type OptimisticMessage = MessageRecord & {
   __attachSize?: number;
 };
 
+/**
+ * An optimistic message that has been promoted to non-optimistic after the
+ * daemon acknowledged it (FileQueued / message_sent), while still carrying the
+ * optimistic display fields until the canonical MessageRecord arrives. Narrows
+ * `__optimistic` to `false` so the promotion needs no `as unknown` cast.
+ */
+export type PromotedMessage = Omit<OptimisticMessage, "__optimistic"> & {
+  __optimistic: false;
+};
+
 interface ConversationState {
   contact: PublicKey | null;
   messages: (MessageRecord | OptimisticMessage)[];
@@ -302,7 +312,11 @@ export async function sendFile(
       const idx = s.messages.findIndex((m) => (m as OptimisticMessage).__tempId === tempId);
       if (idx < 0) return s;
       const next = [...s.messages];
-      next[idx] = { ...(next[idx] as OptimisticMessage), __optimistic: false } as unknown as OptimisticMessage;
+      const promoted: PromotedMessage = {
+        ...(next[idx] as OptimisticMessage),
+        __optimistic: false,
+      };
+      next[idx] = promoted;
       return { ...s, messages: next };
     });
   } catch (e) {
