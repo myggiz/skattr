@@ -170,21 +170,23 @@ async fn finalize_rx<S>(
     let _ = std::fs::create_dir_all(dir);
     let source = crate::attachment::store::StoreSource::new(store, aid);
     let safe_name = crate::delivery::chunk_transfer::sanitize_filename(&manifest.filename);
-    let out_path = crate::delivery::chunk_transfer::unique_download_path(dir, &safe_name);
-    match crate::attachment::reassembler::reassemble(manifest, &source, &out_path) {
-        Ok(()) => {
-            let repo = crate::storage::attachments::AttachmentRepo::new(pool);
-            // Fire-gate: only the lane that flips pending→complete emits. On a
-            // real storage failure, don't ack the peer (so the sender can retry)
-            // and don't emit — the local row stays pending for a later attempt.
-            let won = match repo.set_status_if_pending(&aid) {
-                Ok(won) => won,
-                Err(e) => {
-                    tracing::warn!(err = %e, "inbound: attachment completion CAS failed");
-                    return;
-                }
-            };
-            if won {
+    let repo = crate::storage::attachments::AttachmentRepo::new(pool);
+    // Fire-gate FIRST: only the lane that flips pending→complete allocates a
+    // download path and reassembles, so a losing (`!won`) or erroring lane never
+    // writes an untracked file and the direct/offline lanes can't race on the
+    // same `unique_download_path` output. On a real storage failure, don't ack
+    // (so the sender retries) and leave the row pending.
+    let won = match repo.set_status_if_pending(&aid) {
+        Ok(won) => won,
+        Err(e) => {
+            tracing::warn!(err = %e, "inbound: attachment completion CAS failed");
+            return;
+        }
+    };
+    if won {
+        let out_path = crate::delivery::chunk_transfer::unique_download_path(dir, &safe_name);
+        match crate::attachment::reassembler::reassemble(manifest, &source, &out_path) {
+            Ok(()) => {
                 if let Some(d) = inbound.as_ref() {
                     d.attachment_received(
                         peer,
@@ -196,16 +198,21 @@ async fn finalize_rx<S>(
                     );
                 }
             }
-            if let Some(c) = conn.as_mut() {
-                let _ = c
-                    .send(Frame::AttachmentComplete { attachment_id: aid })
-                    .await;
+            Err(e) => {
+                // Claimed completion but reassembly failed: mark failed (matches
+                // the original direct-lane semantics) and don't ack.
+                tracing::warn!(err = %e, "inbound: reassembly failed");
+                fail_rx(pool, inbound, rx, "reassembly failed").await;
+                return;
             }
         }
-        Err(e) => {
-            tracing::warn!(err = %e, "inbound: reassembly failed");
-            fail_rx(pool, inbound, rx, "reassembly failed").await;
-        }
+    }
+    // Transfer is complete on the wire (we finalized it, or the offline lane
+    // already did). Ack so the sender stops retrying.
+    if let Some(c) = conn.as_mut() {
+        let _ = c
+            .send(Frame::AttachmentComplete { attachment_id: aid })
+            .await;
     }
 }
 
