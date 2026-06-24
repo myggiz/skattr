@@ -170,31 +170,49 @@ async fn finalize_rx<S>(
     let _ = std::fs::create_dir_all(dir);
     let source = crate::attachment::store::StoreSource::new(store, aid);
     let safe_name = crate::delivery::chunk_transfer::sanitize_filename(&manifest.filename);
-    let out_path = crate::delivery::chunk_transfer::unique_download_path(dir, &safe_name);
-    match crate::attachment::reassembler::reassemble(manifest, &source, &out_path) {
-        Ok(()) => {
-            let repo = crate::storage::attachments::AttachmentRepo::new(pool);
-            let _ = repo.set_status(&aid, "complete");
-            if let Some(d) = inbound.as_ref() {
-                d.attachment_received(
-                    peer,
-                    aid,
-                    &safe_name,
-                    &manifest.mime,
-                    manifest.total_size,
-                    &out_path.to_string_lossy(),
-                );
-            }
-            if let Some(c) = conn.as_mut() {
-                let _ = c
-                    .send(Frame::AttachmentComplete { attachment_id: aid })
-                    .await;
-            }
-        }
+    let repo = crate::storage::attachments::AttachmentRepo::new(pool);
+    // Fire-gate FIRST: only the lane that flips pending→complete allocates a
+    // download path and reassembles, so a losing (`!won`) or erroring lane never
+    // writes an untracked file and the direct/offline lanes can't race on the
+    // same `unique_download_path` output. On a real storage failure, don't ack
+    // (so the sender retries) and leave the row pending.
+    let won = match repo.set_status_if_pending(&aid) {
+        Ok(won) => won,
         Err(e) => {
-            tracing::warn!(err = %e, "inbound: reassembly failed");
-            fail_rx(pool, inbound, rx, "reassembly failed").await;
+            tracing::warn!(err = %e, "inbound: attachment completion CAS failed");
+            return;
         }
+    };
+    if won {
+        let out_path = crate::delivery::chunk_transfer::unique_download_path(dir, &safe_name);
+        match crate::attachment::reassembler::reassemble(manifest, &source, &out_path) {
+            Ok(()) => {
+                if let Some(d) = inbound.as_ref() {
+                    d.attachment_received(
+                        peer,
+                        aid,
+                        &safe_name,
+                        &manifest.mime,
+                        manifest.total_size,
+                        &out_path.to_string_lossy(),
+                    );
+                }
+            }
+            Err(e) => {
+                // Claimed completion but reassembly failed: mark failed (matches
+                // the original direct-lane semantics) and don't ack.
+                tracing::warn!(err = %e, "inbound: reassembly failed");
+                fail_rx(pool, inbound, rx, "reassembly failed").await;
+                return;
+            }
+        }
+    }
+    // Transfer is complete on the wire (we finalized it, or the offline lane
+    // already did). Ack so the sender stops retrying.
+    if let Some(c) = conn.as_mut() {
+        let _ = c
+            .send(Frame::AttachmentComplete { attachment_id: aid })
+            .await;
     }
 }
 
@@ -1583,6 +1601,21 @@ mod tests {
 
         // --- Receiver-side state: pool, chunk store, download dir. ---
         let pool = std::sync::Arc::new(Pool::in_memory());
+        // Mirror production: the `Kind::File` manifest dispatch (inbound.rs)
+        // ALWAYS inserts a pending `direction='in'` row before the chunk fetch.
+        // `finalize_rx`'s CAS fire-gate (Phase 4.D) emits AttachmentReceived only
+        // when it flips that pending row → complete, so the row must exist. The
+        // mock InboundDispatch injects the begin directly and bypasses that
+        // insert, so we perform it here as production would.
+        crate::storage::attachments::AttachmentRepo::new(&pool)
+            .insert(
+                &aid,
+                "in",
+                &manifest.to_cbor().unwrap(),
+                manifest.chunks.len() as i64,
+                0,
+            )
+            .unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let chunk_store = Arc::new(ChunkStore::new(tmp.path()));
         let download_dir = tmp.path().to_path_buf();

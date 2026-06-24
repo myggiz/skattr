@@ -607,7 +607,6 @@ impl DaemonInbound {
         let _ = std::fs::create_dir_all(&dir);
         let source = crate::attachment::store::StoreSource::new(store, *attachment_id);
         let safe = crate::delivery::chunk_transfer::sanitize_filename(&manifest.filename);
-        let out_path = crate::delivery::chunk_transfer::unique_download_path(&dir, &safe);
         let repo = crate::storage::attachments::AttachmentRepo::new(&self.pool);
         // Resolve the sender recorded at manifest-ingest time.
         let contact = repo
@@ -616,20 +615,42 @@ impl DaemonInbound {
             .flatten()
             .map(PublicKey)
             .unwrap_or(PublicKey([0u8; 32]));
-        match crate::attachment::reassembler::reassemble(manifest, &source, &out_path) {
-            Ok(()) => {
-                let _ = repo.set_status(attachment_id, "complete");
-                let _ = store.remove(attachment_id);
-                let _ = self.events_tx.send(Event::AttachmentReceived {
-                    contact,
-                    attachment_id: crate::daemon::hex::Hex16::from(*attachment_id),
-                    filename: safe,
-                    mime: manifest.mime.clone(),
-                    size: manifest.total_size,
-                    path: out_path.to_string_lossy().to_string(),
-                });
+        // Fire-gate FIRST: only the lane that flips pending→complete allocates a
+        // download path and reassembles. A losing (`Ok(false)`) or erroring
+        // (`Err`) lane never writes a file, so it can't leave an untracked
+        // download behind, and the direct/offline lanes can't race on the same
+        // `unique_download_path` output.
+        match repo.set_status_if_pending(attachment_id) {
+            Ok(true) => {
+                let out_path = crate::delivery::chunk_transfer::unique_download_path(&dir, &safe);
+                match crate::attachment::reassembler::reassemble(manifest, &source, &out_path) {
+                    Ok(()) => {
+                        let _ = store.remove(attachment_id);
+                        let _ = self.events_tx.send(Event::AttachmentReceived {
+                            contact,
+                            attachment_id: crate::daemon::hex::Hex16::from(*attachment_id),
+                            filename: safe,
+                            mime: manifest.mime.clone(),
+                            size: manifest.total_size,
+                            path: out_path.to_string_lossy().to_string(),
+                        });
+                    }
+                    Err(e) => {
+                        // We claimed completion but reassembly failed. Revert to
+                        // pending so a later poll can retry; keep the staged chunks.
+                        let _ = repo.set_status(attachment_id, "pending");
+                        tracing::warn!(err = %e, "inbound: offline reassembly failed after claim");
+                    }
+                }
             }
-            Err(e) => tracing::warn!(err = %e, "inbound: offline reassembly failed"),
+            Ok(false) => {
+                // Another lane already finalized — drop our staged chunks; we
+                // never wrote a file, so there is nothing else to clean up.
+                let _ = store.remove(attachment_id);
+            }
+            Err(e) => {
+                tracing::warn!(err = %e, "inbound: failed to mark attachment complete");
+            }
         }
     }
 }

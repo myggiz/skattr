@@ -1567,15 +1567,15 @@ where
 
 /// Map any `CoreError` to an `IpcError`. Projects via `CoreError::kind`
 /// into `DaemonErrorKind`; otherwise `Internal(...)` with a truncated
-/// display. Logs the full error server-side.
+/// display. Logs only the error category, never the raw error.
 pub(crate) fn map_err(err: CoreError) -> IpcError {
     if let Some(kind) = err.kind() {
-        tracing::warn!(?err, ?kind, "ipc: typed daemon error");
+        tracing::warn!(?kind, "ipc: typed daemon error");
         IpcError::Daemon(kind)
     } else {
         let msg = format!("{err}");
         let truncated: String = msg.chars().take(256).collect();
-        tracing::warn!(?err, "ipc: internal error");
+        tracing::warn!("ipc: internal error");
         IpcError::Internal(truncated)
     }
 }
@@ -4801,5 +4801,45 @@ mod tests {
             }
         }
         assert_eq!(decrypted.len(), N, "all N distinct messages decrypted");
+    }
+
+    #[test]
+    fn map_err_internal_does_not_log_raw_error_text() {
+        use std::sync::{Arc, Mutex};
+        use tracing::subscriber;
+        use tracing_subscriber::fmt::MakeWriter;
+
+        #[derive(Clone, Default)]
+        struct Buf(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Buf {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> MakeWriter<'a> for Buf {
+            type Writer = Buf;
+            fn make_writer(&'a self) -> Buf {
+                self.clone()
+            }
+        }
+
+        let buf = Buf::default();
+        let sub = tracing_subscriber::fmt().with_writer(buf.clone()).finish();
+        let secret = "SECRET-INVITE-base64-keymaterial";
+        subscriber::with_default(sub, || {
+            // An internal (non-kind) error carrying untrusted text.
+            let e = crate::error::CoreError::Identity(secret.to_string());
+            let _ = map_err(e);
+        });
+        let logged = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        assert!(logged.contains("ipc: internal error"), "category logged");
+        assert!(
+            !logged.contains(secret),
+            "raw untrusted error text must NOT be logged"
+        );
     }
 }

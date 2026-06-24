@@ -27,4 +27,11 @@ pub enum StorageErrorKind {
     /// refactor. Prefer adding a typed variant over populating this.
     #[error("storage: {0}")]
     Other(String),
+
+    /// The DB `schema_version` is newer than this binary knows about — an
+    /// older binary opened a DB written by a newer one. Refuse rather than
+    /// silently operating on an unknown schema. Projects to
+    /// `DaemonErrorKind::StorageError` (no new wire variant).
+    #[error("schema too new: db at version {found}, this binary knows up to {max_known}")]
+    SchemaTooNew { found: u32, max_known: u32 },
 }

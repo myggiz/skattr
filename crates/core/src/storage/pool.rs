@@ -63,6 +63,13 @@ impl Pool {
     /// Open (or create) the storage DB under `data_dir`, keyed by `seed`.
     pub fn open(data_dir: &Path, seed: &Seed) -> Result<Self> {
         std::fs::create_dir_all(data_dir)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // Private to the owning user: the dir holds the encrypted DB +
+            // sentinels. Enforce even if a prior umask created it 0755.
+            std::fs::set_permissions(data_dir, std::fs::Permissions::from_mode(0o700))?;
+        }
         let encrypted_path = data_dir.join("skattr.sqlite.age");
         let working_path = data_dir.join("skattr.sqlite");
         let sentinel_path = data_dir.join("skattr.sqlite.open");
@@ -639,6 +646,18 @@ mod tests {
             })
             .unwrap();
         assert_eq!(count, 0, "transaction closure Err must roll back");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_sets_data_dir_0700() {
+        use std::os::unix::fs::PermissionsExt;
+        let parent = tempfile::tempdir().unwrap();
+        let data_dir = parent.path().join("skattr-data");
+        let seed = crate::identity::Seed::generate().unwrap();
+        let _pool = Pool::open(&data_dir, &seed).unwrap();
+        let mode = std::fs::metadata(&data_dir).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700, "data_dir must be private (0700)");
     }
 }
 

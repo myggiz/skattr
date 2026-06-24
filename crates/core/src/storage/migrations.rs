@@ -103,13 +103,35 @@ pub(crate) fn apply(conn: &mut rusqlite::Connection) -> Result<()> {
         [],
     )?;
 
+    // Propagate a read/conversion failure rather than masking it as 0 — a
+    // hidden error must not bypass the downgrade guard below by looking like a
+    // fresh DB. (`CREATE TABLE IF NOT EXISTS` above guarantees the table exists,
+    // and `COALESCE(MAX(version), 0)` yields 0 for an empty table, so the happy
+    // path still reads 0 on a genuinely fresh DB.)
     let current: u32 = conn
         .query_row(
             "SELECT COALESCE(MAX(version), 0) FROM schema_version",
             [],
             |r| r.get(0),
         )
-        .unwrap_or(0);
+        .map_err(|e| {
+            crate::error::CoreError::Storage(crate::storage::StorageErrorKind::Other(format!(
+                "read schema_version: {e}"
+            )))
+        })?;
+
+    // Schema-downgrade guard: refuse to operate on a DB written by a newer
+    // binary. Silently running an older binary against a future schema risks
+    // corrupting data we don't understand. Projects to StorageError on the wire.
+    let max_known = ALL_MIGRATIONS.iter().map(|m| m.version).max().unwrap_or(0);
+    if current > max_known {
+        return Err(crate::error::CoreError::Storage(
+            crate::storage::StorageErrorKind::SchemaTooNew {
+                found: current,
+                max_known,
+            },
+        ));
+    }
 
     for m in ALL_MIGRATIONS {
         if m.version <= current {
@@ -507,6 +529,23 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM passphrase_audit", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 3);
+    }
+
+    #[test]
+    fn refuses_db_newer_than_binary() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        apply(&mut conn).unwrap(); // bring to latest known
+        let max = ALL_MIGRATIONS.iter().map(|m| m.version).max().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO schema_version (version) VALUES (?1)",
+            [max + 1],
+        )
+        .unwrap();
+        let err = apply(&mut conn).unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::CoreError::Storage(crate::storage::StorageErrorKind::SchemaTooNew { .. })
+        ));
     }
 
     #[test]

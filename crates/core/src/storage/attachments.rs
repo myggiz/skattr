@@ -145,6 +145,28 @@ impl<'p> AttachmentRepo<'p> {
         })
     }
 
+    /// Compare-and-set: flip `status` from `'pending'` to `'complete'`
+    /// atomically. Returns `true` iff this call performed the transition
+    /// (`rows_affected == 1`). The single fire-gate for `AttachmentReceived`,
+    /// so the direct (3.B) and offline (3.C) lanes cannot both emit on a
+    /// simultaneous completion.
+    pub fn set_status_if_pending(&self, attachment_id: &[u8; 16]) -> Result<bool> {
+        self.pool.with_mut(|c| {
+            let n = c
+                .execute(
+                    "UPDATE attachments SET status = 'complete' \
+                     WHERE attachment_id = ?1 AND status = 'pending'",
+                    rusqlite::params![&attachment_id[..]],
+                )
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!(
+                        "attachments set_status_if_pending: {e}"
+                    )))
+                })?;
+            Ok(n == 1)
+        })
+    }
+
     /// Set the transfer status.
     pub fn set_status(&self, attachment_id: &[u8; 16], status: &str) -> Result<()> {
         self.pool.with_mut(|c| {
@@ -442,6 +464,30 @@ impl<'p> AttachmentDepositRepo<'p> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn set_status_if_pending_fires_exactly_once() {
+        let pool = Pool::in_memory();
+        let aid = [0x11u8; 16];
+        // Insert a pending 'in' attachment row directly (schema from 0015).
+        pool.with_mut(|c| {
+            c.execute(
+                "INSERT INTO attachments \
+                 (attachment_id, direction, manifest, total_chunks, status, created_at) \
+                 VALUES (?1, 'in', x'00', 1, 'pending', 0)",
+                rusqlite::params![&aid[..]],
+            )
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
+        let repo = AttachmentRepo::new(&pool);
+        assert!(repo.set_status_if_pending(&aid).unwrap(), "first call wins");
+        assert!(
+            !repo.set_status_if_pending(&aid).unwrap(),
+            "second call loses"
+        );
+    }
 
     #[test]
     fn insert_and_get_and_mark_received_round_trip() {
