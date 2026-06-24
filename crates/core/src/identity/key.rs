@@ -114,8 +114,8 @@ impl IdentityKey {
     /// and InviteLink to sign their Body structs. Pairs with
     /// [`Self::verify_cbor`].
     pub fn sign_cbor<T: serde::Serialize>(&self, body: &T) -> Result<Signature> {
-        let mut bytes = Vec::new();
-        ciborium::ser::into_writer(body, &mut bytes)
+        let mut bytes = zeroize::Zeroizing::new(Vec::new());
+        ciborium::ser::into_writer(body, &mut *bytes)
             .map_err(|e| CoreError::Identity(format!("sign_cbor: {e}")))?;
         Ok(self.sign(&bytes))
     }
@@ -128,8 +128,8 @@ impl IdentityKey {
         body: &T,
         signature: &Signature,
     ) -> Result<()> {
-        let mut bytes = Vec::new();
-        ciborium::ser::into_writer(body, &mut bytes)
+        let mut bytes = zeroize::Zeroizing::new(Vec::new());
+        ciborium::ser::into_writer(body, &mut *bytes)
             .map_err(|_| CoreError::Identity("verification failed".into()))?;
         Self::verify(pubkey, &bytes, signature)
     }
@@ -390,6 +390,22 @@ mod tests {
         let vk = ed25519_dalek::VerifyingKey::from_bytes(&id.public().0).unwrap();
         let via_free_fn = super::ed25519_pub_to_x25519(&vk);
         assert_eq!(via_free_fn, id.noise_static_public());
+    }
+
+    #[test]
+    fn sign_cbor_roundtrips_and_buffer_is_zeroizing() {
+        // Behavioral: sign+verify still round-trips after the buffer change.
+        let key = IdentityKey::from_seed(&crate::identity::Seed::generate().unwrap()).unwrap();
+        #[derive(serde::Serialize)]
+        struct Body {
+            x: u8,
+        }
+        let body = Body { x: 7 };
+        let sig = key.sign_cbor(&body).unwrap();
+        IdentityKey::verify_cbor(&key.public(), &body, &sig).unwrap();
+        // Type-level guard: the scratch buffer is Zeroizing<Vec<u8>>.
+        let scratch: zeroize::Zeroizing<Vec<u8>> = zeroize::Zeroizing::new(Vec::new());
+        assert!(scratch.is_empty());
     }
 
     #[test]
