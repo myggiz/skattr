@@ -44,11 +44,17 @@ pub async fn decode_attachment_manifest(manifest: Vec<u8>) -> Result<ManifestSum
     })
 }
 
-/// Canonicalize a UI-supplied path and assert it points at an existing
-/// regular file. Defense-in-depth: received-file paths are always
-/// daemon-authored (from `Event::AttachmentReceived`), but validate anyway.
-fn validate_openable(path: &str) -> Result<PathBuf, String> {
+/// Canonicalize a UI-supplied path, assert it is an existing regular file,
+/// AND confine it to the daemon's `downloads` dir. Defense-in-depth:
+/// received-file paths are daemon-authored, but this makes open/reveal
+/// safe-by-construction rather than safe-by-context.
+fn validate_openable(path: &str, downloads: &std::path::Path) -> Result<PathBuf, String> {
     let canon = std::fs::canonicalize(path).map_err(|e| format!("canonicalize {path}: {e}"))?;
+    let canon_downloads =
+        std::fs::canonicalize(downloads).map_err(|e| format!("canonicalize downloads: {e}"))?;
+    if !canon.starts_with(&canon_downloads) {
+        return Err(format!("{path}: outside download dir"));
+    }
     let meta = std::fs::metadata(&canon).map_err(|e| format!("{path}: not found: {e}"))?;
     if !meta.is_file() {
         return Err(format!("{path}: not a regular file"));
@@ -56,10 +62,25 @@ fn validate_openable(path: &str) -> Result<PathBuf, String> {
     Ok(canon)
 }
 
+/// Resolve `<data_dir>/downloads` from managed state.
+fn downloads_dir(state: &tauri::State<'_, crate::daemon::AppState>) -> Result<PathBuf, String> {
+    let dd = state
+        .data_dir
+        .read()
+        .clone()
+        .ok_or_else(|| "data_dir not initialised".to_string())?;
+    Ok(dd.join("downloads"))
+}
+
 /// Open a received file with the OS default handler.
 #[tauri::command]
-pub async fn open_file(app: tauri::AppHandle, path: String) -> Result<(), String> {
-    let canon = validate_openable(&path)?;
+pub async fn open_file(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, crate::daemon::AppState>,
+    path: String,
+) -> Result<(), String> {
+    let downloads = downloads_dir(&state)?;
+    let canon = validate_openable(&path, &downloads)?;
     app.opener()
         .open_path(canon.to_string_lossy().to_string(), None::<&str>)
         .map_err(|e| format!("open_file: {e}"))
@@ -67,8 +88,13 @@ pub async fn open_file(app: tauri::AppHandle, path: String) -> Result<(), String
 
 /// Reveal a received file in the OS file manager.
 #[tauri::command]
-pub async fn reveal_in_folder(app: tauri::AppHandle, path: String) -> Result<(), String> {
-    let canon = validate_openable(&path)?;
+pub async fn reveal_in_folder(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, crate::daemon::AppState>,
+    path: String,
+) -> Result<(), String> {
+    let downloads = downloads_dir(&state)?;
+    let canon = validate_openable(&path, &downloads)?;
     app.opener()
         .reveal_item_in_dir(canon)
         .map_err(|e| format!("reveal_in_folder: {e}"))
@@ -147,24 +173,36 @@ mod tests {
     }
 
     #[test]
-    fn validate_existing_regular_file_ok() {
+    fn validate_inside_downloads_ok() {
         let dir = tempfile::tempdir().unwrap();
-        let p = dir.path().join("f.txt");
+        let downloads = dir.path();
+        let p = downloads.join("f.txt");
         std::fs::write(&p, b"hi").unwrap();
-        let got = validate_openable(&p.to_string_lossy()).unwrap();
+        let got = validate_openable(&p.to_string_lossy(), downloads).unwrap();
         assert!(got.is_absolute());
     }
 
     #[test]
+    fn validate_outside_downloads_errs() {
+        let downloads = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let p = other.path().join("f.txt");
+        std::fs::write(&p, b"hi").unwrap();
+        let err = validate_openable(&p.to_string_lossy(), downloads.path()).unwrap_err();
+        assert!(err.contains("outside download dir"));
+    }
+
+    #[test]
     fn validate_missing_file_errs() {
-        let err = validate_openable("/no/such/zzz").unwrap_err();
+        let downloads = tempfile::tempdir().unwrap();
+        let err = validate_openable("/no/such/zzz", downloads.path()).unwrap_err();
         assert!(err.contains("not found") || err.contains("canonicalize"));
     }
 
     #[test]
     fn validate_directory_errs() {
         let dir = tempfile::tempdir().unwrap();
-        let err = validate_openable(&dir.path().to_string_lossy()).unwrap_err();
+        let err = validate_openable(&dir.path().to_string_lossy(), dir.path()).unwrap_err();
         assert!(err.contains("not a regular file"));
     }
 }
