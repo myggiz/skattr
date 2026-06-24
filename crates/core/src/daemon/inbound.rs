@@ -618,16 +618,18 @@ impl DaemonInbound {
             .unwrap_or(PublicKey([0u8; 32]));
         match crate::attachment::reassembler::reassemble(manifest, &source, &out_path) {
             Ok(()) => {
-                let _ = repo.set_status(attachment_id, "complete");
+                let won = repo.set_status_if_pending(attachment_id).unwrap_or(false);
                 let _ = store.remove(attachment_id);
-                let _ = self.events_tx.send(Event::AttachmentReceived {
-                    contact,
-                    attachment_id: crate::daemon::hex::Hex16::from(*attachment_id),
-                    filename: safe,
-                    mime: manifest.mime.clone(),
-                    size: manifest.total_size,
-                    path: out_path.to_string_lossy().to_string(),
-                });
+                if won {
+                    let _ = self.events_tx.send(Event::AttachmentReceived {
+                        contact,
+                        attachment_id: crate::daemon::hex::Hex16::from(*attachment_id),
+                        filename: safe,
+                        mime: manifest.mime.clone(),
+                        size: manifest.total_size,
+                        path: out_path.to_string_lossy().to_string(),
+                    });
+                }
             }
             Err(e) => tracing::warn!(err = %e, "inbound: offline reassembly failed"),
         }

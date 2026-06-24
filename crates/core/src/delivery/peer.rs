@@ -174,16 +174,18 @@ async fn finalize_rx<S>(
     match crate::attachment::reassembler::reassemble(manifest, &source, &out_path) {
         Ok(()) => {
             let repo = crate::storage::attachments::AttachmentRepo::new(pool);
-            let _ = repo.set_status(&aid, "complete");
-            if let Some(d) = inbound.as_ref() {
-                d.attachment_received(
-                    peer,
-                    aid,
-                    &safe_name,
-                    &manifest.mime,
-                    manifest.total_size,
-                    &out_path.to_string_lossy(),
-                );
+            // Fire-gate: only the lane that flips pending→complete emits.
+            if repo.set_status_if_pending(&aid).unwrap_or(false) {
+                if let Some(d) = inbound.as_ref() {
+                    d.attachment_received(
+                        peer,
+                        aid,
+                        &safe_name,
+                        &manifest.mime,
+                        manifest.total_size,
+                        &out_path.to_string_lossy(),
+                    );
+                }
             }
             if let Some(c) = conn.as_mut() {
                 let _ = c
