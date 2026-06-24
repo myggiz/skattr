@@ -51,7 +51,9 @@ pub(crate) async fn run_chunk_sweep(
             Ok(c) => c,
             Err(_) => {
                 // Staged chunk missing (pruned?) — drop the row to avoid a hot loop.
-                let _ = deposit_repo.mark_deposited(&row.attachment_id, row.chunk_index);
+                if let Err(e) = deposit_repo.mark_deposited(&row.attachment_id, row.chunk_index) {
+                    tracing::warn!(target: "skattr::delivery::chunk_sweep", error = %e, "mark_deposited (missing-chunk drop) failed");
+                }
                 continue;
             }
         };
@@ -69,7 +71,10 @@ pub(crate) async fn run_chunk_sweep(
             };
             match client.deposit(recipient_hash, chunk.clone(), 0).await {
                 Ok(_ok) => {
-                    let _ = deposit_repo.mark_deposited(&row.attachment_id, row.chunk_index);
+                    if let Err(e) = deposit_repo.mark_deposited(&row.attachment_id, row.chunk_index)
+                    {
+                        tracing::warn!(target: "skattr::delivery::chunk_sweep", error = %e, "mark_deposited failed");
+                    }
                     deposited = true;
                     break;
                 }
@@ -86,9 +91,15 @@ pub(crate) async fn run_chunk_sweep(
             .all_deposited(&row.attachment_id)
             .unwrap_or(false)
         {
-            let _ = deposit_repo.delete_for_attachment(&row.attachment_id);
-            let _ = chunk_store.remove(&row.attachment_id);
-            let _ = AttachmentRepo::new(pool).set_status(&row.attachment_id, "complete");
+            if let Err(e) = deposit_repo.delete_for_attachment(&row.attachment_id) {
+                tracing::warn!(target: "skattr::delivery::chunk_sweep", error = %e, "delete_for_attachment failed");
+            }
+            if let Err(e) = chunk_store.remove(&row.attachment_id) {
+                tracing::warn!(target: "skattr::delivery::chunk_sweep", error = %e, "chunk_store remove failed");
+            }
+            if let Err(e) = AttachmentRepo::new(pool).set_status(&row.attachment_id, "complete") {
+                tracing::warn!(target: "skattr::delivery::chunk_sweep", error = %e, "set_status complete failed");
+            }
         }
     }
 }
@@ -101,7 +112,9 @@ fn reschedule(
     let attempts = row.attempts.saturating_add(1);
     let idx = (attempts as usize).min(BACKOFF_MS.len()) - 1;
     let next = now_ms + BACKOFF_MS[idx];
-    let _ = repo.reschedule(&row.attachment_id, row.chunk_index, attempts, next);
+    if let Err(e) = repo.reschedule(&row.attachment_id, row.chunk_index, attempts, next) {
+        tracing::warn!(target: "skattr::delivery::chunk_sweep", error = %e, "reschedule failed");
+    }
 }
 
 #[cfg(test)]
