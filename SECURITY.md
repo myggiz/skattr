@@ -6,6 +6,13 @@
 
 ### PGP key
 
+> **⚠️ v1.0 status:** The PGP key below and the minisign public key
+> (`docs/install/minisign.pub`) are **placeholders**. Encrypted vulnerability
+> reports and download-signature verification are **not usable until the real
+> keys are published** (a maintainer action tracked for the v0.1.0 tag, separate
+> from this documentation pass). Until then, the verification *procedure* below
+> is correct but will not validate against the committed placeholder key.
+
 ```
 -----BEGIN PGP PUBLIC KEY BLOCK-----
 (placeholder — replaced before first public release)
@@ -18,9 +25,9 @@ Fingerprint: `TBD`
 > minisign key (`docs/install/minisign.pub`, marked "PLACEHOLDER — REPLACE
 > BEFORE TAGGING v0.1.0") are placeholders. Generating the real keypairs and
 > wiring the GitHub Actions secrets (`MINISIGN_SECRET_KEY` /
-> `MINISIGN_PASSWORD`) is a hard prerequisite of **Phase 4 (release integrity,
-> docs, signing)** and must be done before any public `v0.1.0` tag. Until then,
-> downloads cannot be cryptographically verified.
+> `MINISIGN_PASSWORD`) is a hard prerequisite of the v0.1.0 release and must be
+> done before any public `v0.1.0` tag. Until then, downloads cannot be
+> cryptographically verified.
 
 ## Scope
 
@@ -44,7 +51,7 @@ Releases are built by `.github/workflows/release.yml` on `v*` tags across `ubunt
 - **Linux:** `.deb` and AppImage (signed release artifacts). A Flatpak manifest (`packaging/flatpak/`) is provided for **build-from-source** sandboxing; it is not a published signed binary.
 - **macOS:** `.dmg` (Apple Silicon / ARM64 only; x86_64 is deferred).
 - **Windows:** `.msi` (Tauri WiX bundle).
-- **Verification chain:** a `SHA256SUMS` manifest over all artifacts, signed with **minisign** (`SHA256SUMS.minisig`). Verify the signature against the maintainer's public key (`docs/install/minisign.pub`) before trusting any hash, then verify your download's hash against `SHA256SUMS`. **The committed minisign key is a placeholder today** (see the note above) — verification is not yet meaningful until Phase 4 ships the real key. The Tauri auto-updater is explicitly disabled; updates are manual, verified downloads.
+- **Verification chain:** a `SHA256SUMS` manifest over all artifacts, signed with **minisign** (`SHA256SUMS.minisig`). Verify the signature against the maintainer's public key (`docs/install/minisign.pub`) before trusting any hash, then verify your download's hash against `SHA256SUMS`. **The committed minisign key is a placeholder today** (see the note above) — verification is not yet meaningful until the v0.1.0 release ships the real key. The Tauri auto-updater is explicitly disabled; updates are manual, verified downloads.
 
 ## What we ask
 
@@ -71,7 +78,7 @@ These are documented in the design, the threat model, and the v1.0 readiness aud
 - Skattr does not protect against endpoint compromise. If your device is compromised, the attacker can read your messages.
 - While the daemon is running, a plaintext SQLite database (`skattr.sqlite` + `-wal`/`-shm`) necessarily exists on disk. Phase 2.B made a clean shutdown checkpoint, re-encrypt, and remove it (and re-encrypt crash residue on the next boot), but at-rest encryption protects data **between** runs, not during operation.
 
-### Deferred to v1.1+ (must be disclosed; do not over-trust)
+### Out of v1.0 scope (must be disclosed; do not over-trust)
 
 - **No metadata-minimization defenses yet:** no message-size padding, no send-timing jitter, no cover traffic / cover polling. Traffic-analysis resistance beyond what Tor provides is future work.
 - **No third-party security audit yet.**
