@@ -1585,6 +1585,21 @@ mod tests {
 
         // --- Receiver-side state: pool, chunk store, download dir. ---
         let pool = std::sync::Arc::new(Pool::in_memory());
+        // Mirror production: the `Kind::File` manifest dispatch (inbound.rs)
+        // ALWAYS inserts a pending `direction='in'` row before the chunk fetch.
+        // `finalize_rx`'s CAS fire-gate (Phase 4.D) emits AttachmentReceived only
+        // when it flips that pending row → complete, so the row must exist. The
+        // mock InboundDispatch injects the begin directly and bypasses that
+        // insert, so we perform it here as production would.
+        crate::storage::attachments::AttachmentRepo::new(&pool)
+            .insert(
+                &aid,
+                "in",
+                &manifest.to_cbor().unwrap(),
+                manifest.chunks.len() as i64,
+                0,
+            )
+            .unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let chunk_store = Arc::new(ChunkStore::new(tmp.path()));
         let download_dir = tmp.path().to_path_buf();
