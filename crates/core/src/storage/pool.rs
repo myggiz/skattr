@@ -221,6 +221,34 @@ impl Pool {
         })
     }
 
+    /// Write a consistent, encrypted snapshot of the live DB to `out_age`
+    /// without closing the pool. Checkpoints the WAL, `VACUUM INTO` a temp
+    /// plaintext copy, encrypts it under the storage passphrase, and removes
+    /// the temp. Used by `Command::ExportBackup`.
+    pub(crate) fn snapshot_encrypted(&self, out_age: &Path) -> Result<()> {
+        let snap = self.working_path.with_extension("snapshot");
+        {
+            let guard = self.conn.lock().map_err(|_| {
+                CoreError::Storage(StorageErrorKind::Other("pool mutex poisoned".into()))
+            })?;
+            let conn = guard
+                .as_ref()
+                .ok_or_else(|| CoreError::Storage(StorageErrorKind::Other("pool closed".into())))?;
+            conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!("checkpoint: {e}")))
+                })?;
+            // VACUUM INTO writes a consistent snapshot even with an active WAL.
+            conn.execute("VACUUM INTO ?1", [snap.to_string_lossy().as_ref()])
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!("vacuum into: {e}")))
+                })?;
+        }
+        let res = encrypt_db(&snap, out_age, &self.passphrase);
+        let _ = std::fs::remove_file(&snap); // always clean up the plaintext temp
+        res
+    }
+
     /// Test-only: construct a Pool from an in-memory connection. Skips
     /// all encryption + file-path bookkeeping. Used by repo unit tests
     /// and integration tests under the `test-harness` feature.
@@ -646,6 +674,27 @@ mod tests {
             })
             .unwrap();
         assert_eq!(count, 0, "transaction closure Err must roll back");
+    }
+
+    #[test]
+    fn snapshot_encrypted_produces_decryptable_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let seed = crate::identity::Seed::generate().unwrap();
+        let pool = Pool::open(dir.path(), &seed).unwrap();
+        // write a row so the snapshot has content
+        pool.with_mut(|c| {
+            c.execute("CREATE TABLE t(x)", []).unwrap();
+            c.execute("INSERT INTO t VALUES (42)", []).unwrap();
+            Ok(())
+        })
+        .unwrap();
+        let out = dir.path().join("snap.age");
+        pool.snapshot_encrypted(&out).unwrap();
+        assert!(out.exists(), "snapshot .age written");
+        // temp plaintext snapshot must be gone
+        assert!(!dir.path().join("skattr.sqlite.snapshot").exists());
+        // pool is still usable after snapshot
+        pool.close().unwrap();
     }
 
     #[cfg(unix)]
