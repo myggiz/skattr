@@ -88,6 +88,7 @@ where
         Command::TailLogs { since_seq, limit } => tail_logs(&handle, since_seq, limit).await,
         Command::GetPassphraseAuditLatest => get_passphrase_audit_latest(&handle).await,
         Command::WipeAllData => wipe_all_data(handle).await,
+        Command::ExportBackup { dest_path } => export_backup_cmd(handle, dest_path).await,
     }
 }
 
@@ -1681,6 +1682,39 @@ where
         .map_err(map_err)?;
 
     Ok(CommandResult::PassphraseChanged)
+}
+
+// ---------------------------------------------------------------------------
+// ExportBackup handler
+// ---------------------------------------------------------------------------
+
+/// `ExportBackup` handler: snapshot the live pool into a temp encrypted DB
+/// (`skattr.sqlite.backup.age`, distinct from the live `skattr.sqlite.age`),
+/// bundle it with `data_dir` supplementary files into an archive at
+/// `dest_path` encrypted under the daemon's backup key, then remove the
+/// temp file regardless of outcome.
+async fn export_backup_cmd<S>(
+    handle: Arc<DaemonHandle<S>>,
+    dest_path: String,
+) -> std::result::Result<CommandResult, IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let data_dir = handle.config.read().await.data_dir.clone();
+    let dest = std::path::PathBuf::from(&dest_path);
+    // Temp snapshot distinct from the live `skattr.sqlite.age` so we never
+    // clobber the pool's at-rest file even if bundling fails partway through.
+    let db_age = data_dir.join("skattr.sqlite.backup.age");
+    handle.pool.snapshot_encrypted(&db_age).map_err(map_err)?;
+    let res = crate::storage::backup::export_backup_from_parts(
+        &data_dir,
+        &db_age,
+        &dest,
+        &handle.backup_key,
+    );
+    let _ = std::fs::remove_file(&db_age); // clean up the temp DB .age
+    res.map_err(map_err)?;
+    Ok(CommandResult::Ok)
 }
 
 // ---------------------------------------------------------------------------
@@ -4851,6 +4885,69 @@ mod tests {
         assert!(
             !logged.contains(secret),
             "raw untrusted error text must NOT be logged"
+        );
+    }
+
+    /// `ExportBackup` produces the archive at the requested path and cleans up
+    /// the temporary `skattr.sqlite.backup.age` file.
+    ///
+    /// The test handle uses `backup_key = [0u8; 32]` (Task 7 default). We don't
+    /// decrypt the resulting archive — just assert it exists and that the temp
+    /// file was removed.
+    ///
+    /// `Pool::snapshot_encrypted` uses `VACUUM INTO` which requires a real on-disk
+    /// database (`working_path` must be a writable path, not `/dev/null`). We
+    /// therefore open the pool with `Pool::open` into a tempdir rather than using
+    /// `Pool::in_memory`. `export_backup_from_parts` also requires `identity.vault`
+    /// and `hs.key.age` in `data_dir`; we plant stub bytes for those.
+    #[tokio::test]
+    async fn export_backup_cmd_produces_archive_and_removes_temp_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().to_path_buf();
+
+        // Open a real on-disk pool (snapshot_encrypted uses VACUUM INTO which
+        // requires a real working_path; in_memory sets it to /dev/null).
+        let seed = crate::identity::Seed::generate().unwrap();
+        let pool = Arc::new(Pool::open(&data_dir, &seed).unwrap());
+
+        // Plant the two non-DB backup inputs that export_backup_from_parts requires.
+        std::fs::write(data_dir.join("identity.vault"), b"stub-vault").unwrap();
+        std::fs::write(data_dir.join("hs.key.age"), b"stub-hs-key").unwrap();
+
+        // Build a handle whose config.data_dir points at the same tempdir.
+        let identity = crate::identity::IdentityKey::from_seed(&seed).unwrap();
+        let hub: Arc<crate::delivery::hub::DeliveryHub<tokio::io::DuplexStream>> =
+            Arc::new(crate::delivery::hub::DeliveryHub::new(pool.clone()));
+        let (events_tx, _) = broadcast::channel::<Event>(16);
+        let mut cfg = crate::daemon::config::Config::fallback_for_tests();
+        cfg.data_dir = data_dir.clone();
+        let handle: Arc<DaemonHandle<tokio::io::DuplexStream>> =
+            Arc::new(DaemonHandle::new_with_config(
+                pool,
+                hub,
+                identity,
+                events_tx,
+                cfg,
+                data_dir.join("config.toml"),
+            ));
+
+        let dest = data_dir.join("backup.skattr");
+        let result = execute_command(
+            handle.clone(),
+            Command::ExportBackup {
+                dest_path: dest.to_str().unwrap().to_string(),
+            },
+        )
+        .await;
+
+        assert!(
+            matches!(result, Ok(CommandResult::Ok)),
+            "export_backup must return Ok, got {result:?}"
+        );
+        assert!(dest.exists(), "archive file must exist at dest_path");
+        assert!(
+            !data_dir.join("skattr.sqlite.backup.age").exists(),
+            "temp snapshot must be cleaned up"
         );
     }
 }

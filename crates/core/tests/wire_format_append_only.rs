@@ -48,6 +48,7 @@ fn command_variant_tag(c: &Command) -> &'static str {
         Command::Shutdown => "shutdown",
         Command::TailLogs { .. } => "tail_logs",
         Command::WipeAllData => "wipe_all_data",
+        Command::ExportBackup { .. } => "export_backup",
     }
 }
 
@@ -100,6 +101,7 @@ fn expected_command_variant_set() -> Vec<&'static str> {
         "remove_mailbox",
         "rename_contact",
         "rotate_onion",
+        "export_backup",
         "search_messages",
         "send_file",
         "send_message",
