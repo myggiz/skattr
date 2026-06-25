@@ -254,7 +254,7 @@ into 3.A → 3.B → 3.C → 3.D.
   (session-scoped store), configurable download folder, in-UI retry, sender-side
   download progress, concurrent attachments per peer.
 
-#### Phase 4 — Release integrity, docs, signing — 🔄 in progress (4.D done)
+#### Phase 4 — Release integrity, docs, signing — 🔄 in progress (4.D, 4.B done)
 
 Honest, accurate user-facing docs (close the audit's documentation-truthfulness
 gaps), a working download-verification chain, and **real signing keys**: the
@@ -297,11 +297,34 @@ client-side mitigation goes in **4.C**.
   v1.1/4.B: add `warn!` to the CAS no-emit-on-`Err` paths; tighten the
   `add_contact`/`send_file` log-safety doc-comments re `IpcError::Internal`;
   let `conversation.ts` `send()` adopt `PromotedMessage`.
-- **4.A / 4.B / 4.C** — ⬜ not started. 4.A: release/CI completeness (Playwright
-  + the indeterminate-progress test P4, Flatpak). 4.B: documentation
-  truthfulness (`THREAT_MODEL.md`/README/first-run disclose exactly D1/D2/D3 +
-  the standing v1.1 list, citing the decision record). 4.C: UI robustness +
-  the D1 first-contact client-side mitigation.
+- **4.B — documentation truthfulness** — ✅ done (merge PR #9 `d2850ef`; spec
+  `2026-06-25-phase-4b-doc-truthfulness-design.md`, plan
+  `2026-06-25-phase-4b-doc-truthfulness.md`; **pure docs — no code change**).
+  Corrected every user-facing + audit-flagged internal doc against the shipped
+  v1.0 code, subagent-driven (TDD-adapted: prove each claim false against the
+  code source-of-truth → correct → verify) + an opus whole-branch truthfulness
+  review. **README** dropped the false "groups scale to ~50 members" (2-member
+  gate `mls/group.rs:115`) and the "seed-derived address" overclaim (the onion
+  key is `OsRng`-random, persisted under a seed-derived *storage* key —
+  `transport/hs_key.rs`), and now carries the v1.0 limitations. **THREAT_MODEL**
+  re-stamped to v1.0: withhold-detection downgraded to latent (no alerting code
+  exists), the stable recipient-hash mailbox-correlation leak disclosed
+  (`mailbox/client.rs:272`), the Identity-stability guarantee corrected (seed
+  restores the Ed25519 identity + history *while the DB file is intact*; the
+  `.onion` needs the backup), D1/D2/D3 + the standing v1.1 list added.
+  **SECURITY/install** disclose the minisign/PGP keys are placeholders (chain
+  not usable yet). **ARCHITECTURE/PROTOCOL** facts fixed (migrations `0016`,
+  ciphersuite codepoint `0x0003`, phase table). **deep-dives** superseded
+  banners; **design** ciphersuite name corrected. **passphrase-recovery** (the
+  safety-critical one) rewritten: the DB key is seed-derived and
+  passphrase-independent (`storage/pool.rs:77`), so it now leads with
+  seed-restore — intact files recover history with no backup; deletion is
+  demoted to a last-resort data-loss warning. Tracked v1.1 follow-up (code, out
+  of 4.B scope): the stale `hs_key.rs:13` "deliberate rotation" comment
+  contradicts the degenerate shipped `RotateOnion`.
+- **4.A / 4.C** — ⬜ not started. 4.A: release/CI completeness (Playwright +
+  the indeterminate-progress test P4, Flatpak). 4.C: UI robustness + the D1
+  first-contact client-side mitigation.
 
 ### Deferred / known-limitation status
 
