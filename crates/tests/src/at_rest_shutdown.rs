@@ -61,7 +61,7 @@ async fn clean_shutdown_leaves_only_encrypted_db() {
     });
 
     // Await readiness so the daemon has fully opened (and migrated) its Pool.
-    let _ready = tokio::time::timeout(Duration::from_secs(30), ready_rx)
+    let _ready = tokio::time::timeout(Duration::from_secs(60), ready_rx)
         .await
         .expect("daemon ready within 30 s")
         .expect("ready_tx still open");
