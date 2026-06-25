@@ -2,6 +2,7 @@
 <!-- Copyright (C) 2026 Myggiz AB -->
 <script lang="ts">
   import type { ContactSummary } from "$lib/ipc/types";
+  import { isConnecting } from "$lib/stores/contacts";
 
   let { summary, active = false, expanded = false, onclick, onToggleExpanded }: {
     summary: ContactSummary;
@@ -31,6 +32,9 @@
   <button class="row" class:active onclick={onclick}>
     <div class="title">
       {summary.nickname ?? shortHash(summary.pubkey)}
+      {#if isConnecting(summary)}
+        <span class="connecting-badge" title="First contact still connecting">Connecting…</span>
+      {/if}
       {#if summary.muted}
         <span class="mute-icon" title="Muted" aria-label="Muted">🔕</span>
       {/if}
@@ -77,6 +81,7 @@
   .row:hover, .row.active { background: var(--bg-elevated); }
   .title { font-weight: 500; display: flex; align-items: center; gap: 4px; }
   .mute-icon { color: var(--text-muted, #888); font-size: 0.85em; }
+  .connecting-badge { color: var(--text-muted, #888); font-size: 0.75em; font-weight: 400; }
   .meta { display: flex; justify-content: space-between; color: var(--text-muted); font: var(--t-ui); }
   .preview { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 200px; }
   .badge {
