@@ -227,26 +227,26 @@ impl Pool {
     /// the temp. Used by `Command::ExportBackup`.
     pub(crate) fn snapshot_encrypted(&self, out_age: &Path) -> Result<()> {
         let snap = self.working_path.with_extension("snapshot");
-        {
-            let guard = self.conn.lock().map_err(|_| {
-                CoreError::Storage(StorageErrorKind::Other("pool mutex poisoned".into()))
-            })?;
-            let conn = guard
-                .as_ref()
-                .ok_or_else(|| CoreError::Storage(StorageErrorKind::Other("pool closed".into())))?;
-            conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
-                .map_err(|e| {
-                    CoreError::Storage(StorageErrorKind::Other(format!("checkpoint: {e}")))
+        let result = (|| -> Result<()> {
+            {
+                let guard = self.conn.lock().map_err(|_| {
+                    CoreError::Storage(StorageErrorKind::Other("pool mutex poisoned".into()))
                 })?;
-            // VACUUM INTO writes a consistent snapshot even with an active WAL.
-            conn.execute("VACUUM INTO ?1", [snap.to_string_lossy().as_ref()])
-                .map_err(|e| {
-                    CoreError::Storage(StorageErrorKind::Other(format!("vacuum into: {e}")))
-                })?;
-        }
-        let res = encrypt_db(&snap, out_age, &self.passphrase);
+                let conn = guard.as_ref().ok_or_else(pool_closed)?;
+                conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+                    .map_err(|e| {
+                        CoreError::Storage(StorageErrorKind::Other(format!("checkpoint: {e}")))
+                    })?;
+                // VACUUM INTO writes a consistent snapshot even with an active WAL.
+                conn.execute("VACUUM INTO ?1", [snap.to_string_lossy().as_ref()])
+                    .map_err(|e| {
+                        CoreError::Storage(StorageErrorKind::Other(format!("vacuum into: {e}")))
+                    })?;
+            }
+            encrypt_db(&snap, out_age, &self.passphrase)
+        })();
         let _ = std::fs::remove_file(&snap); // always clean up the plaintext temp
-        res
+        result
     }
 
     /// Test-only: construct a Pool from an in-memory connection. Skips
@@ -693,6 +693,12 @@ mod tests {
         assert!(out.exists(), "snapshot .age written");
         // temp plaintext snapshot must be gone
         assert!(!dir.path().join("skattr.sqlite.snapshot").exists());
+        // decrypt-verify the snapshot round-trips the row
+        let restored = dir.path().join("restored.sqlite");
+        decrypt_db(&out, &restored, &pool.passphrase).unwrap();
+        let conn = rusqlite::Connection::open(&restored).unwrap();
+        let x: i64 = conn.query_row("SELECT x FROM t", [], |r| r.get(0)).unwrap();
+        assert_eq!(x, 42);
         // pool is still usable after snapshot
         pool.close().unwrap();
     }
