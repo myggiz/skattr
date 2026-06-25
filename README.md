@@ -4,24 +4,21 @@
 
 Skattr is a desktop-first, metadata-resistant, end-to-end encrypted messenger built on Tor v3 onion services and MLS (RFC 9420). It has no phone number, no email signup, and no central account server. Identity is a keypair backed by a BIP39 seed phrase.
 
-**Status: Phase 1 on-line messaging almost complete.** Phase 0
-delivered identity, at-rest encryption, Arti integration, and
-storage. Phase 1.A–1.E have since landed the wire-format codec,
-Noise_XK handshake, MLS 2-member groups, invite & contact flow,
-and the delivery layer (per-peer actor connection pool, outbox
-with exponential-backoff retry, ACK correlation, receiver dedup).
-Phase 1.F (CLI integration — `skattr send`, `tail`, `contacts`)
-and Phase 1.G (message history + full-text search) are the final
-Phase 1 steps before end-to-end chat is user-visible. See
-[ARCHITECTURE.md](ARCHITECTURE.md) and [`docs/`](docs/) for the
-full design.
+**Status: approaching a v1.0 release.** Skattr is a working 1:1 (two-party),
+attachment-capable, Tor-only encrypted messenger: real two-daemon messaging in
+both directions, first-contact via signed invite links, offline delivery through
+semi-trusted mailboxes, file attachments (online and offline), and a desktop
+(Tauri) app plus a CLI. Remaining work before tagging v1.0 is release hardening —
+honest docs, a working download-verification chain, and real signing keys. See
+[ARCHITECTURE.md](ARCHITECTURE.md) and [`docs/`](docs/) for the design, and
+[THREAT_MODEL.md](docs/THREAT_MODEL.md) for security properties and limitations.
 
 ## What Skattr is
 
 - **Peer-to-peer.** Clients reach each other directly via Tor onion services. No central relay.
-- **Metadata-resistant.** Tor hides network-level metadata; a semi-trusted "mailbox" handles offline delivery and learns only that *someone* has pending ciphertext for *some* identity hash.
-- **Group-ready.** Built on [MLS](https://datatracker.ietf.org/doc/rfc9420/). 1:1 is a 2-member group; groups scale to ~50 members in v1.
-- **Desktop first.** Native app via Tauri (arriving in Phase 2). A CLI ships alongside for power users and scripting.
+- **Metadata-resistant.** Tor hides network-level metadata; a semi-trusted "mailbox" handles offline delivery and sees only opaque ciphertext, but it does learn a *stable* per-recipient hash plus polling/size metadata — see [THREAT_MODEL.md](docs/THREAT_MODEL.md) for the correlation caveats.
+- **1:1, built on MLS.** v1.0 is two-party messaging — a 2-member [MLS](https://datatracker.ietf.org/doc/rfc9420/) group. Multi-member groups (> 2) are deferred to a later release.
+- **Desktop first.** Native app via Tauri, with a CLI alongside for power users and scripting.
 - **Rust, all the way down.** Tor via [Arti](https://gitlab.torproject.org/tpo/core/arti), MLS via [OpenMLS](https://openmls.tech/), transport auth via [Noise_XK](https://noiseprotocol.org/) (through `snow`).
 
 ## What Skattr isn't
@@ -31,39 +28,28 @@ full design.
 - Not mobile in v1. Mobile is post-1.0 at the earliest.
 - Not "anonymous" — your contacts know who you are. It's metadata-resistant, not identity-destroying.
 
-## What works now (through Phase 1.E)
+## What works
 
-- Create and restore a BIP39-backed identity (`skattr init` /
-  `skattr restore`).
-- Encrypted at-rest storage for identity, HS key, message database.
-- Bootstrap Tor via embedded Arti, publish a v3 onion service with
-  a seed-derived address.
-- Byte-level inbound accept loop (`OnionListener`).
-- Backup / restore of the full state as a portable archive.
-- Wire-format frame codec (16 MiB cap, 10 frame types).
-- `Noise_XK_25519_ChaChaPoly_BLAKE2s` handshake with optional `psk3`
-  for first-contact, producing an `AuthenticatedConnection<S>` with
-  the `h_transport` binding exposed.
-- MLS 2-member groups: create, add-member (Welcome + Commit),
-  encrypt/decrypt, state persists across restart via
-  checkpoint-snapshot.
-- Signed invite links (`skattr://invite/v1#…`) with canonical-CBOR
-  Ed25519 signatures, Zeroizing PSK guard, and single-use tracking.
-- Signed `ContactCard`s with monotonic-version persistence.
-- Delivery layer: per-peer `PeerConnection` actor with 1 s retry
-  tick, 60 s keepalive, 180 s idle close, and `ReplaceConn` for
-  concurrent-dial races. Kill-mid-message → reconnect → exactly-once
-  delivery is proven by a CI integration test.
+- Create/restore a BIP39-backed identity (`skattr init` / `skattr restore`).
+- At-rest encryption for identity, HS key, and the message database; backup/restore as a portable archive.
+- Tor via embedded Arti: publishes a v3 onion service at a stable address (persisted across restarts and preserved by backup/restore).
+- Real two-party messaging in both directions over the production transport, with per-peer retry, ACK correlation, and exactly-once delivery (CI-proven).
+- First contact via signed `skattr://invite/v1#…` links (single-use) and signed `ContactCard`s.
+- `Noise_XK_25519_ChaChaPoly_BLAKE2s` transport auth bound to the MLS group (`h_transport` PSK).
+- Offline delivery through semi-trusted mailboxes (deposit/fetch, failover, drain on removal).
+- File attachments: send/receive with metadata stripping, online (direct) and offline (mailbox), inline image preview in the UI.
+- Scrolling message history with full-text search; configurable retention.
+- Desktop UI (Tauri) and a `skattr` CLI.
 
-## What doesn't work yet
+## Limitations (v1.0)
 
-- `skattr send <contact> "hello"` on the CLI (Phase 1.F — CLI
-  integration is the missing glue between the delivery hub and
-  user-visible commands).
-- Scrolling message history / full-text search (Phase 1.G).
-- Offline delivery via mailbox server (Phase 2).
-- Desktop UI (Phase 2 — Tauri).
-- Group chat beyond 2 members (Phase 3).
+- **Two-party only.** Multi-member groups (> 2) are deferred.
+- **First contact needs both peers online at once** — first contact is direct-only (no mailbox fallback); if your contact is offline when you add them, the connection will not complete until they are online.
+- **"Rotate onion address" is not yet real** — it republishes your current address with a new card version; true address rotation is planned for a later release.
+- **Offline attachments are best-effort** — held by a mailbox for ~7 days and dropped if never fetched; files over 10 MiB transfer only while both peers are online.
+- Not a low-latency chat (Tor round-trips cost seconds), not mobile in v1.0, and not "anonymous" — your contacts know who you are.
+
+See [THREAT_MODEL.md](docs/THREAT_MODEL.md) for the full security model and the v1.1 deferral list, and the [disclosure decision record](docs/superpowers/specs/2026-06-23-v1.0-pull-forward-vs-disclose-decisions.md).
 
 ## Quickstart (desktop, Linux/macOS)
 

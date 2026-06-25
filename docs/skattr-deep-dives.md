@@ -251,6 +251,10 @@ pub struct ContactCard {
 
 **`daemon`** — the single long-lived object that owns the Tor runtime, storage pool, active connections, outbox worker, mailbox scheduler. Exposes a `Command`/`Event` API rather than letting callers touch internals directly.
 
+> **⚠️ Superseded.** The `Daemon::start` / `Daemon::execute` / `Daemon::shutdown` API shown below
+> was an earlier design that did not ship. The real daemon lifecycle is
+> `daemon::state::run_with_transport` (see `crates/core/src/daemon/state.rs`). Kept for historical context.
+
 ```rust
 pub struct Daemon { /* owns everything */ }
 
@@ -579,6 +583,10 @@ A partial list of "clever" things that look helpful and create subtle bugs. Don'
 
 ## Part 3 — Mailbox wire protocol, end-to-end
 
+> **⚠️ Superseded.** This section describes an earlier mailbox wire protocol design that did not ship.
+> The authoritative source is **ADR 0006** (`docs/adr/0006-mailbox-protocol-v1.md`) — the frozen
+> mailbox wire protocol. Kept for historical context.
+
 ### 3.1 Goals
 
 A minimal, versioned, Tor-only protocol that lets:
@@ -850,6 +858,10 @@ Notes:
 - Expiry sweep is a single `DELETE FROM deposits WHERE expires_at < ?` on a timer
 
 ### 3.9 Operator configuration
+
+> **⚠️ Superseded.** The policy knobs and defaults shown below reflect an earlier design that did not ship.
+> The authoritative source for mailbox `Policy` defaults and the operator-tunable knobs is the
+> `Policy` type in `crates/mailbox` / `crates/core/src/mailbox`. Kept for historical context.
 
 ```toml
 # mailbox.toml

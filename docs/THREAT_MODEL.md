@@ -1,13 +1,16 @@
-# Skattr Threat Model v0
+# Skattr Threat Model (v1.0)
 
-> **Status:** Draft at Phase 0 exit. Pre-audit. Will be revised before
-> any public release, and again after the Phase 4 third-party audit.
+> **Status:** v1.0 release model. Reflects the shipped 1:1, attachment-capable,
+> Tor-only client and the mailbox server. A third-party security audit has **not**
+> been performed (disclosed below); this document will be revisited after one.
+> Disclosure scope follows the
+> [v1.0 pull-forward-vs-disclose decision record](superpowers/specs/2026-06-23-v1.0-pull-forward-vs-disclose-decisions.md).
 
 ## Scope
 
 This document covers the Skattr desktop client (`crates/cli` /
-Phase-2 Tauri UI) and the mailbox server (`crates/mailbox`) as they
-exist at the end of Phase 0. It does NOT cover mobile clients
+Tauri UI) and the mailbox server (`crates/mailbox`) as shipped for v1.0.
+It does NOT cover mobile clients
 (post-1.0), the bridge/firewall-circumvention layer (inherited from
 Tor), or operational security practices the user is expected to
 maintain (e.g., backing up their seed phrase).
@@ -37,7 +40,7 @@ Tor circuit, inside TLS. A passive observer sees "this IP is using
 Tor" and nothing else about the Skattr protocol specifically.
 
 **Residual exposure:** Fact that the user is running Tor (not Skattr).
-Partially mitigated by Tor bridges if the user enables them (Phase 1+).
+Partially mitigated by Tor bridges (if supported by your Tor configuration).
 
 ### A2. Active network attacker (MITM, TCP reset, BGP hijack)
 **Capabilities:** All of A1 plus injecting/modifying packets on the
@@ -74,14 +77,19 @@ message sizes, TTLs.
 
 **Defenses:** Mailbox stores MLS ciphertext only; without the MLS
 keys, the contents are random-looking bytes. The mailbox cannot forge
-deposits (sender signs). The mailbox CAN withhold or drop messages,
-but per-sender MLS generation numbers make withholding detectable
-by the recipient.
+deposits (sender signs). The mailbox CAN withhold or drop messages: per-sender MLS generation
+numbers make a withhold **detectable in principle**, but the v1.0 client does
+**not** yet surface a withhold alert — treat this as a latent property, not an
+active defense.
 
-**Residual exposure:** The fact that identity-hash X polled at time
-Y, with message sizes Z. This is load-bearing metadata we don't fully
-defend against in Phase 0. Mitigations: self-host, register with
-multiple mailboxes, enable cover polling (Phase 4).
+**Residual exposure:** The recipient address a mailbox sees is a **stable,
+non-rotating** hash of the recipient's public key. It does not rotate across
+time, so a mailbox can correlate all of a recipient's polls/deposits over its
+whole lifetime, and **two colluding mailboxes can confirm they host the same
+recipient**. Combined with polling cadence, message sizes, and TTLs, this is
+load-bearing metadata v1.0 does not defend against. Mitigations available to the
+user: self-host, and register with multiple mailboxes. (Cover polling / traffic
+padding are **not** implemented — see v1.1 limitations.)
 
 ### A5. Physical seizure / device compromise (stolen laptop)
 **Capabilities:** Physical access to the powered-off device. Full
@@ -99,19 +107,21 @@ process's memory, the on-disk state is opaque.
 (via phishing, keylogger, or brute force on a weak passphrase),
 everything on disk decrypts. Argon2id with `m=64 MiB, t=3, p=4`
 raises brute-force cost but does not eliminate it. Users SHOULD use
-strong passphrases; the CLI does not enforce strength in Phase 0.
+strong passphrases; the CLI does not enforce passphrase strength.
 
 ### A6. Running process compromise (attacker on the live machine)
 **Capabilities:** Runs code as the same Unix user while the daemon
 is running. Can read `/proc/<pid>/mem` on Linux, ptrace the process.
 
-**Defenses:** Minimal at Phase 0. Secret material uses `Zeroize` on
-drop to limit the decrypted-in-RAM window, but while the daemon is
-alive the keys are necessarily in memory. Plaintext SQLite working
-file `skattr.sqlite` exists on disk while the daemon runs.
+**Defenses:** Secret material uses `Zeroize` on drop to limit the
+decrypted-in-RAM window, but while the daemon is alive the keys are
+necessarily in memory. Plaintext SQLite working file `skattr.sqlite`
+exists on disk while the daemon runs.
 
-**Residual exposure:** Everything the live daemon knows. Phase 1+
-mitigations: user-selectable auto-lock that re-encrypts on idle,
+**Residual exposure:** Everything the live daemon knows. The database is
+encrypted on clean shutdown, but while the daemon is running a
+plaintext SQLite working file `skattr.sqlite` exists on disk. Future hardening
+(not in v1.0): user-selectable auto-lock that re-encrypts on idle,
 seccomp/landlock sandboxing, moving the plaintext DB into a
 memfd-backed in-memory file.
 
@@ -119,16 +129,16 @@ memfd-backed in-memory file.
 **Capabilities:** The operating system, Rust toolchain, or any
 transitive dependency has a backdoor or a critical vulnerability.
 
-**Defenses:** Reproducible builds (Phase 4) will let third parties
+**Defenses:** Reproducible builds (planned, not in v1.0) will let third parties
 verify that released binaries match public source. `cargo-deny`
 enforces a license allowlist and advisory DB. Pinned dependency
 versions in `Cargo.lock` (committed). Code signing on distributed
-binaries (Phase 5).
+binaries (planned, not in v1.0).
 
 **Residual exposure:** We have ~300 transitive crates across Arti,
 OpenMLS, RustCrypto. A supply-chain attack on any of them reaches us.
-Audit scope and bug bounty (Phase 4-5) aim to catch issues in the
-protocol-critical subset; the long tail is shared with the broader
+A future audit and bug bounty (planned, not in v1.0) aim to catch issues
+in the protocol-critical subset; the long tail is shared with the broader
 Rust ecosystem.
 
 ## Guarantees (what Skattr promises)
@@ -142,10 +152,15 @@ Rust ecosystem.
   pre-T messages.
 - **Post-compromise security.** A ratchet advances keys on every
   Commit, so recovery is automatic once a compromise ends.
-- **Identity stability.** The BIP39 seed phrase is sufficient to
-  fully restore the identity, the `.onion` address, and (with the
-  storage-seed also recovered — via `skattr restore-backup`) the
-  message history.
+- **Identity stability.** The BIP39 seed phrase fully restores the
+  Ed25519 identity keypair, and — because the message database is encrypted
+  under a seed-derived key — your message history too, **as long as the
+  encrypted database file is intact** (the same seed re-derives its key).
+  The `.onion` address, however, is **not** seed-derived: a clean restore
+  from seed alone generates a **new** HS key → a **new** onion address. To
+  preserve the onion address (and to recover history on a clean machine or
+  after the database file is lost), use the encrypted backup
+  (`skattr restore-backup`, which carries `hs.key.age` and the seed-encrypted DB).
 - **No central trust.** No server sees plaintext, the contact graph,
   or even who is talking to whom (modulo per-mailbox identity-hash
   polling).
@@ -173,9 +188,34 @@ Rust ecosystem.
   (hiding IPs) but the mailbox sees the recipient's identity hash.
   We do not hide WHICH contact you're depositing for.
 - **Multi-device identity.** A single identity runs on a single
-  device at a time in Phase 0-1. Multi-device is a post-1.0 project.
+  device at a time. Multi-device is a post-1.0 project.
 
-## Open questions, tracked for Phase 1+
+## v1.0 known limitations (deferred to a later release)
+
+These are absent in v1.0 by decision (see the
+[disclosure decision record](superpowers/specs/2026-06-23-v1.0-pull-forward-vs-disclose-decisions.md)):
+
+- **First-contact requires both peers online.** The first-contact Welcome is
+  delivered directly (no mailbox fallback); if the inviter is offline when the
+  joiner sends the Welcome, first contact stalls until both are online. Ordinary
+  messages and ContactCard updates *do* have mailbox fallback. (D1)
+- **Onion-address rotation is degenerate.** `Command::RotateOnion` bumps the
+  self-card version and republishes the *current* onion; it does not generate a
+  new address. True rotation is future work. (D2)
+- **Offline attachments are best-effort.** Deposited chunks are held by a mailbox
+  for ~7 days and dropped if never fetched within the window; files larger than
+  10 MiB transfer only while both peers are online. Text messages are not subject
+  to these limits. (D3)
+- **No metadata-minimization.** No message-size padding, send-timing jitter, or
+  cover traffic / cover polling.
+- **The recipient-hash mailbox-correlation leak** (A4) is unmitigated.
+- **No multi-member groups (> 2).**
+- **Reactions / edit / delete-for-everyone / typing / read receipts** are inert
+  placeholders.
+- **No multi-device.**
+- **No third-party security audit** has been performed for v1.0.
+
+## Open questions (v1.1+)
 
 - How do we detect and surface a silent-withhold mailbox? MLS
   generation numbers let the receiver detect gaps, but we need a
@@ -194,3 +234,4 @@ Rust ecosystem.
 | Version | Date       | Notes                                       |
 |---------|------------|---------------------------------------------|
 | v0      | 2026-04-17 | Initial draft, end of Phase 0. Pre-audit.   |
+| v1.0    | 2026-06-25 | v1.0 release model: withhold-detection downgraded, identity-hash correlation disclosed, D1/D2/D3 + v1.1 list added. |
