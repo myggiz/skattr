@@ -16,7 +16,7 @@ honest docs, a working download-verification chain, and real signing keys. See
 ## What Skattr is
 
 - **Peer-to-peer.** Clients reach each other directly via Tor onion services. No central relay.
-- **Metadata-resistant.** Tor hides network-level metadata; a semi-trusted "mailbox" handles offline delivery and learns only that *someone* has pending ciphertext for *some* identity hash.
+- **Metadata-resistant.** Tor hides network-level metadata; a semi-trusted "mailbox" handles offline delivery and sees only opaque ciphertext, but it does learn a *stable* per-recipient hash plus polling/size metadata — see [THREAT_MODEL.md](docs/THREAT_MODEL.md) for the correlation caveats.
 - **1:1, built on MLS.** v1.0 is two-party messaging — a 2-member [MLS](https://datatracker.ietf.org/doc/rfc9420/) group. Multi-member groups (> 2) are deferred to a later release.
 - **Desktop first.** Native app via Tauri, with a CLI alongside for power users and scripting.
 - **Rust, all the way down.** Tor via [Arti](https://gitlab.torproject.org/tpo/core/arti), MLS via [OpenMLS](https://openmls.tech/), transport auth via [Noise_XK](https://noiseprotocol.org/) (through `snow`).
@@ -44,7 +44,7 @@ honest docs, a working download-verification chain, and real signing keys. See
 ## Limitations (v1.0)
 
 - **Two-party only.** Multi-member groups (> 2) are deferred.
-- **First contact needs both peers online at once** — if your contact is offline when you add them, the connection completes once they are online.
+- **First contact needs both peers online at once** — first contact is direct-only (no mailbox fallback); if your contact is offline when you add them, the connection will not complete until they are online.
 - **"Rotate onion address" is not yet real** — it republishes your current address with a new card version; true address rotation is planned for a later release.
 - **Offline attachments are best-effort** — held by a mailbox for ~7 days and dropped if never fetched; files over 10 MiB transfer only while both peers are online.
 - Not a low-latency chat (Tor round-trips cost seconds), not mobile in v1.0, and not "anonymous" — your contacts know who you are.

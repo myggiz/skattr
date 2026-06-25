@@ -153,10 +153,14 @@ Rust ecosystem.
 - **Post-compromise security.** A ratchet advances keys on every
   Commit, so recovery is automatic once a compromise ends.
 - **Identity stability.** The BIP39 seed phrase fully restores the
-  Ed25519 identity keypair. The `.onion` address and message history are
-  preserved only via the encrypted backup (`skattr restore-backup`, which
-  carries `hs.key.age` and the seed-encrypted DB); a clean restore from
-  seed alone generates a **new** HS key → a **new** onion address.
+  Ed25519 identity keypair, and — because the message database is encrypted
+  under a seed-derived key — your message history too, **as long as the
+  encrypted database file is intact** (the same seed re-derives its key).
+  The `.onion` address, however, is **not** seed-derived: a clean restore
+  from seed alone generates a **new** HS key → a **new** onion address. To
+  preserve the onion address (and to recover history on a clean machine or
+  after the database file is lost), use the encrypted backup
+  (`skattr restore-backup`, which carries `hs.key.age` and the seed-encrypted DB).
 - **No central trust.** No server sees plaintext, the contact graph,
   or even who is talking to whom (modulo per-mailbox identity-hash
   polling).

@@ -87,7 +87,7 @@ Replace the whole block from `## What works now (through Phase 1.E)` through the
 ## Limitations (v1.0)
 
 - **Two-party only.** Multi-member groups (> 2) are deferred.
-- **First contact needs both peers online at once** — if your contact is offline when you add them, the connection completes once they are online.
+- **First contact needs both peers online at once** — first contact is direct-only (no mailbox fallback); if your contact is offline when you add them, the connection will not complete until they are online.
 - **"Rotate onion address" is not yet real** — it republishes your current address with a new card version; true address rotation is planned for a later release.
 - **Offline attachments are best-effort** — held by a mailbox for ~7 days and dropped if never fetched; files over 10 MiB transfer only while both peers are online.
 - Not a low-latency chat (Tor round-trips cost seconds), not mobile in v1.0, and not "anonymous" — your contacts know who you are.
