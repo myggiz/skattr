@@ -144,11 +144,11 @@ async fn offline_peer_receives_via_mailbox_fallback() {
 
     let ready_a = tokio::time::timeout(Duration::from_secs(60), ready_a_rx)
         .await
-        .expect("Alice ready within 30 s")
+        .expect("Alice ready within 60 s")
         .expect("Alice ready_tx open");
     let ready_b = tokio::time::timeout(Duration::from_secs(60), ready_b_rx)
         .await
-        .expect("Bob ready within 30 s")
+        .expect("Bob ready within 60 s")
         .expect("Bob ready_tx open");
 
     // Sanity: each side advertises the onion we expect.
