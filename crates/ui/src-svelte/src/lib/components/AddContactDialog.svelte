@@ -41,7 +41,7 @@
       } as any);
       if (resp.resp === "err") {
         const d = resp.data;
-        if (d.err === "daemon" && (d.data.kind === "delivery_timeout" || d.data.kind === "tor_not_ready")) {
+        if (d.err === "daemon" && d.data.kind === "delivery_timeout") {
           error = "Couldn't reach your contact. First contact needs both of you online at the same time — try again when they're back online.";
         } else {
           error = errorMessage(d);

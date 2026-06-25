@@ -86,19 +86,34 @@
     }
   }
 
-  async function exportBackupAction() {
+  /**
+   * Show the save-picker, run the export, and toast on success/failure.
+   * Returns true only when an export SUCCEEDED; returns false on cancel or
+   * failure. Callers must NOT advance to a destructive step unless true.
+   */
+  async function pickAndExport(): Promise<boolean> {
     try {
       const path = await save({
         defaultPath: "skattr-backup.age",
         filters: [{ name: "Skattr backup", extensions: ["age"] }],
       });
-      if (path) {
-        await exportBackup(path);
-        toast.show("Backup saved.");
+      if (!path) {
+        // User cancelled the picker — do NOT advance.
+        return false;
       }
+      await exportBackup(path);
+      toast.show("Backup saved.");
+      return true;
     } catch (e) {
-      toast.show(`${e}`);
+      // Export failed — show error, stay on current stage.
+      toast.show(`Backup failed: ${e}`);
+      return false;
     }
+  }
+
+  async function exportBackupAction() {
+    await pickAndExport();
+    // Return value intentionally ignored: the action button doesn't gate anything.
   }
 
   /**
@@ -107,27 +122,27 @@
    * stage 1 so the user can retry or choose another path.
    */
   async function exportBackupThenAdvance() {
-    try {
-      const path = await save({
-        defaultPath: "skattr-backup.age",
-        filters: [{ name: "Skattr backup", extensions: ["age"] }],
-      });
-      if (!path) {
-        // User cancelled the picker — do NOT advance.
-        return;
-      }
-      await exportBackup(path);
-      toast.show("Backup saved.");
-      // Only advance after a confirmed successful export.
-      confirmStage1 = false;
-      confirmStage2 = true;
-    } catch (e) {
-      // Export failed — show error and stay on stage 1.
-      toast.show(`Backup failed: ${e}`);
+    const exported = await pickAndExport();
+    if (!exported) {
+      // Cancelled or failed — do NOT advance.
+      return;
     }
+    // Only advance after a confirmed successful export.
+    confirmStage1 = false;
+    confirmStage2 = true;
   }
 
   let stage1Busy = $state(false);
+  // Focus ref for the Cancel button in the stage-1 dialog (safe default focus
+  // for a destructive modal — never focus the destructive action).
+  let stage1CancelBtn = $state<HTMLButtonElement | null>(null);
+
+  // Move focus to Cancel when the stage-1 dialog opens.
+  $effect(() => {
+    if (confirmStage1 && stage1CancelBtn) {
+      stage1CancelBtn.focus();
+    }
+  });
 
   async function stage1ExportAndAdvance() {
     if (stage1Busy) return;
@@ -245,12 +260,19 @@
 
 {#if confirmStage1}
   <!-- Bespoke three-button stage-1 dialog (ConfirmDialog supports only two buttons). -->
-  <div class="overlay" role="dialog" aria-modal="true" aria-labelledby="wipe-stage1-title">
+  <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+  <div
+    class="overlay"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="wipe-stage1-title"
+    onkeydown={(e) => { if (e.key === "Escape" && !stage1Busy) confirmStage1 = false; }}
+  >
     <div class="dialog">
       <h2 id="wipe-stage1-title">Delete all Skattr data?</h2>
       <p>This permanently removes contacts, messages, mailboxes, identity, and the database. This cannot be undone. Export a backup first if you want to keep a copy.</p>
       <div class="actions">
-        <button type="button" onclick={() => (confirmStage1 = false)} disabled={stage1Busy}>
+        <button type="button" bind:this={stage1CancelBtn} onclick={() => (confirmStage1 = false)} disabled={stage1Busy}>
           Cancel
         </button>
         <button

@@ -423,11 +423,11 @@ Expected: existing tests still pass (the change only refines the error kind on t
 
 - [ ] **Step 3: First-contact wording in AddContactDialog**
 
-In `AddContactDialog.svelte` `submit()`, when `resp.resp === "err"` and the kind is `delivery_timeout` or `tor_not_ready`, show the first-contact-specific message and **keep the dialog open** so the user can re-submit (the invite was not consumed on dial failure):
+In `AddContactDialog.svelte` `submit()`, when `resp.resp === "err"` and the kind is `delivery_timeout`, show the first-contact-specific message and **keep the dialog open** so the user can re-submit (the invite was not consumed on dial failure). `tor_not_ready` is local Tor startup state, not peer reachability — it falls through to `errorMessage(d)` which already returns "Still connecting to Tor — try again in a moment.":
 ```typescript
       if (resp.resp === "err") {
         const d = resp.data;
-        if (d.err === "daemon" && (d.data.kind === "delivery_timeout" || d.data.kind === "tor_not_ready")) {
+        if (d.err === "daemon" && d.data.kind === "delivery_timeout") {
           error = "Couldn't reach your contact. First contact needs both of you online at the same time — try again when they're back online.";
         } else {
           error = errorMessage(d);

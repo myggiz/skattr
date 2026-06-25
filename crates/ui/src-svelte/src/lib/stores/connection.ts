@@ -38,8 +38,12 @@ export async function handleStreamClosed(
         connection.set({ state: "live" });
         return;
       } catch {
-        const delay = Math.min(baseDelayMs * 2 ** attempt, 8000);
-        if (delay > 0) await sleep(delay);
+        // Skip the sleep on the final attempt — no further retry will follow,
+        // so delaying only postpones the "dead" transition the user sees.
+        if (attempt < maxAttempts - 1) {
+          const delay = Math.min(baseDelayMs * 2 ** attempt, 8000);
+          if (delay > 0) await sleep(delay);
+        }
       }
     }
     connection.set({ state: "dead" });
