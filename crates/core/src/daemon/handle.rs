@@ -6,7 +6,8 @@
 //! `DaemonHandle` groups the subsystems every command handler needs.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, RwLock};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::broadcast;
@@ -122,6 +123,12 @@ where
     /// boot because the root seed is consumed during identity setup and not
     /// retained. Used by `Command::ExportBackup`.
     pub(crate) backup_key: zeroize::Zeroizing<[u8; 32]>,
+    /// Wipe-requested signal (T3-3). Set by `wipe_all_data` so the IPC
+    /// connection loop can perform the actual teardown AFTER the reply
+    /// `Bye` frame is flushed, rather than relying on a fixed sleep.
+    /// `OnceLock` means it transitions exactly once (None → Some(data_dir))
+    /// and is readable without mutable access.
+    pub(crate) wipe_target: Arc<OnceLock<PathBuf>>,
 }
 
 impl<S> DaemonHandle<S>
@@ -161,6 +168,7 @@ where
             group_locks: new_group_lock_registry(),
             inbound: None,
             backup_key: zeroize::Zeroizing::new([0u8; 32]),
+            wipe_target: Arc::new(OnceLock::new()),
         }
     }
 
@@ -191,6 +199,7 @@ where
             group_locks: new_group_lock_registry(),
             inbound: None,
             backup_key: zeroize::Zeroizing::new([0u8; 32]),
+            wipe_target: Arc::new(OnceLock::new()),
         }
     }
 
@@ -228,6 +237,7 @@ where
             group_locks: new_group_lock_registry(),
             inbound: None,
             backup_key: zeroize::Zeroizing::new([0u8; 32]),
+            wipe_target: Arc::new(OnceLock::new()),
         }
     }
 
@@ -322,6 +332,31 @@ where
     pub(crate) fn group_locks(&self) -> GroupLockRegistry {
         self.group_locks.clone()
     }
+
+    /// Signal that a wipe is requested (T3-3). Called by `wipe_all_data`
+    /// before returning `Ok`; the IPC connection loop checks this after
+    /// flushing the terminal `Bye` frame and performs the actual teardown
+    /// there — no blind sleep required.
+    ///
+    /// `OnceLock` ensures the signal is written exactly once. A second
+    /// call (which should never happen) is silently ignored.
+    pub(crate) fn signal_wipe(&self, data_dir: PathBuf) {
+        let _ = self.wipe_target.set(data_dir);
+    }
+
+    /// Consume the wipe signal. Returns `Some(data_dir)` the first time
+    /// after `signal_wipe` was called, `None` on all subsequent calls or
+    /// if `signal_wipe` was never called.
+    ///
+    /// Called by the `CommandExecutor::take_wipe_target` impl, which is
+    /// in turn called by `handle_connection` after it writes the `Bye`
+    /// frame. `OnceLock::get` is non-destructive, but since we only call
+    /// this once (per wipe request) the "consumed" semantics hold for
+    /// our use case.
+    #[must_use]
+    pub(crate) fn take_wipe_target(&self) -> Option<PathBuf> {
+        self.wipe_target.get().cloned()
+    }
 }
 
 #[async_trait::async_trait]
@@ -339,6 +374,10 @@ where
 
     fn latest_tor_status(&self) -> Option<crate::daemon::events::TorStatus> {
         DaemonHandle::latest_tor_status(self)
+    }
+
+    fn take_wipe_target(&self) -> Option<PathBuf> {
+        DaemonHandle::take_wipe_target(self)
     }
 }
 
@@ -362,6 +401,7 @@ where
             group_locks: self.group_locks.clone(),
             inbound: self.inbound.clone(),
             backup_key: zeroize::Zeroizing::new(*self.backup_key),
+            wipe_target: self.wipe_target.clone(),
         }
     }
 }

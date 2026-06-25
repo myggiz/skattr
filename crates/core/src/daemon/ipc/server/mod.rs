@@ -8,6 +8,7 @@
 //! Windows). The platform-specific `Server` type is re-exported from
 //! the active child module.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::broadcast;
@@ -43,6 +44,18 @@ pub trait CommandExecutor: Send + Sync {
     /// stubs and pre-2.C executors compile unchanged. The production
     /// `DaemonHandle` impl returns `latest_tor_status()`.
     fn latest_tor_status(&self) -> Option<crate::daemon::events::TorStatus> {
+        None
+    }
+
+    /// Return the wipe target path if `WipeAllData` was dispatched on
+    /// this connection, consuming the signal. Default `None` so test
+    /// stubs and executors that never handle `WipeAllData` compile
+    /// unchanged. The production `DaemonHandle` impl delegates to
+    /// `DaemonHandle::take_wipe_target`.
+    ///
+    /// Called by `handle_connection` AFTER writing the terminal `Bye`
+    /// frame so the teardown is flush-ordered (T3-3).
+    fn take_wipe_target(&self) -> Option<PathBuf> {
         None
     }
 }
@@ -163,6 +176,27 @@ pub async fn handle_connection<S>(
 
     // Terminal frame. Ignore write errors — the peer may already be gone.
     let _ = write_frame(&mut stream, &IpcResponse::Bye).await;
+
+    // T3-3: flush-ordered wipe teardown. If `WipeAllData` was dispatched
+    // on this connection, the handler set a signal instead of spawning a
+    // blind sleep. Now that the reply + Bye are flushed, perform the
+    // actual teardown: remove the data directory, then exit. This runs
+    // deterministically AFTER the client has received its reply.
+    if let Some(data_dir) = executor.take_wipe_target() {
+        // Drop the executor (and its Arc<DaemonHandle>) so background
+        // tasks (retention sweep, log tap, mailbox poller) get a chance
+        // to wind down before we remove their storage.
+        drop(executor);
+
+        if let Err(e) = tokio::fs::remove_dir_all(&data_dir).await {
+            tracing::error!(
+                error = %e,
+                dir = ?data_dir,
+                "wipe_all_data: remove_dir_all failed; exiting anyway"
+            );
+        }
+        std::process::exit(0);
+    }
 }
 
 /// Accept loop. Spawns [`handle_connection`] per accepted stream.

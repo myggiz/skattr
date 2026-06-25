@@ -1728,32 +1728,15 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     // Resolve data_dir from the live config (same pattern as change_passphrase).
-    // Read-lock dropped before the spawn so nothing holds the lock during teardown.
+    // Read-lock dropped before signalling so nothing holds the lock during teardown.
     let data_dir = handle.config.read().await.data_dir.clone();
 
-    // Spawn the teardown so we can return Ok BEFORE the IPC layer tears down.
-    // This is the ONE handler that intentionally outlives its caller.
-    tokio::spawn(async move {
-        // Allow ~150ms for the reply to flush back over the IPC stream.
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-
-        // Best-effort: drop the handle so background tasks (retention sweep,
-        // log tap, mailbox poller) get a chance to wind down.
-        std::mem::drop(handle);
-
-        // Brief settle to let in-flight tasks finish their current ticks.
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-
-        // Wipe the data directory.
-        if let Err(e) = tokio::fs::remove_dir_all(&data_dir).await {
-            tracing::error!(
-                error = %e,
-                dir = ?data_dir,
-                "wipe_all_data: remove_dir_all failed; exiting anyway"
-            );
-        }
-        std::process::exit(0);
-    });
+    // T3-3: signal intent instead of spawning a detached sleep-and-teardown
+    // task. The IPC connection loop in `server/mod.rs` checks this signal
+    // AFTER it has written the terminal `Bye` frame (i.e. after the reply
+    // is guaranteed-flushed to the client), then performs the actual
+    // teardown there. This is deterministic — no blind sleep, no race.
+    handle.signal_wipe(data_dir);
 
     Ok(CommandResult::Ok)
 }
@@ -4948,6 +4931,62 @@ mod tests {
         assert!(
             !data_dir.join("skattr.sqlite.backup.age").exists(),
             "temp snapshot must be cleaned up"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // WipeAllData signal tests (T3-3)
+    // ---------------------------------------------------------------------------
+
+    /// `WipeAllData` returns `Ok` immediately and sets the wipe signal on the
+    /// handle. No blocking, no sleep. The IPC server reads the signal after
+    /// writing the `Bye` frame.
+    #[tokio::test]
+    async fn wipe_all_data_sets_signal_and_returns_ok() {
+        let workdir = tempfile::tempdir().unwrap();
+        let data_dir = workdir.path().join("skattr-data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        let seed = Seed::generate().unwrap();
+        let identity = IdentityKey::from_seed(&seed).unwrap();
+        let pool = Arc::new(Pool::in_memory());
+        let hub: Arc<DeliveryHub<tokio::io::DuplexStream>> =
+            Arc::new(DeliveryHub::new(pool.clone()));
+        let (events_tx, _) = broadcast::channel::<Event>(16);
+
+        let mut config = crate::daemon::config::Config::defaults()
+            .unwrap_or_else(|_| crate::daemon::config::Config::fallback_for_tests());
+        config.data_dir = data_dir.clone();
+
+        let handle: Arc<DaemonHandle<tokio::io::DuplexStream>> =
+            Arc::new(DaemonHandle::new_with_config(
+                pool,
+                hub,
+                identity,
+                events_tx,
+                config,
+                data_dir.join("skattr.toml"),
+            ));
+
+        // Before WipeAllData: signal must be absent.
+        assert!(
+            handle.take_wipe_target().is_none(),
+            "wipe_target must be None before command"
+        );
+
+        // Dispatch the command.
+        let result = execute_command(handle.clone(), Command::WipeAllData).await;
+        assert!(
+            matches!(result, Ok(CommandResult::Ok)),
+            "WipeAllData must return Ok, got {result:?}"
+        );
+
+        // After WipeAllData: signal must carry the data_dir.
+        let target = handle.take_wipe_target();
+        assert_eq!(
+            target.as_deref(),
+            Some(data_dir.as_path()),
+            "wipe_target must be data_dir after WipeAllData"
         );
     }
 }
