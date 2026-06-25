@@ -1,0 +1,65 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+name: flatpak
+
+# Build-validate the in-repo Flatpak manifest so it can't silently rot.
+# This compiles the whole app under the flatpak-builder sandbox and pulls
+# ~GB of runtime/SDK + extensions, so it is intentionally NOT gated on
+# every PR — only master pushes, a weekly cron, and manual dispatch.
+# No bundle is produced and no artifact is uploaded (Flathub shipping is
+# deferred to v1.1); the job exists purely as a manifest rot-check.
+
+on:
+  push:
+    branches: [master]
+  schedule:
+    - cron: "0 6 * * 1"   # weekly, Monday 06:00 UTC — catch manifest rot
+  workflow_dispatch: {}
+
+jobs:
+  build-validate:
+    name: flatpak manifest build-validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install flatpak + flatpak-builder
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder
+
+      - name: Add Flathub + install runtime/SDK + extensions (23.08)
+        run: |
+          flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          # The manifest (net.myggiz.skattr.yml) declares two sdk-extensions:
+          # rust-stable and node20. Without them the Rust/pnpm build commands
+          # have no toolchain on append-path and the build fails. Mirrors the
+          # install in docs/build/flatpak.md.
+          flatpak install --user -y flathub \
+            org.freedesktop.Platform//23.08 \
+            org.freedesktop.Sdk//23.08 \
+            org.freedesktop.Sdk.Extension.rust-stable//23.08 \
+            org.freedesktop.Sdk.Extension.node20//23.08
+
+      - name: Cache flatpak-builder
+        uses: actions/cache@v5
+        with:
+          path: .flatpak-builder
+          key: flatpak-builder-${{ hashFiles('packaging/flatpak/net.myggiz.skattr.yml') }}
+          restore-keys: |
+            flatpak-builder-
+
+      - name: Build-validate the manifest (no bundle, no upload)
+        run: |
+          # Mirrors docs/build/flatpak.md's local command, minus --install
+          # (we don't need the app installed — only that it builds) and plus:
+          #   --repo / build target dirs under $RUNNER_TEMP (ephemeral),
+          #   --disable-rofiles-fuse (no FUSE in the CI runner),
+          #   --share-network on the build sandbox: the manifest does NOT
+          #     vendor its deps, so cargo install / corepack / pnpm install
+          #     need network during the build phase (Flathub's offline,
+          #     pre-fetched-sources variant is the deferred manifest, see docs).
+          flatpak-builder --user --force-clean --disable-rofiles-fuse \
+            --share-network \
+            --repo="$RUNNER_TEMP/repo" \
+            "$RUNNER_TEMP/build" \
+            packaging/flatpak/net.myggiz.skattr.yml
