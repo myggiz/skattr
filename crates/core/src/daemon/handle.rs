@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::broadcast;
@@ -121,14 +121,16 @@ where
     pub(crate) inbound: Option<Arc<dyn crate::delivery::peer::InboundDispatch>>,
     /// Precomputed backup key (`HKDF(seed, "skattr-backup-v1")`). Derived at
     /// boot because the root seed is consumed during identity setup and not
-    /// retained. Used by `Command::ExportBackup`.
-    pub(crate) backup_key: zeroize::Zeroizing<[u8; 32]>,
+    /// retained. Used by `Command::ExportBackup`. `None` until
+    /// `set_backup_key` is called; `export_backup_cmd` fails closed
+    /// (`InvalidArgument`) if it is still `None` at call time.
+    pub(crate) backup_key: Option<zeroize::Zeroizing<[u8; 32]>>,
     /// Wipe-requested signal (T3-3). Set by `wipe_all_data` so the IPC
     /// connection loop can perform the actual teardown AFTER the reply
     /// `Bye` frame is flushed, rather than relying on a fixed sleep.
-    /// `OnceLock` means it transitions exactly once (None → Some(data_dir))
-    /// and is readable without mutable access.
-    pub(crate) wipe_target: Arc<OnceLock<PathBuf>>,
+    /// `Mutex<Option<PathBuf>>` allows `take_wipe_target` to genuinely
+    /// consume the signal so a second caller sees `None`.
+    pub(crate) wipe_target: Arc<Mutex<Option<PathBuf>>>,
 }
 
 impl<S> DaemonHandle<S>
@@ -167,8 +169,8 @@ where
             log_sink: LogSink::default(),
             group_locks: new_group_lock_registry(),
             inbound: None,
-            backup_key: zeroize::Zeroizing::new([0u8; 32]),
-            wipe_target: Arc::new(OnceLock::new()),
+            backup_key: None,
+            wipe_target: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -198,8 +200,8 @@ where
             log_sink: LogSink::default(),
             group_locks: new_group_lock_registry(),
             inbound: None,
-            backup_key: zeroize::Zeroizing::new([0u8; 32]),
-            wipe_target: Arc::new(OnceLock::new()),
+            backup_key: None,
+            wipe_target: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -236,8 +238,8 @@ where
             log_sink: LogSink::default(),
             group_locks: new_group_lock_registry(),
             inbound: None,
-            backup_key: zeroize::Zeroizing::new([0u8; 32]),
-            wipe_target: Arc::new(OnceLock::new()),
+            backup_key: None,
+            wipe_target: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -278,9 +280,10 @@ where
 
     /// Store the precomputed backup key. Called by `run_with_transport` after
     /// deriving `HKDF(seed, "skattr-backup-v1")` while the seed is still in
-    /// scope. Test helpers leave the field at its zero default.
+    /// scope. Until this is called the field is `None`; `export_backup_cmd`
+    /// fails closed with `InvalidArgument` if the key is absent.
     pub(crate) fn set_backup_key(&mut self, key: zeroize::Zeroizing<[u8; 32]>) {
-        self.backup_key = key;
+        self.backup_key = Some(key);
     }
 
     /// Snapshot the latest cached `TorStatus`. Non-blocking RwLock read.
@@ -338,24 +341,27 @@ where
     /// flushing the terminal `Bye` frame and performs the actual teardown
     /// there — no blind sleep required.
     ///
-    /// `OnceLock` ensures the signal is written exactly once. A second
-    /// call (which should never happen) is silently ignored.
+    /// Idempotent: if a signal is already set (should never happen in
+    /// practice) the second call is silently ignored.
     pub(crate) fn signal_wipe(&self, data_dir: PathBuf) {
-        let _ = self.wipe_target.set(data_dir);
+        if let Ok(mut guard) = self.wipe_target.lock() {
+            if guard.is_none() {
+                *guard = Some(data_dir);
+            }
+        }
     }
 
     /// Consume the wipe signal. Returns `Some(data_dir)` the first time
-    /// after `signal_wipe` was called, `None` on all subsequent calls or
-    /// if `signal_wipe` was never called.
+    /// after `signal_wipe` was called; `None` on all subsequent calls or
+    /// if `signal_wipe` was never called. The signal is genuinely consumed
+    /// (`take`n) so a second caller always sees `None`.
     ///
     /// Called by the `CommandExecutor::take_wipe_target` impl, which is
     /// in turn called by `handle_connection` after it writes the `Bye`
-    /// frame. `OnceLock::get` is non-destructive, but since we only call
-    /// this once (per wipe request) the "consumed" semantics hold for
-    /// our use case.
+    /// frame (T3-3 flush-ordered teardown).
     #[must_use]
     pub(crate) fn take_wipe_target(&self) -> Option<PathBuf> {
-        self.wipe_target.get().cloned()
+        self.wipe_target.lock().ok()?.take()
     }
 }
 
@@ -379,6 +385,12 @@ where
     fn take_wipe_target(&self) -> Option<PathBuf> {
         DaemonHandle::take_wipe_target(self)
     }
+
+    fn wipe_close(&self) {
+        if let Err(e) = self.pool.close() {
+            tracing::warn!(error = %e, "wipe_close: pool close failed");
+        }
+    }
 }
 
 impl<S> DaemonHandle<S>
@@ -400,7 +412,10 @@ where
             log_sink: self.log_sink.clone(),
             group_locks: self.group_locks.clone(),
             inbound: self.inbound.clone(),
-            backup_key: zeroize::Zeroizing::new(*self.backup_key),
+            backup_key: self
+                .backup_key
+                .as_deref()
+                .map(|b| zeroize::Zeroizing::new(*b)),
             wipe_target: self.wipe_target.clone(),
         }
     }

@@ -1693,6 +1693,11 @@ where
 /// bundle it with `data_dir` supplementary files into an archive at
 /// `dest_path` encrypted under the daemon's backup key, then remove the
 /// temp file regardless of outcome.
+///
+/// Both `snapshot_encrypted` (VACUUM INTO + age encrypt) and
+/// `export_backup_from_parts` (tar + age encrypt) are synchronous CPU+I/O;
+/// each is wrapped in `tokio::task::spawn_blocking` to avoid blocking the
+/// async executor.
 async fn export_backup_cmd<S>(
     handle: Arc<DaemonHandle<S>>,
     dest_path: String,
@@ -1700,18 +1705,49 @@ async fn export_backup_cmd<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    use crate::daemon::error_kind::DaemonErrorKind;
+
+    // Fail closed: if the backup key was never initialized (key is None),
+    // return InvalidArgument rather than silently encrypting with zeroes.
+    let backup_key_bytes: [u8; 32] = handle
+        .backup_key
+        .as_deref()
+        .ok_or_else(|| {
+            IpcError::Daemon(DaemonErrorKind::InvalidArgument {
+                message: "backup key not initialized".into(),
+            })
+        })
+        .copied()?;
+
     let data_dir = handle.config.read().await.data_dir.clone();
     let dest = std::path::PathBuf::from(&dest_path);
     // Temp snapshot distinct from the live `skattr.sqlite.age` so we never
     // clobber the pool's at-rest file even if bundling fails partway through.
     let db_age = data_dir.join("skattr.sqlite.backup.age");
-    handle.pool.snapshot_encrypted(&db_age).map_err(map_err)?;
-    let res = crate::storage::backup::export_backup_from_parts(
-        &data_dir,
-        &db_age,
-        &dest,
-        &handle.backup_key,
-    );
+
+    // snapshot_encrypted is synchronous (VACUUM INTO + age encrypt).
+    let pool = handle.pool.clone();
+    let db_age_clone = db_age.clone();
+    let snap_result = tokio::task::spawn_blocking(move || pool.snapshot_encrypted(&db_age_clone))
+        .await
+        .map_err(|e| IpcError::Internal(format!("spawn_blocking join: {e}")))?;
+    snap_result.map_err(map_err)?;
+
+    // export_backup_from_parts is also synchronous (tar + age encrypt).
+    let data_dir_clone = data_dir.clone();
+    let db_age_clone2 = db_age.clone();
+    let res = tokio::task::spawn_blocking(move || {
+        let key = zeroize::Zeroizing::new(backup_key_bytes);
+        crate::storage::backup::export_backup_from_parts(
+            &data_dir_clone,
+            &db_age_clone2,
+            &dest,
+            &key,
+        )
+    })
+    .await
+    .map_err(|e| IpcError::Internal(format!("spawn_blocking join: {e}")))?;
+
     let _ = std::fs::remove_file(&db_age); // clean up the temp DB .age
     res.map_err(map_err)?;
     Ok(CommandResult::Ok)
@@ -4874,9 +4910,11 @@ mod tests {
     /// `ExportBackup` produces the archive at the requested path and cleans up
     /// the temporary `skattr.sqlite.backup.age` file.
     ///
-    /// The test handle uses `backup_key = [0u8; 32]` (Task 7 default). We don't
-    /// decrypt the resulting archive — just assert it exists and that the temp
-    /// file was removed.
+    /// Fix 1: the handle now needs an explicit `set_backup_key` call — it
+    /// defaults to `None` and `export_backup_cmd` fails closed otherwise.
+    /// We use `[1u8; 32]` as a deterministic test key (not zero so we can
+    /// tell it apart from the old default). We don't decrypt the resulting
+    /// archive — just assert it exists and that the temp file was removed.
     ///
     /// `Pool::snapshot_encrypted` uses `VACUUM INTO` which requires a real on-disk
     /// database (`working_path` must be a writable path, not `/dev/null`). We
@@ -4898,21 +4936,24 @@ mod tests {
         std::fs::write(data_dir.join("hs.key.age"), b"stub-hs-key").unwrap();
 
         // Build a handle whose config.data_dir points at the same tempdir.
+        // Fix 1: set_backup_key before wrapping in Arc — the field is now
+        // Option<Zeroizing<[u8;32]>> and defaults to None.
         let identity = crate::identity::IdentityKey::from_seed(&seed).unwrap();
         let hub: Arc<crate::delivery::hub::DeliveryHub<tokio::io::DuplexStream>> =
             Arc::new(crate::delivery::hub::DeliveryHub::new(pool.clone()));
         let (events_tx, _) = broadcast::channel::<Event>(16);
         let mut cfg = crate::daemon::config::Config::fallback_for_tests();
         cfg.data_dir = data_dir.clone();
-        let handle: Arc<DaemonHandle<tokio::io::DuplexStream>> =
-            Arc::new(DaemonHandle::new_with_config(
-                pool,
-                hub,
-                identity,
-                events_tx,
-                cfg,
-                data_dir.join("config.toml"),
-            ));
+        let mut h = DaemonHandle::new_with_config(
+            pool,
+            hub,
+            identity,
+            events_tx,
+            cfg,
+            data_dir.join("config.toml"),
+        );
+        h.set_backup_key(zeroize::Zeroizing::new([1u8; 32]));
+        let handle: Arc<DaemonHandle<tokio::io::DuplexStream>> = Arc::new(h);
 
         let dest = data_dir.join("backup.skattr");
         let result = execute_command(

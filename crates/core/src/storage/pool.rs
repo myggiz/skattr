@@ -237,6 +237,9 @@ impl Pool {
                     .map_err(|e| {
                         CoreError::Storage(StorageErrorKind::Other(format!("checkpoint: {e}")))
                     })?;
+                // Remove any stale snapshot from a previous crash-mid-export;
+                // VACUUM INTO fails if the destination file already exists.
+                let _ = std::fs::remove_file(&snap);
                 // VACUUM INTO writes a consistent snapshot even with an active WAL.
                 conn.execute("VACUUM INTO ?1", [snap.to_string_lossy().as_ref()])
                     .map_err(|e| {
