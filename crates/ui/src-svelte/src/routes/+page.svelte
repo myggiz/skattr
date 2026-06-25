@@ -20,6 +20,8 @@
   import { applyProgress, applyReceived, applyFailed } from "$lib/stores/attachments";
   import { deepLinkInviteUrl } from "$lib/stores/deepLink";
   import { ipcClient } from "$lib/ipc/tauri";
+  import { connection, handleStreamClosed } from "$lib/stores/connection";
+  import { listen } from "@tauri-apps/api/event";
   import type { ContactSummary, PublicKey } from "$lib/ipc/types";
 
   let inviteOpen = $state(false);
@@ -81,34 +83,45 @@
   });
 
   // Subscribe to events on mount; update stores.
+  // `reSubscribe` is extracted so it can be re-invoked on IPC stream death.
+  let unsub: (() => void) | null = null;
+  async function reSubscribe(): Promise<void> {
+    if (unsub) { unsub(); unsub = null; }
+    unsub = await ipcClient.subscribe({ filter: "all" }, (e) => {
+      // Event is adjacent-tagged: { event: "...", data: ... }
+      if (e.event === "tor_status_changed") {
+        torStatus.set(e.data);
+      } else if (e.event === "message_received") {
+        appendMessage(e.data.record);
+      } else if (e.event === "delivery_status_changed") {
+        recordDeliveryStatus(hex16ToString(e.data.message), e.data.status);
+      } else if (e.event === "attachment_progress") {
+        applyProgress(hex16ToString(e.data.attachment_id), e.data.received, e.data.total);
+      } else if (e.event === "attachment_received") {
+        applyReceived(hex16ToString(e.data.attachment_id), {
+          filename: e.data.filename,
+          mime: e.data.mime,
+          size: Number(e.data.size),
+          path: e.data.path,
+        });
+      } else if (e.event === "attachment_failed") {
+        applyFailed(hex16ToString(e.data.attachment_id), e.data.reason);
+      }
+    });
+  }
+
   onMount(() => {
-    let unsub: (() => void) | null = null;
-    (async () => {
-      unsub = await ipcClient.subscribe({ filter: "all" }, (e) => {
-        // Event is adjacent-tagged: { event: "...", data: ... }
-        if (e.event === "tor_status_changed") {
-          torStatus.set(e.data);
-        } else if (e.event === "message_received") {
-          appendMessage(e.data.record);
-        } else if (e.event === "delivery_status_changed") {
-          recordDeliveryStatus(hex16ToString(e.data.message), e.data.status);
-        } else if (e.event === "attachment_progress") {
-          applyProgress(hex16ToString(e.data.attachment_id), e.data.received, e.data.total);
-        } else if (e.event === "attachment_received") {
-          applyReceived(hex16ToString(e.data.attachment_id), {
-            filename: e.data.filename,
-            mime: e.data.mime,
-            size: Number(e.data.size),
-            path: e.data.path,
-          });
-        } else if (e.event === "attachment_failed") {
-          applyFailed(hex16ToString(e.data.attachment_id), e.data.reason);
-        }
-      });
-    })();
-    return () => {
-      if (unsub) unsub();
-    };
+    reSubscribe();
+    return () => { if (unsub) unsub(); };
+  });
+
+  // Watch for IPC stream-closed events (emitted by the Tauri relay) and
+  // self-heal with exponential backoff.
+  onMount(async () => {
+    const unlisten = await listen<string>("ipc:stream-closed", () => {
+      handleStreamClosed(reSubscribe);
+    });
+    return () => unlisten();
   });
 </script>
 
@@ -173,6 +186,16 @@
 
 <Toast />
 
+{#if $connection.state !== "live"}
+  <div class="reconnect-banner" role="status" aria-live="polite">
+    {#if $connection.state === "reconnecting"}
+      Reconnecting to the app service…
+    {:else}
+      Disconnected — <button type="button" class="retry-btn" onclick={() => handleStreamClosed(reSubscribe)}>retry</button>
+    {/if}
+  </div>
+{/if}
+
 <style>
   .shell { display: grid; grid-template-columns: 280px 1fr; grid-template-rows: 100vh; height: 100vh; overflow: hidden; }
   .rail { background: var(--bg); border-right: 1px solid var(--bg-elevated); overflow-y: auto; }
@@ -204,4 +227,27 @@
     border-bottom: 1px solid var(--bg-elevated);
   }
   .title { font: var(--t-display); }
+  .reconnect-banner {
+    position: fixed;
+    top: var(--s-3);
+    left: 50%;
+    transform: translateX(-50%);
+    padding: var(--s-2) var(--s-3);
+    background: var(--bg-elevated);
+    color: var(--text);
+    border: 1px solid var(--bg-elevated);
+    border-radius: 6px;
+    font: var(--t-ui);
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.4);
+    z-index: 1000;
+  }
+  .retry-btn {
+    background: none;
+    border: none;
+    color: var(--accent);
+    font: var(--t-ui);
+    cursor: pointer;
+    padding: 0;
+    text-decoration: underline;
+  }
 </style>
