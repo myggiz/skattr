@@ -1747,8 +1747,20 @@ where
     }
     .await;
 
-    let _ = std::fs::remove_file(&db_age); // always clean up the temp DB .age
+    // Clean up the temp DB `.age`. Propagate the export error first (a failed
+    // export is the real problem); on a *successful* export, surface a cleanup
+    // failure (other than NotFound) rather than reporting Ok while leaving a
+    // complete encrypted snapshot behind in `data_dir`.
+    let cleanup = std::fs::remove_file(&db_age);
     outcome?;
+    if let Err(e) = cleanup {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            return Err(IpcError::Internal(format!(
+                "backup written to {} but temp snapshot cleanup failed: {e}",
+                dest.display()
+            )));
+        }
+    }
     Ok(CommandResult::Ok)
 }
 
