@@ -101,6 +101,44 @@
     }
   }
 
+  /**
+   * Export backup then advance to stage 2 on success.
+   * A cancelled file-picker (no path chosen) or a failed export stays on
+   * stage 1 so the user can retry or choose another path.
+   */
+  async function exportBackupThenAdvance() {
+    try {
+      const path = await save({
+        defaultPath: "skattr-backup.age",
+        filters: [{ name: "Skattr backup", extensions: ["age"] }],
+      });
+      if (!path) {
+        // User cancelled the picker — do NOT advance.
+        return;
+      }
+      await exportBackup(path);
+      toast.show("Backup saved.");
+      // Only advance after a confirmed successful export.
+      confirmStage1 = false;
+      confirmStage2 = true;
+    } catch (e) {
+      // Export failed — show error and stay on stage 1.
+      toast.show(`Backup failed: ${e}`);
+    }
+  }
+
+  let stage1Busy = $state(false);
+
+  async function stage1ExportAndAdvance() {
+    if (stage1Busy) return;
+    stage1Busy = true;
+    try {
+      await exportBackupThenAdvance();
+    } finally {
+      stage1Busy = false;
+    }
+  }
+
   async function wipe() {
     confirmStage2 = false;
     try {
@@ -206,17 +244,36 @@
 </section>
 
 {#if confirmStage1}
-  <ConfirmDialog
-    title="Delete all Skattr data?"
-    body="This permanently removes contacts, messages, mailboxes, identity, and the database. This cannot be undone."
-    confirmLabel="I understand, continue"
-    danger
-    onConfirm={() => {
-      confirmStage1 = false;
-      confirmStage2 = true;
-    }}
-    onCancel={() => (confirmStage1 = false)}
-  />
+  <!-- Bespoke three-button stage-1 dialog (ConfirmDialog supports only two buttons). -->
+  <div class="overlay" role="dialog" aria-modal="true" aria-labelledby="wipe-stage1-title">
+    <div class="dialog">
+      <h2 id="wipe-stage1-title">Delete all Skattr data?</h2>
+      <p>This permanently removes contacts, messages, mailboxes, identity, and the database. This cannot be undone. Export a backup first if you want to keep a copy.</p>
+      <div class="actions">
+        <button type="button" onclick={() => (confirmStage1 = false)} disabled={stage1Busy}>
+          Cancel
+        </button>
+        <button
+          type="button"
+          class="danger-btn"
+          onclick={() => {
+            confirmStage1 = false;
+            confirmStage2 = true;
+          }}
+          disabled={stage1Busy}
+        >
+          Continue without backup
+        </button>
+        <button
+          type="button"
+          onclick={stage1ExportAndAdvance}
+          disabled={stage1Busy}
+        >
+          {stage1Busy ? "Saving…" : "Export backup first"}
+        </button>
+      </div>
+    </div>
+  </div>
 {/if}
 
 {#if confirmStage2}
@@ -312,5 +369,36 @@
   button {
     padding: 6px 12px;
     cursor: pointer;
+  }
+  /* Three-button wipe stage-1 dialog */
+  .overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+    display: grid;
+    place-items: center;
+    z-index: 900;
+  }
+  .dialog {
+    background: var(--bg-elevated);
+    color: var(--text);
+    padding: var(--s-3);
+    border-radius: 8px;
+    max-width: 480px;
+    width: 90vw;
+  }
+  .dialog h2 {
+    font: var(--t-display);
+    margin: 0 0 var(--s-2);
+  }
+  .dialog p {
+    font: var(--t-body);
+    margin: 0 0 var(--s-3);
+  }
+  .actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--s-2);
+    flex-wrap: wrap;
   }
 </style>
