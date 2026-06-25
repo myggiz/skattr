@@ -15,6 +15,12 @@ on:
     - cron: "0 6 * * 1"   # weekly, Monday 06:00 UTC — catch manifest rot
   workflow_dispatch: {}
 
+# Serialize per-ref so an overlapping push/schedule can't run two of these
+# expensive (~GB SDK + full sandbox build) jobs at once.
+concurrency:
+  group: flatpak-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-validate:
     name: flatpak manifest build-validate

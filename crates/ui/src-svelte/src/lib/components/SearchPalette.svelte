@@ -185,7 +185,7 @@
             aria-selected={i === highlightIdx}
             class:active={i === highlightIdx}
             onclick={() => pick(i)}
-            onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(i); } }}
+            onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); pick(i); } }}
           >
             <div class="meta">
               {nicknameMap.get(r.record.contact) ?? r.record.contact.slice(0, 8) + "…"}
