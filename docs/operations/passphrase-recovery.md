@@ -65,17 +65,55 @@ never deleted by the retention sweep.
 
 ## Lost passphrase
 
-If you've forgotten your passphrase, recovery is **not possible**
-through the daemon — by design. The BIP39 seed phrase you wrote
-down during first-run is your only recovery path:
+Your passphrase protects the local **identity vault**
+(`identity.vault`, Argon2id → XChaCha20-Poly1305). It is **not**
+the key to your message history: the message database
+(`skattr.sqlite.age`) is encrypted under a key derived from your
+**seed phrase** (`HKDF(seed, "skattr-storage-v1")`). This means
+that if you still have your 24-word seed phrase, you can recover
+**fully** — identity and message history — without knowing the old
+passphrase.
 
-1. Back up `${data_dir}` to a safe location (so you can recover
-   any in-flight messages later if you choose to dig manually).
-2. Delete `${data_dir}/identity.vault` and `${data_dir}/skattr.sqlite.age`.
-3. Run `skattr restore <seed words>` and choose a new passphrase.
-4. Your contacts will see your old onion as unreachable; you'll
-   need to send them new invites (or wait for them to send you
-   one).
+**Recommended recovery (preserves history):**
+
+**If your files are intact on this machine** — you simply forgot the
+passphrase (the common case) — you do **not** need a backup. The message
+database key is derived from your seed phrase, not your passphrase, so a fresh
+vault with a new passphrase still opens your existing database.
+
+1. Stop the daemon.
+2. Move or rename the inaccessible `identity.vault` out of the way (do **not**
+   delete `skattr.sqlite.age`). `skattr restore` will not overwrite an existing
+   vault.
+3. Recreate the vault from your seed phrase (you will be prompted to set a new
+   passphrase):
+   ```
+   skattr restore "<24 seed words>"
+   ```
+4. Start the daemon. It re-derives the seed-based storage key and decrypts your
+   existing `skattr.sqlite.age` — **your message history is preserved; no backup
+   archive is required.**
+
+**On a clean machine, or if `skattr.sqlite.age` is lost or corrupt:** restore
+from a backup archive you made earlier with `skattr backup <archive.age>`:
+
+1. Stop the daemon (or start fresh on the new machine).
+2. Restore identity + message history from the backup:
+   ```
+   skattr restore-backup "<24 seed words>" <archive.age>
+   ```
+   This re-derives the database key from the seed phrase, decrypts the
+   backed-up history, and prompts for a new passphrase.
+
+**⚠️ Last resort only — permanently destroys message history:**
+Deleting `skattr.sqlite.age` (and its `-wal`/`-shm` sidecars,
+if present) discards **all local message history permanently**.
+There is no way to recover deleted history, even with the seed
+phrase. Only do this if you have no backup and accept the
+permanent loss of history. After deletion, you can restore your
+identity with `skattr restore "<24 seed words>"`, but your
+contacts will see your old onion as unreachable and you will need
+to send them new invites.
 
 The seed phrase is the only thing that survives passphrase loss.
 Store it offline. Do not commit it to git. Do not share it with
