@@ -9,8 +9,9 @@ A high-level tour of the codebase. Pair this with [`docs/skattr-design.md`](docs
 > production path" — the messenger flows passed only because tests hand-wired
 > the transport via `test_exports`; nothing wired it into `Daemon::run`. The
 > current phasing is **1 (make messaging work) → 2 (critical security &
-> data-integrity) → 3 (attachments) → 4 (release/docs/signing)**. Phases 1 and
-> 2 are complete; see the phase table at the bottom and `CLAUDE.md`.
+> data-integrity) → 3 (attachments) → 4 (release/docs/signing)**. Phases 1, 2,
+> and 3 are complete; phase 4 is in progress. See the phase table at the bottom
+> and `CLAUDE.md`.
 
 ## Workspace layout
 
@@ -78,7 +79,9 @@ daemon              long-lived process. `daemon::state::run_with_transport<T>` o
   ├── delivery      `DeliveryHub` per-peer actor hub; `dial::OutboundDial` on-demand
   │                 dialer; `outbox` + `backoff` exp-retry; `receiver` dedup + ts-window
   │                 + ACK; `MailboxFallbackShared` + `run_mailbox_fallback`; the
-  │                 `mailbox_sweeper` re-deposit engine; `kill_stream` (test-harness).
+  │                 `mailbox_sweeper` re-deposit engine; `chunk_transfer` +
+  │                 `chunk_sweep` (attachment pull / offline-deposit);
+  │                 `kill_stream` (test-harness).
   ├── mailbox       client of the mailbox server: `protocol` (frozen wire, ADR 0006),
   │                 `codec`, `auth` (challenge/sign), `client`, `poll` (`PollScheduler`,
   │                 Idle/Active/Unreachable per-mailbox with jitter).
@@ -95,7 +98,7 @@ daemon              long-lived process. `daemon::state::run_with_transport<T>` o
   ├── identity      Ed25519 keypair, BIP39, Argon2id + XChaCha20-Poly1305 vault, HKDF.
   └── storage       `Pool` (age-encrypted; `Mutex<Option<Connection>>`, WAL-safe
                     `close(&self)` + `Drop` backstop + sentinel/re-encrypt-on-boot),
-                    `migrations` (runner, through 0014), typed repos (`contacts`,
+                    `migrations` (runner, through 0016), typed repos (`contacts`,
                     `messages` + FTS5, `groups`, `outbox`, `mailboxes`, `key_packages`,
                     `outstanding_invites`, `seen_messages`, `read_state`,
                     `passphrase_audit`), `backup`.
@@ -161,7 +164,7 @@ The **original build** (old phases 0–2.H) is complete: scaffold, identity/cryp
 | **2.C — offline delivery: fallback + drain** ✅ | delivery::{hub, peer, mailbox_sweeper, outbox}, daemon::{dispatch, inbound}, storage::outbox | Offline peer receives via mailbox fallback (`offline_peer_receives_via_mailbox_fallback`); RemoveMailbox preserves held messages; no ts-replay poison |
 | **2.D — resource hardening (anti-flood)** ✅ | mailbox crate (store/policy/server), daemon::accept | Mailbox survives flood + victim-fill (bounded disk, no lockout); idle/connection caps; bounded Delete; daemon accept-loop concurrency bounded (`mailbox_flood`) |
 | **2.B — at-rest encryption lifecycle** ✅ | storage::pool, daemon::state, storage::backup | No plaintext DB/sidecars/sentinel after clean shutdown; re-encrypt crash residue on boot; `export_backup` works (`clean_shutdown_leaves_only_encrypted_db`) |
-| **3 — attachments** ⬜ | envelope::kinds, delivery (chunked transfer), mailbox path | File send/receive/preview with metadata stripping |
-| **4 — release integrity, docs, signing** ⬜ | docs, release CI, signing keys | Honest docs; real minisign + PGP keys; working download-verification chain |
+| **3 — attachments** ✅ | envelope::kinds (`Kind::File`), attachment::{chunker, manifest, reassembler, store, strip}, delivery::{chunk_transfer, chunk_sweep}, storage::{attachments, attachment_deposits}, UI file bubble | File send/receive/preview with metadata stripping, online (direct) + offline (mailbox); guardrails `attachment_roundtrip_multichunk_over_loopback`, `offline_attachment_via_mailbox`, `offline_attachment_cross_session_resume` |
+| **4 — release integrity, docs, signing** 🔄 | docs, release CI, signing keys | Honest docs; real minisign + PGP keys; working download-verification chain (4.D security hardening done; 4.B docs truthfulness in progress) |
 
 **v1.1+ deferrals** (disclosed as absent in the v1.0 threat model): third-party audit; metadata-minimization (size padding, timing jitter, cover traffic); multi-member groups (>2); real onion-key rotation (Task 23.5); reactions/edit/delete-for-everyone/typing/read-receipts; multi-device.

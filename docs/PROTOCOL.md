@@ -28,7 +28,7 @@ From bottom to top:
    injected as external PSK into the first MLS Commit.
 5. **MLS** — group key agreement and application encryption.
    Ciphersuite `MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519`
-   (IANA 0x0001). See
+   (IANA 0x0003). See
    [`skattr-design.md` §1.5](skattr-design.md#15-application-messaging-mls).
 6. **Envelope** — CBOR application payload with `v`, `id`, `ts`, optional
    `reply_to`, `kind`. See
