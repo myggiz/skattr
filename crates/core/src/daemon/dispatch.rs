@@ -88,6 +88,7 @@ where
         Command::TailLogs { since_seq, limit } => tail_logs(&handle, since_seq, limit).await,
         Command::GetPassphraseAuditLatest => get_passphrase_audit_latest(&handle).await,
         Command::WipeAllData => wipe_all_data(handle).await,
+        Command::ExportBackup { dest_path } => export_backup_cmd(handle, dest_path).await,
     }
 }
 
@@ -346,7 +347,18 @@ where
         .hub
         .connect_and_ingest_at(inviter, &inviter_onion)
         .await
-        .map_err(map_err)?;
+        .map_err(|e| {
+            // First contact requires reaching the inviter now; a dial failure
+            // (offline / Tor flaky) is surfaced as DeliveryTimeout so the UI can
+            // show the "both must be online" guidance. Preserve a more specific
+            // kind if the underlying error already has one.
+            match e.kind() {
+                Some(k) => IpcError::Daemon(k),
+                None => {
+                    IpcError::Daemon(crate::daemon::error_kind::DaemonErrorKind::DeliveryTimeout)
+                }
+            }
+        })?;
 
     let contact_repo = ContactRepo::new(&handle.pool);
     let contact = Contact {
@@ -1673,6 +1685,86 @@ where
 }
 
 // ---------------------------------------------------------------------------
+// ExportBackup handler
+// ---------------------------------------------------------------------------
+
+/// `ExportBackup` handler: snapshot the live pool into a temp encrypted DB
+/// (`skattr.sqlite.backup.age`, distinct from the live `skattr.sqlite.age`),
+/// bundle it with `data_dir` supplementary files into an archive at
+/// `dest_path` encrypted under the daemon's backup key, then remove the
+/// temp file regardless of outcome.
+///
+/// Both `snapshot_encrypted` (VACUUM INTO + age encrypt) and
+/// `export_backup_from_parts` (tar + age encrypt) are synchronous CPU+I/O;
+/// each is wrapped in `tokio::task::spawn_blocking` to avoid blocking the
+/// async executor.
+async fn export_backup_cmd<S>(
+    handle: Arc<DaemonHandle<S>>,
+    dest_path: String,
+) -> std::result::Result<CommandResult, IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    use crate::daemon::error_kind::DaemonErrorKind;
+
+    // Fail closed: require an initialized backup key. Keep it in `Zeroizing`
+    // the whole time — never copy the raw [u8;32] onto the stack un-zeroed.
+    let backup_key: zeroize::Zeroizing<[u8; 32]> = handle.backup_key.clone().ok_or_else(|| {
+        IpcError::Daemon(DaemonErrorKind::InvalidArgument {
+            message: "backup key not initialized".into(),
+        })
+    })?;
+
+    let data_dir = handle.config.read().await.data_dir.clone();
+    let dest = std::path::PathBuf::from(&dest_path);
+    // Per-export UNIQUE temp snapshot, distinct from the live `skattr.sqlite.age`
+    // (never clobbers the pool's at-rest file) and from any concurrent export.
+    static EXPORT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = EXPORT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let db_age = data_dir.join(format!("skattr.sqlite.backup.{seq}.age"));
+
+    // Run the synchronous snapshot (VACUUM INTO + age encrypt) and bundle (tar +
+    // age) off the async workers via spawn_blocking. The temp `.age` is cleaned
+    // up on EVERY exit path — snapshot failure, export failure, or join error.
+    let pool = handle.pool.clone();
+    let outcome: std::result::Result<(), IpcError> = async {
+        let db_age_c = db_age.clone();
+        tokio::task::spawn_blocking(move || pool.snapshot_encrypted(&db_age_c))
+            .await
+            .map_err(|e| IpcError::Internal(format!("spawn_blocking join: {e}")))?
+            .map_err(map_err)?;
+
+        let data_dir_c = data_dir.clone();
+        let db_age_c2 = db_age.clone();
+        let dest_c = dest.clone();
+        let key = backup_key.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::storage::backup::export_backup_from_parts(&data_dir_c, &db_age_c2, &dest_c, &key)
+        })
+        .await
+        .map_err(|e| IpcError::Internal(format!("spawn_blocking join: {e}")))?
+        .map_err(map_err)
+    }
+    .await;
+
+    // Clean up the temp DB `.age`. Propagate the export error first (a failed
+    // export is the real problem); on a *successful* export, surface a cleanup
+    // failure (other than NotFound) rather than reporting Ok while leaving a
+    // complete encrypted snapshot behind in `data_dir`.
+    let cleanup = std::fs::remove_file(&db_age);
+    outcome?;
+    if let Err(e) = cleanup {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            return Err(IpcError::Internal(format!(
+                "backup written to {} but temp snapshot cleanup failed: {e}",
+                dest.display()
+            )));
+        }
+    }
+    Ok(CommandResult::Ok)
+}
+
+// ---------------------------------------------------------------------------
 // WipeAllData handler
 // ---------------------------------------------------------------------------
 
@@ -1683,32 +1775,15 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     // Resolve data_dir from the live config (same pattern as change_passphrase).
-    // Read-lock dropped before the spawn so nothing holds the lock during teardown.
+    // Read-lock dropped before signalling so nothing holds the lock during teardown.
     let data_dir = handle.config.read().await.data_dir.clone();
 
-    // Spawn the teardown so we can return Ok BEFORE the IPC layer tears down.
-    // This is the ONE handler that intentionally outlives its caller.
-    tokio::spawn(async move {
-        // Allow ~150ms for the reply to flush back over the IPC stream.
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-
-        // Best-effort: drop the handle so background tasks (retention sweep,
-        // log tap, mailbox poller) get a chance to wind down.
-        std::mem::drop(handle);
-
-        // Brief settle to let in-flight tasks finish their current ticks.
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-
-        // Wipe the data directory.
-        if let Err(e) = tokio::fs::remove_dir_all(&data_dir).await {
-            tracing::error!(
-                error = %e,
-                dir = ?data_dir,
-                "wipe_all_data: remove_dir_all failed; exiting anyway"
-            );
-        }
-        std::process::exit(0);
-    });
+    // T3-3: signal intent instead of spawning a detached sleep-and-teardown
+    // task. The IPC connection loop in `server/mod.rs` checks this signal
+    // AFTER it has written the terminal `Bye` frame (i.e. after the reply
+    // is guaranteed-flushed to the client), then performs the actual
+    // teardown there. This is deterministic — no blind sleep, no race.
+    handle.signal_wipe(data_dir);
 
     Ok(CommandResult::Ok)
 }
@@ -4840,6 +4915,130 @@ mod tests {
         assert!(
             !logged.contains(secret),
             "raw untrusted error text must NOT be logged"
+        );
+    }
+
+    /// `ExportBackup` produces the archive at the requested path and cleans up
+    /// the temporary `skattr.sqlite.backup.age` file.
+    ///
+    /// Fix 1: the handle now needs an explicit `set_backup_key` call — it
+    /// defaults to `None` and `export_backup_cmd` fails closed otherwise.
+    /// We use `[1u8; 32]` as a deterministic test key (not zero so we can
+    /// tell it apart from the old default). We don't decrypt the resulting
+    /// archive — just assert it exists and that the temp file was removed.
+    ///
+    /// `Pool::snapshot_encrypted` uses `VACUUM INTO` which requires a real on-disk
+    /// database (`working_path` must be a writable path, not `/dev/null`). We
+    /// therefore open the pool with `Pool::open` into a tempdir rather than using
+    /// `Pool::in_memory`. `export_backup_from_parts` also requires `identity.vault`
+    /// and `hs.key.age` in `data_dir`; we plant stub bytes for those.
+    #[tokio::test]
+    async fn export_backup_cmd_produces_archive_and_removes_temp_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().to_path_buf();
+
+        // Open a real on-disk pool (snapshot_encrypted uses VACUUM INTO which
+        // requires a real working_path; in_memory sets it to /dev/null).
+        let seed = crate::identity::Seed::generate().unwrap();
+        let pool = Arc::new(Pool::open(&data_dir, &seed).unwrap());
+
+        // Plant the two non-DB backup inputs that export_backup_from_parts requires.
+        std::fs::write(data_dir.join("identity.vault"), b"stub-vault").unwrap();
+        std::fs::write(data_dir.join("hs.key.age"), b"stub-hs-key").unwrap();
+
+        // Build a handle whose config.data_dir points at the same tempdir.
+        // Fix 1: set_backup_key before wrapping in Arc — the field is now
+        // Option<Zeroizing<[u8;32]>> and defaults to None.
+        let identity = crate::identity::IdentityKey::from_seed(&seed).unwrap();
+        let hub: Arc<crate::delivery::hub::DeliveryHub<tokio::io::DuplexStream>> =
+            Arc::new(crate::delivery::hub::DeliveryHub::new(pool.clone()));
+        let (events_tx, _) = broadcast::channel::<Event>(16);
+        let mut cfg = crate::daemon::config::Config::fallback_for_tests();
+        cfg.data_dir = data_dir.clone();
+        let mut h = DaemonHandle::new_with_config(
+            pool,
+            hub,
+            identity,
+            events_tx,
+            cfg,
+            data_dir.join("config.toml"),
+        );
+        h.set_backup_key(zeroize::Zeroizing::new([1u8; 32]));
+        let handle: Arc<DaemonHandle<tokio::io::DuplexStream>> = Arc::new(h);
+
+        let dest = data_dir.join("backup.skattr");
+        let result = execute_command(
+            handle.clone(),
+            Command::ExportBackup {
+                dest_path: dest.to_str().unwrap().to_string(),
+            },
+        )
+        .await;
+
+        assert!(
+            matches!(result, Ok(CommandResult::Ok)),
+            "export_backup must return Ok, got {result:?}"
+        );
+        assert!(dest.exists(), "archive file must exist at dest_path");
+        assert!(
+            !data_dir.join("skattr.sqlite.backup.age").exists(),
+            "temp snapshot must be cleaned up"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // WipeAllData signal tests (T3-3)
+    // ---------------------------------------------------------------------------
+
+    /// `WipeAllData` returns `Ok` immediately and sets the wipe signal on the
+    /// handle. No blocking, no sleep. The IPC server reads the signal after
+    /// writing the `Bye` frame.
+    #[tokio::test]
+    async fn wipe_all_data_sets_signal_and_returns_ok() {
+        let workdir = tempfile::tempdir().unwrap();
+        let data_dir = workdir.path().join("skattr-data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        let seed = Seed::generate().unwrap();
+        let identity = IdentityKey::from_seed(&seed).unwrap();
+        let pool = Arc::new(Pool::in_memory());
+        let hub: Arc<DeliveryHub<tokio::io::DuplexStream>> =
+            Arc::new(DeliveryHub::new(pool.clone()));
+        let (events_tx, _) = broadcast::channel::<Event>(16);
+
+        let mut config = crate::daemon::config::Config::defaults()
+            .unwrap_or_else(|_| crate::daemon::config::Config::fallback_for_tests());
+        config.data_dir = data_dir.clone();
+
+        let handle: Arc<DaemonHandle<tokio::io::DuplexStream>> =
+            Arc::new(DaemonHandle::new_with_config(
+                pool,
+                hub,
+                identity,
+                events_tx,
+                config,
+                data_dir.join("skattr.toml"),
+            ));
+
+        // Before WipeAllData: signal must be absent.
+        assert!(
+            handle.take_wipe_target().is_none(),
+            "wipe_target must be None before command"
+        );
+
+        // Dispatch the command.
+        let result = execute_command(handle.clone(), Command::WipeAllData).await;
+        assert!(
+            matches!(result, Ok(CommandResult::Ok)),
+            "WipeAllData must return Ok, got {result:?}"
+        );
+
+        // After WipeAllData: signal must carry the data_dir.
+        let target = handle.take_wipe_target();
+        assert_eq!(
+            target.as_deref(),
+            Some(data_dir.as_path()),
+            "wipe_target must be data_dir after WipeAllData"
         );
     }
 }

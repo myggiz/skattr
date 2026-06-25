@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Myggiz AB
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { isConnecting } from "./contacts";
 
 vi.mock("$lib/ipc/tauri", () => ({
   ipcClient: {
@@ -15,6 +16,18 @@ vi.mock("$lib/ipc/tauri", () => ({
 import { ipcClient } from "$lib/ipc/tauri";
 import { rename, archive, toggleExpanded, expandedPubkey } from "./contacts";
 import { get } from "svelte/store";
+
+describe("isConnecting", () => {
+  it("true while group_state is pending_join", () => {
+    expect(isConnecting({ group_state: "pending_join" } as any)).toBe(true);
+  });
+  it("false when active", () => {
+    expect(isConnecting({ group_state: "active" } as any)).toBe(false);
+  });
+  it("false when null", () => {
+    expect(isConnecting({ group_state: null } as any)).toBe(false);
+  });
+});
 
 describe("contacts store", () => {
   beforeEach(() => vi.clearAllMocks());

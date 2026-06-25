@@ -515,17 +515,13 @@ mod tests {
         .unwrap()
         .to_url()
         .unwrap();
-        // Flip one character in the sig segment.
+        // Flip the first character of the sig segment to a *different* valid
+        // base64url char. Deterministic tamper — always a real change even if
+        // the original char is 'A' (the old `^= 0x01` + replace-with-'A' logic
+        // was a no-op when the original was 'A', a ~1/64 flake).
         let mut bytes = url.into_bytes();
         let sig_start = sig_value_offset(&bytes);
-        bytes[sig_start] ^= 0x01;
-        // Ensure we didn't produce an out-of-alphabet char.
-        if !bytes[sig_start].is_ascii_alphanumeric()
-            && bytes[sig_start] != b'-'
-            && bytes[sig_start] != b'_'
-        {
-            bytes[sig_start] = b'A';
-        }
+        bytes[sig_start] = if bytes[sig_start] == b'A' { b'B' } else { b'A' };
         let tampered = String::from_utf8(bytes).unwrap();
 
         let err = InviteLink::from_url(&tampered, 1_000_000).expect_err("tampered");

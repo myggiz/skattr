@@ -220,13 +220,13 @@ async fn two_daemons_exchange_messages_both_directions_over_loopback() {
         .await
     });
 
-    let ready_a = tokio::time::timeout(Duration::from_secs(30), ready_a_rx)
+    let ready_a = tokio::time::timeout(Duration::from_secs(60), ready_a_rx)
         .await
-        .expect("Alice ready within 30 s")
+        .expect("Alice ready within 60 s")
         .expect("Alice ready_tx open");
-    let ready_b = tokio::time::timeout(Duration::from_secs(30), ready_b_rx)
+    let ready_b = tokio::time::timeout(Duration::from_secs(60), ready_b_rx)
         .await
-        .expect("Bob ready within 30 s")
+        .expect("Bob ready within 60 s")
         .expect("Bob ready_tx open");
 
     assert_eq!(

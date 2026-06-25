@@ -3,6 +3,11 @@
 import { writable, type Writable } from "svelte/store";
 import type { ContactSummary } from "$lib/ipc/types";
 
+/** A contact whose first-contact Welcome is still in flight. */
+export function isConnecting(c: ContactSummary): boolean {
+  return c.group_state === "pending_join";
+}
+
 import { ipcClient } from "$lib/ipc/tauri";
 import { unwrapOk } from "$lib/ipc/client";
 

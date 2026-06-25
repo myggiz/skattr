@@ -6,6 +6,7 @@
 //! `DaemonHandle` groups the subsystems every command handler needs.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -118,6 +119,18 @@ where
     /// unit tests. Used by the RemoveMailbox drain to dispatch held deposits
     /// before finalizing removal.
     pub(crate) inbound: Option<Arc<dyn crate::delivery::peer::InboundDispatch>>,
+    /// Precomputed backup key (`HKDF(seed, "skattr-backup-v1")`). Derived at
+    /// boot because the root seed is consumed during identity setup and not
+    /// retained. Used by `Command::ExportBackup`. `None` until
+    /// `set_backup_key` is called; `export_backup_cmd` fails closed
+    /// (`InvalidArgument`) if it is still `None` at call time.
+    pub(crate) backup_key: Option<zeroize::Zeroizing<[u8; 32]>>,
+    /// Wipe-requested signal (T3-3). Set by `wipe_all_data` so the IPC
+    /// connection loop can perform the actual teardown AFTER the reply
+    /// `Bye` frame is flushed, rather than relying on a fixed sleep.
+    /// `Mutex<Option<PathBuf>>` allows `take_wipe_target` to genuinely
+    /// consume the signal so a second caller sees `None`.
+    pub(crate) wipe_target: Arc<Mutex<Option<PathBuf>>>,
 }
 
 impl<S> DaemonHandle<S>
@@ -156,6 +169,8 @@ where
             log_sink: LogSink::default(),
             group_locks: new_group_lock_registry(),
             inbound: None,
+            backup_key: None,
+            wipe_target: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -185,6 +200,8 @@ where
             log_sink: LogSink::default(),
             group_locks: new_group_lock_registry(),
             inbound: None,
+            backup_key: None,
+            wipe_target: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -221,6 +238,8 @@ where
             log_sink: LogSink::default(),
             group_locks: new_group_lock_registry(),
             inbound: None,
+            backup_key: None,
+            wipe_target: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -257,6 +276,14 @@ where
     /// finalizing removal.
     pub(crate) fn set_inbound(&mut self, inbound: Arc<dyn crate::delivery::peer::InboundDispatch>) {
         self.inbound = Some(inbound);
+    }
+
+    /// Store the precomputed backup key. Called by `run_with_transport` after
+    /// deriving `HKDF(seed, "skattr-backup-v1")` while the seed is still in
+    /// scope. Until this is called the field is `None`; `export_backup_cmd`
+    /// fails closed with `InvalidArgument` if the key is absent.
+    pub(crate) fn set_backup_key(&mut self, key: zeroize::Zeroizing<[u8; 32]>) {
+        self.backup_key = Some(key);
     }
 
     /// Snapshot the latest cached `TorStatus`. Non-blocking RwLock read.
@@ -308,6 +335,34 @@ where
     pub(crate) fn group_locks(&self) -> GroupLockRegistry {
         self.group_locks.clone()
     }
+
+    /// Signal that a wipe is requested (T3-3). Called by `wipe_all_data`
+    /// before returning `Ok`; the IPC connection loop checks this after
+    /// flushing the terminal `Bye` frame and performs the actual teardown
+    /// there — no blind sleep required.
+    ///
+    /// Idempotent: if a signal is already set (should never happen in
+    /// practice) the second call is silently ignored.
+    pub(crate) fn signal_wipe(&self, data_dir: PathBuf) {
+        if let Ok(mut guard) = self.wipe_target.lock() {
+            if guard.is_none() {
+                *guard = Some(data_dir);
+            }
+        }
+    }
+
+    /// Consume the wipe signal. Returns `Some(data_dir)` the first time
+    /// after `signal_wipe` was called; `None` on all subsequent calls or
+    /// if `signal_wipe` was never called. The signal is genuinely consumed
+    /// (`take`n) so a second caller always sees `None`.
+    ///
+    /// Called by the `CommandExecutor::take_wipe_target` impl, which is
+    /// in turn called by `handle_connection` after it writes the `Bye`
+    /// frame (T3-3 flush-ordered teardown).
+    #[must_use]
+    pub(crate) fn take_wipe_target(&self) -> Option<PathBuf> {
+        self.wipe_target.lock().ok()?.take()
+    }
 }
 
 #[async_trait::async_trait]
@@ -325,6 +380,16 @@ where
 
     fn latest_tor_status(&self) -> Option<crate::daemon::events::TorStatus> {
         DaemonHandle::latest_tor_status(self)
+    }
+
+    fn take_wipe_target(&self) -> Option<PathBuf> {
+        DaemonHandle::take_wipe_target(self)
+    }
+
+    fn wipe_close(&self) {
+        if let Err(e) = self.pool.close() {
+            tracing::warn!(error = %e, "wipe_close: pool close failed");
+        }
     }
 }
 
@@ -347,6 +412,11 @@ where
             log_sink: self.log_sink.clone(),
             group_locks: self.group_locks.clone(),
             inbound: self.inbound.clone(),
+            backup_key: self
+                .backup_key
+                .as_deref()
+                .map(|b| zeroize::Zeroizing::new(*b)),
+            wipe_target: self.wipe_target.clone(),
         }
     }
 }

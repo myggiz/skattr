@@ -35,27 +35,21 @@ use crate::identity::Seed;
 
 const BACKUP_FILES: &[&str] = &["identity.vault", "hs.key.age", "skattr.sqlite.age"];
 
-/// Write a backup archive to `out_path`. Fails if any of the three
-/// source files are missing from `data_dir`.
-pub(crate) fn export_backup(data_dir: &Path, out_path: &Path, seed: &Seed) -> Result<()> {
-    for name in BACKUP_FILES {
-        let p = data_dir.join(name);
-        if !p.exists() {
-            return Err(CoreError::Storage(StorageErrorKind::Other(format!(
-                "missing backup input: {}",
-                p.display()
-            ))));
-        }
-    }
-
+/// Build a gzip-compressed tar of `members` (each is `(source_path,
+/// archive_name)`), age-encrypt the tarball under `passphrase`, and
+/// atomically write the result to `out_path`.
+fn write_encrypted_archive(
+    members: &[(&Path, &str)],
+    out_path: &Path,
+    passphrase: &Zeroizing<String>,
+) -> Result<()> {
     // Build gzipped tar in memory.
     let mut tar_gz = Vec::new();
     {
         let gz = flate2::write::GzEncoder::new(&mut tar_gz, flate2::Compression::default());
         let mut builder = tar::Builder::new(gz);
-        for name in BACKUP_FILES {
-            let src = data_dir.join(name);
-            builder.append_path_with_name(&src, name).map_err(|e| {
+        for (src, name) in members {
+            builder.append_path_with_name(src, name).map_err(|e| {
                 CoreError::Storage(StorageErrorKind::Other(format!("tar append {name}: {e}")))
             })?;
         }
@@ -68,8 +62,6 @@ pub(crate) fn export_backup(data_dir: &Path, out_path: &Path, seed: &Seed) -> Re
     }
 
     // Age-encrypt the gzipped tarball.
-    let key = hkdf_expand::<32>(seed.as_bytes(), INFO_BACKUP_V1)?;
-    let passphrase = Zeroizing::new(hex::encode(key.as_ref()));
     let encryptor = age::Encryptor::with_user_passphrase(age::secrecy::SecretString::from(
         passphrase.as_str().to_string(),
     ));
@@ -90,6 +82,53 @@ pub(crate) fn export_backup(data_dir: &Path, out_path: &Path, seed: &Seed) -> Re
     std::fs::write(&tmp_path, &ciphertext)?;
     std::fs::rename(&tmp_path, out_path)?;
     Ok(())
+}
+
+/// Write a backup archive to `out_path`. Fails if any of the three
+/// source files are missing from `data_dir`.
+pub(crate) fn export_backup(data_dir: &Path, out_path: &Path, seed: &Seed) -> Result<()> {
+    for name in BACKUP_FILES {
+        let p = data_dir.join(name);
+        if !p.exists() {
+            return Err(CoreError::Storage(StorageErrorKind::Other(format!(
+                "missing backup input: {}",
+                p.display()
+            ))));
+        }
+    }
+
+    let vault = data_dir.join("identity.vault");
+    let hs_key = data_dir.join("hs.key.age");
+    let db_age = data_dir.join("skattr.sqlite.age");
+    let members: [(&Path, &str); 3] = [
+        (&vault, "identity.vault"),
+        (&hs_key, "hs.key.age"),
+        (&db_age, "skattr.sqlite.age"),
+    ];
+
+    let key = hkdf_expand::<32>(seed.as_bytes(), INFO_BACKUP_V1)?;
+    let passphrase = Zeroizing::new(hex::encode(key.as_ref()));
+    write_encrypted_archive(&members, out_path, &passphrase)
+}
+
+/// Bundle `identity.vault` + `hs.key.age` (from `data_dir`) and the DB snapshot
+/// `.age` at `db_age` (stored as `skattr.sqlite.age`) into an age-encrypted
+/// archive at `out_path`, encrypted under `backup_key`. Used by live export.
+pub(crate) fn export_backup_from_parts(
+    data_dir: &Path,
+    db_age: &Path,
+    out_path: &Path,
+    backup_key: &[u8; 32],
+) -> Result<()> {
+    let vault = data_dir.join("identity.vault");
+    let hs_key = data_dir.join("hs.key.age");
+    let members: [(&Path, &str); 3] = [
+        (&vault, "identity.vault"),
+        (&hs_key, "hs.key.age"),
+        (db_age, "skattr.sqlite.age"),
+    ];
+    let passphrase = Zeroizing::new(hex::encode(backup_key));
+    write_encrypted_archive(&members, out_path, &passphrase)
 }
 
 /// Read a backup archive from `archive_path` and extract the three

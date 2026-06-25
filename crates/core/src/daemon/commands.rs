@@ -320,6 +320,12 @@ pub enum Command {
     /// Stop accepting IPC, drop the storage Pool, remove `data_dir`,
     /// then `process::exit(0)`. Reply is sent BEFORE the teardown.
     WipeAllData,
+
+    /// Export an encrypted backup archive of the live state to `dest_path`.
+    ExportBackup {
+        /// Absolute destination path for the archive.
+        dest_path: String,
+    },
 }
 
 /// Outcome of a `SendMessage` command after the inline-delivery wait.

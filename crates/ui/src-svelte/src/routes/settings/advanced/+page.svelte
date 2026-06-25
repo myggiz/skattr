@@ -2,7 +2,8 @@
 <!-- Copyright (C) 2026 Myggiz AB -->
 <script lang="ts">
   import { onMount } from "svelte";
-  import { config, fetchConfig, patchConfig, wipeAllData } from "$lib/stores/config";
+  import { config, fetchConfig, patchConfig, wipeAllData, exportBackup } from "$lib/stores/config";
+  import { save } from "@tauri-apps/plugin-dialog";
   import { ipcClient } from "$lib/ipc/tauri";
   import { unwrapOk } from "$lib/ipc/client";
   import LogsViewer from "$lib/components/LogsViewer.svelte";
@@ -82,6 +83,74 @@
       );
     } catch (err) {
       toast.show(`Failed: ${err}`);
+    }
+  }
+
+  /**
+   * Show the save-picker, run the export, and toast on success/failure.
+   * Returns true only when an export SUCCEEDED; returns false on cancel or
+   * failure. Callers must NOT advance to a destructive step unless true.
+   */
+  async function pickAndExport(): Promise<boolean> {
+    try {
+      const path = await save({
+        defaultPath: "skattr-backup.age",
+        filters: [{ name: "Skattr backup", extensions: ["age"] }],
+      });
+      if (!path) {
+        // User cancelled the picker — do NOT advance.
+        return false;
+      }
+      await exportBackup(path);
+      toast.show("Backup saved.");
+      return true;
+    } catch (e) {
+      // Export failed — show error, stay on current stage.
+      toast.show(`Backup failed: ${e}`);
+      return false;
+    }
+  }
+
+  async function exportBackupAction() {
+    await pickAndExport();
+    // Return value intentionally ignored: the action button doesn't gate anything.
+  }
+
+  /**
+   * Export backup then advance to stage 2 on success.
+   * A cancelled file-picker (no path chosen) or a failed export stays on
+   * stage 1 so the user can retry or choose another path.
+   */
+  async function exportBackupThenAdvance() {
+    const exported = await pickAndExport();
+    if (!exported) {
+      // Cancelled or failed — do NOT advance.
+      return;
+    }
+    // Only advance after a confirmed successful export.
+    confirmStage1 = false;
+    confirmStage2 = true;
+  }
+
+  let stage1Busy = $state(false);
+  // Focus ref for the Cancel button in the stage-1 dialog (safe default focus
+  // for a destructive modal — never focus the destructive action).
+  let stage1CancelBtn = $state<HTMLButtonElement | null>(null);
+
+  // Move focus to Cancel when the stage-1 dialog opens.
+  $effect(() => {
+    if (confirmStage1 && stage1CancelBtn) {
+      stage1CancelBtn.focus();
+    }
+  });
+
+  async function stage1ExportAndAdvance() {
+    if (stage1Busy) return;
+    stage1Busy = true;
+    try {
+      await exportBackupThenAdvance();
+    } finally {
+      stage1Busy = false;
     }
   }
 
@@ -175,6 +244,12 @@
   </dl>
 </section>
 
+<section>
+  <h2>Backup</h2>
+  <p class="backup-desc">Export an encrypted backup of your database (.age file). Restore by replacing your data directory with the decrypted contents.</p>
+  <button type="button" onclick={exportBackupAction}>Export backup…</button>
+</section>
+
 <section class="danger-zone">
   <h2>Danger zone</h2>
   <p>Permanently removes all contacts, messages, mailboxes, identity, and the database.</p>
@@ -184,17 +259,43 @@
 </section>
 
 {#if confirmStage1}
-  <ConfirmDialog
-    title="Delete all Skattr data?"
-    body="This permanently removes contacts, messages, mailboxes, identity, and the database. This cannot be undone."
-    confirmLabel="I understand, continue"
-    danger
-    onConfirm={() => {
-      confirmStage1 = false;
-      confirmStage2 = true;
-    }}
-    onCancel={() => (confirmStage1 = false)}
-  />
+  <!-- Bespoke three-button stage-1 dialog (ConfirmDialog supports only two buttons). -->
+  <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+  <div
+    class="overlay"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="wipe-stage1-title"
+    onkeydown={(e) => { if (e.key === "Escape" && !stage1Busy) confirmStage1 = false; }}
+  >
+    <div class="dialog">
+      <h2 id="wipe-stage1-title">Delete all Skattr data?</h2>
+      <p>This permanently removes contacts, messages, mailboxes, identity, and the database. This cannot be undone. Export a backup first if you want to keep a copy.</p>
+      <div class="actions">
+        <button type="button" bind:this={stage1CancelBtn} onclick={() => (confirmStage1 = false)} disabled={stage1Busy}>
+          Cancel
+        </button>
+        <button
+          type="button"
+          class="danger-btn"
+          onclick={() => {
+            confirmStage1 = false;
+            confirmStage2 = true;
+          }}
+          disabled={stage1Busy}
+        >
+          Continue without backup
+        </button>
+        <button
+          type="button"
+          onclick={stage1ExportAndAdvance}
+          disabled={stage1Busy}
+        >
+          {stage1Busy ? "Saving…" : "Export backup first"}
+        </button>
+      </div>
+    </div>
+  </div>
 {/if}
 
 {#if confirmStage2}
@@ -258,6 +359,11 @@
   .muted {
     color: var(--text-muted);
   }
+  .backup-desc {
+    font: var(--t-body);
+    color: var(--text-muted);
+    margin: 0 0 var(--s-2);
+  }
   .danger-zone {
     border: 1px solid var(--danger);
     border-radius: 6px;
@@ -285,5 +391,36 @@
   button {
     padding: 6px 12px;
     cursor: pointer;
+  }
+  /* Three-button wipe stage-1 dialog */
+  .overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+    display: grid;
+    place-items: center;
+    z-index: 900;
+  }
+  .dialog {
+    background: var(--bg-elevated);
+    color: var(--text);
+    padding: var(--s-3);
+    border-radius: 8px;
+    max-width: 480px;
+    width: 90vw;
+  }
+  .dialog h2 {
+    font: var(--t-display);
+    margin: 0 0 var(--s-2);
+  }
+  .dialog p {
+    font: var(--t-body);
+    margin: 0 0 var(--s-3);
+  }
+  .actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--s-2);
+    flex-wrap: wrap;
   }
 </style>

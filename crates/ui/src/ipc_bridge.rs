@@ -34,6 +34,47 @@ pub async fn ipc_request(
         .ok_or_else(|| "daemon not yet running; call start_in_process_cmd first".to_string())?;
     match client.execute(cmd).await {
         Ok(result) => Ok(IpcResponse::Ok(result)),
-        Err(e) => Ok(IpcResponse::Err(IpcError::Internal(format!("{e}")))),
+        Err(e) => Ok(IpcResponse::Err(map_client_err(e))),
+    }
+}
+
+/// Preserve the daemon's structured `IpcError` instead of flattening it.
+/// `IpcClientError::Server` already carries the typed wire error the daemon
+/// produced (via `CoreError::kind()`); only genuine transport/codec failures
+/// become `Internal`.
+fn map_client_err(e: skattr_core::daemon::ipc::IpcClientError) -> IpcError {
+    use skattr_core::daemon::ipc::IpcClientError;
+    match e {
+        IpcClientError::Server(ipc_err) => ipc_err,
+        other => {
+            let msg: String = format!("{other}").chars().take(256).collect();
+            IpcError::Internal(msg)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn server_error_passes_through_structured() {
+        use skattr_core::daemon::error_kind::DaemonErrorKind;
+        use skattr_core::daemon::ipc::IpcClientError;
+        let e = IpcClientError::Server(IpcError::Daemon(DaemonErrorKind::InviteExpired));
+        assert!(
+            matches!(
+                map_client_err(e),
+                IpcError::Daemon(DaemonErrorKind::InviteExpired)
+            ),
+            "expected structured Daemon(InviteExpired)"
+        );
+    }
+
+    #[test]
+    fn transport_error_becomes_internal() {
+        use skattr_core::daemon::ipc::IpcClientError;
+        let e = IpcClientError::DaemonNotRunning;
+        assert!(matches!(map_client_err(e), IpcError::Internal(_)));
     }
 }

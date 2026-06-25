@@ -8,6 +8,7 @@
 //! Windows). The platform-specific `Server` type is re-exported from
 //! the active child module.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::broadcast;
@@ -45,6 +46,27 @@ pub trait CommandExecutor: Send + Sync {
     fn latest_tor_status(&self) -> Option<crate::daemon::events::TorStatus> {
         None
     }
+
+    /// Return the wipe target path if `WipeAllData` was dispatched on
+    /// this connection, consuming the signal. Default `None` so test
+    /// stubs and executors that never handle `WipeAllData` compile
+    /// unchanged. The production `DaemonHandle` impl delegates to
+    /// `DaemonHandle::take_wipe_target`.
+    ///
+    /// Called by `handle_connection` AFTER writing the terminal `Bye`
+    /// frame so the teardown is flush-ordered (T3-3). Must be called
+    /// at most once per wipe event — the `Mutex<Option>` implementation
+    /// genuinely consumes the signal.
+    fn take_wipe_target(&self) -> Option<PathBuf> {
+        None
+    }
+
+    /// Best-effort close the storage pool before wipe teardown so the
+    /// WAL is folded and the plaintext DB is encrypted before
+    /// `remove_dir_all` deletes the data directory. Default no-op so
+    /// test stubs compile unchanged. The production `DaemonHandle` impl
+    /// calls `self.pool.close()` and logs any error.
+    fn wipe_close(&self) {}
 }
 
 /// Handle one accepted connection. The loop owns a per-connection
@@ -59,6 +81,10 @@ pub async fn handle_connection<S>(
 {
     let mut events_rx: Option<broadcast::Receiver<Event>> = None;
     let mut subscribed: Option<EventFilter> = None;
+    // Set when a `WipeAllData` command is dispatched. Used in post-loop
+    // teardown. We stash it here rather than calling `take_wipe_target`
+    // a second time — Fix 2 makes the signal genuinely consuming.
+    let mut pending_wipe: Option<PathBuf> = None;
 
     loop {
         // Two sources: inbound request, or a pending event on the
@@ -119,13 +145,25 @@ pub async fn handle_connection<S>(
                     Ok(result) => IpcResponse::Ok(result),
                     Err(e) => IpcResponse::Err(e),
                 };
+                // Consume the wipe signal exactly once. Fix 2 makes
+                // `take_wipe_target` a genuine take (Mutex<Option>) so
+                // we must not call it twice; stash the result in
+                // `pending_wipe` for the post-loop teardown section.
+                let wipe_target = executor.take_wipe_target();
                 // Close after a one-shot Execute if no subscription is
                 // active. When subscribed, keep the connection open so
                 // the client can interleave Execute(SendMessage) calls
                 // with the ongoing event stream. Always close on error.
-                let is_terminal = subscribed.is_none() || matches!(resp, IpcResponse::Err(_));
+                // Also close immediately if a WipeAllData was dispatched —
+                // the client must receive its reply and Bye before teardown.
+                let is_terminal = subscribed.is_none()
+                    || matches!(resp, IpcResponse::Err(_))
+                    || wipe_target.is_some();
                 if write_frame(&mut stream, &resp).await.is_err() {
                     break;
+                }
+                if let Some(dir) = wipe_target {
+                    pending_wipe = Some(dir);
                 }
                 if is_terminal {
                     break;
@@ -163,6 +201,38 @@ pub async fn handle_connection<S>(
 
     // Terminal frame. Ignore write errors — the peer may already be gone.
     let _ = write_frame(&mut stream, &IpcResponse::Bye).await;
+
+    // T3-3: flush-ordered wipe teardown. `pending_wipe` was set in the
+    // Execute arm when `WipeAllData` was dispatched. Now that the reply +
+    // Bye are flushed, perform the actual teardown: close the pool (so the
+    // WAL is folded and the DB is encrypted), drop the executor (Arc<Handle>
+    // and its background tasks), remove the data directory, then exit. This
+    // runs deterministically AFTER the client has received its reply.
+    //
+    // We use `pending_wipe` (not a second `take_wipe_target()` call) because
+    // Fix 2 makes the signal genuinely consuming — a second call returns None.
+    if let Some(data_dir) = pending_wipe {
+        // Close the pool before dropping the executor so the WAL is
+        // folded and plaintext DB is encrypted before removal.
+        executor.wipe_close();
+        // Drop the executor (and its Arc<DaemonHandle>) so background
+        // tasks (retention sweep, log tap, mailbox poller) get a chance
+        // to wind down before we remove their storage.
+        drop(executor);
+
+        if let Err(e) = tokio::fs::remove_dir_all(&data_dir).await {
+            tracing::error!(
+                error = %e,
+                dir = ?data_dir,
+                "wipe_all_data: remove_dir_all failed; exiting anyway"
+            );
+        }
+        #[cfg(not(test))]
+        std::process::exit(0);
+        // In tests, skip process::exit so the async task completes normally.
+        #[cfg(test)]
+        return;
+    }
 }
 
 /// Accept loop. Spawns [`handle_connection`] per accepted stream.
@@ -553,5 +623,83 @@ mod tests {
 
         drop(client);
         let _ = handle_task.await;
+    }
+
+    /// A `WipeAllData` command dispatched on a *subscribed* connection must be
+    /// treated as terminal: the server sends `Ok` + `Bye` and the
+    /// `handle_connection` future must complete, even though the connection
+    /// is normally kept alive while subscribed.
+    ///
+    /// This is the regression test for Fix 3a (wipe-terminal) + Fix 2
+    /// (consuming wipe signal). `process::exit` is guarded with
+    /// `#[cfg(not(test))]` in the production path so this test task
+    /// exits normally.
+    #[tokio::test]
+    async fn wipe_on_subscribed_connection_is_terminal() {
+        struct WipeExec {
+            wipe_signaled: std::sync::Mutex<bool>,
+        }
+        #[async_trait]
+        impl CommandExecutor for WipeExec {
+            async fn execute(&self, _cmd: Command) -> std::result::Result<CommandResult, IpcError> {
+                *self.wipe_signaled.lock().unwrap() = true;
+                Ok(CommandResult::Ok)
+            }
+            fn take_wipe_target(&self) -> Option<std::path::PathBuf> {
+                let mut flag = self.wipe_signaled.lock().unwrap();
+                if *flag {
+                    *flag = false; // consume so second call returns None
+                    Some(std::path::PathBuf::from("/nonexistent-wipe-test-dir"))
+                } else {
+                    None
+                }
+            }
+        }
+
+        let (mut client, server_stream) = tokio::io::duplex(1024 * 1024);
+        let (events_tx, _) = broadcast::channel::<Event>(16);
+        let executor: Arc<dyn CommandExecutor> = Arc::new(WipeExec {
+            wipe_signaled: std::sync::Mutex::new(false),
+        });
+
+        let handle_task = tokio::spawn(handle_connection(server_stream, executor, events_tx));
+
+        // Subscribe first so the connection is in the subscribed state.
+        write_frame(&mut client, &IpcRequest::Subscribe(EventFilter::All))
+            .await
+            .unwrap();
+        let r1: IpcResponse = read_frame(&mut client).await.unwrap();
+        assert!(
+            matches!(r1, IpcResponse::Ok(CommandResult::Subscribed)),
+            "expected Ok(Subscribed), got {r1:?}"
+        );
+
+        // Execute WipeAllData on the subscribed connection.
+        write_frame(&mut client, &IpcRequest::Execute(Command::WipeAllData))
+            .await
+            .unwrap();
+
+        // Server must send Ok(CommandResult::Ok).
+        let r2: IpcResponse = read_frame(&mut client).await.unwrap();
+        assert!(
+            matches!(r2, IpcResponse::Ok(CommandResult::Ok)),
+            "expected Ok(Ok) after wipe, got {r2:?}"
+        );
+
+        // Server must send Bye (connection treated as terminal even though subscribed).
+        let r3: IpcResponse = read_frame(&mut client).await.unwrap();
+        assert!(
+            matches!(r3, IpcResponse::Bye),
+            "expected Bye after wipe on subscribed connection, got {r3:?}"
+        );
+
+        // The handle_connection future must complete within 5 s (not hang
+        // waiting for more input on the subscribed connection).
+        let timed = tokio::time::timeout(std::time::Duration::from_secs(5), handle_task).await;
+        assert!(
+            timed.is_ok(),
+            "handle_connection must complete after wipe (timed out)"
+        );
+        timed.unwrap().unwrap();
     }
 }

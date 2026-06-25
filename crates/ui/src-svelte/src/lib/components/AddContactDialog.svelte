@@ -3,6 +3,7 @@
 <script lang="ts">
   import { ipcClient } from "$lib/ipc/tauri";
   import { refreshContacts } from "$lib/stores/contacts";
+  import { errorMessage } from "$lib/ipc/errors";
   import jsQR from "jsqr";
   import { onDestroy } from "svelte";
 
@@ -38,8 +39,17 @@
         cmd: "add_contact",
         invite_url: url.trim(),
       } as any);
+      if (resp.resp === "err") {
+        const d = resp.data;
+        if (d.err === "daemon" && d.data.kind === "delivery_timeout") {
+          error = "Couldn't reach your contact. First contact needs both of you online at the same time — try again when they're back online.";
+        } else {
+          error = errorMessage(d);
+        }
+        return; // keep the dialog open for retry
+      }
       if (resp.resp !== "ok") {
-        error = "Failed to add contact.";
+        error = "Something went wrong.";
         return;
       }
       await refreshContacts();
