@@ -106,6 +106,8 @@
 </div>
 
 {#if showAdd}
+  <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+  <!-- role="dialog" overlay with Escape/click-dismiss is the standard modal pattern; inner content has full keyboard access -->
   <div
     class="modal-overlay"
     onclick={() => (showAdd = false)}
