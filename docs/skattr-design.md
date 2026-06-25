@@ -92,7 +92,7 @@ Why MLS instead of Double Ratchet:
 - Better post-compromise recovery for long-offline users (new epoch via Commit heals faster than chain ratchet)
 - IETF-standardized (RFC 9420), multiple interoperable implementations
 
-Use **OpenMLS** (Rust, actively maintained). Ciphersuite: `MLS_256_DHKEMX25519_AES256GCM_SHA512_Ed25519` — modern, well-analyzed primitives, no post-quantum yet but the ciphersuite can be upgraded via MLS's `extensions` mechanism when PQ variants mature.
+Use **OpenMLS** (Rust, actively maintained). Ciphersuite: `MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519` (IANA `0x0003`) — modern, well-analyzed primitives, no post-quantum yet but the ciphersuite can be upgraded via MLS's `extensions` mechanism when PQ variants mature. (The 128-bit ChaCha suite is the locked decision; an earlier draft named a 256-bit AES variant.)
 
 **Binding MLS to transport:** during Noise handshake, compute a binding value `h_transport = HKDF(handshake_hash, "skattr-binding-v1")`. Include `h_transport` as external PSK input to the first MLS Commit after handshake. This prevents an attacker who somehow got the MLS state from replaying it over a different Noise session.
 
