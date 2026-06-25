@@ -118,6 +118,10 @@ where
     /// unit tests. Used by the RemoveMailbox drain to dispatch held deposits
     /// before finalizing removal.
     pub(crate) inbound: Option<Arc<dyn crate::delivery::peer::InboundDispatch>>,
+    /// Precomputed backup key (`HKDF(seed, "skattr-backup-v1")`). Derived at
+    /// boot because the root seed is consumed during identity setup and not
+    /// retained. Used by `Command::ExportBackup`.
+    pub(crate) backup_key: zeroize::Zeroizing<[u8; 32]>,
 }
 
 impl<S> DaemonHandle<S>
@@ -156,6 +160,7 @@ where
             log_sink: LogSink::default(),
             group_locks: new_group_lock_registry(),
             inbound: None,
+            backup_key: zeroize::Zeroizing::new([0u8; 32]),
         }
     }
 
@@ -185,6 +190,7 @@ where
             log_sink: LogSink::default(),
             group_locks: new_group_lock_registry(),
             inbound: None,
+            backup_key: zeroize::Zeroizing::new([0u8; 32]),
         }
     }
 
@@ -221,6 +227,7 @@ where
             log_sink: LogSink::default(),
             group_locks: new_group_lock_registry(),
             inbound: None,
+            backup_key: zeroize::Zeroizing::new([0u8; 32]),
         }
     }
 
@@ -257,6 +264,13 @@ where
     /// finalizing removal.
     pub(crate) fn set_inbound(&mut self, inbound: Arc<dyn crate::delivery::peer::InboundDispatch>) {
         self.inbound = Some(inbound);
+    }
+
+    /// Store the precomputed backup key. Called by `run_with_transport` after
+    /// deriving `HKDF(seed, "skattr-backup-v1")` while the seed is still in
+    /// scope. Test helpers leave the field at its zero default.
+    pub(crate) fn set_backup_key(&mut self, key: zeroize::Zeroizing<[u8; 32]>) {
+        self.backup_key = key;
     }
 
     /// Snapshot the latest cached `TorStatus`. Non-blocking RwLock read.
@@ -347,6 +361,7 @@ where
             log_sink: self.log_sink.clone(),
             group_locks: self.group_locks.clone(),
             inbound: self.inbound.clone(),
+            backup_key: zeroize::Zeroizing::new(*self.backup_key),
         }
     }
 }

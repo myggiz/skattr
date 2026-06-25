@@ -124,6 +124,10 @@ impl Daemon {
         let vault_path = data_dir.join("identity.vault");
         let (_vault, identity_for_seed) = Vault::open(&vault_path, passphrase.as_str())?;
         let seed = derive_storage_seed(identity_for_seed)?;
+        let backup_key = crate::identity::derive::hkdf_expand::<32>(
+            seed.as_bytes(),
+            crate::identity::derive::INFO_BACKUP_V1,
+        )?;
         let (_vault2, identity) = Vault::open(&vault_path, passphrase.as_str())?;
         let (_vault3, identity_for_poller) = Vault::open(&vault_path, passphrase.as_str())?;
         let (_vault4, identity_for_inbound) = Vault::open(&vault_path, passphrase.as_str())?;
@@ -200,6 +204,7 @@ impl Daemon {
             identity_for_inbound,
             transport_identity,
             seed,
+            backup_key,
             data_dir,
             config,
             config_path,
@@ -267,6 +272,7 @@ pub async fn run_with_transport<T>(
     identity_for_inbound: crate::identity::IdentityKey,
     transport_identity: Arc<crate::identity::IdentityKey>,
     seed: crate::identity::Seed,
+    backup_key: zeroize::Zeroizing<[u8; 32]>,
     data_dir: &Path,
     config: Config,
     config_path: std::path::PathBuf,
@@ -424,6 +430,10 @@ where
     // can dispatch held deposits into local storage before finalizing removal
     // (Task 22.5).
     handle.set_inbound(inbound.clone());
+    // Store the precomputed backup key (derived at boot while the seed was still
+    // in scope). Command::ExportBackup reads this at runtime without needing the
+    // root seed (which has already been consumed by derive_storage_seed).
+    handle.set_backup_key(backup_key);
 
     // Log tap: forward every record from the ring buffer's broadcast channel
     // onto the daemon event bus so `EventFilter::Logs` subscribers receive
@@ -559,6 +569,10 @@ pub async fn run_loopback(
     let vault_path = data_dir.join("identity.vault");
     let (_vault, identity_for_seed) = Vault::open(&vault_path, passphrase.as_str())?;
     let seed = derive_storage_seed(identity_for_seed)?;
+    let backup_key = crate::identity::derive::hkdf_expand::<32>(
+        seed.as_bytes(),
+        crate::identity::derive::INFO_BACKUP_V1,
+    )?;
     let (_vault2, identity) = Vault::open(&vault_path, passphrase.as_str())?;
     let (_vault3, identity_for_poller) = Vault::open(&vault_path, passphrase.as_str())?;
     let (_vault4, identity_for_inbound) = Vault::open(&vault_path, passphrase.as_str())?;
@@ -602,6 +616,7 @@ pub async fn run_loopback(
         identity_for_inbound,
         transport_identity,
         seed,
+        backup_key,
         data_dir,
         config,
         config_path,
@@ -659,6 +674,10 @@ pub async fn run_loopback_with_mailbox(
     let vault_path = data_dir.join("identity.vault");
     let (_vault, identity_for_seed) = Vault::open(&vault_path, passphrase.as_str())?;
     let seed = derive_storage_seed(identity_for_seed)?;
+    let backup_key = crate::identity::derive::hkdf_expand::<32>(
+        seed.as_bytes(),
+        crate::identity::derive::INFO_BACKUP_V1,
+    )?;
     let (_vault2, identity) = Vault::open(&vault_path, passphrase.as_str())?;
     let (_vault3, identity_for_poller) = Vault::open(&vault_path, passphrase.as_str())?;
     let (_vault4, identity_for_inbound) = Vault::open(&vault_path, passphrase.as_str())?;
@@ -698,6 +717,7 @@ pub async fn run_loopback_with_mailbox(
         identity_for_inbound,
         transport_identity,
         seed,
+        backup_key,
         data_dir,
         config,
         config_path,
