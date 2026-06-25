@@ -6,6 +6,8 @@
 //! separate connection for streaming events) and relays each frame to
 //! a Tauri Channel for SvelteKit to consume.
 
+use tauri::Emitter;
+
 use skattr_core::daemon::events::Event;
 use skattr_core::daemon::ipc::wire::EventFilter;
 use skattr_core::daemon::ipc::IpcClient;
@@ -14,6 +16,7 @@ use crate::daemon::AppState;
 
 #[tauri::command]
 pub async fn ipc_subscribe(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     filter: EventFilter,
     channel: tauri::ipc::Channel<Event>,
@@ -36,10 +39,20 @@ pub async fn ipc_subscribe(
         .map_err(|e| format!("subscribe: {e}"))?;
 
     tokio::spawn(async move {
-        while let Ok(ev) = client.next_event().await {
-            if channel.send(ev).is_err() {
-                // Receiver gone — Svelte unmounted the consumer.
-                break;
+        loop {
+            match client.next_event().await {
+                Ok(ev) => {
+                    if channel.send(ev).is_err() {
+                        // Receiver gone — Svelte unmounted the consumer. Normal.
+                        break;
+                    }
+                }
+                Err(e) => {
+                    // Stream died (daemon gone / socket closed). Signal the
+                    // frontend so it can re-subscribe instead of freezing.
+                    let _ = app.emit("ipc:stream-closed", format!("{e}"));
+                    break;
+                }
             }
         }
     });
