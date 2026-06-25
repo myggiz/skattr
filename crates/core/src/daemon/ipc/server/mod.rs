@@ -696,7 +696,10 @@ mod tests {
         // The handle_connection future must complete within 5 s (not hang
         // waiting for more input on the subscribed connection).
         let timed = tokio::time::timeout(std::time::Duration::from_secs(5), handle_task).await;
-        assert!(timed.is_ok(), "handle_connection must complete after wipe (timed out)");
+        assert!(
+            timed.is_ok(),
+            "handle_connection must complete after wipe (timed out)"
+        );
         timed.unwrap().unwrap();
     }
 }
