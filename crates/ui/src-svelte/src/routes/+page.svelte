@@ -126,11 +126,13 @@
 
   // Watch for IPC stream-closed events (emitted by the Tauri relay) and
   // self-heal with exponential backoff.
-  onMount(async () => {
-    const unlisten = await listen<string>("ipc:stream-closed", () => {
+  onMount(() => {
+    const unlistenP = listen<string>("ipc:stream-closed", () => {
       handleStreamClosed(reSubscribe);
     });
-    return () => unlisten();
+    return () => {
+      unlistenP.then((unlisten) => unlisten());
+    };
   });
 </script>
 
