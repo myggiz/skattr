@@ -37,6 +37,7 @@
         close_to_tray: null,
         start_minimised: null,
         persist_logs_to_disk: null,
+        download_dir: null,
       });
       toast.show('Retention updated');
     } catch (e) {
