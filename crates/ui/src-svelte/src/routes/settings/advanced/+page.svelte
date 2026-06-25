@@ -2,7 +2,8 @@
 <!-- Copyright (C) 2026 Myggiz AB -->
 <script lang="ts">
   import { onMount } from "svelte";
-  import { config, fetchConfig, patchConfig, wipeAllData } from "$lib/stores/config";
+  import { config, fetchConfig, patchConfig, wipeAllData, exportBackup } from "$lib/stores/config";
+  import { save } from "@tauri-apps/plugin-dialog";
   import { ipcClient } from "$lib/ipc/tauri";
   import { unwrapOk } from "$lib/ipc/client";
   import LogsViewer from "$lib/components/LogsViewer.svelte";
@@ -82,6 +83,21 @@
       );
     } catch (err) {
       toast.show(`Failed: ${err}`);
+    }
+  }
+
+  async function exportBackupAction() {
+    try {
+      const path = await save({
+        defaultPath: "skattr-backup.age",
+        filters: [{ name: "Skattr backup", extensions: ["age"] }],
+      });
+      if (path) {
+        await exportBackup(path);
+        toast.show("Backup saved.");
+      }
+    } catch (e) {
+      toast.show(`${e}`);
     }
   }
 
@@ -175,6 +191,12 @@
   </dl>
 </section>
 
+<section>
+  <h2>Backup</h2>
+  <p class="backup-desc">Export an encrypted backup of your database (.age file). Restore by replacing your data directory with the decrypted contents.</p>
+  <button type="button" onclick={exportBackupAction}>Export backup…</button>
+</section>
+
 <section class="danger-zone">
   <h2>Danger zone</h2>
   <p>Permanently removes all contacts, messages, mailboxes, identity, and the database.</p>
@@ -257,6 +279,11 @@
   }
   .muted {
     color: var(--text-muted);
+  }
+  .backup-desc {
+    font: var(--t-body);
+    color: var(--text-muted);
+    margin: 0 0 var(--s-2);
   }
   .danger-zone {
     border: 1px solid var(--danger);

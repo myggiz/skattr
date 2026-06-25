@@ -10,6 +10,7 @@ import { writable, get } from "svelte/store";
 import type { ConfigSnapshot, ConfigPatch, LogRecord } from "$lib/ipc/types";
 import { ipcClient } from "$lib/ipc/tauri";
 import { unwrapOk } from "$lib/ipc/client";
+import { errorMessage } from "$lib/ipc/errors";
 
 // ---------------------------------------------------------------------------
 // Config store
@@ -173,5 +174,18 @@ export async function wipeAllData(): Promise<void> {
   const resp = await ipcClient.request({ cmd: "wipe_all_data" });
   if (resp.resp !== "ok") {
     throw new Error(`wipe_all_data failed: ${JSON.stringify(resp)}`);
+  }
+}
+
+/**
+ * Export an encrypted backup of the database to the given path.
+ * The file is written by the daemon as an age-encrypted `.age` archive.
+ */
+export async function exportBackup(destPath: string): Promise<void> {
+  const resp = await ipcClient.request({ cmd: "export_backup", dest_path: destPath });
+  if (resp.resp === "err") {
+    throw new Error(errorMessage(resp.data));
+  } else if (resp.resp !== "ok") {
+    throw new Error(`export_backup: unexpected response ${resp.resp}`);
   }
 }
