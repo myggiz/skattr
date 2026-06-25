@@ -5,9 +5,14 @@ import { writable } from "svelte/store";
 export type ConnState = "live" | "reconnecting" | "dead";
 export const connection = writable<{ state: ConnState }>({ state: "live" });
 
+/** Module-level reentrancy guard: prevents concurrent handleStreamClosed runs
+ *  from racing and leaving two live subscriptions. */
+let reconnecting = false;
+
 /** Test seam: reset to live. */
 export function __resetForTest(): void {
   connection.set({ state: "live" });
+  reconnecting = false;
 }
 
 interface RetryOpts { maxAttempts?: number; baseDelayMs?: number; }
@@ -15,23 +20,30 @@ interface RetryOpts { maxAttempts?: number; baseDelayMs?: number; }
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 /** On stream death: flip to reconnecting and retry `resubscribe` with bounded
- *  exponential backoff; → live on success, → dead after maxAttempts. */
+ *  exponential backoff; → live on success, → dead after maxAttempts.
+ *  Concurrent calls are dropped (the first in-flight run wins). */
 export async function handleStreamClosed(
   resubscribe: () => Promise<void>,
   opts: RetryOpts = {},
 ): Promise<void> {
+  if (reconnecting) return;
+  reconnecting = true;
   const maxAttempts = opts.maxAttempts ?? 6;
   const baseDelayMs = opts.baseDelayMs ?? 500;
   connection.set({ state: "reconnecting" });
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    try {
-      await resubscribe();
-      connection.set({ state: "live" });
-      return;
-    } catch {
-      const delay = Math.min(baseDelayMs * 2 ** attempt, 8000);
-      if (delay > 0) await sleep(delay);
+  try {
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        await resubscribe();
+        connection.set({ state: "live" });
+        return;
+      } catch {
+        const delay = Math.min(baseDelayMs * 2 ** attempt, 8000);
+        if (delay > 0) await sleep(delay);
+      }
     }
+    connection.set({ state: "dead" });
+  } finally {
+    reconnecting = false;
   }
-  connection.set({ state: "dead" });
 }

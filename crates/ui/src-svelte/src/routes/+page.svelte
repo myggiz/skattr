@@ -111,8 +111,17 @@
   }
 
   onMount(() => {
-    reSubscribe();
-    return () => { if (unsub) unsub(); };
+    // Guard against mount-race: if the component unmounts before the async
+    // reSubscribe promise resolves, tear down the just-created subscription
+    // immediately rather than leaking it.
+    let cancelled = false;
+    reSubscribe().then(() => {
+      if (cancelled && unsub) { unsub(); unsub = null; }
+    });
+    return () => {
+      cancelled = true;
+      if (unsub) { unsub(); unsub = null; }
+    };
   });
 
   // Watch for IPC stream-closed events (emitted by the Tauri relay) and
@@ -235,7 +244,7 @@
     padding: var(--s-2) var(--s-3);
     background: var(--bg-elevated);
     color: var(--text);
-    border: 1px solid var(--bg-elevated);
+    border: 1px solid var(--fg-dim);
     border-radius: 6px;
     font: var(--t-ui);
     box-shadow: 0 2px 12px rgba(0, 0, 0, 0.4);
