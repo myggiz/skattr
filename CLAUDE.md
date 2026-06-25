@@ -254,7 +254,7 @@ into 3.A → 3.B → 3.C → 3.D.
   (session-scoped store), configurable download folder, in-UI retry, sender-side
   download progress, concurrent attachments per peer.
 
-#### Phase 4 — Release integrity, docs, signing — 🔄 in progress (4.D, 4.B done)
+#### Phase 4 — Release integrity, docs, signing — 🔄 in progress (4.D, 4.B, 4.C done)
 
 Honest, accurate user-facing docs (close the audit's documentation-truthfulness
 gaps), a working download-verification chain, and **real signing keys**: the
@@ -322,9 +322,34 @@ client-side mitigation goes in **4.C**.
   demoted to a last-resort data-loss warning. Tracked v1.1 follow-up (code, out
   of 4.B scope): the stale `hs_key.rs:13` "deliberate rotation" comment
   contradicts the degenerate shipped `RotateOnion`.
-- **4.A / 4.C** — ⬜ not started. 4.A: release/CI completeness (Playwright +
-  the indeterminate-progress test P4, Flatpak). 4.C: UI robustness + the D1
-  first-contact client-side mitigation.
+- **4.C — UI robustness & data-safety UX** — ✅ done (merge PR #11 `68a7039`;
+  spec `2026-06-25-phase-4c-ui-robustness-design.md`, plan
+  `2026-06-25-phase-4c-ui-robustness.md`; **no peer-facing protocol change** —
+  the new `Command::ExportBackup` is additive append-only local IPC). Four items,
+  subagent-driven + opus whole-branch review: **(A)** the Tauri bridge
+  (`ipc_bridge.rs`) preserves the structured `IpcError` instead of flattening to
+  `Internal`; a frontend `errorMessage(IpcError)` maps `DaemonErrorKind` to human
+  strings (AddContactDialog shows specific invite/Tor messages). **(B)** the event
+  relay (`events.rs`) emits `ipc:stream-closed` on death (was a silent `break`); a
+  `connection` store re-subscribes with bounded backoff (concurrent-guarded) + a
+  reconnect banner — a transient IPC hiccup self-heals. **(C)** the D1 mitigation
+  (waiting-state only, no auto-retry): `add_contact` dial failure → `DeliveryTimeout`
+  so the dialog shows "both must be online" with a clean re-submit; a "Connecting…"
+  badge while `group_state==pending_join`. **(D)** GUI backup + gated wipe: a
+  boot-derived `DaemonHandle.backup_key` (`Option<Zeroizing>`, fail-closed),
+  `Pool::snapshot_encrypted` (`VACUUM INTO` → storage-key encrypt) +
+  `export_backup_from_parts` (CLI-restorable archive), `Command::ExportBackup` run
+  via `spawn_blocking` with a unique temp + guaranteed cleanup, a Settings
+  "Export backup…" action, a three-way wipe gate (offer backup first; cancel/fail
+  can't reach the wipe), and a deterministic wipe teardown after the flushed IPC
+  `Bye` (replacing the 150 ms sleep, audit T3-3). Also fixed three pre-existing CI
+  flakiness sources surfaced during the babysit (the 30s→60s daemon-readiness
+  timeouts; the `from_url_rejects_tampered_signature` `'A'`-byte no-op tamper).
+  Remaining v1.1 follow-ups: full clean-teardown reroute for wipe (background
+  tasks); the `errors.ts` default-arm / `take_wipe_target` naming notes.
+- **4.A** — ⬜ not started: release/CI completeness (Playwright in CI, the
+  indeterminate-progress test P4, Flatpak) — the last sub-project before the real
+  signing keys + v1.0 tag.
 
 ### Deferred / known-limitation status
 
