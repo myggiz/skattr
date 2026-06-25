@@ -40,8 +40,13 @@
         invite_url: url.trim(),
       } as any);
       if (resp.resp === "err") {
-        error = errorMessage(resp.data);
-        return;
+        const d = resp.data;
+        if (d.err === "daemon" && (d.data.kind === "delivery_timeout" || d.data.kind === "tor_not_ready")) {
+          error = "Couldn't reach your contact. First contact needs both of you online at the same time — try again when they're back online.";
+        } else {
+          error = errorMessage(d);
+        }
+        return; // keep the dialog open for retry
       }
       if (resp.resp !== "ok") {
         error = "Something went wrong.";

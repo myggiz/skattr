@@ -346,7 +346,18 @@ where
         .hub
         .connect_and_ingest_at(inviter, &inviter_onion)
         .await
-        .map_err(map_err)?;
+        .map_err(|e| {
+            // First contact requires reaching the inviter now; a dial failure
+            // (offline / Tor flaky) is surfaced as DeliveryTimeout so the UI can
+            // show the "both must be online" guidance. Preserve a more specific
+            // kind if the underlying error already has one.
+            match e.kind() {
+                Some(k) => IpcError::Daemon(k),
+                None => {
+                    IpcError::Daemon(crate::daemon::error_kind::DaemonErrorKind::DeliveryTimeout)
+                }
+            }
+        })?;
 
     let contact_repo = ContactRepo::new(&handle.pool);
     let contact = Contact {
