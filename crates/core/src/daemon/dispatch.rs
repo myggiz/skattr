@@ -1707,49 +1707,48 @@ where
 {
     use crate::daemon::error_kind::DaemonErrorKind;
 
-    // Fail closed: if the backup key was never initialized (key is None),
-    // return InvalidArgument rather than silently encrypting with zeroes.
-    let backup_key_bytes: [u8; 32] = handle
-        .backup_key
-        .as_deref()
-        .ok_or_else(|| {
-            IpcError::Daemon(DaemonErrorKind::InvalidArgument {
-                message: "backup key not initialized".into(),
-            })
+    // Fail closed: require an initialized backup key. Keep it in `Zeroizing`
+    // the whole time — never copy the raw [u8;32] onto the stack un-zeroed.
+    let backup_key: zeroize::Zeroizing<[u8; 32]> = handle.backup_key.clone().ok_or_else(|| {
+        IpcError::Daemon(DaemonErrorKind::InvalidArgument {
+            message: "backup key not initialized".into(),
         })
-        .copied()?;
+    })?;
 
     let data_dir = handle.config.read().await.data_dir.clone();
     let dest = std::path::PathBuf::from(&dest_path);
-    // Temp snapshot distinct from the live `skattr.sqlite.age` so we never
-    // clobber the pool's at-rest file even if bundling fails partway through.
-    let db_age = data_dir.join("skattr.sqlite.backup.age");
+    // Per-export UNIQUE temp snapshot, distinct from the live `skattr.sqlite.age`
+    // (never clobbers the pool's at-rest file) and from any concurrent export.
+    static EXPORT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = EXPORT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let db_age = data_dir.join(format!("skattr.sqlite.backup.{seq}.age"));
 
-    // snapshot_encrypted is synchronous (VACUUM INTO + age encrypt).
+    // Run the synchronous snapshot (VACUUM INTO + age encrypt) and bundle (tar +
+    // age) off the async workers via spawn_blocking. The temp `.age` is cleaned
+    // up on EVERY exit path — snapshot failure, export failure, or join error.
     let pool = handle.pool.clone();
-    let db_age_clone = db_age.clone();
-    let snap_result = tokio::task::spawn_blocking(move || pool.snapshot_encrypted(&db_age_clone))
+    let outcome: std::result::Result<(), IpcError> = async {
+        let db_age_c = db_age.clone();
+        tokio::task::spawn_blocking(move || pool.snapshot_encrypted(&db_age_c))
+            .await
+            .map_err(|e| IpcError::Internal(format!("spawn_blocking join: {e}")))?
+            .map_err(map_err)?;
+
+        let data_dir_c = data_dir.clone();
+        let db_age_c2 = db_age.clone();
+        let dest_c = dest.clone();
+        let key = backup_key.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::storage::backup::export_backup_from_parts(&data_dir_c, &db_age_c2, &dest_c, &key)
+        })
         .await
-        .map_err(|e| IpcError::Internal(format!("spawn_blocking join: {e}")))?;
-    snap_result.map_err(map_err)?;
+        .map_err(|e| IpcError::Internal(format!("spawn_blocking join: {e}")))?
+        .map_err(map_err)
+    }
+    .await;
 
-    // export_backup_from_parts is also synchronous (tar + age encrypt).
-    let data_dir_clone = data_dir.clone();
-    let db_age_clone2 = db_age.clone();
-    let res = tokio::task::spawn_blocking(move || {
-        let key = zeroize::Zeroizing::new(backup_key_bytes);
-        crate::storage::backup::export_backup_from_parts(
-            &data_dir_clone,
-            &db_age_clone2,
-            &dest,
-            &key,
-        )
-    })
-    .await
-    .map_err(|e| IpcError::Internal(format!("spawn_blocking join: {e}")))?;
-
-    let _ = std::fs::remove_file(&db_age); // clean up the temp DB .age
-    res.map_err(map_err)?;
+    let _ = std::fs::remove_file(&db_age); // always clean up the temp DB .age
+    outcome?;
     Ok(CommandResult::Ok)
 }
 
