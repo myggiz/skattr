@@ -3,6 +3,7 @@
 <script lang="ts">
   import { ipcClient } from "$lib/ipc/tauri";
   import { refreshContacts } from "$lib/stores/contacts";
+  import { errorMessage } from "$lib/ipc/errors";
   import jsQR from "jsqr";
   import { onDestroy } from "svelte";
 
@@ -38,8 +39,12 @@
         cmd: "add_contact",
         invite_url: url.trim(),
       } as any);
+      if (resp.resp === "err") {
+        error = errorMessage(resp.data);
+        return;
+      }
       if (resp.resp !== "ok") {
-        error = "Failed to add contact.";
+        error = "Something went wrong.";
         return;
       }
       await refreshContacts();
