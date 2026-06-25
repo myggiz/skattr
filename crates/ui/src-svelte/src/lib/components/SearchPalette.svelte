@@ -154,6 +154,8 @@
         onkeydown={handleOverlayKey}
       ></div>
     {/if}
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+    <!-- role="dialog" + onkeydown is the standard modal keyboard-trap pattern -->
     <!-- svelte-ignore a11y_interactive_supports_focus -->
     <div
       class="panel"
@@ -162,6 +164,8 @@
       aria-label="Search messages"
       onkeydown={onPanelKey}
     >
+      <!-- svelte-ignore a11y_autofocus -->
+      <!-- autofocus is intentional: the palette opens on demand and focus must land in the search field immediately -->
       <input
         type="text"
         value={queryStr}
@@ -181,6 +185,7 @@
             aria-selected={i === highlightIdx}
             class:active={i === highlightIdx}
             onclick={() => pick(i)}
+            onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); pick(i); } }}
           >
             <div class="meta">
               {nicknameMap.get(r.record.contact) ?? r.record.contact.slice(0, 8) + "…"}

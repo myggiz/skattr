@@ -52,6 +52,7 @@ let _pendingPatch: ConfigPatch = {
   close_to_tray: null,
   start_minimised: null,
   persist_logs_to_disk: null,
+  download_dir: null,
 };
 
 /**
@@ -87,6 +88,7 @@ export function patchConfig(patch: ConfigPatch): Promise<void> {
         close_to_tray: null,
         start_minimised: null,
         persist_logs_to_disk: null,
+        download_dir: null,
       };
       try {
         const resp = await ipcClient.request({ cmd: "set_config", patch: toSend });

@@ -68,6 +68,21 @@ describe("FileAttachmentBubble", () => {
     expect(container.querySelector(".progress")).not.toBeNull();
   });
 
+  test("shows the indeterminate 'Downloading…' state when total is 0", async () => {
+    const { container, findByText } = render(FileAttachmentBubble, {
+      props: { record: fileRecord("incoming") },
+    });
+    await findByText("photo.jpg");
+    applyProgress(AID, 0, 0); // received=0, total=0 → indeterminate
+    await tick();
+    const progress = container.querySelector(".progress");
+    expect(progress).not.toBeNull();
+    expect(progress?.classList.contains("indeterminate")).toBe(true);
+    await findByText("Downloading…");
+    // No determinate percentage bar in the indeterminate state.
+    expect(container.querySelector(".progress .bar")).toBeNull();
+  });
+
   test("renders an inline <img> when complete + image", async () => {
     const { container, findByText } = render(FileAttachmentBubble, {
       props: { record: fileRecord("incoming") },

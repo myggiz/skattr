@@ -113,7 +113,7 @@ pub struct ConfigPatch {
     pub persist_logs_to_disk: Option<bool>,
     /// If `Some`, set the attachment download directory. New in 3.B.
     #[serde(default)]
-    #[ts(type = "string")]
+    #[ts(type = "string | null")]
     pub download_dir: Option<std::path::PathBuf>,
 }
 

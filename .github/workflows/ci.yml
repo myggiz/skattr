@@ -109,6 +109,18 @@ jobs:
         working-directory: crates/ui/src-svelte
         run: pnpm test
 
+      - name: Type check (svelte-check, 0 errors / 0 warnings)
+        working-directory: crates/ui/src-svelte
+        run: pnpm check
+
+      - name: Install Playwright browser
+        working-directory: crates/ui/src-svelte
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: E2E tests (Playwright, mock backend)
+        working-directory: crates/ui/src-svelte
+        run: pnpm test:e2e
+
       - name: Clippy (skattr-ui)
         run: cargo clippy -p skattr-ui --all-targets --all-features -- -D warnings
 
