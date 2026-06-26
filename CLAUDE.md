@@ -254,7 +254,7 @@ into 3.A → 3.B → 3.C → 3.D.
   (session-scoped store), configurable download folder, in-UI retry, sender-side
   download progress, concurrent attachments per peer.
 
-#### Phase 4 — Release integrity, docs, signing — 🔄 in progress (4.D, 4.B, 4.C done)
+#### Phase 4 — Release integrity, docs, signing — 🔄 in progress (4.D, 4.B, 4.C, 4.A done — only the real signing keys remain)
 
 Honest, accurate user-facing docs (close the audit's documentation-truthfulness
 gaps), a working download-verification chain, and **real signing keys**: the
@@ -347,9 +347,36 @@ client-side mitigation goes in **4.C**.
   timeouts; the `from_url_rejects_tampered_signature` `'A'`-byte no-op tamper).
   Remaining v1.1 follow-ups: full clean-teardown reroute for wipe (background
   tasks); the `errors.ts` default-arm / `take_wipe_target` naming notes.
-- **4.A** — ⬜ not started: release/CI completeness (Playwright in CI, the
-  indeterminate-progress test P4, Flatpak) — the last sub-project before the real
-  signing keys + v1.0 tag.
+- **4.A — release/CI completeness** — ✅ done (merge PR #13 `19c5b52`; spec
+  `2026-06-25-phase-4a-release-ci-completeness-design.md`, plan
+  `2026-06-25-phase-4a-release-ci-completeness.md`; **CI/test/packaging only — no
+  product/protocol change, no ADR**). Makes the project's own quality evidence
+  actually gate merges, subagent-driven + opus whole-branch review. **Item A**
+  the 13 Playwright e2e specs (mock-backend, `TAURI_MOCK=1`) now run as a hard
+  gate in the `ui` job (`playwright install --with-deps chromium` → `pnpm
+  test:e2e`; ran 13/13 green in CI for the first time). **Item B** `pnpm check`
+  (svelte-check) is now a hard gate at **0 errors / 0 warnings** — root-fixed the
+  4 `ConfigPatch.download_dir` type errors (the ts-rs field annotation made
+  nullable-in-patch, `download_dir: null` set at 4 call sites) and cleared the 4
+  a11y warnings (SearchPalette + mailboxes overlay); `package.json check` gains
+  `--fail-on-warnings`. **Item D** the P4 coverage hole — a Vitest case for
+  `FileAttachmentBubble`'s indeterminate "Downloading…" branch (`applyProgress(AID,
+  0, 0)` → `.indeterminate` + label, no `.bar`). **Item C** a separate
+  `.github/workflows/flatpak.yml` (master-push + weekly cron + `workflow_dispatch`,
+  **not** per-PR) to keep the in-repo Flatpak manifest from silently rotting.
+  Real minisign/PGP key generation stayed an explicit **non-goal** (the
+  `release.yml` signing plumbing is wired; key material is a pre-tag maintainer
+  action). **Flatpak follow-up** (fix-forward, merge PR #14 `00b4a4b`): the new
+  `flatpak.yml`'s first authoritative master run failed — it caught real manifest
+  rot (the pinned `org.freedesktop.*//23.08` runtime's `rust-stable` is frozen at
+  Cargo 1.81, too old for the current dep tree which needs `edition2024`/Rust ≥
+  1.85). Per the disclose-don't-overclaim philosophy and since the `.flatpak`
+  isn't shipped in v1.0, the **full** build-validation was deferred to v1.1; the
+  workflow now only **parse-checks** the manifest (`flatpak-builder
+  --show-manifest`, no toolchain/runtime/network — fast + green), and
+  `docs/build/flatpak.md` documents the exact v1.1 fix (runtime bump 23.08→24.08
+  with Rust ≥ 1.85 + the build-phase `--share=network` grant). See the
+  Deferred-status entry.
 
 ### Deferred / known-limitation status
 
@@ -381,6 +408,19 @@ client-side mitigation goes in **4.C**.
   forever (no auto-fail/partial-GC janitor — shared deferral with 3.B). Large
   files (>10 MiB) cannot transfer while a peer is offline. All disclosed in the
   v1.0 limitations.
+- **Flatpak full build-validation is deferred (manifest does not build today)** —
+  ❌ deferred (v1.1). The in-repo manifest (`packaging/flatpak/net.myggiz.skattr.yml`)
+  pins the `org.freedesktop.*//23.08` runtime, past freedesktop's support window
+  and frozen at **Cargo 1.81** — too old for the current dep tree (`tauri-cli
+  2.11.0` pulls `edition2024` crates needing **Rust ≥ 1.85**), so a sandbox build
+  fails to compile. The `.flatpak` isn't shipped in v1.0 (Flathub publication is
+  itself v1.1-deferred; the v1.0 install story is build-from-source / `release.yml`'s
+  `.deb`/AppImage/`.dmg`/`.msi`). 4.A's `flatpak.yml` therefore only **parse-checks**
+  the manifest (`flatpak-builder --show-manifest`) — it does *not* build it. v1.1
+  fix (documented in `docs/build/flatpak.md`): bump the runtime 23.08→24.08 (Rust
+  ≥ 1.85), grant build-phase network via the manifest's `build-options.build-args:
+  [--share=network]` (there is **no** `flatpak-builder --share-network` CLI flag),
+  and restore the full sandbox build in `flatpak.yml`.
 - **v1.1+ deferrals** (must be disclosed as absent in the v1.0 threat model):
   third-party security audit; metadata-minimization (message-size padding,
   send-timing jitter, cover traffic / cover polling); multi-member groups (>2);
