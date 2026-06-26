@@ -15,12 +15,14 @@ references.
 > in this version of Cargo (1.81.0)"*. Making it build again is **v1.1** work,
 > tracked alongside the (also-deferred) Flathub publication below, and requires:
 > 1. **Bump the runtime** from `23.08` to a supported branch (e.g. `24.08`)
->    whose `rust-stable` extension ships Rust ≥ 1.85 — update `runtime-version`,
->    the two `sdk-extensions`, and every `//23.08` ref here and in
->    `.github/workflows/flatpak.yml`. Re-validate against the project's Rust
+>    whose `rust-stable` extension ships Rust ≥ 1.85 — update `runtime-version`
+>    and the two `sdk-extensions` in this manifest, plus the `//23.08` refs in
+>    the manual install command below. Re-validate against the project's Rust
 >    floor (the `rust-toolchain.toml` 1.95 pin exists to dodge an arti SIGSEGV
 >    on 1.96; the Flatpak sandbox has no `rustup`, so that pin is *ignored*
->    inside the sandbox and the SDK extension's Cargo is used).
+>    inside the sandbox and the SDK extension's Cargo is used). Then restore the
+>    full sandbox build in `.github/workflows/flatpak.yml` (currently parse-only)
+>    against the new runtime/SDK version.
 > 2. **Grant build-phase network**: the manifest is non-vendored, so its
 >    `build-commands` (`cargo install`, `corepack`, `pnpm install`) fetch during
 >    the build. flatpak-builder sandboxes the build with no network by default —
