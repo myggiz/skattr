@@ -46,12 +46,17 @@ file an issue.
 
 ### Step 3 — verify the minisign signature
 
-Save the public key from `docs/install/minisign.pub` to a file
-(or use the one in this repo directly):
+Point minisign at the public-key file from `docs/install/minisign.pub`
+(the `-p` flag takes the key file directly, including its
+`untrusted comment:` line):
 
 ```bash
-minisign -Vm SHA256SUMS -P "$(cat path/to/minisign.pub)"
+minisign -Vm SHA256SUMS -p path/to/minisign.pub
 ```
+
+(Use lowercase `-p <file>` for the key *file*. Uppercase `-P` takes the
+bare key *string* only — `-P "$(cat minisign.pub)"` fails because the
+file's comment line is not part of the key.)
 
 Expected: `Signature and comment signature verified`.
 
