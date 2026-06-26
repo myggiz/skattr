@@ -6,6 +6,36 @@ development and testing but is **not** suitable for Flathub
 submission — Flathub requires reproducible, tag-based source
 references.
 
+> **⚠️ Known limitation — the manifest does not currently build (v1.1 packaging work).**
+> The manifest pins the `org.freedesktop.*//23.08` runtime, which is past
+> freedesktop's support window and whose `rust-stable` SDK extension is frozen
+> at **Cargo 1.81**. Skattr's current dependency tree (via `tauri-cli 2.11.0`)
+> pulls crates that require the `edition2024` feature, i.e. **Rust ≥ 1.85**, so
+> a sandbox build fails with *"feature `edition2024` is required … not stabilized
+> in this version of Cargo (1.81.0)"*. Making it build again is **v1.1** work,
+> tracked alongside the (also-deferred) Flathub publication below, and requires:
+> 1. **Bump the runtime** from `23.08` to a supported branch (e.g. `24.08`)
+>    whose `rust-stable` extension ships Rust ≥ 1.85 — update `runtime-version`
+>    and the two `sdk-extensions` in this manifest, plus the `//23.08` refs in
+>    the manual install command below. Re-validate against the project's Rust
+>    floor (the `rust-toolchain.toml` 1.95 pin exists to dodge an arti SIGSEGV
+>    on 1.96; the Flatpak sandbox has no `rustup`, so that pin is *ignored*
+>    inside the sandbox and the SDK extension's Cargo is used). Then restore the
+>    full sandbox build in `.github/workflows/flatpak.yml` (currently parse-only)
+>    against the new runtime/SDK version.
+> 2. **Grant build-phase network**: the manifest is non-vendored, so its
+>    `build-commands` (`cargo install`, `corepack`, `pnpm install`) fetch during
+>    the build. flatpak-builder sandboxes the build with no network by default —
+>    add `build-args: [--share=network]` under the module's `build-options`
+>    (the canonical mechanism; there is **no** `flatpak-builder --share-network`
+>    CLI flag).
+>
+> Until then, the in-repo manifest is documented for reference and the CI job
+> `.github/workflows/flatpak.yml` only **parse-checks** the manifest
+> (`flatpak-builder --show-manifest`) rather than running a full build. The
+> v1.0 install story is build-from-source / the other packaging targets in
+> `release.yml` (`.deb` / AppImage / `.dmg` / `.msi`).
+
 ## Building from a checkout
 
 ```bash
