@@ -82,17 +82,14 @@ jobs:
         working-directory: crates/ui/src-svelte
         run: pnpm install --frozen-lockfile
 
-      - name: Build frontend
-        working-directory: crates/ui/src-svelte
-        run: pnpm build
-
       - name: Install tauri-cli
         run: cargo install tauri-cli --version '=2.11.0' --locked
 
       - name: Build bundle
         # Run from the Tauri app dir so tauri-cli resolves the app root
-        # unambiguously: beforeBuildCommand (`pnpm --dir src-svelte build`) and
-        # frontendDist (`src-svelte/build`) are both relative to crates/ui.
+        # unambiguously: beforeBuildCommand (`pnpm build`) and frontendDist
+        # (`src-svelte/build`) are both relative to crates/ui. The frontend is
+        # built by beforeBuildCommand here (no separate `pnpm build` step needed).
         # Bundles still land in the workspace target (target/release/bundle),
         # which the Stage step reads from the repo root.
         working-directory: crates/ui
