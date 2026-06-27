@@ -90,6 +90,12 @@ jobs:
         run: cargo install tauri-cli --version '=2.11.0' --locked
 
       - name: Build bundle
+        # Run from the Tauri app dir so tauri-cli resolves the app root
+        # unambiguously: beforeBuildCommand (`pnpm --dir src-svelte build`) and
+        # frontendDist (`src-svelte/build`) are both relative to crates/ui.
+        # Bundles still land in the workspace target (target/release/bundle),
+        # which the Stage step reads from the repo root.
+        working-directory: crates/ui
         run: cargo tauri build
         env:
           CI: true

@@ -4,10 +4,10 @@
   "version": "0.0.1",
   "identifier": "net.myggiz.skattr",
   "build": {
-    "frontendDist": "../src-svelte/build",
+    "frontendDist": "src-svelte/build",
     "devUrl": "http://localhost:1420",
-    "beforeDevCommand": "pnpm --dir src-svelte dev",
-    "beforeBuildCommand": "pnpm --dir src-svelte build"
+    "beforeDevCommand": "pnpm dev",
+    "beforeBuildCommand": "pnpm build"
   },
   "app": {
     "windows": [
