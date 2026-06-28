@@ -1758,9 +1758,14 @@ mod tests {
 
         // --- Encrypted-at-rest: completion must NOT write plaintext to the download
         // dir; encrypted chunks must be retained for on-demand decrypt. ---
+        // Create the download dir up front and `expect` the read so a missing /
+        // unreadable dir FAILS the test rather than passing vacuously.
+        std::fs::create_dir_all(&download_dir).expect("create download dir");
         let entries: Vec<_> = std::fs::read_dir(&download_dir)
-            .map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.path()).collect())
-            .unwrap_or_default();
+            .expect("download dir must be readable")
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .collect();
         assert!(
             entries.is_empty(),
             "completion must leave no plaintext in the download dir, found: {entries:?}"

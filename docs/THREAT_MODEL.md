@@ -102,8 +102,12 @@ disk read.
 - Received attachment chunks under `<data_dir>/attachments/<hex id>/<index>` are
   stored as AEAD ciphertext (keys live inside the MLS-protected manifest).
   Plaintext is produced only on an explicit *Open* or *Save* command: *Open*
-  decrypts into `<data_dir>/cache/open/`, which is wiped on app start and
-  clean shutdown; *Save* decrypts to a user-chosen path.
+  decrypts into `<data_dir>/cache/open/`, which the app makes a *best-effort*
+  attempt to wipe on start and clean shutdown; *Save* decrypts to a user-chosen
+  path. The wipe is `remove_dir_all` with failures logged (not fatal): a delete
+  failure — or a crash / kill that skips the clean-shutdown path — can leave
+  decrypted attachment plaintext in the open-cache until the next successful
+  wipe.
 
 Without both the passphrase AND either the seed phrase or a live
 process's memory, the on-disk state is opaque.

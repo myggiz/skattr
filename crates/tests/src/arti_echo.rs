@@ -41,6 +41,7 @@ async fn two_daemons_echo_bytes_over_tor() {
     let mut rt_a = TorRuntime::bootstrap(TorConfig {
         state_dir: tmp_a.path().to_path_buf(),
         socks_port: None,
+        trust_dir_permissions: true,
     })
     .await
     .expect("A: bootstrap");
@@ -70,6 +71,7 @@ async fn two_daemons_echo_bytes_over_tor() {
     let rt_b = TorRuntime::bootstrap(TorConfig {
         state_dir: tmp_b.path().to_path_buf(),
         socks_port: None,
+        trust_dir_permissions: true,
     })
     .await
     .expect("B: bootstrap");

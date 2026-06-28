@@ -439,9 +439,25 @@ where
     // currently needs a remove + re-add).
     {
         let hub = handle.hub.clone();
+        // Build our self-card BEFORE spawning so its version bump is persisted
+        // synchronously here; move it into the task and send it only AFTER the
+        // peer ACKs the Welcome (has joined the group), so the card can't be
+        // dropped for arriving before the peer is a group member. `IpcError`
+        // implements Debug (not Display); `?e` is correct here. It carries only
+        // DaemonErrorKind (counts / InvalidArgument message / unit variants) —
+        // no onion or pubkey.
+        let self_card = match build_self_card(handle) {
+            Ok(card) => Some(card),
+            Err(e) => {
+                tracing::warn!(?e, "add_contact: could not build self-card to send");
+                None
+            }
+        };
+        let handle_for_card = handle.clone();
         let welcome_bytes = welcome.clone();
         let peer = inviter;
         tokio::spawn(async move {
+            let self_card = self_card;
             // Immediate attempt, then increasing backoff (~6 min total). Tor
             // hidden-service first contact is slow + flaky; give it room.
             let backoffs_secs = [0u64, 5, 10, 20, 30, 45, 60, 60, 60, 60];
@@ -455,6 +471,13 @@ where
                         {
                             Ok(Ok(Ok(()))) => {
                                 tracing::info!(attempt = i + 1, "welcome: acked by peer");
+                                // The peer has joined the group; now it is safe
+                                // to send our self-card for the reverse
+                                // direction. Best-effort: if it fails, the
+                                // inviter learns our onion on our next message.
+                                if let Some(card) = self_card.as_ref() {
+                                    send_card_to_contact(&handle_for_card, card, peer).await;
+                                }
                                 return;
                             }
                             other => {
@@ -473,22 +496,6 @@ where
             }
             tracing::warn!("welcome: gave up re-delivering after all attempts");
         });
-    }
-
-    // Send our own card to the new contact so they learn our onion for the
-    // reverse direction. Best-effort: rides the same peer-actor connection
-    // after the Welcome; if it fails, the inviter learns our onion on our next
-    // message instead.
-    match build_self_card(handle) {
-        Ok(self_card) => {
-            send_card_to_contact(handle, &self_card, inviter).await;
-        }
-        // `IpcError` implements Debug (not Display); `?e` is correct here. It
-        // carries only DaemonErrorKind (counts / InvalidArgument message / unit
-        // variants) — no onion or pubkey.
-        Err(e) => {
-            tracing::warn!(?e, "add_contact: could not build self-card to send")
-        }
     }
 
     Ok(CommandResult::ContactAdded(ContactSummary {

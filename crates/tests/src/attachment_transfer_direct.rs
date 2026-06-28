@@ -285,9 +285,14 @@ async fn attachment_roundtrip_multichunk_over_loopback() {
     .await;
 
     // --- Assert 1: no plaintext written to the download dir (encrypted-at-rest) ---
+    // Create the download dir up front and `expect` the read so a missing /
+    // unreadable dir FAILS the test rather than passing vacuously.
+    std::fs::create_dir_all(&bob_download_dir).expect("create Bob download dir");
     let dl_entries: Vec<_> = std::fs::read_dir(&bob_download_dir)
-        .map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.path()).collect())
-        .unwrap_or_default();
+        .expect("Bob download dir must be readable")
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .collect();
     assert!(
         dl_entries.is_empty(),
         "completion must leave no plaintext in the download dir, found: {dl_entries:?}"
@@ -303,6 +308,56 @@ async fn attachment_roundtrip_multichunk_over_loopback() {
     assert!(
         jpeg_chunk_dir.is_dir() && std::fs::read_dir(&jpeg_chunk_dir).unwrap().count() > 0,
         "encrypted chunks for the JPEG transfer must be retained after completion"
+    );
+
+    // --- Assert 3: on-demand decrypt recovers the original bytes via IPC ---
+    // The retained encrypted chunks must decrypt back to the source bytes
+    // through the real `SaveAttachment` command (the intentional plaintext
+    // export). This proves the receiver can recover the payload, not merely
+    // that ciphertext was stored.
+    // A non-subscribed connection is terminal after one Execute (the server
+    // closes it), so use a fresh connection per save.
+
+    // .bin: byte-identical to the source (non-image → strip is a passthrough).
+    let bin_out = tmp_b.path().join("saved-payload.bin");
+    let bin_aid: skattr_core::daemon::hex::Hex16 = bin_id.parse().unwrap();
+    let mut bob_save_bin = IpcClient::connect(&ready_b.ipc_socket).await.unwrap();
+    match bob_save_bin
+        .execute(Command::SaveAttachment {
+            attachment_id: bin_aid,
+            dest_path: bin_out.to_string_lossy().to_string(),
+        })
+        .await
+        .unwrap()
+    {
+        CommandResult::Ok => {}
+        other => panic!("expected Ok from SaveAttachment(.bin), got {other:?}"),
+    }
+    let saved_bin = std::fs::read(&bin_out).unwrap();
+    assert_eq!(
+        saved_bin, bin_payload,
+        "decrypted .bin must be byte-identical to the source"
+    );
+
+    // .jpg: decrypts successfully and the EXIF APP1 segment is gone.
+    let jpeg_out = tmp_b.path().join("saved-photo.jpg");
+    let jpeg_aid: skattr_core::daemon::hex::Hex16 = jpeg_id.parse().unwrap();
+    let mut bob_save_jpeg = IpcClient::connect(&ready_b.ipc_socket).await.unwrap();
+    match bob_save_jpeg
+        .execute(Command::SaveAttachment {
+            attachment_id: jpeg_aid,
+            dest_path: jpeg_out.to_string_lossy().to_string(),
+        })
+        .await
+        .unwrap()
+    {
+        CommandResult::Ok => {}
+        other => panic!("expected Ok from SaveAttachment(.jpg), got {other:?}"),
+    }
+    let saved_jpeg = std::fs::read(&jpeg_out).unwrap();
+    assert!(
+        !contains_exif_app1(&saved_jpeg),
+        "decrypted JPEG must not contain the EXIF APP1 marker (strip ran before chunking)"
     );
 
     // --- Graceful shutdown ---

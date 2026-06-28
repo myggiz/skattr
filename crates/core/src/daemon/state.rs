@@ -177,6 +177,12 @@ impl Daemon {
         let cfg = TorConfig {
             state_dir: data_dir.join("arti"),
             socks_port: None,
+            // Single-user desktop deployment: relax Arti's ancestor-permission
+            // check so a group/other-writable home or `/tmp` ancestor doesn't
+            // block startup. We own data_dir at 0700 and the DB is encrypted at
+            // rest, so the check is redundant here. Not enabled by default for
+            // other (e.g. test / multi-user) callers of TorConfig.
+            trust_dir_permissions: true,
         };
         let rt = TorRuntime::bootstrap(cfg).await?;
         let mailbox_factory: Arc<dyn crate::mailbox::poll::MailboxConnectFactory> =

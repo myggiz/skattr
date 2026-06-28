@@ -558,9 +558,12 @@ impl DaemonInbound {
             // the mutex; ContactRepo::upsert / set_group_id call pool.with_mut
             // and would deadlock).
             tx.execute(
+                // hidden=0 on conflict mirrors ContactRepo::upsert_in_tx: a
+                // previously-removed (soft-deleted) contact that rejoins via an
+                // inbound Welcome must be un-hidden, or it stays invisible.
                 "INSERT INTO contacts (identity_pubkey, display_name, added_at) \
                  VALUES (?1, ?2, ?3) \
-                 ON CONFLICT(identity_pubkey) DO UPDATE SET display_name=excluded.display_name",
+                 ON CONFLICT(identity_pubkey) DO UPDATE SET display_name=excluded.display_name, hidden=0",
                 rusqlite::params![&derived.0[..], Option::<String>::None, now],
             )
             .map_err(|e| {
