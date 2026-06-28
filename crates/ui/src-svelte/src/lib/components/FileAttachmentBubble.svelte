@@ -54,8 +54,9 @@
   // Re-hydrate after a restart: the transfer store is session-scoped, so a
   // received file's Open / Show-in-folder actions are gone on reload even though
   // the file is still on disk. Locate it by filename and repopulate the store.
+  // TODO(Task 6): replace resolve_received_file + path with AttachmentAvailable query.
   $effect(() => {
-    if (isOutgoing || !summary || xferState?.path) return;
+    if (isOutgoing || !summary || xferState?.available) return;
     const s = summary;
     invoke<string | null>("resolve_received_file", { filename: s.filename })
       .then((path) => {
@@ -64,7 +65,6 @@
             filename: s.filename,
             mime: s.mime,
             size: s.total_size,
-            path,
           });
         }
       })
@@ -77,7 +77,7 @@
   let size = $derived(summary?.total_size ?? optimisticSize);
 
   let receiving = $derived(!isOutgoing && xferState?.status === "receiving");
-  let complete = $derived(!isOutgoing && xferState?.status === "complete" && !!xferState?.path);
+  let complete = $derived(!isOutgoing && xferState?.status === "complete" && !!xferState?.available);
   let failed = $derived(!isOutgoing && xferState?.status === "failed");
   let showImage = $derived(complete && isImage(mime) && !imgBroken);
 
@@ -91,27 +91,12 @@
   );
 
   async function doOpen() {
-    if (!xferState?.path) return;
-    try {
-      await invoke("open_file", { path: xferState.path });
-    } catch {
-      // Most commonly this means the OS has no app associated with the file
-      // type. Rather than fail silently, offer to open the containing folder so
-      // the user can choose how to open it themselves.
-      const showFolder = await ask(
-        "Your system doesn't have an app set to open this type of file. Open its folder instead, so you can open it yourself?",
-        { title: "Can't open file", kind: "warning" },
-      );
-      if (showFolder) await doReveal();
-    }
+    // TODO(Task 6): resolve path via AttachmentAvailable query and invoke open_file.
+    if (!xferState?.available) return;
   }
   async function doReveal() {
-    if (!xferState?.path) return;
-    try {
-      await invoke("reveal_in_folder", { path: xferState.path });
-    } catch {
-      toast.show("Couldn't open the folder");
-    }
+    // TODO(Task 6): resolve path via AttachmentAvailable query and invoke reveal_in_folder.
+    if (!xferState?.available) return;
   }
 
   let iconGlyph = $derived(icons[mimeIconName(mime)]);
@@ -123,10 +108,11 @@
       <span class="ficon">{@html icons["paperclip"]}</span>
       <span class="fname">📎 Attachment (unavailable)</span>
     </div>
-  {:else if showImage && xferState?.path}
+  {:else if showImage}
+    <!-- TODO(Task 6): resolve path via AttachmentAvailable and pass to convertFileSrc -->
     <img
       class="preview"
-      src={convertFileSrc(xferState.path)}
+      src=""
       alt={filename}
       onerror={() => (imgBroken = true)}
     />

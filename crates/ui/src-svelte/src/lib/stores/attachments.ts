@@ -16,7 +16,7 @@ export interface AttachmentState {
   filename?: string;
   mime?: string;
   size?: number; // bytes (≤100 MiB → JS number is exact)
-  path?: string; // local path once complete (receiver)
+  available?: boolean; // true once the encrypted-at-rest file can be opened (receiver)
   reason?: string; // when failed
 }
 
@@ -73,9 +73,9 @@ export function applyProgress(aidHex: string, received: number, total: number): 
   }));
 }
 
-export function applyReceived(
+export function markAvailable(
   aidHex: string,
-  info: { filename: string; mime: string; size: number; path: string },
+  info: { filename: string; mime: string; size: number },
 ): void {
   patch(aidHex, (prev) => ({
     ...prev,
@@ -84,8 +84,15 @@ export function applyReceived(
     filename: info.filename,
     mime: info.mime,
     size: info.size,
-    path: info.path,
+    available: true,
   }));
+}
+
+export function applyReceived(
+  aidHex: string,
+  info: { filename: string; mime: string; size: number },
+): void {
+  markAvailable(aidHex, info);
 }
 
 export function applyFailed(aidHex: string, reason: string): void {

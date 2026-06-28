@@ -112,7 +112,6 @@
           filename: e.data.filename,
           mime: e.data.mime,
           size: Number(e.data.size),
-          path: e.data.path,
         });
       } else if (e.event === "attachment_failed") {
         applyFailed(hex16ToString(e.data.attachment_id), e.data.reason);

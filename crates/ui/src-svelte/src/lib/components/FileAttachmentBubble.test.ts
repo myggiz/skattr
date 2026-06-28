@@ -47,8 +47,15 @@ function fileRecord(direction: "incoming" | "outgoing"): MessageRecord {
 beforeEach(() => {
   attachments.set(new Map());
   invokeMock.mockReset();
-  invokeMock.mockResolvedValue({
-    attachment_id: AID, filename: "photo.jpg", mime: "image/jpeg", total_size: 2048,
+  // Discriminate by command: decode_attachment_manifest → manifest; resolve_received_file → null.
+  invokeMock.mockImplementation((cmd: string, args?: unknown) => {
+    if (cmd === "decode_attachment_manifest") {
+      const manifest = (args as { manifest: number[] })?.manifest ?? [];
+      if (manifest.length === 0) return Promise.reject(new Error("empty manifest"));
+      return Promise.resolve({ attachment_id: AID, filename: "photo.jpg", mime: "image/jpeg", total_size: 2048 });
+    }
+    // resolve_received_file and any other command → no path on disk (session-fresh).
+    return Promise.resolve(null);
   });
 });
 
@@ -84,30 +91,33 @@ describe("FileAttachmentBubble", () => {
   });
 
   test("renders an inline <img> when complete + image", async () => {
+    // TODO(Task 6): once path resolution is wired, also assert convertFileSrcMock was called.
     const { container, findByText } = render(FileAttachmentBubble, {
       props: { record: fileRecord("incoming") },
     });
     await findByText("photo.jpg");
-    applyReceived(AID, { filename: "photo.jpg", mime: "image/jpeg", size: 2048, path: "/dl/photo.jpg" });
+    applyReceived(AID, { filename: "photo.jpg", mime: "image/jpeg", size: 2048 });
     await tick();
     const img = container.querySelector("img");
     expect(img).not.toBeNull();
-    expect(convertFileSrcMock).toHaveBeenCalledWith("/dl/photo.jpg");
   });
 
-  test("complete + non-image shows Open/Reveal, no img", async () => {
-    invokeMock.mockResolvedValue({
-      attachment_id: AID, filename: "doc.pdf", mime: "application/pdf", total_size: 10,
+  test("complete + non-image shows Open/Show-in-folder, no img", async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "decode_attachment_manifest") {
+        return Promise.resolve({ attachment_id: AID, filename: "doc.pdf", mime: "application/pdf", total_size: 10 });
+      }
+      return Promise.resolve(null);
     });
     const { container, findByText, getByRole } = render(FileAttachmentBubble, {
       props: { record: fileRecord("incoming") },
     });
     await findByText("doc.pdf");
-    applyReceived(AID, { filename: "doc.pdf", mime: "application/pdf", size: 10, path: "/dl/doc.pdf" });
+    applyReceived(AID, { filename: "doc.pdf", mime: "application/pdf", size: 10 });
     await tick();
     expect(container.querySelector("img")).toBeNull();
     expect(getByRole("button", { name: /open/i })).toBeTruthy();
-    expect(getByRole("button", { name: /reveal/i })).toBeTruthy();
+    expect(getByRole("button", { name: /show in folder/i })).toBeTruthy();
   });
 
   test("outgoing bubble shows a delivery icon and no progress bar", async () => {
