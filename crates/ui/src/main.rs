@@ -290,7 +290,6 @@ fn main() {
             attachments::file_size,
             attachments::open_file,
             attachments::reveal_in_folder,
-            attachments::resolve_received_file,
         ])
         .setup(|app| {
             // Single consolidated data dir. With identifier "skattr" this is

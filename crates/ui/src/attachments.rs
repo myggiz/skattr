@@ -44,16 +44,19 @@ pub async fn decode_attachment_manifest(manifest: Vec<u8>) -> Result<ManifestSum
     })
 }
 
-/// Canonicalize a UI-supplied path, assert it is an existing regular file,
-/// AND confine it to the daemon's `downloads` dir. Defense-in-depth:
-/// received-file paths are daemon-authored, but this makes open/reveal
-/// safe-by-construction rather than safe-by-context.
-fn validate_openable(path: &str, downloads: &std::path::Path) -> Result<PathBuf, String> {
+/// Canonicalize a UI-supplied path, assert it is an existing regular file, AND
+/// confine it to one of `roots` (downloads or the managed open-cache).
+/// A root that fails to canonicalize simply doesn't match — it does not error
+/// out the whole check or accept the path.
+fn validate_openable(path: &str, roots: &[std::path::PathBuf]) -> Result<PathBuf, String> {
     let canon = std::fs::canonicalize(path).map_err(|e| format!("canonicalize {path}: {e}"))?;
-    let canon_downloads =
-        std::fs::canonicalize(downloads).map_err(|e| format!("canonicalize downloads: {e}"))?;
-    if !canon.starts_with(&canon_downloads) {
-        return Err(format!("{path}: outside download dir"));
+    let ok = roots.iter().any(|r| {
+        std::fs::canonicalize(r)
+            .map(|cr| canon.starts_with(&cr))
+            .unwrap_or(false)
+    });
+    if !ok {
+        return Err(format!("{path}: outside allowed dirs"));
     }
     let meta = std::fs::metadata(&canon).map_err(|e| format!("{path}: not found: {e}"))?;
     if !meta.is_file() {
@@ -81,6 +84,16 @@ fn downloads_dir(state: &tauri::State<'_, crate::daemon::AppState>) -> Result<Pa
     Ok(cfg.resolved_download_dir())
 }
 
+/// `<data_dir>/cache/open` — the managed decrypt cache created by `OpenAttachment`.
+fn open_cache_dir(state: &tauri::State<'_, crate::daemon::AppState>) -> Result<PathBuf, String> {
+    let dd = state
+        .data_dir
+        .read()
+        .clone()
+        .ok_or_else(|| "data_dir not initialised".to_string())?;
+    Ok(dd.join("cache").join("open"))
+}
+
 /// Open a received file with the OS default handler.
 #[tauri::command]
 pub async fn open_file(
@@ -88,8 +101,8 @@ pub async fn open_file(
     state: tauri::State<'_, crate::daemon::AppState>,
     path: String,
 ) -> Result<(), String> {
-    let downloads = downloads_dir(&state)?;
-    let canon = validate_openable(&path, &downloads)?;
+    let roots = vec![downloads_dir(&state)?, open_cache_dir(&state)?];
+    let canon = validate_openable(&path, &roots)?;
     app.opener()
         .open_path(canon.to_string_lossy().to_string(), None::<&str>)
         .map_err(|e| format!("open_file: {e}"))
@@ -102,48 +115,11 @@ pub async fn reveal_in_folder(
     state: tauri::State<'_, crate::daemon::AppState>,
     path: String,
 ) -> Result<(), String> {
-    let downloads = downloads_dir(&state)?;
-    let canon = validate_openable(&path, &downloads)?;
+    let roots = vec![downloads_dir(&state)?, open_cache_dir(&state)?];
+    let canon = validate_openable(&path, &roots)?;
     app.opener()
         .reveal_item_in_dir(canon)
         .map_err(|e| format!("reveal_in_folder: {e}"))
-}
-
-/// Locate a previously-received file on disk by its (manifest) filename so the
-/// UI can re-hydrate the Open / Show-in-folder actions after a restart — the
-/// live transfer store is session-scoped, so a completed attachment otherwise
-/// loses its interactivity on reload. Checks the configured download dir and the
-/// in-data-dir downloads folder (covers files saved before the download-dir
-/// default changed / migrated). Returns the absolute path if a regular file
-/// with that basename is found.
-#[tauri::command]
-pub async fn resolve_received_file(
-    state: tauri::State<'_, crate::daemon::AppState>,
-    filename: String,
-) -> Result<Option<String>, String> {
-    let dd = state
-        .data_dir
-        .read()
-        .clone()
-        .ok_or_else(|| "data_dir not initialised".to_string())?;
-    // Basename only — never traverse out of a candidate directory.
-    let base = std::path::Path::new(&filename)
-        .file_name()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_default();
-    if base.is_empty() {
-        return Ok(None);
-    }
-    let candidates = [downloads_dir(&state)?, dd.join("downloads")];
-    for dir in candidates {
-        let p = dir.join(&base);
-        if let Ok(meta) = std::fs::metadata(&p) {
-            if meta.is_file() {
-                return Ok(Some(p.to_string_lossy().to_string()));
-            }
-        }
-    }
-    Ok(None)
 }
 
 /// Stat a local file and return its byte length. Used by the pre-send size
@@ -221,10 +197,10 @@ mod tests {
     #[test]
     fn validate_inside_downloads_ok() {
         let dir = tempfile::tempdir().unwrap();
-        let downloads = dir.path();
+        let downloads = dir.path().to_path_buf();
         let p = downloads.join("f.txt");
         std::fs::write(&p, b"hi").unwrap();
-        let got = validate_openable(&p.to_string_lossy(), downloads).unwrap();
+        let got = validate_openable(&p.to_string_lossy(), &[downloads]).unwrap();
         assert!(got.is_absolute());
     }
 
@@ -234,21 +210,43 @@ mod tests {
         let other = tempfile::tempdir().unwrap();
         let p = other.path().join("f.txt");
         std::fs::write(&p, b"hi").unwrap();
-        let err = validate_openable(&p.to_string_lossy(), downloads.path()).unwrap_err();
-        assert!(err.contains("outside download dir"));
+        let err =
+            validate_openable(&p.to_string_lossy(), &[downloads.path().to_path_buf()]).unwrap_err();
+        assert!(err.contains("outside allowed dirs"));
     }
 
     #[test]
     fn validate_missing_file_errs() {
         let downloads = tempfile::tempdir().unwrap();
-        let err = validate_openable("/no/such/zzz", downloads.path()).unwrap_err();
+        let err = validate_openable("/no/such/zzz", &[downloads.path().to_path_buf()]).unwrap_err();
         assert!(err.contains("not found") || err.contains("canonicalize"));
     }
 
     #[test]
     fn validate_directory_errs() {
         let dir = tempfile::tempdir().unwrap();
-        let err = validate_openable(&dir.path().to_string_lossy(), dir.path()).unwrap_err();
+        let err = validate_openable(&dir.path().to_string_lossy(), &[dir.path().to_path_buf()])
+            .unwrap_err();
         assert!(err.contains("not a regular file"));
+    }
+
+    #[test]
+    fn validate_openable_accepts_cache_and_rejects_outside() {
+        let dir = tempfile::tempdir().unwrap();
+        let downloads = dir.path().join("downloads");
+        let cache = dir.path().join("cache").join("open").join("aa");
+        std::fs::create_dir_all(&downloads).unwrap();
+        std::fs::create_dir_all(&cache).unwrap();
+        let f = cache.join("x.bin");
+        std::fs::write(&f, b"x").unwrap();
+        // In-cache file is accepted.
+        let cache_open_root = cache.parent().unwrap().parent().unwrap().join("open");
+        assert!(
+            validate_openable(f.to_str().unwrap(), &[downloads.clone(), cache_open_root]).is_ok()
+        );
+        // A file outside both roots is rejected.
+        let outside = dir.path().join("outside.bin");
+        std::fs::write(&outside, b"x").unwrap();
+        assert!(validate_openable(outside.to_str().unwrap(), &[downloads, cache]).is_err());
     }
 }
