@@ -104,8 +104,9 @@ fn install_contact_with_card(pool: &Pool, peer: &IdentityKey, onion: &str, mailb
 
 /// One offline transfer: stage on Alice's side (due now), persist the manifest
 /// as a pending `'in'` row in Bob's pool, sweep until every chunk is deposited
-/// into the mailbox, then poll Bob's mailbox until the file is reassembled.
-/// Returns the written file path from the `AttachmentReceived` event.
+/// into the mailbox, then poll Bob's mailbox until completion is signalled.
+/// Returns the manifest's attachment_id (hex) so the caller can verify chunk
+/// retention.
 #[allow(clippy::too_many_arguments)]
 async fn run_one_offline_transfer(
     alice_pool: &Arc<Pool>,
@@ -211,7 +212,7 @@ async fn run_one_offline_transfer(
         "every chunk deposit must be dispatched + deleted exactly once"
     );
 
-    // ── The completion event carries the reassembled file path. ──
+    // ── The completion event signals availability (encrypted at rest). ──
     let want_id = skattr_core::daemon::hex::Hex16::from(manifest.attachment_id).to_string();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
@@ -224,14 +225,13 @@ async fn run_one_offline_transfer(
             Ok(Ok(Event::AttachmentReceived {
                 contact,
                 attachment_id,
-                path,
                 ..
             })) if attachment_id.to_string() == want_id => {
                 assert_eq!(
                     contact, alice_pub,
                     "received attachment must be attributed to Alice"
                 );
-                return path;
+                return want_id;
             }
             Ok(Ok(_)) => {}
             Ok(Err(broadcast::error::RecvError::Lagged(_))) => {}
@@ -371,9 +371,9 @@ async fn offline_attachment_via_mailbox() {
     //    path (chunk store + download dir), plus an event subscription. ──
     let (_bob_store, bob_inbound, mut bob_events_rx) = h.new_bob_session();
 
-    // ── Transfer 1: ~300 KiB binary (≥6 chunks), byte-identical end-to-end. ──
+    // ── Transfer 1: ~300 KiB binary (≥6 chunks). ──
     let bin_payload = deterministic_payload(300 * 1024);
-    let bin_path = run_one_offline_transfer(
+    let bin_id = run_one_offline_transfer(
         alice_pool,
         alice_store,
         alice_hub,
@@ -390,11 +390,6 @@ async fn offline_attachment_via_mailbox() {
         6,
     )
     .await;
-    let got_bin = std::fs::read(&bin_path).unwrap();
-    assert_eq!(
-        got_bin, bin_payload,
-        "received .bin must be byte-identical to the source across all chunks"
-    );
 
     // ── Transfer 2: JPEG with EXIF — strip must remove the APP1 marker. ──
     let jpeg_payload = jpeg_with_exif();
@@ -402,7 +397,7 @@ async fn offline_attachment_via_mailbox() {
         contains_exif_app1(&jpeg_payload),
         "source JPEG must contain the EXIF APP1 marker we expect stripped"
     );
-    let jpeg_path = run_one_offline_transfer(
+    let jpeg_id = run_one_offline_transfer(
         alice_pool,
         alice_store,
         alice_hub,
@@ -419,10 +414,24 @@ async fn offline_attachment_via_mailbox() {
         1,
     )
     .await;
-    let got_jpeg = std::fs::read(&jpeg_path).unwrap();
+
+    // ── Encrypted-at-rest: no plaintext written to download dir; chunks retained. ──
+    let dl_entries: Vec<_> = std::fs::read_dir(h.bob_download_dir.path())
+        .map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.path()).collect())
+        .unwrap_or_default();
     assert!(
-        !contains_exif_app1(&got_jpeg),
-        "EXIF APP1 marker (FF E1) must be stripped before the chunks hit the mailbox"
+        dl_entries.is_empty(),
+        "completion must leave no plaintext in the download dir, found: {dl_entries:?}"
+    );
+    let bin_chunk_dir = h.bob_chunk_dir.path().join("attachments").join(&bin_id);
+    assert!(
+        bin_chunk_dir.is_dir() && std::fs::read_dir(&bin_chunk_dir).unwrap().count() > 0,
+        "encrypted chunks for the .bin transfer must be retained after completion"
+    );
+    let jpeg_chunk_dir = h.bob_chunk_dir.path().join("attachments").join(&jpeg_id);
+    assert!(
+        jpeg_chunk_dir.is_dir() && std::fs::read_dir(&jpeg_chunk_dir).unwrap().count() > 0,
+        "encrypted chunks for the JPEG transfer must be retained after completion"
     );
 }
 
@@ -659,10 +668,10 @@ async fn offline_attachment_cross_session_resume() {
         "all chunks must be received after the resume completes"
     );
 
-    // ── Completion fired on the FRESH session-2 channel → reassembled path. ──
+    // ── Completion fired on the FRESH session-2 channel (encrypted at rest). ──
     let want_id = skattr_core::daemon::hex::Hex16::from(manifest.attachment_id).to_string();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    let path = loop {
+    loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         assert!(
             !remaining.is_zero(),
@@ -672,24 +681,29 @@ async fn offline_attachment_cross_session_resume() {
             Ok(Ok(Event::AttachmentReceived {
                 contact,
                 attachment_id,
-                path,
                 ..
             })) if attachment_id.to_string() == want_id => {
                 assert_eq!(contact, h.alice_pub, "must be attributed to Alice");
-                break path;
+                break;
             }
             Ok(Ok(_)) => {}
             Ok(Err(broadcast::error::RecvError::Lagged(_))) => {}
             Ok(Err(broadcast::error::RecvError::Closed)) => panic!("Bob event channel closed"),
             Err(_) => panic!("AttachmentReceived(id={want_id}) not seen within timeout"),
         }
-    };
+    }
 
-    // ── Byte-identity: the reassembled file equals the (stripped == identity
-    //    for .bin) source across BOTH the partial and resumed chunks. ──
-    let got = std::fs::read(&path).unwrap();
-    assert_eq!(
-        got, payload,
-        "the resumed transfer must reassemble byte-identically to the source"
+    // ── Encrypted-at-rest: no plaintext in download dir; all chunks retained. ──
+    let dl_entries: Vec<_> = std::fs::read_dir(h.bob_download_dir.path())
+        .map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.path()).collect())
+        .unwrap_or_default();
+    assert!(
+        dl_entries.is_empty(),
+        "completion must leave no plaintext in the download dir, found: {dl_entries:?}"
+    );
+    let chunk_dir = h.bob_chunk_dir.path().join("attachments").join(&want_id);
+    assert!(
+        chunk_dir.is_dir() && std::fs::read_dir(&chunk_dir).unwrap().count() > 0,
+        "encrypted chunks must be retained after the resumed completion"
     );
 }

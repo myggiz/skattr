@@ -47,6 +47,7 @@ honest docs, a working download-verification chain, and real signing keys. See
 - **First contact needs both peers online at once** — first contact is direct-only (no mailbox fallback); if your contact is offline when you add them, the connection will not complete until they are online.
 - **"Rotate onion address" is not yet real** — it republishes your current address with a new card version; true address rotation is planned for a later release.
 - **Offline attachments are best-effort** — held by a mailbox for ~7 days and dropped if never fetched; files over 10 MiB transfer only while both peers are online.
+- **Received attachments are encrypted at rest and decrypted on demand.** Completed chunks are kept as AEAD ciphertext under `<data_dir>/attachments/` indefinitely — there is no automatic GC. Use *Open* (decrypts to a temporary cache wiped on app start/exit) or *Save* (decrypt to a path you choose) to access a file. Disk usage grows with received files; a delete/retention policy is planned for v1.1.
 - Not a low-latency chat (Tor round-trips cost seconds), not mobile in v1.0, and not "anonymous" — your contacts know who you are.
 
 See [THREAT_MODEL.md](docs/THREAT_MODEL.md) for the full security model and the v1.1 deferral list, and the [disclosure decision record](docs/superpowers/specs/2026-06-23-v1.0-pull-forward-vs-disclose-decisions.md).

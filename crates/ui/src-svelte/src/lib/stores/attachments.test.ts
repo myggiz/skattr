@@ -8,6 +8,7 @@ import {
   applyManifest,
   applyProgress,
   applyReceived,
+  markAvailable,
   applyFailed,
   attachmentFor,
 } from "./attachments";
@@ -37,12 +38,18 @@ describe("attachments store", () => {
     expect(attachmentFor("cc")).toMatchObject({ status: "receiving", received: 1, total: 4 });
   });
 
-  test("applyReceived marks complete with path", () => {
-    applyProgress("dd", 4, 4);
-    applyReceived("dd", { filename: "x.png", mime: "image/png", size: 5, path: "/d/x.png" });
-    expect(attachmentFor("dd")).toMatchObject({
-      status: "complete", path: "/d/x.png", filename: "x.png", mime: "image/png", size: 5,
-    });
+  test("applyReceived marks complete without a path", () => {
+    applyReceived("aa".repeat(16), { filename: "f.bin", mime: "application/octet-stream", size: 10 });
+    const s = attachmentFor("aa".repeat(16))!;
+    expect(s.status).toBe("complete");
+    expect("path" in s).toBe(false);
+  });
+
+  test("markAvailable flips a complete attachment available", () => {
+    markAvailable("bb".repeat(16), { filename: "g.bin", mime: "text/plain", size: 3 });
+    const s = attachmentFor("bb".repeat(16))!;
+    expect(s.status).toBe("complete");
+    expect(s.available).toBe(true);
   });
 
   test("applyFailed marks failed with reason", () => {

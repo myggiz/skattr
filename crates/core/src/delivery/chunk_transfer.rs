@@ -10,7 +10,6 @@
 //! the `ChunkStore` / `AttachmentRepo` IO.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
@@ -228,26 +227,6 @@ fn is_bidi_or_format_control(c: char) -> bool {
     )
 }
 
-/// Return a non-colliding path under `dir` for `filename`, suffixing
-/// ` (1)`, ` (2)`, ... before the extension on collision.
-pub(crate) fn unique_download_path(dir: &Path, filename: &str) -> PathBuf {
-    let candidate = dir.join(filename);
-    if !candidate.exists() {
-        return candidate;
-    }
-    let (stem, ext) = match filename.rsplit_once('.') {
-        Some((s, e)) => (s.to_string(), format!(".{e}")),
-        None => (filename.to_string(), String::new()),
-    };
-    for n in 1..=9999 {
-        let candidate = dir.join(format!("{stem} ({n}){ext}"));
-        if !candidate.exists() {
-            return candidate;
-        }
-    }
-    dir.join(filename)
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -353,15 +332,6 @@ mod tests {
                 ch as u32
             );
         }
-    }
-
-    #[test]
-    fn unique_path_suffixes_on_collision() {
-        let dir = tempfile::tempdir().unwrap();
-        let p1 = unique_download_path(dir.path(), "x.txt");
-        std::fs::write(&p1, b"a").unwrap();
-        let p2 = unique_download_path(dir.path(), "x.txt");
-        assert!(p2.ends_with("x (1).txt"));
     }
 
     #[test]

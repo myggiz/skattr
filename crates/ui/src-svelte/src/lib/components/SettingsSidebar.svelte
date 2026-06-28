@@ -17,6 +17,7 @@
 </script>
 
 <nav class="sidebar" aria-label="Settings sections">
+  <button type="button" class="back" on:click={() => goto('/')}>← Back</button>
   <h2>Settings</h2>
   {#each sections as s}
     <button
@@ -56,4 +57,10 @@
   }
   button.active { color: var(--text, #e8eaed); background: var(--bg, #0e0f12); }
   button:hover  { color: var(--text, #e8eaed); }
+  button.back {
+    color: var(--text, #e8eaed);
+    font: var(--t-ui, 13px / 1.4 "Inter", system-ui, sans-serif);
+    margin-bottom: var(--s-1, 4px);
+  }
+  button.back:hover { background: var(--bg, #0e0f12); }
 </style>

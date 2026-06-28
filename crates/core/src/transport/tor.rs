@@ -39,6 +39,12 @@ pub struct TorConfig {
     pub state_dir: PathBuf,
     /// SOCKS port to expose locally, or `None` to disable.
     pub socks_port: Option<u16>,
+    /// Opt-in to relax Arti's fs-mistrust ancestor-permission policing
+    /// (`storage.permissions.dangerously_trust_everyone`). Defaults to `false`
+    /// (Arti's safe behavior). Set `true` only for the single-user desktop
+    /// deployment, where a group/other-writable home or `/tmp` ancestor would
+    /// otherwise block startup; never enable this for multi-user/server use.
+    pub trust_dir_permissions: bool,
 }
 
 /// Opaque handle to a running Arti instance.
@@ -67,12 +73,25 @@ impl TorRuntime {
 
         // `TorClientConfigBuilder::from_directories` is the idiomatic 0.41 API
         // (plain `.default().storage(…).build()` is internal).
-        let tor_config: TorClientConfig =
-            TorClientConfigBuilder::from_directories(&config.state_dir, &cache_dir)
-                .build()
-                .map_err(|e| {
-                    CoreError::Transport(TransportErrorKind::Other(format!("arti config: {e}")))
-                })?;
+        let mut builder = TorClientConfigBuilder::from_directories(&config.state_dir, &cache_dir);
+        // Relax Arti's fs-mistrust ancestor-permission policing ONLY when the
+        // caller explicitly opts in (`trust_dir_permissions`). Arti otherwise
+        // refuses to start ("problem with filesystem permissions: Error while
+        // trying to access persistent state") whenever any ancestor of the
+        // state dir is group/other-writable — e.g. a umask-002 home, or `/tmp`.
+        // That check targets multi-user server deployments; for a single-user
+        // desktop app it only blocks startup. We already create our own dirs
+        // 0700 and the message DB is age-encrypted at rest, so the protection
+        // Arti is enforcing is redundant in that case. This is exactly the
+        // remedy Arti's own error hint suggests
+        // (storage.permissions.dangerously_trust_everyone). The gate keeps the
+        // relaxation from being the unconditional default for every caller.
+        if config.trust_dir_permissions {
+            builder.storage().permissions().dangerously_trust_everyone();
+        }
+        let tor_config: TorClientConfig = builder.build().map_err(|e| {
+            CoreError::Transport(TransportErrorKind::Other(format!("arti config: {e}")))
+        })?;
 
         // Attach to the already-running Tokio reactor (we are inside `#[tokio::main]`
         // or a `#[tokio::test]`).
@@ -363,6 +382,7 @@ mod tests {
         let cfg = TorConfig {
             state_dir: tmp.path().to_path_buf(),
             socks_port: None,
+            trust_dir_permissions: true,
         };
         let rt = TorRuntime::bootstrap(cfg).await.expect("bootstrap");
         rt.shutdown().await.expect("shutdown");
@@ -375,6 +395,7 @@ mod tests {
         let cfg = TorConfig {
             state_dir: tmp.path().to_path_buf(),
             socks_port: None,
+            trust_dir_permissions: true,
         };
         let rt = TorRuntime::bootstrap(cfg).await.expect("bootstrap");
         assert_eq!(*rt.status().borrow(), TorStatus::Ready);
@@ -388,6 +409,7 @@ mod tests {
         let cfg = TorConfig {
             state_dir: tmp.path().to_path_buf(),
             socks_port: None,
+            trust_dir_permissions: true,
         };
         let mut rt = TorRuntime::bootstrap(cfg).await.expect("bootstrap");
         let seed = crate::identity::Seed::generate().unwrap();
@@ -415,6 +437,7 @@ mod tests {
         let mut rt_a = TorRuntime::bootstrap(TorConfig {
             state_dir: tmp_a.path().to_path_buf(),
             socks_port: None,
+            trust_dir_permissions: true,
         })
         .await
         .expect("A: bootstrap");
@@ -442,6 +465,7 @@ mod tests {
         let rt_b = TorRuntime::bootstrap(TorConfig {
             state_dir: tmp_b.path().to_path_buf(),
             socks_port: None,
+            trust_dir_permissions: true,
         })
         .await
         .expect("B: bootstrap");

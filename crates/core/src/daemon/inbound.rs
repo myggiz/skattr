@@ -558,9 +558,12 @@ impl DaemonInbound {
             // the mutex; ContactRepo::upsert / set_group_id call pool.with_mut
             // and would deadlock).
             tx.execute(
+                // hidden=0 on conflict mirrors ContactRepo::upsert_in_tx: a
+                // previously-removed (soft-deleted) contact that rejoins via an
+                // inbound Welcome must be un-hidden, or it stays invisible.
                 "INSERT INTO contacts (identity_pubkey, display_name, added_at) \
                  VALUES (?1, ?2, ?3) \
-                 ON CONFLICT(identity_pubkey) DO UPDATE SET display_name=excluded.display_name",
+                 ON CONFLICT(identity_pubkey) DO UPDATE SET display_name=excluded.display_name, hidden=0",
                 rusqlite::params![&derived.0[..], Option::<String>::None, now],
             )
             .map_err(|e| {
@@ -586,26 +589,17 @@ impl DaemonInbound {
         Ok(derived)
     }
 
-    /// Reassemble a completed offline attachment (Phase 3.C) to the download
-    /// directory and emit `Event::AttachmentReceived`. The sender's pubkey is
-    /// looked up from the `peer` column written when the manifest was ingested;
-    /// falls back to `PublicKey([0u8; 32])` if unavailable (should not happen
-    /// for well-formed 'in' rows).
+    /// Mark a completed offline attachment as complete and emit
+    /// `Event::AttachmentReceived`. Encrypted chunks are retained in the
+    /// `ChunkStore` for on-demand decryption; nothing is written to disk here.
+    /// The sender's pubkey is looked up from the `peer` column written when the
+    /// manifest was ingested; falls back to `PublicKey([0u8; 32])` if unavailable
+    /// (should not happen for well-formed 'in' rows).
     fn finalize_offline(
         &self,
         attachment_id: &[u8; 16],
         manifest: &crate::attachment::manifest::AttachmentManifest,
-        store: &crate::attachment::store::ChunkStore,
     ) {
-        let dir = match self.download_dir.read() {
-            Ok(g) => match g.as_ref() {
-                Some(d) => d.clone(),
-                None => return,
-            },
-            Err(_) => return,
-        };
-        let _ = std::fs::create_dir_all(&dir);
-        let source = crate::attachment::store::StoreSource::new(store, *attachment_id);
         let safe = crate::delivery::chunk_transfer::sanitize_filename(&manifest.filename);
         let repo = crate::storage::attachments::AttachmentRepo::new(&self.pool);
         // Resolve the sender recorded at manifest-ingest time.
@@ -615,38 +609,21 @@ impl DaemonInbound {
             .flatten()
             .map(PublicKey)
             .unwrap_or(PublicKey([0u8; 32]));
-        // Fire-gate FIRST: only the lane that flips pending→complete allocates a
-        // download path and reassembles. A losing (`Ok(false)`) or erroring
-        // (`Err`) lane never writes a file, so it can't leave an untracked
-        // download behind, and the direct/offline lanes can't race on the same
-        // `unique_download_path` output.
+        // Fire-gate: only the lane that flips pending→complete emits, so the
+        // direct/offline lanes can't race and produce duplicate events.
         match repo.set_status_if_pending(attachment_id) {
             Ok(true) => {
-                let out_path = crate::delivery::chunk_transfer::unique_download_path(&dir, &safe);
-                match crate::attachment::reassembler::reassemble(manifest, &source, &out_path) {
-                    Ok(()) => {
-                        let _ = store.remove(attachment_id);
-                        let _ = self.events_tx.send(Event::AttachmentReceived {
-                            contact,
-                            attachment_id: crate::daemon::hex::Hex16::from(*attachment_id),
-                            filename: safe,
-                            mime: manifest.mime.clone(),
-                            size: manifest.total_size,
-                            path: out_path.to_string_lossy().to_string(),
-                        });
-                    }
-                    Err(e) => {
-                        // We claimed completion but reassembly failed. Revert to
-                        // pending so a later poll can retry; keep the staged chunks.
-                        let _ = repo.set_status(attachment_id, "pending");
-                        tracing::warn!(err = %e, "inbound: offline reassembly failed after claim");
-                    }
-                }
+                // Encrypted-at-rest: retain chunks, do not reassemble. Emit availability.
+                let _ = self.events_tx.send(Event::AttachmentReceived {
+                    contact,
+                    attachment_id: crate::daemon::hex::Hex16::from(*attachment_id),
+                    filename: safe,
+                    mime: manifest.mime.clone(),
+                    size: manifest.total_size,
+                });
             }
             Ok(false) => {
-                // Another lane already finalized — drop our staged chunks; we
-                // never wrote a file, so there is nothing else to clean up.
-                let _ = store.remove(attachment_id);
+                // Another lane already finalized; chunks are shared + retained, nothing to do.
             }
             Err(e) => {
                 tracing::warn!(err = %e, "inbound: failed to mark attachment complete");
@@ -768,7 +745,7 @@ impl InboundDispatch for DaemonInbound {
                 .map(|v| v.len() as i64)
                 .unwrap_or(0);
             if now >= manifest.chunks.len() as i64 {
-                self.finalize_offline(&attachment_id, &manifest, &store);
+                self.finalize_offline(&attachment_id, &manifest);
             } else if now % 8 == 0 {
                 let _ = self
                     .events_tx
@@ -797,7 +774,6 @@ impl InboundDispatch for DaemonInbound {
         filename: &str,
         mime: &str,
         size: u64,
-        path: &str,
     ) {
         let _ = self.events_tx.send(Event::AttachmentReceived {
             contact,
@@ -805,7 +781,6 @@ impl InboundDispatch for DaemonInbound {
             filename: filename.to_string(),
             mime: mime.to_string(),
             size,
-            path: path.to_string(),
         });
     }
 

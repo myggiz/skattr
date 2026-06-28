@@ -3,7 +3,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { config, fetchConfig, patchConfig, wipeAllData, exportBackup } from "$lib/stores/config";
-  import { save } from "@tauri-apps/plugin-dialog";
+  import { save, open } from "@tauri-apps/plugin-dialog";
   import { ipcClient } from "$lib/ipc/tauri";
   import { unwrapOk } from "$lib/ipc/client";
   import LogsViewer from "$lib/components/LogsViewer.svelte";
@@ -83,6 +83,25 @@
       );
     } catch (err) {
       toast.show(`Failed: ${err}`);
+    }
+  }
+
+  // Let the user choose where explicit Save… actions write their decrypted copy.
+  // Received attachments stay encrypted at rest; plaintext is only produced
+  // when the user clicks Open or Save…. Defaults to ~/Downloads when unset.
+  async function chooseDownloadFolder() {
+    try {
+      const picked = await open({
+        directory: true,
+        multiple: false,
+        title: "Choose download folder",
+      });
+      if (typeof picked === "string" && picked.length > 0) {
+        await patchConfig(singlePatch("download_dir", picked));
+        toast.show(`Download folder set to ${picked}`);
+      }
+    } catch (e) {
+      toast.show(`Couldn't set download folder: ${e}`);
     }
   }
 
@@ -194,6 +213,17 @@
     />
     Start minimised to tray (effective on next launch)
   </label>
+</section>
+
+<section>
+  <h2>Files</h2>
+  <p class="hint">
+    Received attachments stay encrypted until you open or save them. When you
+    click <strong>Save…</strong>, the decrypted copy goes to your
+    <strong>Downloads</strong> folder by default — choose a different location
+    here.
+  </p>
+  <button type="button" onclick={chooseDownloadFolder}>Choose save folder…</button>
 </section>
 
 <section>

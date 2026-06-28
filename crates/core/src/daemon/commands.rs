@@ -326,6 +326,27 @@ pub enum Command {
         /// Absolute destination path for the archive.
         dest_path: String,
     },
+    /// Decrypt a completed inbound attachment into the managed open-cache and
+    /// return its path (the UI shell then opens it). Plaintext is ephemeral —
+    /// the cache is wiped on daemon start + clean shutdown.
+    OpenAttachment {
+        /// 16-byte attachment id.
+        attachment_id: crate::daemon::hex::Hex16,
+    },
+    /// Decrypt a completed inbound attachment to a user-chosen path (the
+    /// intentional plaintext export).
+    SaveAttachment {
+        /// 16-byte attachment id.
+        attachment_id: crate::daemon::hex::Hex16,
+        /// Absolute destination path chosen by the user.
+        dest_path: String,
+    },
+    /// Report whether a completed, decryptable inbound attachment exists for
+    /// this id (drives UI rehydration after restart).
+    AttachmentAvailable {
+        /// 16-byte attachment id.
+        attachment_id: crate::daemon::hex::Hex16,
+    },
 }
 
 /// Outcome of a `SendMessage` command after the inline-delivery wait.
@@ -590,6 +611,16 @@ pub enum CommandResult {
         /// Unix seconds when the passphrase was last changed. `None` if
         /// never changed (i.e., still the original passphrase from init).
         last_changed_unix: Option<u64>,
+    },
+    /// Path of a freshly decrypted attachment in the managed open-cache.
+    AttachmentDecrypted {
+        /// Absolute cache path.
+        path: String,
+    },
+    /// Availability answer for `Command::AttachmentAvailable`.
+    AttachmentAvailability {
+        /// True iff a completed inbound attachment exists for the id.
+        available: bool,
     },
 }
 
@@ -1224,5 +1255,27 @@ mod phase_1g_wire_tests {
         let m = NotificationMode::Generic;
         let s = serde_json::to_string(&m).unwrap();
         assert_eq!(s, "\"generic\"");
+    }
+
+    #[test]
+    fn attachment_ipc_variants_serde_roundtrip() {
+        fn rt<T: serde::Serialize + for<'de> serde::Deserialize<'de>>(v: &T) -> T {
+            let mut buf = Vec::new();
+            ciborium::ser::into_writer(v, &mut buf).unwrap();
+            ciborium::de::from_reader(&buf[..]).unwrap()
+        }
+        use crate::daemon::hex::Hex16;
+        let cmd = Command::AttachmentAvailable {
+            attachment_id: Hex16::from([7u8; 16]),
+        };
+        let back: Command = rt(&cmd);
+        assert!(matches!(back, Command::AttachmentAvailable { .. }));
+
+        let result = CommandResult::AttachmentAvailability { available: true };
+        let back: CommandResult = rt(&result);
+        assert!(matches!(
+            back,
+            CommandResult::AttachmentAvailability { available: true }
+        ));
     }
 }

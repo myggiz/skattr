@@ -33,10 +33,12 @@ test.describe("existing-vault unlock path", () => {
     await page.getByPlaceholder("Passphrase").fill("any-passphrase");
     await page.getByRole("button", { name: "Unlock" }).click();
 
-    // ── Step 2: Bootstrap / Tor connecting ──────────────────────────────
-    await expect(page.getByRole("heading", { name: "Connecting to Tor" })).toBeVisible({ timeout: 5_000 });
-
-    // ── Step 3: Main shell ───────────────────────────────────────────────
+    // ── Step 2: Bootstrap → main shell ──────────────────────────────────
+    // The Bootstrap screen ("Connecting to Tor") treats start_in_process_cmd's
+    // return as the ready signal; in the mock that resolves instantly, so the
+    // loading frame is sub-millisecond and not reliably observable (in the real
+    // app it shows for the whole Tor bootstrap). Assert the outcome — reaching
+    // the main shell after unlock — rather than the transient loading frame.
     await expect(page.locator(".shell")).toBeVisible({ timeout: 10_000 });
   });
 });

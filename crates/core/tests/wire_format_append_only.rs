@@ -49,6 +49,9 @@ fn command_variant_tag(c: &Command) -> &'static str {
         Command::TailLogs { .. } => "tail_logs",
         Command::WipeAllData => "wipe_all_data",
         Command::ExportBackup { .. } => "export_backup",
+        Command::OpenAttachment { .. } => "open_attachment",
+        Command::SaveAttachment { .. } => "save_attachment",
+        Command::AttachmentAvailable { .. } => "attachment_available",
     }
 }
 
@@ -76,6 +79,8 @@ fn command_result_variant_tag(r: &CommandResult) -> &'static str {
         CommandResult::Pruned { .. } => "pruned",
         CommandResult::SearchResults(_) => "search_results",
         CommandResult::Subscribed => "subscribed",
+        CommandResult::AttachmentDecrypted { .. } => "attachment_decrypted",
+        CommandResult::AttachmentAvailability { .. } => "attachment_availability",
     }
 }
 
@@ -87,25 +92,35 @@ fn expected_command_variant_set() -> Vec<&'static str> {
     let mut v = vec![
         "add_contact",
         "add_mailbox",
+        "attachment_available",
+        "change_passphrase",
         "create_group",
         "create_invite",
         "daemon_info",
+        "export_backup",
         "export_history",
+        "get_config",
+        "get_passphrase_audit_latest",
         "list_contacts",
         "list_contacts_with_filter",
         "list_mailboxes",
         "mark_read",
+        "open_attachment",
         "prune_history",
         "recent_messages",
         "remove_contact",
         "remove_mailbox",
         "rename_contact",
         "rotate_onion",
-        "export_backup",
+        "save_attachment",
         "search_messages",
         "send_file",
         "send_message",
+        "set_config",
+        "set_contact_muted",
         "shutdown",
+        "tail_logs",
+        "wipe_all_data",
     ];
     v.sort();
     v
@@ -115,6 +130,8 @@ fn expected_command_variant_set() -> Vec<&'static str> {
 /// rule as `expected_command_variant_set`.
 fn expected_command_result_variant_set() -> Vec<&'static str> {
     let mut v = vec![
+        "attachment_availability",
+        "attachment_decrypted",
         "config",
         "contact_added",
         "contacts",

@@ -56,9 +56,15 @@ pub struct UiConfig {
     /// If true, the app starts minimised to tray.
     #[serde(default)]
     pub start_minimised: bool,
-    /// If true, daemon logs are persisted to disk.
-    #[serde(default)]
+    /// If true, daemon logs are persisted to disk (`<data_dir>/skattr.log`).
+    /// Off by default: a metadata-resistant messenger should not leave
+    /// (even redacted) logs on disk unless the user opts in via Settings.
+    #[serde(default = "default_persist_logs")]
     pub persist_logs_to_disk: bool,
+}
+
+fn default_persist_logs() -> bool {
+    false
 }
 
 impl Default for UiConfig {
@@ -66,7 +72,7 @@ impl Default for UiConfig {
         Self {
             close_to_tray: default_close_to_tray(),
             start_minimised: false,
-            persist_logs_to_disk: false,
+            persist_logs_to_disk: default_persist_logs(),
         }
     }
 }
@@ -135,13 +141,26 @@ impl Config {
         })
     }
 
-    /// The effective download directory: the configured `download_dir` or
-    /// `<data_dir>/downloads` when unset.
+    /// The effective download directory.
+    ///
+    /// Priority: (1) the explicitly-configured `download_dir`; (2) the user's
+    /// XDG Downloads folder (`~/Downloads`) when it exists — the sensible
+    /// default so received files land somewhere the user expects and controls;
+    /// (3) `<data_dir>/downloads` as a last resort so a receive never fails when
+    /// the user has no `~/Downloads` (the UI lets them pick a folder in
+    /// Settings rather than scattering files).
     #[must_use]
     pub fn resolved_download_dir(&self) -> PathBuf {
-        self.download_dir
-            .clone()
-            .unwrap_or_else(|| self.data_dir.join("downloads"))
+        if let Some(d) = &self.download_dir {
+            return d.clone();
+        }
+        if let Some(dl) = directories::UserDirs::new().and_then(|u| {
+            let d = u.download_dir().map(std::path::Path::to_path_buf);
+            d.filter(|p| p.is_dir())
+        }) {
+            return dl;
+        }
+        self.data_dir.join("downloads")
     }
 
     /// Return the configured `ipc_socket` or a platform-appropriate default.
@@ -483,7 +502,7 @@ mod tests {
         ));
         assert!(cfg.ui.close_to_tray);
         assert!(!cfg.ui.start_minimised);
-        assert!(!cfg.ui.persist_logs_to_disk);
+        assert!(!cfg.ui.persist_logs_to_disk); // off by default (opt-in)
     }
 
     #[test]
@@ -564,17 +583,33 @@ mod tests {
         assert_eq!(snap.direct_timeout_secs, 30);
         assert!(snap.close_to_tray);
         assert!(!snap.start_minimised);
-        assert!(!snap.persist_logs_to_disk);
+        assert!(!snap.persist_logs_to_disk); // off by default (opt-in)
     }
 
     #[test]
-    fn download_dir_defaults_under_data_dir() {
+    fn resolved_download_dir_priority() {
         let mut c = Config::defaults().unwrap();
         c.data_dir = std::path::PathBuf::from("/tmp/skattr-x");
+
+        // 1. An explicit configured value always wins.
+        c.download_dir = Some(std::path::PathBuf::from("/tmp/custom-downloads"));
         assert_eq!(
             c.resolved_download_dir(),
-            std::path::PathBuf::from("/tmp/skattr-x/downloads")
+            std::path::PathBuf::from("/tmp/custom-downloads")
         );
+
+        // 2. Unset → the user's XDG Downloads folder when it exists, otherwise
+        //    <data_dir>/downloads. Compute the expectation the same way the impl
+        //    does so the test is deterministic regardless of the host's home.
+        c.download_dir = None;
+        let expected = directories::UserDirs::new()
+            .and_then(|u| {
+                u.download_dir()
+                    .map(std::path::Path::to_path_buf)
+                    .filter(|p| p.is_dir())
+            })
+            .unwrap_or_else(|| c.data_dir.join("downloads"));
+        assert_eq!(c.resolved_download_dir(), expected);
     }
 
     #[test]

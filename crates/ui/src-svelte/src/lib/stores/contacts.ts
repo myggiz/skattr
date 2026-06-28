@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Myggiz AB
 import { writable, type Writable } from "svelte/store";
+import { pubkeyEq } from "$lib/pubkey";
 import type { ContactSummary } from "$lib/ipc/types";
 
 /** A contact whose first-contact Welcome is still in flight. */
@@ -25,7 +26,7 @@ export async function refreshContacts(): Promise<void> {
 export const expandedPubkey: Writable<string | null> = writable(null);
 
 export function toggleExpanded(pubkey: string): void {
-  expandedPubkey.update((current) => (current === pubkey ? null : pubkey));
+  expandedPubkey.update((current) => (pubkeyEq(current, pubkey) ? null : pubkey));
 }
 
 export async function rename(contact: string, nickname: string | null): Promise<void> {

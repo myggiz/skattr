@@ -29,6 +29,14 @@
       step = "bootstrap";
     }
   }
+
+  // "Start a new identity" from the unlock screen: wipe all local data
+  // (pre-daemon) and restart the wizard from the welcome step.
+  async function startNew() {
+    await invoke("reset_local_data");
+    mnemonic = null;
+    step = "welcome";
+  }
 </script>
 
 {#if step === "welcome"}
@@ -40,5 +48,5 @@
 {:else if step === "bootstrap"}
   <Bootstrap />
 {:else if step === "unlock"}
-  <Passphrase mode="unlock" onNext={() => (step = "bootstrap")} />
+  <Passphrase mode="unlock" onNext={() => (step = "bootstrap")} onReset={startNew} />
 {/if}

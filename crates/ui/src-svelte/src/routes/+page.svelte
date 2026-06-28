@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <!-- Copyright (C) 2026 Myggiz AB -->
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, onDestroy } from "svelte";
   import { goto } from "$app/navigation";
   import { invoke } from "@tauri-apps/api/core";
 
@@ -21,6 +21,7 @@
   import { deepLinkInviteUrl } from "$lib/stores/deepLink";
   import { ipcClient } from "$lib/ipc/tauri";
   import { connection, handleStreamClosed } from "$lib/stores/connection";
+  import { pubkeyEq } from "$lib/pubkey";
   import { listen } from "@tauri-apps/api/event";
   import type { ContactSummary, PublicKey } from "$lib/ipc/types";
 
@@ -28,6 +29,11 @@
   let addOpen = $state(false);
   // URL pre-filled when the dialog is opened via a skattr:// deep-link.
   let addInitialUrl = $state("");
+  // Subscription teardown bookkeeping. The live subscription is started from
+  // the async onMount below (only once the daemon is confirmed running), so a
+  // `destroyed` flag guards against the component unmounting mid-await.
+  let destroyed = false;
+  let unlistenStreamClosed: (() => void) | null = null;
 
   onMount(async () => {
     // If no vault exists yet, go to first-run to initialise identity.
@@ -36,9 +42,23 @@
       goto("/first-run");
       return;
     }
-    // If vault exists we are already unlocked (Bootstrap.svelte called goto("/")).
-    // Stay on "/" and show the main shell; refresh the contact list.
+    // A vault exists, but that alone doesn't mean we're usable: on a fresh
+    // launch (relaunch with an existing vault) we have NOT unlocked and the
+    // in-process daemon is NOT running yet. Only stay on the main shell if the
+    // daemon actually started this session (set after Bootstrap → goto("/")).
+    // Otherwise route to first-run to unlock, which starts the daemon and
+    // returns here.
+    const running = await invoke<boolean>("daemon_running");
+    if (!running) {
+      goto("/first-run");
+      return;
+    }
     await refreshContacts();
+    // Daemon confirmed running: start the live event subscription + the
+    // stream-closed self-heal listener. Starting them HERE (not in a separate
+    // onMount that races an async-set flag) guarantees they run only on the
+    // main-shell path and never when redirecting to /first-run.
+    if (!destroyed) startMainShellSubscriptions();
   });
 
   async function selectContact(summary: ContactSummary) {
@@ -49,7 +69,7 @@
   let activeSummary = $derived(
     $conversation.contact === null
       ? undefined
-      : $contacts.find((c) => c.pubkey === $conversation.contact),
+      : $contacts.find((c) => pubkeyEq(c.pubkey, $conversation.contact)),
   );
 
   let composerDisabled = $derived(
@@ -84,8 +104,15 @@
 
   // Subscribe to events on mount; update stores.
   // `reSubscribe` is extracted so it can be re-invoked on IPC stream death.
+  // Only called when `daemonConfirmed` — not when redirecting to /first-run.
   let unsub: (() => void) | null = null;
   async function reSubscribe(): Promise<void> {
+    // Guard at the source: a reconnect retry queued in handleStreamClosed's
+    // backoff can fire after the page unmounts. Bailing here makes every caller
+    // (the catch handler, the stream-closed listener, the retry button, and any
+    // queued backoff retry) a no-op once destroyed, so no off-screen IPC wiring
+    // is recreated after teardown.
+    if (destroyed) return;
     if (unsub) { unsub(); unsub = null; }
     unsub = await ipcClient.subscribe({ filter: "all" }, (e) => {
       // Event is adjacent-tagged: { event: "...", data: ... }
@@ -102,37 +129,44 @@
           filename: e.data.filename,
           mime: e.data.mime,
           size: Number(e.data.size),
-          path: e.data.path,
         });
       } else if (e.event === "attachment_failed") {
         applyFailed(hex16ToString(e.data.attachment_id), e.data.reason);
+      } else if (e.event === "contact_updated" || e.event === "contact_card_received") {
+        // A contact was added/updated out-of-band — e.g. an inbound first-contact
+        // Welcome made us join a group. Refresh the list so it appears without a
+        // manual restart.
+        void refreshContacts();
       }
     });
   }
 
-  onMount(() => {
-    // Guard against mount-race: if the component unmounts before the async
-    // reSubscribe promise resolves, tear down the just-created subscription
-    // immediately rather than leaking it.
-    let cancelled = false;
-    reSubscribe().then(() => {
-      if (cancelled && unsub) { unsub(); unsub = null; }
-    });
-    return () => {
-      cancelled = true;
-      if (unsub) { unsub(); unsub = null; }
-    };
-  });
-
-  // Watch for IPC stream-closed events (emitted by the Tauri relay) and
-  // self-heal with exponential backoff.
-  onMount(() => {
-    const unlistenP = listen<string>("ipc:stream-closed", () => {
+  // Start the main-shell subscriptions once the daemon is confirmed running.
+  // Invoked from the async onMount above (not a separate onMount), so it never
+  // races an async-set flag and never fires on the /first-run redirect path.
+  // Self-heals: a subscribe rejection or an IPC stream-closed event both route
+  // through the bounded-backoff reconnect path.
+  function startMainShellSubscriptions(): void {
+    reSubscribe()
+      .then(() => {
+        if (destroyed && unsub) { unsub(); unsub = null; }
+      })
+      .catch(() => {
+        // Daemon became unavailable between the running check and subscribe;
+        // treat it as stream-closed so the reconnect path handles it.
+        handleStreamClosed(reSubscribe);
+      });
+    listen<string>("ipc:stream-closed", () => {
       handleStreamClosed(reSubscribe);
+    }).then((unlisten) => {
+      if (destroyed) { unlisten(); } else { unlistenStreamClosed = unlisten; }
     });
-    return () => {
-      unlistenP.then((unlisten) => unlisten());
-    };
+  }
+
+  onDestroy(() => {
+    destroyed = true;
+    if (unsub) { unsub(); unsub = null; }
+    if (unlistenStreamClosed) { unlistenStreamClosed(); unlistenStreamClosed = null; }
   });
 </script>
 
@@ -158,12 +192,12 @@
     {#each $contacts as c}
       <ContactRow
         summary={c}
-        active={$conversation.contact === c.pubkey}
-        expanded={$expandedPubkey === c.pubkey}
+        active={pubkeyEq($conversation.contact, c.pubkey)}
+        expanded={pubkeyEq($expandedPubkey, c.pubkey)}
         onclick={() => selectContact(c)}
         onToggleExpanded={() => toggleExpanded(c.pubkey)}
       />
-      {#if $expandedPubkey === c.pubkey}
+      {#if pubkeyEq($expandedPubkey, c.pubkey)}
         <ContactDetailsPanel summary={c} />
       {/if}
     {/each}
@@ -171,7 +205,7 @@
   <main class="pane">
     <header>
       <span class="title">{
-        $contacts.find((c) => c.pubkey === $conversation.contact)?.nickname
+        $contacts.find((c) => pubkeyEq(c.pubkey, $conversation.contact))?.nickname
         ?? "Select a contact"
       }</span>
       <TorPill />

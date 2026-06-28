@@ -28,9 +28,11 @@ impl<'p> ContactRepo<'p> {
     pub fn upsert(&self, contact: &Contact) -> Result<()> {
         self.pool.with_mut(|c| {
             c.execute(
+                // hidden=0 on conflict: re-adding a previously-removed
+                // (soft-deleted) contact must un-hide it.
                 "INSERT INTO contacts (identity_pubkey, display_name, added_at) \
                  VALUES (?1, ?2, ?3) \
-                 ON CONFLICT(identity_pubkey) DO UPDATE SET display_name=excluded.display_name",
+                 ON CONFLICT(identity_pubkey) DO UPDATE SET display_name=excluded.display_name, hidden=0",
                 rusqlite::params![
                     &contact.identity.0[..],
                     &contact.display_name,
@@ -54,9 +56,11 @@ impl<'p> ContactRepo<'p> {
         contact: &Contact,
     ) -> Result<()> {
         tx.execute(
+            // hidden=0 on conflict: re-adding a previously-removed (soft-deleted)
+            // contact must un-hide it, or it stays invisible in the UI.
             "INSERT INTO contacts (identity_pubkey, display_name, added_at) \
              VALUES (?1, ?2, ?3) \
-             ON CONFLICT(identity_pubkey) DO UPDATE SET display_name=excluded.display_name",
+             ON CONFLICT(identity_pubkey) DO UPDATE SET display_name=excluded.display_name, hidden=0",
             rusqlite::params![
                 &contact.identity.0[..],
                 &contact.display_name,

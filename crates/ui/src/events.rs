@@ -42,6 +42,10 @@ pub async fn ipc_subscribe(
         loop {
             match client.next_event().await {
                 Ok(ev) => {
+                    // NOTE: must NOT log per-event here. The daemon re-emits log
+                    // lines as Event::LogRecord onto the same bus this relay
+                    // streams — a per-event log would become a new event and
+                    // create an infinite amplification loop.
                     if channel.send(ev).is_err() {
                         // Receiver gone — Svelte unmounted the consumer. Normal.
                         break;

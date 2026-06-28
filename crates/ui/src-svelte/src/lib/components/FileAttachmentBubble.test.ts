@@ -4,14 +4,29 @@ import { describe, expect, test, vi, beforeEach } from "vitest";
 import { render } from "@testing-library/svelte";
 import { tick } from "svelte";
 
-// convertFileSrc + invoke come from @tauri-apps/api/core.
-const { invokeMock, convertFileSrcMock } = vi.hoisted(() => ({
+// invoke comes from @tauri-apps/api/core (convertFileSrc removed in Task 6).
+const { invokeMock } = vi.hoisted(() => ({
   invokeMock: vi.fn(),
-  convertFileSrcMock: vi.fn((p: string) => `asset://localhost/${p}`),
 }));
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: invokeMock,
-  convertFileSrc: convertFileSrcMock,
+}));
+
+// Mock ipcClient so we can inspect attachment_available and other IPC calls.
+const { ipcRequestMock } = vi.hoisted(() => ({
+  ipcRequestMock: vi.fn(),
+}));
+vi.mock("$lib/ipc/tauri", () => ({
+  ipcClient: { request: ipcRequestMock },
+}));
+
+// Mock @tauri-apps/plugin-dialog save function.
+const { saveMock } = vi.hoisted(() => ({
+  saveMock: vi.fn(),
+}));
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  save: saveMock,
+  ask: vi.fn().mockResolvedValue(false),
 }));
 
 // Mock decodeManifestMemo to bypass the module-level memo so each test
@@ -26,7 +41,7 @@ vi.mock("$lib/attachments", async (importOriginal) => {
 });
 
 import FileAttachmentBubble from "./FileAttachmentBubble.svelte";
-import { attachments, applyReceived, applyProgress } from "$lib/stores/attachments";
+import { attachments, applyProgress, markAvailable } from "$lib/stores/attachments";
 import type { MessageRecord } from "$lib/ipc/types";
 
 const AID = "ab".repeat(16);
@@ -47,9 +62,19 @@ function fileRecord(direction: "incoming" | "outgoing"): MessageRecord {
 beforeEach(() => {
   attachments.set(new Map());
   invokeMock.mockReset();
-  invokeMock.mockResolvedValue({
-    attachment_id: AID, filename: "photo.jpg", mime: "image/jpeg", total_size: 2048,
+  ipcRequestMock.mockReset();
+  saveMock.mockReset();
+  // Discriminate by command: decode_attachment_manifest → manifest.
+  invokeMock.mockImplementation((cmd: string, args?: unknown) => {
+    if (cmd === "decode_attachment_manifest") {
+      const manifest = (args as { manifest: number[] })?.manifest ?? [];
+      if (manifest.length === 0) return Promise.reject(new Error("empty manifest"));
+      return Promise.resolve({ attachment_id: AID, filename: "photo.jpg", mime: "image/jpeg", total_size: 2048 });
+    }
+    return Promise.resolve(null);
   });
+  // Default: attachment_available returns not available.
+  ipcRequestMock.mockResolvedValue({ resp: "ok", data: { result: "attachment_availability", data: { available: false } } });
 });
 
 describe("FileAttachmentBubble", () => {
@@ -83,31 +108,100 @@ describe("FileAttachmentBubble", () => {
     expect(container.querySelector(".progress .bar")).toBeNull();
   });
 
-  test("renders an inline <img> when complete + image", async () => {
-    const { container, findByText } = render(FileAttachmentBubble, {
+  test("complete + available receiver bubble shows Open and Save… buttons, no <img>", async () => {
+    const { container, findByText, getByRole } = render(FileAttachmentBubble, {
       props: { record: fileRecord("incoming") },
     });
     await findByText("photo.jpg");
-    applyReceived(AID, { filename: "photo.jpg", mime: "image/jpeg", size: 2048, path: "/dl/photo.jpg" });
+    markAvailable(AID, { filename: "photo.jpg", mime: "image/jpeg", size: 2048 });
     await tick();
-    const img = container.querySelector("img");
-    expect(img).not.toBeNull();
-    expect(convertFileSrcMock).toHaveBeenCalledWith("/dl/photo.jpg");
+    // No inline image preview (Task 6 decision: images are plain file cards).
+    expect(container.querySelector("img")).toBeNull();
+    expect(container.querySelector(".preview")).toBeNull();
+    // Open and Save… buttons are present.
+    expect(getByRole("button", { name: /open/i })).toBeTruthy();
+    expect(getByRole("button", { name: /save/i })).toBeTruthy();
   });
 
-  test("complete + non-image shows Open/Reveal, no img", async () => {
-    invokeMock.mockResolvedValue({
-      attachment_id: AID, filename: "doc.pdf", mime: "application/pdf", total_size: 10,
+  test("complete non-image shows Open and Save… buttons, no <img>", async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "decode_attachment_manifest") {
+        return Promise.resolve({ attachment_id: AID, filename: "doc.pdf", mime: "application/pdf", total_size: 10 });
+      }
+      return Promise.resolve(null);
     });
     const { container, findByText, getByRole } = render(FileAttachmentBubble, {
       props: { record: fileRecord("incoming") },
     });
     await findByText("doc.pdf");
-    applyReceived(AID, { filename: "doc.pdf", mime: "application/pdf", size: 10, path: "/dl/doc.pdf" });
+    markAvailable(AID, { filename: "doc.pdf", mime: "application/pdf", size: 10 });
     await tick();
     expect(container.querySelector("img")).toBeNull();
     expect(getByRole("button", { name: /open/i })).toBeTruthy();
-    expect(getByRole("button", { name: /reveal/i })).toBeTruthy();
+    expect(getByRole("button", { name: /save/i })).toBeTruthy();
+  });
+
+  test("clicking Save… invokes dialog save then save_attachment IPC", async () => {
+    const DEST = "/home/user/Downloads/photo.jpg";
+    saveMock.mockResolvedValue(DEST);
+    ipcRequestMock.mockImplementation((cmd: unknown) => {
+      const c = cmd as { cmd: string };
+      if (c.cmd === "attachment_available") {
+        return Promise.resolve({ resp: "ok", data: { result: "attachment_availability", data: { available: false } } });
+      }
+      if (c.cmd === "save_attachment") {
+        return Promise.resolve({ resp: "ok", data: { result: "ok" } });
+      }
+      return Promise.resolve({ resp: "ok", data: { result: "ok" } });
+    });
+
+    const { findByText, getByRole } = render(FileAttachmentBubble, {
+      props: { record: fileRecord("incoming") },
+    });
+    await findByText("photo.jpg");
+    markAvailable(AID, { filename: "photo.jpg", mime: "image/jpeg", size: 2048 });
+    await tick();
+
+    const saveBtn = getByRole("button", { name: /save/i });
+    saveBtn.click();
+    await tick();
+    await new Promise((r) => setTimeout(r, 0));
+    await tick();
+
+    expect(saveMock).toHaveBeenCalledOnce();
+    expect(ipcRequestMock).toHaveBeenCalledWith(
+      expect.objectContaining({ cmd: "save_attachment", attachment_id: AID, dest_path: DEST }),
+    );
+  });
+
+  test("on mount of received-but-not-in-store bubble, issues attachment_available and calls markAvailable on true", async () => {
+    // Set up ipcRequestMock to return available=true for attachment_available.
+    ipcRequestMock.mockImplementation((cmd: unknown) => {
+      const c = cmd as { cmd: string };
+      if (c.cmd === "attachment_available") {
+        return Promise.resolve({
+          resp: "ok",
+          data: { result: "attachment_availability", data: { available: true } },
+        });
+      }
+      return Promise.resolve({ resp: "ok", data: { result: "ok" } });
+    });
+
+    const { findByText, getByRole } = render(FileAttachmentBubble, {
+      props: { record: fileRecord("incoming") },
+    });
+    await findByText("photo.jpg");
+    // Let the $effect run.
+    await new Promise((r) => setTimeout(r, 0));
+    await tick();
+
+    // The component should have queried attachment_available.
+    expect(ipcRequestMock).toHaveBeenCalledWith(
+      expect.objectContaining({ cmd: "attachment_available", attachment_id: AID }),
+    );
+    // Since available=true, the store should now show Open and Save… buttons.
+    expect(getByRole("button", { name: /open/i })).toBeTruthy();
+    expect(getByRole("button", { name: /save/i })).toBeTruthy();
   });
 
   test("outgoing bubble shows a delivery icon and no progress bar", async () => {

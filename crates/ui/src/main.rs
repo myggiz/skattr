@@ -131,6 +131,80 @@ fn set_close_to_tray(state: tauri::State<'_, CloseToTraySentinel>, enabled: bool
     state.0.store(enabled, Ordering::SeqCst);
 }
 
+/// The consolidated data dir (`~/.local/share/skattr`), computed from
+/// XDG_DATA_HOME / HOME so it is stable regardless of the Tauri app identifier.
+///
+/// With identifier `net.myggiz.skattr` Tauri's `app_data_dir()` would return
+/// `~/.local/share/net.myggiz.skattr` — stranding any existing identity data.
+/// Daemon-sensitive files (vault, DB, Arti state) always live under the
+/// env-derived `~/.local/share/skattr`; Tauri's identifier path is used only
+/// for webview caches and other Tauri-managed state.
+fn consolidated_data_dir() -> std::path::PathBuf {
+    let data_home = std::env::var_os("XDG_DATA_HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .or_else(|| {
+            std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/share"))
+        })
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    data_home.join("skattr")
+}
+
+/// One-time migration from the pre-consolidation split layout into
+/// `new_data_dir`: the old daemon data (`~/.local/share/net.myggiz.skattr/skattr`)
+/// and the old config (`~/.config/skattr/config.toml`) are moved in. No-op once
+/// the new dir already holds an identity vault, or if there is nothing to move.
+///
+/// Returns `Err` if a file from the old data directory cannot be renamed (data
+/// loss risk), so the caller can abort startup rather than silently continuing
+/// with an incomplete identity.  Config migration failures are best-effort only
+/// (a missing config is merely cosmetic).
+fn migrate_legacy_data(new_data_dir: &std::path::Path) -> Result<(), String> {
+    if new_data_dir.join("identity.vault").exists() {
+        return Ok(());
+    }
+    let home = match std::env::var_os("HOME") {
+        Some(h) => std::path::PathBuf::from(h),
+        None => return Ok(()),
+    };
+    let data_home = std::env::var_os("XDG_DATA_HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| home.join(".local/share"));
+    let old_data = data_home.join("net.myggiz.skattr").join("skattr");
+    if old_data.join("identity.vault").exists() {
+        let entries =
+            std::fs::read_dir(&old_data).map_err(|e| format!("migrate: read legacy dir: {e}"))?;
+        for entry in entries.flatten() {
+            let dst = new_data_dir.join(entry.file_name());
+            std::fs::rename(entry.path(), &dst).map_err(|e| {
+                format!(
+                    "migrate: rename {}: {e}",
+                    entry.file_name().to_string_lossy()
+                )
+            })?;
+        }
+        tracing::info!(
+            from = %old_data.display(),
+            to = %new_data_dir.display(),
+            "migrated legacy data into consolidated dir"
+        );
+    }
+    let config_home = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| home.join(".config"));
+    let old_config = config_home.join("skattr").join("config.toml");
+    let new_config = new_data_dir.join("config.toml");
+    if old_config.exists() && !new_config.exists() {
+        // Config migration is best-effort: a missing config just means defaults.
+        if let Err(e) = std::fs::rename(&old_config, &new_config) {
+            tracing::warn!(error = %e, "migrate: could not move legacy config.toml (non-fatal)");
+        }
+    }
+    Ok(())
+}
+
 fn main() {
     let argv: Vec<String> = std::env::args().collect();
     if detect_smoke_test_flag(&argv) {
@@ -138,18 +212,66 @@ fn main() {
     }
 
     use skattr_core::daemon::logs::{LogSink, RingBufferLayer};
-    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+    use tracing_subscriber::filter::{EnvFilter, LevelFilter};
+    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 
     // Create the log sink before building the subscriber so both the
     // tracing layer and the daemon share the same ring buffer allocation.
     let log_sink = LogSink::new();
+
+    // The consolidated data dir (~/.local/share/skattr). Computed here from the
+    // environment because tracing is set up before the Tauri app handle exists.
+    // Deliberately env-based rather than using app_data_dir() so the path is
+    // identifier-independent (identifier "net.myggiz.skattr" would give a
+    // different XDG path and strand existing data).
+    let data_dir = consolidated_data_dir();
+
+    // Optional on-disk log (default ON during pre-1.0 field-testing): writes
+    // <data_dir>/skattr.log so problems can be diagnosed from a shared file —
+    // including from another machine. Controlled by ui.persist_logs_to_disk.
+    let persist_logs = {
+        let p = data_dir.join("config.toml");
+        skattr_core::daemon::Config::load(&p)
+            .or_else(|_| skattr_core::daemon::Config::defaults())
+            .map(|c| c.ui.persist_logs_to_disk)
+            .unwrap_or(true)
+    };
+    let file_layer = if persist_logs {
+        let log_dir = data_dir.clone();
+        let _ = std::fs::create_dir_all(&log_dir);
+        let appender = tracing_appender::rolling::never(&log_dir, "skattr.log");
+        let (non_blocking, guard) = tracing_appender::non_blocking(appender);
+        // Keep the writer alive for the whole process so buffered lines flush.
+        Box::leak(Box::new(guard));
+        // Disk file gets DEBUG (its own per-layer filter), independent of the
+        // bus level below and of RUST_LOG, so the shared log is always useful.
+        Some(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(non_blocking)
+                .with_filter(EnvFilter::new("info,skattr_core=debug,skattr_ui=debug"))
+                .boxed(),
+        )
+    } else {
+        None
+    };
+
+    // stderr honors RUST_LOG, defaulting to info.
+    let stderr_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+
     tracing_subscriber::registry()
         .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,skattr=debug")),
+            tracing_subscriber::fmt::layer()
+                .with_writer(std::io::stderr)
+                .with_filter(stderr_filter),
         )
-        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
-        .with(RingBufferLayer::new(log_sink.clone()))
+        // The ring buffer feeds the in-app LogsViewer AND is re-emitted as
+        // Event::LogRecord onto the IPC event bus. Cap it at INFO: high-volume
+        // DEBUG (which still reaches the disk file above) would otherwise flood
+        // the broadcast bus and lag/drop real events (messages, contact updates).
+        .with(RingBufferLayer::new(log_sink.clone()).with_filter(LevelFilter::INFO))
+        .with(file_layer)
         .init();
 
     let app_state = daemon::AppState {
@@ -177,10 +299,12 @@ fn main() {
             bootstrap::vault_exists,
             bootstrap::identity_init,
             bootstrap::vault_unlock,
+            bootstrap::reset_local_data,
             ipc_bridge::ipc_request,
             ipc_bridge::render_invite_qr,
             events::ipc_subscribe,
             daemon::start_in_process_cmd,
+            daemon::daemon_running,
             notifications::notify,
             notifications::focus_window_and_open_conversation,
             set_close_to_tray,
@@ -190,45 +314,45 @@ fn main() {
             attachments::reveal_in_folder,
         ])
         .setup(|app| {
-            // Resolve data_dir once and stash it. `app_data_dir` only fails
-            // on platforms where Tauri can't determine a config root —
-            // surface that as a Tauri setup error so the caller sees it.
-            let data_dir = app
-                .path()
-                .app_data_dir()
-                .map_err(|e| format!("resolve app_data_dir: {e}"))?
-                .join("skattr");
-            std::fs::create_dir_all(&data_dir).ok();
+            // Daemon-sensitive data always lives under the env-derived
+            // ~/.local/share/skattr regardless of the Tauri app identifier.
+            // Tauri's app_data_dir() would give ~/.local/share/net.myggiz.skattr
+            // with identifier "net.myggiz.skattr" and strand existing identity
+            // data, so we compute the path ourselves.
+            let data_dir = consolidated_data_dir();
+            std::fs::create_dir_all(&data_dir)
+                .map_err(|e| format!("create data dir: {e}"))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Err(e) = std::fs::set_permissions(
+                    &data_dir,
+                    std::fs::Permissions::from_mode(0o700),
+                ) {
+                    tracing::warn!(error = %e, "could not set data_dir permissions to 0700 (non-fatal)");
+                }
+            }
+
+            // One-time migration from the previous split layout
+            // (~/.local/share/net.myggiz.skattr/skattr/ for data, ~/.config/skattr
+            // for config) into the consolidated dir, so existing identities carry
+            // over rather than being silently abandoned.
+            migrate_legacy_data(&data_dir).map_err(|e| format!("data migration failed: {e}"))?;
+
             let state: tauri::State<daemon::AppState> = app.state();
-            // Clone before moving data_dir into managed state, so the
-            // asset-protocol scope grant (below) can derive the downloads path.
-            let downloads = data_dir.join("downloads");
+
+            // Config now lives inside the data dir. Load it to resolve the
+            // download dir + UI prefs. (Falls back to defaults on first run.)
+            let config_path = data_dir.join("config.toml");
+            let mut full_cfg = match skattr_core::daemon::Config::load(&config_path) {
+                Ok(c) => c,
+                Err(_) => skattr_core::daemon::Config::defaults()
+                    .map_err(|e| format!("config defaults: {e}"))?,
+            };
+            full_cfg.data_dir = data_dir.clone();
+            let ui_cfg = full_cfg.ui.clone();
+
             *state.data_dir.write() = Some(data_dir);
-
-            // Scope the asset protocol to the daemon's downloads dir so the
-            // webview can lazily stream received images via convertFileSrc.
-            // The dir is created lazily by the daemon on first receive; create
-            // it now so the scope grant targets an existing path.
-            std::fs::create_dir_all(&downloads).ok();
-            app.asset_protocol_scope()
-                .allow_directory(&downloads, true)
-                .map_err(|e| format!("asset scope: {e}"))?;
-
-            // Read the on-disk config to pick up ui.close_to_tray and
-            // ui.start_minimised before the daemon is fully started.
-            // We read directly from TOML here (rather than waiting for the
-            // in-process daemon to be ready) because:
-            //   1. The daemon is started later by start_in_process_cmd.
-            //   2. start_minimised must take effect at window creation time.
-            // A runtime change to start_minimised requires a restart
-            // (same semantics as persist_logs_to_disk from Task 22).
-            let config_path = skattr_core::daemon::config::resolve_config_path(None);
-            // Falls back to defaults (close_to_tray=true, start_minimised=false)
-            // when the config file doesn't exist yet (first-run).
-            let ui_cfg = skattr_core::daemon::Config::load(&config_path)
-                .or_else(|_| skattr_core::daemon::Config::defaults())
-                .map(|c| c.ui)
-                .unwrap_or_default();
 
             // Initialise the close-to-tray sentinel from the persisted value.
             let sentinel = CloseToTraySentinel(Arc::new(AtomicBool::new(ui_cfg.close_to_tray)));

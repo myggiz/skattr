@@ -50,6 +50,13 @@ const _failAttachment =
 
 let _vault = _preseeded || _fixtureSeeded || _fixture200Msgs || _fixtureInviteFlow || _fixtureAddContactFlow || _fixtureAttachments;
 
+// Daemon-running state, consulted by the main shell's onMount (`+page.svelte`):
+// a vault existing isn't enough — the shell only stays put if the in-process
+// daemon started this session. Fixtures that drive the app straight to "/"
+// represent an already-running session, so seed it from `_vault`; the
+// first-run / unlock flows flip it true once `start_in_process_cmd` runs.
+let _daemonRunning = _vault;
+
 // Active subscribe channel — used by fixture to emit delivery_status_changed.
 let _subscribeChannel: Channel<unknown> | null = null;
 
@@ -129,11 +136,15 @@ export async function invoke<T = unknown>(
     }
 
     case "start_in_process_cmd": {
+      _daemonRunning = true;
       return {
         onion: MOCK_ONION,
         ipc_socket: "/tmp/skattr-mock.sock",
       } as unknown as T;
     }
+
+    case "daemon_running":
+      return _daemonRunning as unknown as T;
 
     case "ipc_request": {
       const cmdObj = args?.cmd as { cmd: string } | undefined;

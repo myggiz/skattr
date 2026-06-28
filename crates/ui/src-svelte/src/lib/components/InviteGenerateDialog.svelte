@@ -61,7 +61,13 @@
     await navigator.clipboard.writeText(url);
     toast.show("Copied");
   }
+
+  function handleKey(e: KeyboardEvent) {
+    if (e.key === "Escape" && !busy) onClose();
+  }
 </script>
+
+<svelte:window onkeydown={handleKey} />
 
 <div class="overlay" role="dialog" aria-modal="true">
   <div class="dialog">
@@ -116,6 +122,7 @@
     background: var(--bg-elevated); color: var(--text);
     padding: var(--s-3); border-radius: 8px;
     max-width: 520px; width: 90vw;
+    max-height: 90vh; overflow-y: auto;
   }
   h2 { font: var(--t-display); margin: 0 0 var(--s-2); }
   label { display: block; margin: var(--s-2) 0; }

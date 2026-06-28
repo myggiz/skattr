@@ -99,6 +99,15 @@ disk read.
 - `identity.vault` under a user passphrase (Argon2id → XChaCha20-Poly1305).
 - `hs.key.age` under `HKDF(seed, "skattr-hs-storage-v1")`.
 - `skattr.sqlite.age` under `HKDF(seed, "skattr-storage-v1")`.
+- Received attachment chunks under `<data_dir>/attachments/<hex id>/<index>` are
+  stored as AEAD ciphertext (keys live inside the MLS-protected manifest).
+  Plaintext is produced only on an explicit *Open* or *Save* command: *Open*
+  decrypts into `<data_dir>/cache/open/`, which the app makes a *best-effort*
+  attempt to wipe on start and clean shutdown; *Save* decrypts to a user-chosen
+  path. The wipe is `remove_dir_all` with failures logged (not fatal): a delete
+  failure — or a crash / kill that skips the clean-shutdown path — can leave
+  decrypted attachment plaintext in the open-cache until the next successful
+  wipe.
 
 Without both the passphrase AND either the seed phrase or a live
 process's memory, the on-disk state is opaque.
@@ -206,6 +215,10 @@ These are absent in v1.0 by decision (see the
   for ~7 days and dropped if never fetched within the window; files larger than
   10 MiB transfer only while both peers are online. Text messages are not subject
   to these limits. (D3)
+- **Received attachment chunks are retained indefinitely.** Completed ciphertext
+  chunks accumulate under `<data_dir>/attachments/`; there is no automatic GC or
+  per-file expiry. Disk usage grows with received files. A delete/retention policy
+  is a v1.1 candidate.
 - **No metadata-minimization.** No message-size padding, send-timing jitter, or
   cover traffic / cover polling.
 - **The recipient-hash mailbox-correlation leak** (A4) is unmitigated.

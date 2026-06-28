@@ -92,20 +92,18 @@ pub enum Event {
     /// One redacted log record. Streamed only when the subscriber's
     /// filter includes `EventFilter::Logs`.
     LogRecord(crate::daemon::commands::LogRecord),
-    /// An inbound attachment finished downloading + reassembling.
+    /// An inbound attachment finished transferring and is available (encrypted at rest).
     AttachmentReceived {
         /// Sending peer.
         contact: PublicKey,
         /// 16-byte attachment id.
         attachment_id: crate::daemon::hex::Hex16,
-        /// Sanitized filename as written to disk.
+        /// Sanitized filename.
         filename: String,
         /// Effective MIME type (post-strip).
         mime: String,
         /// File size in bytes.
         size: u64,
-        /// Absolute path of the written file.
-        path: String,
     },
     /// Incremental attachment transfer progress (throttled).
     AttachmentProgress {

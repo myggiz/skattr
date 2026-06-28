@@ -97,13 +97,53 @@ pub async fn vault_unlock(
     Ok(())
 }
 
+/// Wipe all on-disk identity state for a fresh start ("Start a new identity"
+/// from the onboarding unlock screen). This is a **pre-daemon** wipe: at the
+/// unlock screen no daemon/IPC is running yet, so `Command::WipeAllData` is not
+/// reachable — we delete the data dir directly. Removes the whole data dir
+/// (vault, age-encrypted DB + sidecars, Arti/Tor state, config) and recreates
+/// it empty (0700 on unix) so the wizard restarts at the welcome step.
+///
+/// Fails if the in-process daemon is currently running; callers must go through
+/// `Command::WipeAllData` in that case.
+#[tauri::command]
+pub async fn reset_local_data(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    // Guard: refuse to wipe if the daemon is live. At the unlock screen the
+    // daemon should never be running, but defensive check prevents accidental
+    // data destruction if the command is ever called at the wrong time.
+    if state.ready.read().is_some() {
+        return Err(
+            "daemon is running; use Command::WipeAllData instead of reset_local_data".to_string(),
+        );
+    }
+    let data_dir = state
+        .data_dir
+        .read()
+        .clone()
+        .ok_or_else(|| "data_dir not initialised".to_string())?;
+    if data_dir.exists() {
+        std::fs::remove_dir_all(&data_dir).map_err(|e| format!("wipe data dir: {e}"))?;
+    }
+    std::fs::create_dir_all(&data_dir).map_err(|e| format!("recreate data dir: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("set data dir perms: {e}"))?;
+    }
+    // Drop any passphrase captured before the user chose to start over.
+    *state.pending_passphrase.write() = None;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     /// Lint guard: the pre-daemon Tauri command surface is restricted
-    /// to three annotations. Adding a fourth requires re-evaluating
-    /// the wizard-first contract from the 2.C spec.
+    /// to four annotations (`vault_exists`, `identity_init`, `vault_unlock`,
+    /// `reset_local_data`). Adding a fifth requires re-evaluating the
+    /// wizard-first contract from the 2.C spec.
     #[test]
-    fn bootstrap_tauri_commands_are_capped_at_three() {
+    fn bootstrap_tauri_commands_are_capped_at_four() {
         // CARGO_MANIFEST_DIR is the absolute path to crates/ui/; file!() is
         // a path relative to the workspace root that doesn't resolve from
         // an arbitrary cwd (e.g., when `cargo test` is invoked from outside
@@ -118,8 +158,8 @@ mod tests {
             .filter(|l| l.trim_start().starts_with("#[tauri::command]"))
             .count();
         assert_eq!(
-            count, 3,
-            "bootstrap.rs must expose exactly 3 Tauri commands; got {count}"
+            count, 4,
+            "bootstrap.rs must expose exactly 4 Tauri commands; got {count}"
         );
     }
 }
