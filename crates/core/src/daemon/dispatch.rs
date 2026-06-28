@@ -420,15 +420,50 @@ where
 
     let _ = handle.events_tx.send(Event::ContactUpdated(inviter));
 
-    // Submit Welcome to the inviter via the hub. We do not await the
-    // ACK here — UI responsiveness comes first, and a failed delivery
-    // surfaces via Event::DeliveryStatusChanged through the hub's
-    // existing failure path.
-    handle
-        .hub
-        .send_welcome(inviter, welcome)
-        .await
-        .map_err(map_err)?;
+    // Deliver the Welcome to the inviter, retrying until they ACK. First contact
+    // has no durable outbox for the Welcome, so a single flaky-Tor dial would
+    // lose it — leaving us with a contact the peer never joined (no retry, no
+    // fallback). Retry in the background with backoff so add_contact stays
+    // responsive. This is in-session only; cross-restart durability is a
+    // follow-up (the contact already persisted above, so a restart mid-retry
+    // currently needs a remove + re-add).
+    {
+        let hub = handle.hub.clone();
+        let welcome_bytes = welcome.clone();
+        let peer = inviter;
+        tokio::spawn(async move {
+            // Immediate attempt, then increasing backoff (~6 min total). Tor
+            // hidden-service first contact is slow + flaky; give it room.
+            let backoffs_secs = [0u64, 5, 10, 20, 30, 45, 60, 60, 60, 60];
+            for (i, &wait) in backoffs_secs.iter().enumerate() {
+                if wait > 0 {
+                    tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+                }
+                match hub.send_welcome(peer, welcome_bytes.clone()).await {
+                    Ok(ack_rx) => {
+                        match tokio::time::timeout(std::time::Duration::from_secs(45), ack_rx).await
+                        {
+                            Ok(Ok(Ok(()))) => {
+                                tracing::info!(attempt = i + 1, "welcome: acked by peer");
+                                return;
+                            }
+                            other => {
+                                tracing::debug!(
+                                    attempt = i + 1,
+                                    ?other,
+                                    "welcome: not acked yet, retrying"
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!(?e, attempt = i + 1, "welcome: send failed, retrying");
+                    }
+                }
+            }
+            tracing::warn!("welcome: gave up re-delivering after all attempts");
+        });
+    }
 
     // Send our own card to the new contact so they learn our onion for the
     // reverse direction. Best-effort: rides the same peer-actor connection

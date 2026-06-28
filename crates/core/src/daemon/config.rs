@@ -56,9 +56,15 @@ pub struct UiConfig {
     /// If true, the app starts minimised to tray.
     #[serde(default)]
     pub start_minimised: bool,
-    /// If true, daemon logs are persisted to disk.
-    #[serde(default)]
+    /// If true, daemon logs are persisted to disk (`<data_dir>/skattr.log`).
+    /// Defaulted ON during the pre-1.0 field-testing phase so issues can be
+    /// diagnosed from a shared log file.
+    #[serde(default = "default_persist_logs")]
     pub persist_logs_to_disk: bool,
+}
+
+fn default_persist_logs() -> bool {
+    true
 }
 
 impl Default for UiConfig {
@@ -66,7 +72,7 @@ impl Default for UiConfig {
         Self {
             close_to_tray: default_close_to_tray(),
             start_minimised: false,
-            persist_logs_to_disk: false,
+            persist_logs_to_disk: default_persist_logs(),
         }
     }
 }
@@ -135,13 +141,26 @@ impl Config {
         })
     }
 
-    /// The effective download directory: the configured `download_dir` or
-    /// `<data_dir>/downloads` when unset.
+    /// The effective download directory.
+    ///
+    /// Priority: (1) the explicitly-configured `download_dir`; (2) the user's
+    /// XDG Downloads folder (`~/Downloads`) when it exists — the sensible
+    /// default so received files land somewhere the user expects and controls;
+    /// (3) `<data_dir>/downloads` as a last resort so a receive never fails when
+    /// the user has no `~/Downloads` (the UI lets them pick a folder in
+    /// Settings rather than scattering files).
     #[must_use]
     pub fn resolved_download_dir(&self) -> PathBuf {
-        self.download_dir
-            .clone()
-            .unwrap_or_else(|| self.data_dir.join("downloads"))
+        if let Some(d) = &self.download_dir {
+            return d.clone();
+        }
+        if let Some(dl) = directories::UserDirs::new().and_then(|u| {
+            let d = u.download_dir().map(std::path::Path::to_path_buf);
+            d.filter(|p| p.is_dir())
+        }) {
+            return dl;
+        }
+        self.data_dir.join("downloads")
     }
 
     /// Return the configured `ipc_socket` or a platform-appropriate default.
@@ -483,7 +502,7 @@ mod tests {
         ));
         assert!(cfg.ui.close_to_tray);
         assert!(!cfg.ui.start_minimised);
-        assert!(!cfg.ui.persist_logs_to_disk);
+        assert!(cfg.ui.persist_logs_to_disk); // defaulted ON for field-testing
     }
 
     #[test]
@@ -564,7 +583,7 @@ mod tests {
         assert_eq!(snap.direct_timeout_secs, 30);
         assert!(snap.close_to_tray);
         assert!(!snap.start_minimised);
-        assert!(!snap.persist_logs_to_disk);
+        assert!(snap.persist_logs_to_disk); // defaulted ON for field-testing
     }
 
     #[test]

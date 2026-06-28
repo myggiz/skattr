@@ -67,12 +67,20 @@ impl TorRuntime {
 
         // `TorClientConfigBuilder::from_directories` is the idiomatic 0.41 API
         // (plain `.default().storage(…).build()` is internal).
-        let tor_config: TorClientConfig =
-            TorClientConfigBuilder::from_directories(&config.state_dir, &cache_dir)
-                .build()
-                .map_err(|e| {
-                    CoreError::Transport(TransportErrorKind::Other(format!("arti config: {e}")))
-                })?;
+        let mut builder = TorClientConfigBuilder::from_directories(&config.state_dir, &cache_dir);
+        // Relax Arti's fs-mistrust ancestor-permission policing. Arti otherwise
+        // refuses to start ("problem with filesystem permissions: Error while
+        // trying to access persistent state") whenever any ancestor of the
+        // state dir is group/other-writable — e.g. a umask-002 home, or `/tmp`.
+        // That check targets multi-user server deployments; for a single-user
+        // desktop app it only blocks startup. We already create our own dirs
+        // 0700 and the message DB is age-encrypted at rest, so the protection
+        // Arti is enforcing is redundant here. This is exactly the remedy Arti's
+        // own error hint suggests (storage.permissions.dangerously_trust_everyone).
+        builder.storage().permissions().dangerously_trust_everyone();
+        let tor_config: TorClientConfig = builder.build().map_err(|e| {
+            CoreError::Transport(TransportErrorKind::Other(format!("arti config: {e}")))
+        })?;
 
         // Attach to the already-running Tokio reactor (we are inside `#[tokio::main]`
         // or a `#[tokio::test]`).
