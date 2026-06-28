@@ -107,6 +107,12 @@
   // Only called when `daemonConfirmed` — not when redirecting to /first-run.
   let unsub: (() => void) | null = null;
   async function reSubscribe(): Promise<void> {
+    // Guard at the source: a reconnect retry queued in handleStreamClosed's
+    // backoff can fire after the page unmounts. Bailing here makes every caller
+    // (the catch handler, the stream-closed listener, the retry button, and any
+    // queued backoff retry) a no-op once destroyed, so no off-screen IPC wiring
+    // is recreated after teardown.
+    if (destroyed) return;
     if (unsub) { unsub(); unsub = null; }
     unsub = await ipcClient.subscribe({ filter: "all" }, (e) => {
       // Event is adjacent-tagged: { event: "...", data: ... }
