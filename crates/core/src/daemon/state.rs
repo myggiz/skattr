@@ -319,6 +319,9 @@ where
     inbound_impl.set_identity(Arc::new(identity_for_inbound));
     inbound_impl.set_group_locks(group_locks.clone());
     let chunk_store = std::sync::Arc::new(crate::attachment::store::ChunkStore::new(data_dir));
+    // Clear any decrypted plaintext left in the open-cache from a previous run
+    // (covers abnormal exits where the shutdown wipe never ran).
+    wipe_open_cache(data_dir);
     inbound_impl.set_chunk_store(chunk_store.clone());
     inbound_impl.set_download_dir(config.resolved_download_dir());
     let inbound = Arc::new(inbound_impl) as Arc<dyn InboundDispatch>;
@@ -534,6 +537,8 @@ where
     if let Err(e) = pool.close() {
         tracing::warn!(error = %e, "pool close at shutdown failed");
     }
+    // Remove decrypted plaintext so a clean shutdown leaves none on disk.
+    wipe_open_cache(data_dir);
     Ok(())
 }
 
@@ -734,6 +739,19 @@ pub async fn run_loopback_with_mailbox(
     .await
 }
 
+/// Best-effort wipe of the managed attachment open-cache
+/// (`<data_dir>/cache/open`). Decrypted plaintext lives here only while an
+/// attachment is open; clearing it at boot + clean shutdown keeps plaintext
+/// ephemeral. Failures are warned, never fatal.
+pub(crate) fn wipe_open_cache(data_dir: &std::path::Path) {
+    let dir = data_dir.join("cache").join("open");
+    match std::fs::remove_dir_all(&dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => tracing::warn!(error = %e, "open-cache wipe failed"),
+    }
+}
+
 /// No-op `MailboxConnectFactory` for the loopback guardrail: no mailboxes are
 /// configured in the test, so `connect` is never invoked; it returns
 /// `Unreachable` to satisfy the signature.
@@ -795,6 +813,23 @@ mod tests {
     use super::*;
     use tokio::sync::oneshot;
     use zeroize::Zeroizing;
+
+    #[test]
+    fn wipe_open_cache_removes_decrypted_plaintext() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp
+            .path()
+            .join("cache")
+            .join("open")
+            .join("aa")
+            .join("x.bin");
+        std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        std::fs::write(&cache, b"plaintext").unwrap();
+        super::wipe_open_cache(tmp.path());
+        assert!(!tmp.path().join("cache").join("open").exists());
+        // Idempotent: a second wipe on an absent dir is a no-op (no panic, no error).
+        super::wipe_open_cache(tmp.path());
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore = "spawns a real Arti bootstrap; run with --ignored"]
