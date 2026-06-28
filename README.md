@@ -8,8 +8,9 @@ Skattr is a desktop-first, metadata-resistant, end-to-end encrypted messenger bu
 attachment-capable, Tor-only encrypted messenger: real two-daemon messaging in
 both directions, first-contact via signed invite links, offline delivery through
 semi-trusted mailboxes, file attachments (online and offline), and a desktop
-(Tauri) app plus a CLI. Remaining work before tagging v1.0 is release hardening —
-honest docs, a working download-verification chain, and real signing keys. See
+(Tauri) app plus a CLI. The release-hardening work — honest docs, a working
+download-verification chain, and a real minisign signing key — is in place;
+v0.1.0 is the first signed release. See
 [ARCHITECTURE.md](ARCHITECTURE.md) and [`docs/`](docs/) for the design, and
 [THREAT_MODEL.md](docs/THREAT_MODEL.md) for security properties and limitations.
 

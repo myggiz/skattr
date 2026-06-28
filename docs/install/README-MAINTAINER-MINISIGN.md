@@ -1,7 +1,11 @@
 # Maintainer prerequisite: minisign keypair (Phase 2.G Task 12)
 
-**Status:** the in-repo `minisign.pub` is a **placeholder**. Replace
-before tagging `v0.1.0`.
+**Status:** the real maintainer public key (key ID `EEDBFDA4BF232D38`) is
+committed to `docs/install/minisign.pub`. The remaining maintainer action
+before tagging `v0.1.0` is wiring the GitHub Actions secrets
+(`MINISIGN_SECRET_KEY` / `MINISIGN_PASSWORD`) so `release.yml` can sign — see
+step 4 below; steps 1–3 (key generation) are already done. Delete this doc
+once the secrets are set.
 
 ## Why this is a maintainer-only step
 

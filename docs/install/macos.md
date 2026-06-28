@@ -14,7 +14,7 @@ Code signing + notarisation are tracked for Phase 5.
 
 See [`docs/install/README.md`](README.md) for the
 SHA256 + minisign verification steps. The rest of this guide
-assumes both checks passed. (Note: the published minisign key is a placeholder until v0.1.0; verification is not active yet.)
+assumes both checks passed.
 
 ## Install
 
@@ -69,7 +69,7 @@ and Phase 5 will close it.
 For now, the *signature* you should trust is the
 minisign signature on `SHA256SUMS` — the same supply-chain
 guarantee Linux users get. The macOS Gatekeeper warning is
-about Apple's signing chain, which is orthogonal. (Note: the published minisign key is a placeholder until v0.1.0; verification is not active yet.)
+about Apple's signing chain, which is orthogonal.
 
 ## `skattr://` URL handler
 
