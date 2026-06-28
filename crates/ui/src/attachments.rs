@@ -62,14 +62,23 @@ fn validate_openable(path: &str, downloads: &std::path::Path) -> Result<PathBuf,
     Ok(canon)
 }
 
-/// Resolve `<data_dir>/downloads` from managed state.
+/// Resolve the effective download directory (configured value, else
+/// `~/Downloads`, else `<data_dir>/downloads`) from managed state + the
+/// persisted config. Used to confine `open_file`/`reveal_in_folder`.
 fn downloads_dir(state: &tauri::State<'_, crate::daemon::AppState>) -> Result<PathBuf, String> {
     let dd = state
         .data_dir
         .read()
         .clone()
         .ok_or_else(|| "data_dir not initialised".to_string())?;
-    Ok(dd.join("downloads"))
+    let mut cfg = match skattr_core::daemon::Config::load(&dd.join("config.toml")) {
+        Ok(c) => c,
+        Err(_) => {
+            skattr_core::daemon::Config::defaults().map_err(|e| format!("config defaults: {e}"))?
+        }
+    };
+    cfg.data_dir = dd;
+    Ok(cfg.resolved_download_dir())
 }
 
 /// Open a received file with the OS default handler.
@@ -98,6 +107,43 @@ pub async fn reveal_in_folder(
     app.opener()
         .reveal_item_in_dir(canon)
         .map_err(|e| format!("reveal_in_folder: {e}"))
+}
+
+/// Locate a previously-received file on disk by its (manifest) filename so the
+/// UI can re-hydrate the Open / Show-in-folder actions after a restart — the
+/// live transfer store is session-scoped, so a completed attachment otherwise
+/// loses its interactivity on reload. Checks the configured download dir and the
+/// in-data-dir downloads folder (covers files saved before the download-dir
+/// default changed / migrated). Returns the absolute path if a regular file
+/// with that basename is found.
+#[tauri::command]
+pub async fn resolve_received_file(
+    state: tauri::State<'_, crate::daemon::AppState>,
+    filename: String,
+) -> Result<Option<String>, String> {
+    let dd = state
+        .data_dir
+        .read()
+        .clone()
+        .ok_or_else(|| "data_dir not initialised".to_string())?;
+    // Basename only — never traverse out of a candidate directory.
+    let base = std::path::Path::new(&filename)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    if base.is_empty() {
+        return Ok(None);
+    }
+    let candidates = [downloads_dir(&state)?, dd.join("downloads")];
+    for dir in candidates {
+        let p = dir.join(&base);
+        if let Ok(meta) = std::fs::metadata(&p) {
+            if meta.is_file() {
+                return Ok(Some(p.to_string_lossy().to_string()));
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// Stat a local file and return its byte length. Used by the pre-send size
