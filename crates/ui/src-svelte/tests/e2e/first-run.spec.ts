@@ -57,15 +57,12 @@ test.describe("first-run wizard happy path", () => {
     await page.getByPlaceholder("word1 word2 word3 …").fill(MOCK_MNEMONIC);
     await page.getByRole("button", { name: "Confirm" }).click();
 
-    // ── Step 5: Bootstrap / Tor connecting ───────────────────────────────
-    // Bootstrap.svelte calls start_in_process_cmd then subscribes to
-    // tor_status.  The mock fires Ready after 50 ms, which triggers
-    // finishBootstrap() → ipc_request("daemon_info") → goto("/").
-    await expect(page.getByRole("heading", { name: "Connecting to Tor" })).toBeVisible({ timeout: 5_000 });
-
-    // ── Step 6: Main shell ───────────────────────────────────────────────
-    // After Ready event + daemon_info, the router pushes "/".
-    // The main shell has a .shell grid with a .rail aside.
+    // ── Step 5: Bootstrap → main shell ───────────────────────────────────
+    // Bootstrap.svelte treats start_in_process_cmd's return as the ready
+    // signal; in the mock that resolves instantly, so the "Connecting to Tor"
+    // loading frame is sub-millisecond and not reliably observable (in the real
+    // app it shows for the whole Tor bootstrap). Assert the outcome — reaching
+    // the main shell (.shell grid with a .rail aside) — not the transient frame.
     await expect(page.locator(".shell")).toBeVisible({ timeout: 10_000 });
   });
 });
