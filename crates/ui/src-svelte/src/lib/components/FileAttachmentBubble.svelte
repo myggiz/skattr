@@ -1,16 +1,19 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <!-- Copyright (C) 2026 Myggiz AB -->
 <script lang="ts">
-  import { invoke, convertFileSrc } from "@tauri-apps/api/core";
+  import { invoke } from "@tauri-apps/api/core";
+  import { save } from "@tauri-apps/plugin-dialog";
+  import { ask } from "@tauri-apps/plugin-dialog";
   import type { MessageRecord } from "$lib/ipc/types";
   import type { OptimisticMessage } from "$lib/stores/conversation";
-  import { attachments, applyManifest, applyReceived } from "$lib/stores/attachments";
+  import { attachments, applyManifest, markAvailable } from "$lib/stores/attachments";
   import { delivery, deliveryToIconStatus, hex16ToString } from "$lib/stores/delivery";
-  import { decodeManifestMemo, isImage, mimeIconName, formatBytes } from "$lib/attachments";
+  import { decodeManifestMemo, mimeIconName, formatBytes } from "$lib/attachments";
   import type { ManifestSummary } from "$lib/attachments";
   import { icons } from "$lib/icons";
   import { toast } from "$lib/stores/toast";
-  import { ask } from "@tauri-apps/plugin-dialog";
+  import { ipcClient } from "$lib/ipc/tauri";
+  import { unwrapOk } from "$lib/ipc/client";
   import DeliveryIcon from "./DeliveryIcon.svelte";
 
   let { record }: { record: MessageRecord | OptimisticMessage } = $props();
@@ -24,7 +27,6 @@
 
   let summary = $state<ManifestSummary | null>(null);
   let decodeFailed = $state(false);
-  let imgBroken = $state(false);
 
   // Decode the manifest once per message id; on success seed the store's
   // static fields so the bubble can render filename/size even if no transfer
@@ -51,21 +53,20 @@
   let aidHex = $derived(summary ? summary.attachment_id : null);
   let xferState = $derived(aidHex ? $attachments.get(aidHex) : undefined);
 
-  // Re-hydrate after a restart: the transfer store is session-scoped, so a
-  // received file's Open / Show-in-folder actions are gone on reload even though
-  // the file is still on disk. Locate it by filename and repopulate the store.
-  // TODO(Task 6): replace resolve_received_file + path with AttachmentAvailable query.
+  // Rehydrate after restart: the transfer store is session-scoped. Ask the
+  // daemon whether this completed attachment is decryptable and, if so, enable
+  // Open/Save. No plaintext is produced by this query.
   $effect(() => {
     if (isOutgoing || !summary || xferState?.available) return;
     const s = summary;
-    invoke<string | null>("resolve_received_file", { filename: s.filename })
-      .then((path) => {
-        if (path) {
-          applyReceived(s.attachment_id, {
-            filename: s.filename,
-            mime: s.mime,
-            size: s.total_size,
-          });
+    const aid = s.attachment_id; // hex string
+    ipcClient
+      .request({ cmd: "attachment_available", attachment_id: aid } as any)
+      .then((resp) => {
+        if (resp.resp !== "ok") return;
+        const result = resp.data;
+        if (result.result === "attachment_availability" && result.data.available) {
+          markAvailable(aid, { filename: s.filename, mime: s.mime, size: s.total_size });
         }
       })
       .catch(() => {});
@@ -77,9 +78,8 @@
   let size = $derived(summary?.total_size ?? optimisticSize);
 
   let receiving = $derived(!isOutgoing && xferState?.status === "receiving");
-  let complete = $derived(!isOutgoing && xferState?.status === "complete" && !!xferState?.available);
+  let complete = $derived(!isOutgoing && (xferState?.status === "complete" || xferState?.available === true));
   let failed = $derived(!isOutgoing && xferState?.status === "failed");
-  let showImage = $derived(complete && isImage(mime) && !imgBroken);
 
   let pct = $derived(
     xferState && xferState.total > 0 ? Math.round((xferState.received / xferState.total) * 100) : 0,
@@ -90,13 +90,53 @@
     isOutgoing ? deliveryToIconStatus($delivery.get(hex16ToString(record.message_id))) : null,
   );
 
-  async function doOpen() {
-    // TODO(Task 6): resolve path via AttachmentAvailable query and invoke open_file.
-    if (!xferState?.available) return;
+  // Returns the managed-cache plaintext path, or throws.
+  async function decryptToCache(): Promise<string> {
+    const resp = await ipcClient.request({ cmd: "open_attachment", attachment_id: aidHex } as any);
+    const result = unwrapOk(resp); // throws on err
+    if (result.result !== "attachment_decrypted") throw new Error("unexpected result");
+    return result.data.path;
   }
+
+  async function doOpen() {
+    if (!aidHex) return;
+    try {
+      const path = await decryptToCache();
+      await invoke("open_file", { path });
+    } catch {
+      const showFolder = await ask(
+        "Your system doesn't have an app set to open this type of file. Open its folder instead, so you can open it yourself?",
+        { title: "Can't open file", kind: "warning" },
+      );
+      if (showFolder) await doReveal();
+    }
+  }
+
   async function doReveal() {
-    // TODO(Task 6): resolve path via AttachmentAvailable query and invoke reveal_in_folder.
-    if (!xferState?.available) return;
+    if (!aidHex) return;
+    try {
+      const path = await decryptToCache();
+      await invoke("reveal_in_folder", { path });
+    } catch {
+      toast.show("Couldn't open the folder");
+    }
+  }
+
+  async function doSave() {
+    if (!aidHex) return;
+    const dest = await save({ defaultPath: filename || undefined });
+    if (!dest) return; // cancelled
+    try {
+      const resp = await ipcClient.request({
+        cmd: "save_attachment",
+        attachment_id: aidHex,
+        dest_path: dest,
+      } as any);
+      if (resp.resp !== "ok") throw new Error("save failed");
+      toast.show(`Saved to ${dest}`);
+    } catch {
+      toast.show("Couldn't save the file");
+    }
   }
 
   let iconGlyph = $derived(icons[mimeIconName(mime)]);
@@ -107,22 +147,6 @@
     <div class="card">
       <span class="ficon">{@html icons["paperclip"]}</span>
       <span class="fname">📎 Attachment (unavailable)</span>
-    </div>
-  {:else if showImage}
-    <!-- TODO(Task 6): resolve path via AttachmentAvailable and pass to convertFileSrc -->
-    <img
-      class="preview"
-      src=""
-      alt={filename}
-      onerror={() => (imgBroken = true)}
-    />
-    <div class="card">
-      <span class="fname">{filename}</span>
-      {#if size !== undefined}<span class="fsize">{formatBytes(size)}</span>{/if}
-      <div class="actions">
-        <button type="button" onclick={doOpen} aria-label="Open">Open</button>
-        <button type="button" onclick={doReveal} aria-label="Show in folder">Show in folder</button>
-      </div>
     </div>
   {:else}
     <div class="card">
@@ -135,7 +159,7 @@
       {#if complete}
         <div class="actions">
           <button type="button" onclick={doOpen} aria-label="Open">Open</button>
-          <button type="button" onclick={doReveal} aria-label="Show in folder">Show in folder</button>
+          <button type="button" onclick={doSave} aria-label="Save decrypted file">Save…</button>
         </div>
       {/if}
       {#if failed}
@@ -170,7 +194,6 @@
   .fname { font: var(--t-ui); word-break: break-word; }
   .fsize { color: var(--text-muted); font: var(--t-ui); }
   .file-bubble.outgoing .fsize { color: rgba(255, 255, 255, 0.7); }
-  .preview { max-width: 100%; max-height: 320px; border-radius: 8px; display: block; margin-bottom: var(--s-1); }
   .actions { display: flex; gap: var(--s-1); }
   .actions button {
     padding: 2px var(--s-2);
