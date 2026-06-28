@@ -110,8 +110,13 @@ pub async fn start_in_process_cmd(state: tauri::State<'_, AppState>) -> Result<R
 
     let ready = match tokio::time::timeout(std::time::Duration::from_secs(180), ready_rx).await {
         // Outer timeout elapsed: the daemon is still alive but never signalled
-        // ready within the window.
-        Err(_) => return Err("Tor bootstrap timed out (180s)".to_string()),
+        // ready within the window. Try graceful shutdown first; then abort the
+        // task so no orphaned daemon process keeps consuming resources.
+        Err(_) => {
+            let _ = shutdown_tx.send(());
+            task.abort();
+            return Err("Tor bootstrap timed out (180s)".to_string());
+        }
         Ok(Ok(ready)) => ready,
         // `ready_tx` was dropped without sending — the daemon task ended before
         // it became ready. Await the task to surface its *actual* startup error

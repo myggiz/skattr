@@ -103,8 +103,19 @@ pub async fn vault_unlock(
 /// reachable — we delete the data dir directly. Removes the whole data dir
 /// (vault, age-encrypted DB + sidecars, Arti/Tor state, config) and recreates
 /// it empty (0700 on unix) so the wizard restarts at the welcome step.
+///
+/// Fails if the in-process daemon is currently running; callers must go through
+/// `Command::WipeAllData` in that case.
 #[tauri::command]
 pub async fn reset_local_data(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    // Guard: refuse to wipe if the daemon is live. At the unlock screen the
+    // daemon should never be running, but defensive check prevents accidental
+    // data destruction if the command is ever called at the wrong time.
+    if state.ready.read().is_some() {
+        return Err(
+            "daemon is running; use Command::WipeAllData instead of reset_local_data".to_string(),
+        );
+    }
     let data_dir = state
         .data_dir
         .read()
