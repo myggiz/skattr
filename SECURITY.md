@@ -2,32 +2,12 @@
 
 ## Reporting a vulnerability
 
-**Do not open a public issue for security problems.** Email `security@myggiz.net`, ideally encrypted to the project PGP key below. Expect acknowledgement within 72 hours and a status update within 7 days.
+**Do not open a public issue for security problems.** Email `security@myggiz.net`. Expect acknowledgement within 72 hours and a status update within 7 days.
 
-### PGP key
-
-> **⚠️ v1.0 status:** The PGP key below and the minisign public key
-> (`docs/install/minisign.pub`) are **placeholders**. Encrypted vulnerability
-> reports and download-signature verification are **not usable until the real
-> keys are published** (a maintainer action tracked for the v0.1.0 tag, separate
-> from this documentation pass). Until then, the verification *procedure* below
-> is correct but will not validate against the committed placeholder key.
-
-```
------BEGIN PGP PUBLIC KEY BLOCK-----
-(placeholder — replaced before first public release)
------END PGP PUBLIC KEY BLOCK-----
-```
-
-Fingerprint: `TBD`
-
-> **Placeholder, not yet real.** Both this PGP key and the release-signing
-> minisign key (`docs/install/minisign.pub`, marked "PLACEHOLDER — REPLACE
-> BEFORE TAGGING v0.1.0") are placeholders. Generating the real keypairs and
-> wiring the GitHub Actions secrets (`MINISIGN_SECRET_KEY` /
-> `MINISIGN_PASSWORD`) is a hard prerequisite of the v0.1.0 release and must be
-> done before any public `v0.1.0` tag. Until then, downloads cannot be
-> cryptographically verified.
+> **No encrypted reporting channel in v0.1.0.** Skattr does not yet publish a
+> PGP key for encrypted vulnerability reports; send plaintext email and avoid
+> including live secrets or exploit payloads in the clear. An encrypted
+> reporting channel is planned after v0.1.0.
 
 ## Scope
 
@@ -51,7 +31,7 @@ Releases are built by `.github/workflows/release.yml` on `v*` tags across `ubunt
 - **Linux:** `.deb` and AppImage (signed release artifacts). A Flatpak manifest (`packaging/flatpak/`) is provided for **build-from-source** sandboxing; it is not a published signed binary.
 - **macOS:** `.dmg` (Apple Silicon / ARM64 only; x86_64 is deferred).
 - **Windows:** `.msi` (Tauri WiX bundle).
-- **Verification chain:** a `SHA256SUMS` manifest over all artifacts, signed with **minisign** (`SHA256SUMS.minisig`). Verify the signature against the maintainer's public key (`docs/install/minisign.pub`) before trusting any hash, then verify your download's hash against `SHA256SUMS`. **The committed minisign key is a placeholder today** (see the note above) — verification is not yet meaningful until the v0.1.0 release ships the real key. The Tauri auto-updater is explicitly disabled; updates are manual, verified downloads.
+- **Verification chain:** a `SHA256SUMS` manifest over all artifacts, signed with **minisign** (`SHA256SUMS.minisig`). Verify the signature against the maintainer's public key (`docs/install/minisign.pub`, key ID `EEDBFDA4BF232D38`) before trusting any hash, then verify your download's hash against `SHA256SUMS`. The verification chain is live for signed releases as of v0.1.0. The Tauri auto-updater is explicitly disabled; updates are manual, verified downloads.
 
 ## What we ask
 

@@ -40,9 +40,9 @@ skattr_0.0.1_amd64.deb: OK
 If you see `FAILED`, **do not run the binary**. Re-download or
 file an issue.
 
-> **⚠️ The published `minisign.pub` is currently a placeholder.** Signature
-> verification will **not** succeed until the real signing key ships with the
-> v0.1.0 release. The steps below are the correct procedure for when it does.
+The committed `minisign.pub` is the real maintainer key (key ID
+`EEDBFDA4BF232D38`); signature verification is live for signed releases as of
+v0.1.0.
 
 ### Step 3 — verify the minisign signature
 

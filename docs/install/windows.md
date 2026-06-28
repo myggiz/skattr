@@ -38,7 +38,7 @@ on PATH. Then:
 minisign.exe -V -m SHA256SUMS -p minisign.pub
 ```
 
-Expected: `Signature and comment signature verified` (or similar). (Note: the published minisign key is a placeholder until v0.1.0; verification is not active yet.)
+Expected: `Signature and comment signature verified` (or similar).
 
 ## 3. Install
 
