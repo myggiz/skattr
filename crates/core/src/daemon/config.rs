@@ -57,14 +57,14 @@ pub struct UiConfig {
     #[serde(default)]
     pub start_minimised: bool,
     /// If true, daemon logs are persisted to disk (`<data_dir>/skattr.log`).
-    /// Defaulted ON during the pre-1.0 field-testing phase so issues can be
-    /// diagnosed from a shared log file.
+    /// Off by default: a metadata-resistant messenger should not leave
+    /// (even redacted) logs on disk unless the user opts in via Settings.
     #[serde(default = "default_persist_logs")]
     pub persist_logs_to_disk: bool,
 }
 
 fn default_persist_logs() -> bool {
-    true
+    false
 }
 
 impl Default for UiConfig {
@@ -502,7 +502,7 @@ mod tests {
         ));
         assert!(cfg.ui.close_to_tray);
         assert!(!cfg.ui.start_minimised);
-        assert!(cfg.ui.persist_logs_to_disk); // defaulted ON for field-testing
+        assert!(!cfg.ui.persist_logs_to_disk); // off by default (opt-in)
     }
 
     #[test]
@@ -583,7 +583,7 @@ mod tests {
         assert_eq!(snap.direct_timeout_secs, 30);
         assert!(snap.close_to_tray);
         assert!(!snap.start_minimised);
-        assert!(snap.persist_logs_to_disk); // defaulted ON for field-testing
+        assert!(!snap.persist_logs_to_disk); // off by default (opt-in)
     }
 
     #[test]
