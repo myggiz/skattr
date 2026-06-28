@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <!-- Copyright (C) 2026 Myggiz AB -->
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, onDestroy } from "svelte";
   import { goto } from "$app/navigation";
   import { invoke } from "@tauri-apps/api/core";
 
@@ -29,10 +29,11 @@
   let addOpen = $state(false);
   // URL pre-filled when the dialog is opened via a skattr:// deep-link.
   let addInitialUrl = $state("");
-  // Set to true once the first onMount confirms the daemon is running.
-  // Guards the subscription onMounts so they don't attempt to subscribe
-  // when we're about to redirect to /first-run (daemon not yet started).
-  let daemonConfirmed = $state(false);
+  // Subscription teardown bookkeeping. The live subscription is started from
+  // the async onMount below (only once the daemon is confirmed running), so a
+  // `destroyed` flag guards against the component unmounting mid-await.
+  let destroyed = false;
+  let unlistenStreamClosed: (() => void) | null = null;
 
   onMount(async () => {
     // If no vault exists yet, go to first-run to initialise identity.
@@ -52,8 +53,12 @@
       goto("/first-run");
       return;
     }
-    daemonConfirmed = true;
     await refreshContacts();
+    // Daemon confirmed running: start the live event subscription + the
+    // stream-closed self-heal listener. Starting them HERE (not in a separate
+    // onMount that races an async-set flag) guarantees they run only on the
+    // main-shell path and never when redirecting to /first-run.
+    if (!destroyed) startMainShellSubscriptions();
   });
 
   async function selectContact(summary: ContactSummary) {
@@ -130,41 +135,32 @@
     });
   }
 
-  onMount(() => {
-    // Guard: only subscribe when the daemon is actually running. If the first
-    // onMount determined that the daemon isn't running and redirected to
-    // /first-run, daemonConfirmed stays false and we skip the subscription
-    // entirely, avoiding an unhandled rejection from a non-ready daemon.
-    if (!daemonConfirmed) return;
-
-    // Guard against mount-race: if the component unmounts before the async
-    // reSubscribe promise resolves, tear down the just-created subscription
-    // immediately rather than leaking it.
-    let cancelled = false;
-    reSubscribe().then(() => {
-      if (cancelled && unsub) { unsub(); unsub = null; }
-    }).catch(() => {
-      // Rejection here means the daemon became unavailable between the
-      // daemon_running check and subscribe; treat it as stream-closed so
-      // the reconnect path handles it.
+  // Start the main-shell subscriptions once the daemon is confirmed running.
+  // Invoked from the async onMount above (not a separate onMount), so it never
+  // races an async-set flag and never fires on the /first-run redirect path.
+  // Self-heals: a subscribe rejection or an IPC stream-closed event both route
+  // through the bounded-backoff reconnect path.
+  function startMainShellSubscriptions(): void {
+    reSubscribe()
+      .then(() => {
+        if (destroyed && unsub) { unsub(); unsub = null; }
+      })
+      .catch(() => {
+        // Daemon became unavailable between the running check and subscribe;
+        // treat it as stream-closed so the reconnect path handles it.
+        handleStreamClosed(reSubscribe);
+      });
+    listen<string>("ipc:stream-closed", () => {
       handleStreamClosed(reSubscribe);
+    }).then((unlisten) => {
+      if (destroyed) { unlisten(); } else { unlistenStreamClosed = unlisten; }
     });
-    return () => {
-      cancelled = true;
-      if (unsub) { unsub(); unsub = null; }
-    };
-  });
+  }
 
-  // Watch for IPC stream-closed events (emitted by the Tauri relay) and
-  // self-heal with exponential backoff.
-  onMount(() => {
-    if (!daemonConfirmed) return;
-    const unlistenP = listen<string>("ipc:stream-closed", () => {
-      handleStreamClosed(reSubscribe);
-    });
-    return () => {
-      unlistenP.then((unlisten) => unlisten());
-    };
+  onDestroy(() => {
+    destroyed = true;
+    if (unsub) { unsub(); unsub = null; }
+    if (unlistenStreamClosed) { unlistenStreamClosed(); unlistenStreamClosed = null; }
   });
 </script>
 
