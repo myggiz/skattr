@@ -63,14 +63,16 @@ fn contains_exif_app1(bytes: &[u8]) -> bool {
     bytes.windows(2).any(|w| w == [0xFF, 0xE1])
 }
 
-/// Spawn a loopback daemon at `dir` advertising `onion`. Returns the `Ready`
-/// handle and the shutdown sender + join handle for teardown.
+/// Spawn a loopback daemon at `dir` advertising `onion`. `download_dir` is set
+/// explicitly so the test controls where (and whether) received files land.
+/// Returns the `Ready` handle and the shutdown sender + join handle for teardown.
 #[allow(clippy::type_complexity)]
 fn spawn_daemon(
     dir: &std::path::Path,
     onion: &str,
     net: LoopbackNet,
     pw: Zeroizing<String>,
+    download_dir: std::path::PathBuf,
 ) -> (
     oneshot::Receiver<Ready>,
     oneshot::Sender<()>,
@@ -79,7 +81,8 @@ fn spawn_daemon(
     let (ready_tx, ready_rx) = oneshot::channel();
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let dir = dir.to_path_buf();
-    let cfg = config_for(&dir);
+    let mut cfg = config_for(&dir);
+    cfg.download_dir = Some(download_dir);
     let onion = onion.to_string();
     let task = tokio::spawn(async move {
         run_loopback(
@@ -100,14 +103,13 @@ fn spawn_daemon(
 }
 
 /// Await an `Event::AttachmentReceived` from `sender` whose `attachment_id`
-/// (16-byte hex) matches `want_id`, draining unrelated events. Returns the
-/// written file `path`.
+/// (16-byte hex) matches `want_id`, draining unrelated events.
 async fn wait_for_attachment(
     sub: &mut IpcClient<skattr_core::daemon::ipc::IpcStream>,
     sender: skattr_core::identity::PublicKey,
     want_id: &str,
     timeout: Duration,
-) -> String {
+) {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -119,10 +121,9 @@ async fn wait_for_attachment(
             Ok(Ok(Event::AttachmentReceived {
                 contact,
                 attachment_id,
-                path,
                 ..
             })) if contact == sender && attachment_id.to_string() == want_id => {
-                return path;
+                return;
             }
             Ok(Ok(_)) => {}
             Ok(Err(e)) => panic!("subscribe stream error: {e:?}"),
@@ -153,11 +154,25 @@ async fn attachment_roundtrip_multichunk_over_loopback() {
     let net = LoopbackNet::new();
     let pw = Zeroizing::new(PASSPHRASE.to_string());
 
+    // Pin Bob's download dir to a controlled subdir so the "no plaintext written"
+    // assertion is not confused by pre-existing files in ~/Downloads.
+    let bob_download_dir = tmp_b.path().join("downloads");
+
     // --- Spawn Alice + Bob through the real assembly ---
-    let (ready_a_rx, shutdown_a_tx, task_a) =
-        spawn_daemon(tmp_a.path(), "alice.onion", net.clone(), pw.clone());
-    let (ready_b_rx, shutdown_b_tx, task_b) =
-        spawn_daemon(tmp_b.path(), "bob.onion", net.clone(), pw.clone());
+    let (ready_a_rx, shutdown_a_tx, task_a) = spawn_daemon(
+        tmp_a.path(),
+        "alice.onion",
+        net.clone(),
+        pw.clone(),
+        tmp_a.path().join("downloads"),
+    );
+    let (ready_b_rx, shutdown_b_tx, task_b) = spawn_daemon(
+        tmp_b.path(),
+        "bob.onion",
+        net.clone(),
+        pw.clone(),
+        bob_download_dir.clone(),
+    );
 
     let ready_a: Ready = tokio::time::timeout(Duration::from_secs(60), ready_a_rx)
         .await
@@ -260,9 +275,8 @@ async fn attachment_roundtrip_multichunk_over_loopback() {
     };
 
     // --- Await both completions (correlated by attachment_id) ---
-    let bin_path =
-        wait_for_attachment(&mut bob_sub, alice_pubkey, &bin_id, Duration::from_secs(60)).await;
-    let jpeg_path = wait_for_attachment(
+    wait_for_attachment(&mut bob_sub, alice_pubkey, &bin_id, Duration::from_secs(60)).await;
+    wait_for_attachment(
         &mut bob_sub,
         alice_pubkey,
         &jpeg_id,
@@ -270,18 +284,25 @@ async fn attachment_roundtrip_multichunk_over_loopback() {
     )
     .await;
 
-    // --- Assert 1: byte-identical multi-chunk transfer ---
-    let got_bin = std::fs::read(&bin_path).unwrap();
-    assert_eq!(
-        got_bin, bin_payload,
-        "received .bin must be byte-identical to the source across all chunks"
+    // --- Assert 1: no plaintext written to the download dir (encrypted-at-rest) ---
+    let dl_entries: Vec<_> = std::fs::read_dir(&bob_download_dir)
+        .map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.path()).collect())
+        .unwrap_or_default();
+    assert!(
+        dl_entries.is_empty(),
+        "completion must leave no plaintext in the download dir, found: {dl_entries:?}"
     );
 
-    // --- Assert 2: EXIF stripped end-to-end ---
-    let got_jpeg = std::fs::read(&jpeg_path).unwrap();
+    // --- Assert 2: encrypted chunks retained for each transfer ---
+    let bin_chunk_dir = tmp_b.path().join("attachments").join(&bin_id);
     assert!(
-        !contains_exif_app1(&got_jpeg),
-        "EXIF APP1 marker (FF E1) must be stripped before transfer"
+        bin_chunk_dir.is_dir() && std::fs::read_dir(&bin_chunk_dir).unwrap().count() > 0,
+        "encrypted chunks for the .bin transfer must be retained after completion"
+    );
+    let jpeg_chunk_dir = tmp_b.path().join("attachments").join(&jpeg_id);
+    assert!(
+        jpeg_chunk_dir.is_dir() && std::fs::read_dir(&jpeg_chunk_dir).unwrap().count() > 0,
+        "encrypted chunks for the JPEG transfer must be retained after completion"
     );
 
     // --- Graceful shutdown ---

@@ -111,13 +111,10 @@ where
 /// finalized in place (emitting `Event::AttachmentReceived`) and the loop
 /// advances to the next queue entry rather than installing a stuck-complete
 /// `active_rx` that nothing would ever finalize.
-#[allow(clippy::too_many_arguments)]
 async fn maybe_start_next_rx<S>(
     conn: &mut Option<AuthenticatedConnection<S>>,
     pool: &std::sync::Arc<crate::storage::Pool>,
     inbound: &Option<std::sync::Arc<dyn InboundDispatch>>,
-    chunk_store: &Option<std::sync::Arc<crate::attachment::store::ChunkStore>>,
-    download_dir: &Option<std::path::PathBuf>,
     peer: PublicKey,
     rx_queue: &mut std::collections::VecDeque<crate::delivery::chunk_transfer::AttachmentBegin>,
 ) -> Option<crate::delivery::chunk_transfer::ChunkRx>
@@ -135,7 +132,7 @@ where
             // Already had everything (resume / duplicate-manifest edge): finalize
             // now and advance, rather than blocking the FIFO head with an rx that
             // no Chunk frame would ever complete.
-            finalize_rx(conn, pool, inbound, chunk_store, download_dir, peer, &rx).await;
+            finalize_rx(conn, pool, inbound, peer, &rx).await;
             continue;
         }
         let reqs = rx.next_requests();
@@ -145,15 +142,13 @@ where
     }
 }
 
-/// Reassemble a completed inbound attachment to the download dir and emit
-/// `Event::AttachmentReceived` + send `AttachmentComplete` to the sender.
-#[allow(clippy::too_many_arguments)]
+/// Emit `Event::AttachmentReceived` and send `AttachmentComplete` to the
+/// sender. Encrypted chunks are retained in the `ChunkStore` for on-demand
+/// decryption; nothing is written to the download dir here.
 async fn finalize_rx<S>(
     conn: &mut Option<AuthenticatedConnection<S>>,
     pool: &std::sync::Arc<crate::storage::Pool>,
     inbound: &Option<std::sync::Arc<dyn InboundDispatch>>,
-    chunk_store: &Option<std::sync::Arc<crate::attachment::store::ChunkStore>>,
-    download_dir: &Option<std::path::PathBuf>,
     peer: PublicKey,
     rx: &crate::delivery::chunk_transfer::ChunkRx,
 ) where
@@ -161,21 +156,11 @@ async fn finalize_rx<S>(
 {
     let manifest = rx.manifest();
     let aid = manifest.attachment_id;
-    let Some(dir) = download_dir.as_ref() else {
-        return;
-    };
-    let Some(store) = chunk_store.as_ref() else {
-        return;
-    };
-    let _ = std::fs::create_dir_all(dir);
-    let source = crate::attachment::store::StoreSource::new(store, aid);
     let safe_name = crate::delivery::chunk_transfer::sanitize_filename(&manifest.filename);
     let repo = crate::storage::attachments::AttachmentRepo::new(pool);
-    // Fire-gate FIRST: only the lane that flips pending→complete allocates a
-    // download path and reassembles, so a losing (`!won`) or erroring lane never
-    // writes an untracked file and the direct/offline lanes can't race on the
-    // same `unique_download_path` output. On a real storage failure, don't ack
-    // (so the sender retries) and leave the row pending.
+    // Fire-gate: only the lane that flips pending→complete emits, so the
+    // direct/offline lanes can't race and produce duplicate events. On a real
+    // storage failure, don't ack (so the sender retries) and leave the row pending.
     let won = match repo.set_status_if_pending(&aid) {
         Ok(won) => won,
         Err(e) => {
@@ -184,31 +169,15 @@ async fn finalize_rx<S>(
         }
     };
     if won {
-        let out_path = crate::delivery::chunk_transfer::unique_download_path(dir, &safe_name);
-        match crate::attachment::reassembler::reassemble(manifest, &source, &out_path) {
-            Ok(()) => {
-                if let Some(d) = inbound.as_ref() {
-                    d.attachment_received(
-                        peer,
-                        aid,
-                        &safe_name,
-                        &manifest.mime,
-                        manifest.total_size,
-                        &out_path.to_string_lossy(),
-                    );
-                }
-            }
-            Err(e) => {
-                // Claimed completion but reassembly failed: mark failed (matches
-                // the original direct-lane semantics) and don't ack.
-                tracing::warn!(err = %e, "inbound: reassembly failed");
-                fail_rx(pool, inbound, rx, "reassembly failed").await;
-                return;
-            }
+        // Encrypted-at-rest: do NOT reassemble and do NOT remove chunks here.
+        // The chunks stay in the ChunkStore; plaintext is produced only on an
+        // explicit OpenAttachment/SaveAttachment. Emit availability so the UI can
+        // surface Open/Save.
+        if let Some(d) = inbound.as_ref() {
+            d.attachment_received(peer, aid, &safe_name, &manifest.mime, manifest.total_size);
         }
     }
-    // Transfer is complete on the wire (we finalized it, or the offline lane
-    // already did). Ack so the sender stops retrying.
+    // Ack on the wire regardless (we finalized, or the offline lane already did).
     if let Some(c) = conn.as_mut() {
         let _ = c
             .send(Frame::AttachmentComplete { attachment_id: aid })
@@ -328,7 +297,6 @@ pub trait InboundDispatch: Send + Sync + 'static {
         _filename: &str,
         _mime: &str,
         _size: u64,
-        _path: &str,
     ) {
     }
 
@@ -683,8 +651,6 @@ where
                                     &mut conn,
                                     &pool,
                                     &inbound,
-                                    &chunk_store,
-                                    &download_dir,
                                     peer,
                                     &mut rx_queue,
                                 )
@@ -788,8 +754,6 @@ where
                                         &mut conn,
                                         &pool,
                                         &inbound,
-                                        &chunk_store,
-                                        &download_dir,
                                         peer,
                                         &mut rx_queue,
                                     )
@@ -878,8 +842,6 @@ where
                                             &mut conn,
                                             &pool,
                                             &inbound,
-                                            &chunk_store,
-                                            &download_dir,
                                             peer,
                                             &rx,
                                         )
@@ -888,8 +850,6 @@ where
                                             &mut conn,
                                             &pool,
                                             &inbound,
-                                            &chunk_store,
-                                            &download_dir,
                                             peer,
                                             &mut rx_queue,
                                         )
@@ -919,8 +879,6 @@ where
                                                 &mut conn,
                                                 &pool,
                                                 &inbound,
-                                                &chunk_store,
-                                                &download_dir,
                                                 peer,
                                                 &mut rx_queue,
                                             )
@@ -948,8 +906,6 @@ where
                                 &mut conn,
                                 &pool,
                                 &inbound,
-                                &chunk_store,
-                                &download_dir,
                                 peer,
                                 &mut rx_queue,
                             )
@@ -1554,7 +1510,7 @@ mod tests {
 
         // --- Stub InboundDispatch: yields exactly one AttachmentBegin and
         // records completion / failure. ---
-        type Received = Arc<StdMutex<Option<([u8; 16], String)>>>;
+        type Received = Arc<StdMutex<Option<[u8; 16]>>>;
         struct Stub {
             begin: StdMutex<Option<crate::delivery::chunk_transfer::AttachmentBegin>>,
             received: Received,
@@ -1579,9 +1535,8 @@ mod tests {
                 _filename: &str,
                 _mime: &str,
                 _size: u64,
-                path: &str,
             ) {
-                *self.received.lock().unwrap() = Some((aid, path.to_string()));
+                *self.received.lock().unwrap() = Some(aid);
             }
             fn attachment_failed(&self, _aid: [u8; 16], reason: &str) {
                 *self.failed.lock().unwrap() = Some(reason.to_string());
@@ -1617,8 +1572,11 @@ mod tests {
             )
             .unwrap();
         let tmp = tempfile::tempdir().unwrap();
+        // Use tmp.path() as the data dir (chunk store root: tmp/attachments/<hex>/).
+        // Use a distinct subdirectory as the download dir so the "no plaintext written"
+        // assertion is not confused by the chunk store's own `attachments/` subdir.
         let chunk_store = Arc::new(ChunkStore::new(tmp.path()));
-        let download_dir = tmp.path().to_path_buf();
+        let download_dir = tmp.path().join("downloads");
 
         // --- Noise handshake #1: conn1 (actor initiator) + peer_conn1 (test). ---
         let actor_id = IdentityKey::generate().unwrap();
@@ -1775,9 +1733,9 @@ mod tests {
         });
 
         // --- Assert completion within a timeout. ---
-        let mut done: Option<([u8; 16], String)> = None;
+        let mut done: Option<[u8; 16]> = None;
         for _ in 0..50 {
-            if let Some(rec) = received.lock().unwrap().clone() {
+            if let Some(rec) = *received.lock().unwrap() {
                 done = Some(rec);
                 break;
             }
@@ -1788,7 +1746,7 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        let (got_aid, got_path) = done.expect("attachment_received must fire within 5s");
+        let got_aid = done.expect("attachment_received must fire within 5s");
         assert_eq!(
             got_aid, aid,
             "completed attachment id must match the manifest"
@@ -1798,11 +1756,19 @@ mod tests {
             "attachment_failed must never fire"
         );
 
-        // --- Reassembled file is byte-identical to the ORIGINAL plaintext. ---
-        let on_disk = std::fs::read(&got_path).unwrap();
-        assert_eq!(
-            on_disk, payload,
-            "reassembled file must be byte-identical to the original plaintext"
+        // --- Encrypted-at-rest: completion must NOT write plaintext to the download
+        // dir; encrypted chunks must be retained for on-demand decrypt. ---
+        let entries: Vec<_> = std::fs::read_dir(&download_dir)
+            .map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.path()).collect())
+            .unwrap_or_default();
+        assert!(
+            entries.is_empty(),
+            "completion must leave no plaintext in the download dir, found: {entries:?}"
+        );
+        let chunk_dir = tmp.path().join("attachments").join(hex::encode(aid));
+        assert!(
+            chunk_dir.is_dir() && std::fs::read_dir(&chunk_dir).unwrap().count() > 0,
+            "encrypted chunks must be retained after completion"
         );
 
         drop(ctrl_tx);
