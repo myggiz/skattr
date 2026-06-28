@@ -587,13 +587,29 @@ mod tests {
     }
 
     #[test]
-    fn download_dir_defaults_under_data_dir() {
+    fn resolved_download_dir_priority() {
         let mut c = Config::defaults().unwrap();
         c.data_dir = std::path::PathBuf::from("/tmp/skattr-x");
+
+        // 1. An explicit configured value always wins.
+        c.download_dir = Some(std::path::PathBuf::from("/tmp/custom-downloads"));
         assert_eq!(
             c.resolved_download_dir(),
-            std::path::PathBuf::from("/tmp/skattr-x/downloads")
+            std::path::PathBuf::from("/tmp/custom-downloads")
         );
+
+        // 2. Unset → the user's XDG Downloads folder when it exists, otherwise
+        //    <data_dir>/downloads. Compute the expectation the same way the impl
+        //    does so the test is deterministic regardless of the host's home.
+        c.download_dir = None;
+        let expected = directories::UserDirs::new()
+            .and_then(|u| {
+                u.download_dir()
+                    .map(std::path::Path::to_path_buf)
+                    .filter(|p| p.is_dir())
+            })
+            .unwrap_or_else(|| c.data_dir.join("downloads"));
+        assert_eq!(c.resolved_download_dir(), expected);
     }
 
     #[test]
