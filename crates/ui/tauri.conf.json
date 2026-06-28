@@ -73,8 +73,6 @@
       "desktop": {
         "schemes": ["skattr"]
       }
-    },
-    "dialog": {},
-    "opener": {}
+    }
   }
 }
