@@ -89,6 +89,16 @@ where
         Command::GetPassphraseAuditLatest => get_passphrase_audit_latest(&handle).await,
         Command::WipeAllData => wipe_all_data(handle).await,
         Command::ExportBackup { dest_path } => export_backup_cmd(handle, dest_path).await,
+        Command::OpenAttachment { attachment_id } => {
+            open_attachment_cmd(handle, attachment_id.0).await
+        }
+        Command::SaveAttachment {
+            attachment_id,
+            dest_path,
+        } => save_attachment_cmd(handle, attachment_id.0, dest_path).await,
+        Command::AttachmentAvailable { attachment_id } => {
+            attachment_available_cmd(handle, attachment_id.0).await
+        }
     }
 }
 
@@ -1797,6 +1807,115 @@ where
         }
     }
     Ok(CommandResult::Ok)
+}
+
+// ---------------------------------------------------------------------------
+// OpenAttachment / SaveAttachment / AttachmentAvailable handlers
+// ---------------------------------------------------------------------------
+
+/// Resolve a completed inbound attachment's manifest + chunk store and
+/// reassemble the plaintext to `out_path`. Synchronous (file I/O + AEAD);
+/// callers wrap in spawn_blocking. Errors map to typed IpcError.
+fn decrypt_attachment_to<S>(
+    handle: &Arc<DaemonHandle<S>>,
+    data_dir: &std::path::Path,
+    attachment_id: [u8; 16],
+    out_path: &std::path::Path,
+) -> std::result::Result<(), IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    use crate::daemon::error_kind::DaemonErrorKind;
+    let repo = crate::storage::attachments::AttachmentRepo::new(&handle.pool);
+    let row = repo.get(&attachment_id).map_err(map_err)?.ok_or_else(|| {
+        IpcError::Daemon(DaemonErrorKind::InvalidArgument {
+            message: "attachment not found".into(),
+        })
+    })?;
+    if row.direction != "in" || row.status != "complete" {
+        return Err(IpcError::Daemon(DaemonErrorKind::InvalidArgument {
+            message: "attachment not available".into(),
+        }));
+    }
+    let manifest = crate::attachment::manifest::AttachmentManifest::from_cbor(&row.manifest)
+        .map_err(map_err)?;
+    let store = crate::attachment::store::ChunkStore::new(data_dir);
+    let source = crate::attachment::store::StoreSource::new(&store, attachment_id);
+    if let Some(parent) = out_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| IpcError::Internal(format!("create dir: {e}")))?;
+    }
+    crate::attachment::reassembler::reassemble(&manifest, &source, out_path).map_err(map_err)
+}
+
+async fn open_attachment_cmd<S>(
+    handle: Arc<DaemonHandle<S>>,
+    attachment_id: [u8; 16],
+) -> std::result::Result<CommandResult, IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let data_dir = handle.config.read().await.data_dir.clone();
+    // Resolve filename for the cache path from the manifest.
+    let repo = crate::storage::attachments::AttachmentRepo::new(&handle.pool);
+    let row = repo.get(&attachment_id).map_err(map_err)?.ok_or_else(|| {
+        IpcError::Daemon(
+            crate::daemon::error_kind::DaemonErrorKind::InvalidArgument {
+                message: "attachment not found".into(),
+            },
+        )
+    })?;
+    let manifest = crate::attachment::manifest::AttachmentManifest::from_cbor(&row.manifest)
+        .map_err(map_err)?;
+    let safe = crate::delivery::chunk_transfer::sanitize_filename(&manifest.filename);
+    let out_path = data_dir
+        .join("cache")
+        .join("open")
+        .join(hex::encode(attachment_id))
+        .join(&safe);
+    let h = handle.clone();
+    let dd = data_dir.clone();
+    let op = out_path.clone();
+    tokio::task::spawn_blocking(move || decrypt_attachment_to(&h, &dd, attachment_id, &op))
+        .await
+        .map_err(|e| IpcError::Internal(format!("spawn_blocking join: {e}")))??;
+    Ok(CommandResult::AttachmentDecrypted {
+        path: out_path.to_string_lossy().to_string(),
+    })
+}
+
+async fn save_attachment_cmd<S>(
+    handle: Arc<DaemonHandle<S>>,
+    attachment_id: [u8; 16],
+    dest_path: String,
+) -> std::result::Result<CommandResult, IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let data_dir = handle.config.read().await.data_dir.clone();
+    let out = std::path::PathBuf::from(&dest_path);
+    let h = handle.clone();
+    let dd = data_dir.clone();
+    let op = out.clone();
+    tokio::task::spawn_blocking(move || decrypt_attachment_to(&h, &dd, attachment_id, &op))
+        .await
+        .map_err(|e| IpcError::Internal(format!("spawn_blocking join: {e}")))??;
+    Ok(CommandResult::Ok)
+}
+
+async fn attachment_available_cmd<S>(
+    handle: Arc<DaemonHandle<S>>,
+    attachment_id: [u8; 16],
+) -> std::result::Result<CommandResult, IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let repo = crate::storage::attachments::AttachmentRepo::new(&handle.pool);
+    let available = matches!(
+        repo.get(&attachment_id).map_err(map_err)?,
+        Some(row) if row.direction == "in" && row.status == "complete"
+    );
+    Ok(CommandResult::AttachmentAvailability { available })
 }
 
 // ---------------------------------------------------------------------------
@@ -5074,6 +5193,208 @@ mod tests {
             target.as_deref(),
             Some(data_dir.as_path()),
             "wipe_target must be data_dir after WipeAllData"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // OpenAttachment / SaveAttachment / AttachmentAvailable tests
+    // ---------------------------------------------------------------------------
+
+    /// Stage a complete inbound attachment (insert manifest+chunks via
+    /// AttachmentRepo + ChunkStore from a known plaintext), set status=complete,
+    /// then exercise all three new commands:
+    ///
+    /// - open_attachment_cmd → AttachmentDecrypted { path } where path is under
+    ///   `<data_dir>/cache/open/<hex id>/` and bytes are byte-identical to plaintext.
+    /// - save_attachment_cmd → Ok, and the dest file bytes are byte-identical.
+    /// - attachment_available_cmd → AttachmentAvailability { available: true }.
+    /// - attachment_available_cmd for unknown id → available: false.
+    /// - open_attachment_cmd on a pending row → Err(InvalidArgument).
+    #[tokio::test]
+    async fn open_save_available_attachment_commands() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().to_path_buf();
+
+        let seed = Seed::generate().unwrap();
+        let pool = Arc::new(Pool::open(&data_dir, &seed).unwrap());
+        let identity = IdentityKey::from_seed(&seed).unwrap();
+        let hub: Arc<DeliveryHub<tokio::io::DuplexStream>> =
+            Arc::new(DeliveryHub::new(pool.clone()));
+        let (events_tx, _) = broadcast::channel::<Event>(16);
+        let mut cfg = crate::daemon::config::Config::fallback_for_tests();
+        cfg.data_dir = data_dir.clone();
+        let handle: Arc<DaemonHandle<tokio::io::DuplexStream>> =
+            Arc::new(DaemonHandle::new_with_config(
+                pool.clone(),
+                hub,
+                identity,
+                events_tx,
+                cfg,
+                data_dir.join("config.toml"),
+            ));
+
+        // Stage a complete inbound attachment.
+        let plaintext = b"hello world this is a test attachment payload for decryption";
+        let (manifest, chunks) = crate::attachment::chunker::chunk_plaintext(
+            plaintext,
+            "test.bin",
+            "application/octet-stream",
+        )
+        .unwrap();
+        let attachment_id = manifest.attachment_id;
+
+        let store = crate::attachment::store::ChunkStore::new(&data_dir);
+        for (i, ct) in chunks.iter().enumerate() {
+            store.put(&attachment_id, i as u32, ct).unwrap();
+        }
+
+        let manifest_cbor = manifest.to_cbor().unwrap();
+        let repo = crate::storage::attachments::AttachmentRepo::new(&pool);
+        repo.insert(&attachment_id, "in", &manifest_cbor, chunks.len() as i64, 0)
+            .unwrap();
+        for i in 0..chunks.len() as u32 {
+            repo.mark_received(&attachment_id, i).unwrap();
+        }
+        repo.set_status(&attachment_id, "complete").unwrap();
+
+        let hex_id = crate::daemon::hex::Hex16::from(attachment_id);
+
+        // 1. open_attachment_cmd → path under cache/open/<id>/ with correct bytes.
+        let result = execute_command(
+            handle.clone(),
+            Command::OpenAttachment {
+                attachment_id: hex_id,
+            },
+        )
+        .await
+        .unwrap();
+        let cache_path = match result {
+            CommandResult::AttachmentDecrypted { path } => path,
+            other => panic!("expected AttachmentDecrypted, got {other:?}"),
+        };
+        let expected_prefix = data_dir
+            .join("cache")
+            .join("open")
+            .join(hex::encode(attachment_id));
+        assert!(
+            std::path::Path::new(&cache_path).starts_with(&expected_prefix),
+            "cache path {cache_path} must be under {expected_prefix:?}"
+        );
+        let got = std::fs::read(&cache_path).unwrap();
+        assert_eq!(got, plaintext, "open decrypted bytes must match original");
+
+        // 2. save_attachment_cmd → Ok, dest file bytes identical.
+        let save_dest = data_dir.join("saved_output.bin");
+        let result = execute_command(
+            handle.clone(),
+            Command::SaveAttachment {
+                attachment_id: hex_id,
+                dest_path: save_dest.to_str().unwrap().to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(result, CommandResult::Ok),
+            "SaveAttachment must return Ok, got {result:?}"
+        );
+        let saved = std::fs::read(&save_dest).unwrap();
+        assert_eq!(saved, plaintext, "save decrypted bytes must match original");
+
+        // 3. attachment_available_cmd → true for complete inbound.
+        let result = execute_command(
+            handle.clone(),
+            Command::AttachmentAvailable {
+                attachment_id: hex_id,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(
+                result,
+                CommandResult::AttachmentAvailability { available: true }
+            ),
+            "AttachmentAvailable must be true, got {result:?}"
+        );
+
+        // 4. attachment_available_cmd for unknown id → false.
+        let unknown_id = crate::daemon::hex::Hex16::from([0xFFu8; 16]);
+        let result = execute_command(
+            handle.clone(),
+            Command::AttachmentAvailable {
+                attachment_id: unknown_id,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(
+                result,
+                CommandResult::AttachmentAvailability { available: false }
+            ),
+            "AttachmentAvailable for unknown id must be false, got {result:?}"
+        );
+    }
+
+    /// open_attachment_cmd on a pending (status != 'complete') row must return
+    /// Err(IpcError::Daemon(DaemonErrorKind::InvalidArgument)).
+    #[tokio::test]
+    async fn open_attachment_on_pending_row_returns_invalid_argument() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().to_path_buf();
+
+        let seed = Seed::generate().unwrap();
+        let pool = Arc::new(Pool::open(&data_dir, &seed).unwrap());
+        let identity = IdentityKey::from_seed(&seed).unwrap();
+        let hub: Arc<DeliveryHub<tokio::io::DuplexStream>> =
+            Arc::new(DeliveryHub::new(pool.clone()));
+        let (events_tx, _) = broadcast::channel::<Event>(16);
+        let mut cfg = crate::daemon::config::Config::fallback_for_tests();
+        cfg.data_dir = data_dir.clone();
+        let handle: Arc<DaemonHandle<tokio::io::DuplexStream>> =
+            Arc::new(DaemonHandle::new_with_config(
+                pool.clone(),
+                hub,
+                identity,
+                events_tx,
+                cfg,
+                data_dir.join("config.toml"),
+            ));
+
+        // Stage a PENDING (not complete) inbound attachment.
+        let plaintext = b"pending attachment";
+        let (manifest, _chunks) = crate::attachment::chunker::chunk_plaintext(
+            plaintext,
+            "pending.bin",
+            "application/octet-stream",
+        )
+        .unwrap();
+        let attachment_id = manifest.attachment_id;
+        let manifest_cbor = manifest.to_cbor().unwrap();
+        let repo = crate::storage::attachments::AttachmentRepo::new(&pool);
+        // Insert with status='pending' (the default from insert).
+        repo.insert(&attachment_id, "in", &manifest_cbor, 1, 0)
+            .unwrap();
+        // Do NOT mark complete — status stays 'pending'.
+
+        let hex_id = crate::daemon::hex::Hex16::from(attachment_id);
+        let result = execute_command(
+            handle.clone(),
+            Command::OpenAttachment {
+                attachment_id: hex_id,
+            },
+        )
+        .await;
+
+        assert!(
+            matches!(
+                result,
+                Err(IpcError::Daemon(
+                    crate::daemon::error_kind::DaemonErrorKind::InvalidArgument { .. }
+                ))
+            ),
+            "OpenAttachment on pending row must return InvalidArgument, got {result:?}"
         );
     }
 }
