@@ -2,8 +2,7 @@
 <!-- Copyright (C) 2026 Myggiz AB -->
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
-  import { save } from "@tauri-apps/plugin-dialog";
-  import { ask } from "@tauri-apps/plugin-dialog";
+  import { save, ask } from "@tauri-apps/plugin-dialog";
   import type { MessageRecord } from "$lib/ipc/types";
   import type { OptimisticMessage } from "$lib/stores/conversation";
   import { attachments, applyManifest, markAvailable } from "$lib/stores/attachments";
