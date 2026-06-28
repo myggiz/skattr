@@ -48,17 +48,21 @@
 
   onMount(async () => {
     try {
+      // `start_in_process_cmd` resolves only once the daemon has bootstrapped
+      // Tor and published its onion (i.e. Tor is Ready). Treat its return as
+      // the authoritative ready signal — do NOT depend on receiving a separate
+      // `tor_status` "Ready" event, whose cached replay can race the
+      // subscription and leave the wizard stuck on "Starting…".
       await invoke("start_in_process_cmd");
-      // Subscribe TorStatus so cached replay paints the progress bar.
+      torStatus.set("Ready");
+      // Keep a subscription for any subsequent status changes (e.g. Tor drops
+      // and re-bootstraps) so the pill stays accurate after onboarding.
       await ipcClient.subscribe({ filter: "tor_status" }, (e) => {
-        // Event is adjacent-tagged: { event: "tor_status_changed", data: TorStatus }
         if (e.event === "tor_status_changed") {
           torStatus.set(e.data);
-          if (e.data === "Ready") {
-            finishBootstrap();
-          }
         }
       });
+      await finishBootstrap();
     } catch (e) {
       error = String(e);
     }

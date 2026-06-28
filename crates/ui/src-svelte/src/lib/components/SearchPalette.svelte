@@ -14,6 +14,7 @@
   } from "$lib/stores/searchPalette";
   import { contacts } from "$lib/stores/contacts";
   import { openConversationFromSummary } from "$lib/stores/conversation";
+  import { pubkeyEq } from "$lib/pubkey";
   import { get } from "svelte/store";
 
   let { inline = false }: { inline?: boolean } = $props();
@@ -96,7 +97,7 @@
     // because this is a SPA with no /conversation/[contact] route. We open the
     // contact's conversation then set focusedRowId so VirtualMessageList can
     // scroll the target row into view.
-    const contactSummary = get(contacts).find((c) => c.pubkey === r.record.contact);
+    const contactSummary = get(contacts).find((c) => pubkeyEq(c.pubkey, r.record.contact));
     if (contactSummary) {
       void openConversationFromSummary(contactSummary).then(() => {
         setFocusedRowId(r.record.row_id);

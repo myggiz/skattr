@@ -3,7 +3,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { config, fetchConfig, patchConfig, wipeAllData, exportBackup } from "$lib/stores/config";
-  import { save } from "@tauri-apps/plugin-dialog";
+  import { save, open } from "@tauri-apps/plugin-dialog";
   import { ipcClient } from "$lib/ipc/tauri";
   import { unwrapOk } from "$lib/ipc/client";
   import LogsViewer from "$lib/components/LogsViewer.svelte";
@@ -83,6 +83,24 @@
       );
     } catch (err) {
       toast.show(`Failed: ${err}`);
+    }
+  }
+
+  // Let the user choose where received files are saved. Defaults to ~/Downloads
+  // when unset; the picker gives full control over the location.
+  async function chooseDownloadFolder() {
+    try {
+      const picked = await open({
+        directory: true,
+        multiple: false,
+        title: "Choose download folder",
+      });
+      if (typeof picked === "string" && picked.length > 0) {
+        await patchConfig(singlePatch("download_dir", picked));
+        toast.show(`Download folder set to ${picked}`);
+      }
+    } catch (e) {
+      toast.show(`Couldn't set download folder: ${e}`);
     }
   }
 
@@ -194,6 +212,15 @@
     />
     Start minimised to tray (effective on next launch)
   </label>
+</section>
+
+<section>
+  <h2>Files</h2>
+  <p class="hint">
+    Received files are saved to your <strong>Downloads</strong> folder by default.
+    Choose a different location here — Skattr never scatters files elsewhere.
+  </p>
+  <button type="button" onclick={chooseDownloadFolder}>Choose download folder…</button>
 </section>
 
 <section>

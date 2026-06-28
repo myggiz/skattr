@@ -1,4 +1,5 @@
-import type { ConfigSnapshot, NotificationMode } from '$lib/ipc/types';
+import type { ConfigSnapshot, NotificationMode, PublicKey } from '$lib/ipc/types';
+import { pubkeyEq } from '$lib/pubkey';
 
 export interface FocusInputs {
   windowFocused: boolean;
@@ -24,7 +25,14 @@ export function shouldNotify(
 ): boolean {
   if (config.notification_mode === 'off') return false;
   if (contact.muted) return false;
-  if (focus.windowFocused && focus.activeContactId === msg.contact) return false;
+  if (
+    focus.windowFocused &&
+    pubkeyEq(
+      focus.activeContactId as unknown as PublicKey,
+      msg.contact as unknown as PublicKey,
+    )
+  )
+    return false;
   return true;
 }
 

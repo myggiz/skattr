@@ -21,6 +21,7 @@
   import { deepLinkInviteUrl } from "$lib/stores/deepLink";
   import { ipcClient } from "$lib/ipc/tauri";
   import { connection, handleStreamClosed } from "$lib/stores/connection";
+  import { pubkeyEq } from "$lib/pubkey";
   import { listen } from "@tauri-apps/api/event";
   import type { ContactSummary, PublicKey } from "$lib/ipc/types";
 
@@ -36,8 +37,17 @@
       goto("/first-run");
       return;
     }
-    // If vault exists we are already unlocked (Bootstrap.svelte called goto("/")).
-    // Stay on "/" and show the main shell; refresh the contact list.
+    // A vault exists, but that alone doesn't mean we're usable: on a fresh
+    // launch (relaunch with an existing vault) we have NOT unlocked and the
+    // in-process daemon is NOT running yet. Only stay on the main shell if the
+    // daemon actually started this session (set after Bootstrap → goto("/")).
+    // Otherwise route to first-run to unlock, which starts the daemon and
+    // returns here.
+    const running = await invoke<boolean>("daemon_running");
+    if (!running) {
+      goto("/first-run");
+      return;
+    }
     await refreshContacts();
   });
 
@@ -49,7 +59,7 @@
   let activeSummary = $derived(
     $conversation.contact === null
       ? undefined
-      : $contacts.find((c) => c.pubkey === $conversation.contact),
+      : $contacts.find((c) => pubkeyEq(c.pubkey, $conversation.contact)),
   );
 
   let composerDisabled = $derived(
@@ -106,6 +116,11 @@
         });
       } else if (e.event === "attachment_failed") {
         applyFailed(hex16ToString(e.data.attachment_id), e.data.reason);
+      } else if (e.event === "contact_updated" || e.event === "contact_card_received") {
+        // A contact was added/updated out-of-band — e.g. an inbound first-contact
+        // Welcome made us join a group. Refresh the list so it appears without a
+        // manual restart.
+        void refreshContacts();
       }
     });
   }
@@ -158,12 +173,12 @@
     {#each $contacts as c}
       <ContactRow
         summary={c}
-        active={$conversation.contact === c.pubkey}
-        expanded={$expandedPubkey === c.pubkey}
+        active={pubkeyEq($conversation.contact, c.pubkey)}
+        expanded={pubkeyEq($expandedPubkey, c.pubkey)}
         onclick={() => selectContact(c)}
         onToggleExpanded={() => toggleExpanded(c.pubkey)}
       />
-      {#if $expandedPubkey === c.pubkey}
+      {#if pubkeyEq($expandedPubkey, c.pubkey)}
         <ContactDetailsPanel summary={c} />
       {/if}
     {/each}
@@ -171,7 +186,7 @@
   <main class="pane">
     <header>
       <span class="title">{
-        $contacts.find((c) => c.pubkey === $conversation.contact)?.nickname
+        $contacts.find((c) => pubkeyEq(c.pubkey, $conversation.contact))?.nickname
         ?? "Select a contact"
       }</span>
       <TorPill />

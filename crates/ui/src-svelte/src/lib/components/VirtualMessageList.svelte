@@ -77,6 +77,28 @@
   let virtualItems = $derived($virtualizer?.getVirtualItems() ?? []);
   let totalHeight = $derived($virtualizer?.getTotalSize() ?? 0);
 
+  // Autoscroll ("tail") — follow the latest message, but only while the user is
+  // already at (or near) the bottom. If they've scrolled up to read history,
+  // don't yank them back down.
+  let stickToBottom = $state(true);
+
+  function onListScroll() {
+    if (!scrollEl) return;
+    const dist = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight;
+    stickToBottom = dist < 80;
+  }
+
+  // When the message set grows (new message, or first load of a conversation)
+  // and we're stuck to the bottom, scroll to the end so the latest is visible.
+  $effect(() => {
+    const n = rows.length; // track growth
+    if (n === 0 || !stickToBottom || !scrollEl) return;
+    const el = scrollEl;
+    requestAnimationFrame(() => {
+      el.scrollTop = el.scrollHeight;
+    });
+  });
+
   $effect(() => {
     if (!topSentinel) return;
     const obs = new IntersectionObserver(
@@ -141,7 +163,7 @@
   });
 </script>
 
-<div class="list" bind:this={scrollEl} data-message-count={items.length}>
+<div class="list" bind:this={scrollEl} data-message-count={items.length} onscroll={onListScroll}>
   <div bind:this={topSentinel} class="sentinel"></div>
   <div style="height: {totalHeight}px; position: relative;">
     {#each virtualItems as row (rows[row.index]?.key ?? row.index)}

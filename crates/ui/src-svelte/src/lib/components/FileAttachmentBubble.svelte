@@ -4,12 +4,13 @@
   import { invoke, convertFileSrc } from "@tauri-apps/api/core";
   import type { MessageRecord } from "$lib/ipc/types";
   import type { OptimisticMessage } from "$lib/stores/conversation";
-  import { attachments, applyManifest } from "$lib/stores/attachments";
+  import { attachments, applyManifest, applyReceived } from "$lib/stores/attachments";
   import { delivery, deliveryToIconStatus, hex16ToString } from "$lib/stores/delivery";
   import { decodeManifestMemo, isImage, mimeIconName, formatBytes } from "$lib/attachments";
   import type { ManifestSummary } from "$lib/attachments";
   import { icons } from "$lib/icons";
   import { toast } from "$lib/stores/toast";
+  import { ask } from "@tauri-apps/plugin-dialog";
   import DeliveryIcon from "./DeliveryIcon.svelte";
 
   let { record }: { record: MessageRecord | OptimisticMessage } = $props();
@@ -50,6 +51,26 @@
   let aidHex = $derived(summary ? summary.attachment_id : null);
   let xferState = $derived(aidHex ? $attachments.get(aidHex) : undefined);
 
+  // Re-hydrate after a restart: the transfer store is session-scoped, so a
+  // received file's Open / Show-in-folder actions are gone on reload even though
+  // the file is still on disk. Locate it by filename and repopulate the store.
+  $effect(() => {
+    if (isOutgoing || !summary || xferState?.path) return;
+    const s = summary;
+    invoke<string | null>("resolve_received_file", { filename: s.filename })
+      .then((path) => {
+        if (path) {
+          applyReceived(s.attachment_id, {
+            filename: s.filename,
+            mime: s.mime,
+            size: s.total_size,
+            path,
+          });
+        }
+      })
+      .catch(() => {});
+  });
+
   // Display fields: prefer decoded manifest, fall back to optimistic send info.
   let filename = $derived(summary?.filename ?? optimisticName ?? "");
   let mime = $derived(summary?.mime);
@@ -74,7 +95,14 @@
     try {
       await invoke("open_file", { path: xferState.path });
     } catch {
-      toast.show("Failed to open file");
+      // Most commonly this means the OS has no app associated with the file
+      // type. Rather than fail silently, offer to open the containing folder so
+      // the user can choose how to open it themselves.
+      const showFolder = await ask(
+        "Your system doesn't have an app set to open this type of file. Open its folder instead, so you can open it yourself?",
+        { title: "Can't open file", kind: "warning" },
+      );
+      if (showFolder) await doReveal();
     }
   }
   async function doReveal() {
@@ -82,7 +110,7 @@
     try {
       await invoke("reveal_in_folder", { path: xferState.path });
     } catch {
-      toast.show("Failed to reveal file");
+      toast.show("Couldn't open the folder");
     }
   }
 
@@ -107,7 +135,7 @@
       {#if size !== undefined}<span class="fsize">{formatBytes(size)}</span>{/if}
       <div class="actions">
         <button type="button" onclick={doOpen} aria-label="Open">Open</button>
-        <button type="button" onclick={doReveal} aria-label="Reveal in folder">Reveal</button>
+        <button type="button" onclick={doReveal} aria-label="Show in folder">Show in folder</button>
       </div>
     </div>
   {:else}
@@ -121,7 +149,7 @@
       {#if complete}
         <div class="actions">
           <button type="button" onclick={doOpen} aria-label="Open">Open</button>
-          <button type="button" onclick={doReveal} aria-label="Reveal in folder">Reveal</button>
+          <button type="button" onclick={doReveal} aria-label="Show in folder">Show in folder</button>
         </div>
       {/if}
       {#if failed}

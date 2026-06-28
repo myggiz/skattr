@@ -4,6 +4,7 @@
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
   import SettingsSidebar from '$lib/components/SettingsSidebar.svelte';
+  import Toast from '$lib/components/Toast.svelte';
 
   onMount(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -20,6 +21,7 @@
     <slot />
   </main>
 </div>
+<Toast />
 
 <style>
   .settings-shell {

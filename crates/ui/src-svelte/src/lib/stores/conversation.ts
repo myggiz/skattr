@@ -4,6 +4,7 @@ import { writable, get } from "svelte/store";
 
 import { ipcClient } from "$lib/ipc/tauri";
 import { unwrapOk } from "$lib/ipc/client";
+import { pubkeyEq } from "$lib/pubkey";
 import type { ContactSummary, MessageRecord, PublicKey } from "$lib/ipc/types";
 
 export type OptimisticMessage = MessageRecord & {
@@ -42,14 +43,6 @@ export const conversation = writable<ConversationState>({
   readCursor: 0n,
 });
 
-/**
- * String equality on the hex-encoded PublicKey emitted by ts-rs.
- * Kept as a named helper so the type-narrowing intent stays
- * obvious at call sites.
- */
-function pubkeyEq(a: PublicKey, b: PublicKey): boolean {
-  return a === b;
-}
 
 export function appendOptimistic(
   contact: PublicKey,
@@ -164,7 +157,7 @@ export async function loadOlder(): Promise<void> {
     if (result.result === "messages_page") {
       const olderChrono = [...result.data.records].reverse();
       conversation.update((s) => {
-        if (s.contact !== reqContact) return s;
+        if (!pubkeyEq(s.contact, reqContact)) return s;
         return {
           ...s,
           messages: [...olderChrono, ...s.messages],
@@ -174,13 +167,13 @@ export async function loadOlder(): Promise<void> {
       });
     } else {
       conversation.update((s) => {
-        if (s.contact !== reqContact) return s;
+        if (!pubkeyEq(s.contact, reqContact)) return s;
         return { ...s, loadingOlder: false };
       });
     }
   } catch (e) {
     conversation.update((s) => {
-      if (s.contact !== reqContact) return s;
+      if (!pubkeyEq(s.contact, reqContact)) return s;
       return { ...s, loadingOlder: false };
     });
     throw e;
@@ -223,7 +216,7 @@ export async function send(contact: PublicKey, body: string): Promise<void> {
       kind: { kind: "text", body },
     });
     const cur = get(conversation);
-    if (cur.contact !== contact) {
+    if (!pubkeyEq(cur.contact, contact)) {
       // User switched away — the daemon persisted the row;
       // it'll show up next time the original conversation is opened.
       return;
@@ -258,7 +251,7 @@ export async function send(contact: PublicKey, body: string): Promise<void> {
     }
   } catch (e) {
     const cur = get(conversation);
-    if (cur.contact !== contact) return;
+    if (!pubkeyEq(cur.contact, contact)) return;
     markFailed(tempId, e instanceof Error ? e.message : String(e));
   }
 }
@@ -296,7 +289,7 @@ export async function sendFile(
   });
   try {
     const resp = await ipcClient.request({ cmd: "send_file", contact, path });
-    if (get(conversation).contact !== contact) return;
+    if (!pubkeyEq(get(conversation).contact, contact)) return;
     const result = unwrapOk(resp);
     if (result.result !== "file_queued") {
       markFailed(tempId, "unexpected reply variant");
@@ -320,7 +313,7 @@ export async function sendFile(
       return { ...s, messages: next };
     });
   } catch (e) {
-    if (get(conversation).contact !== contact) return;
+    if (!pubkeyEq(get(conversation).contact, contact)) return;
     markFailed(tempId, e instanceof Error ? e.message : String(e));
   }
 }
