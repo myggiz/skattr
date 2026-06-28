@@ -82,6 +82,14 @@
   // don't yank them back down.
   let stickToBottom = $state(true);
 
+  // Reset tail-scroll state when the active contact changes so that switching
+  // conversations always starts pinned to the bottom, regardless of how far the
+  // user had scrolled in the previous thread.
+  $effect(() => {
+    void $conversation.contact; // track the active contact
+    stickToBottom = true;
+  });
+
   function onListScroll() {
     if (!scrollEl) return;
     const dist = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight;

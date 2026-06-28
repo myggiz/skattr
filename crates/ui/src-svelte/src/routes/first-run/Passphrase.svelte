@@ -65,6 +65,12 @@
           error = "Passphrases don't match.";
           return;
         }
+        // Re-evaluate synchronously at submit time to avoid a stale `strength`
+        // score from a previous async `evaluate()` call (race: user switches from
+        // a strong to a weak passphrase and submits before the new score resolves).
+        const zResult = await zxcvbnAsync(pass);
+        strength = zResult.score;
+        feedback = zResult.feedback;
         if (strength < 3) {
           error = weakPassphraseMessage();
           return;

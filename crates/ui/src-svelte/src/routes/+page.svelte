@@ -29,6 +29,10 @@
   let addOpen = $state(false);
   // URL pre-filled when the dialog is opened via a skattr:// deep-link.
   let addInitialUrl = $state("");
+  // Set to true once the first onMount confirms the daemon is running.
+  // Guards the subscription onMounts so they don't attempt to subscribe
+  // when we're about to redirect to /first-run (daemon not yet started).
+  let daemonConfirmed = $state(false);
 
   onMount(async () => {
     // If no vault exists yet, go to first-run to initialise identity.
@@ -48,6 +52,7 @@
       goto("/first-run");
       return;
     }
+    daemonConfirmed = true;
     await refreshContacts();
   });
 
@@ -94,6 +99,7 @@
 
   // Subscribe to events on mount; update stores.
   // `reSubscribe` is extracted so it can be re-invoked on IPC stream death.
+  // Only called when `daemonConfirmed` — not when redirecting to /first-run.
   let unsub: (() => void) | null = null;
   async function reSubscribe(): Promise<void> {
     if (unsub) { unsub(); unsub = null; }
@@ -125,12 +131,23 @@
   }
 
   onMount(() => {
+    // Guard: only subscribe when the daemon is actually running. If the first
+    // onMount determined that the daemon isn't running and redirected to
+    // /first-run, daemonConfirmed stays false and we skip the subscription
+    // entirely, avoiding an unhandled rejection from a non-ready daemon.
+    if (!daemonConfirmed) return;
+
     // Guard against mount-race: if the component unmounts before the async
     // reSubscribe promise resolves, tear down the just-created subscription
     // immediately rather than leaking it.
     let cancelled = false;
     reSubscribe().then(() => {
       if (cancelled && unsub) { unsub(); unsub = null; }
+    }).catch(() => {
+      // Rejection here means the daemon became unavailable between the
+      // daemon_running check and subscribe; treat it as stream-closed so
+      // the reconnect path handles it.
+      handleStreamClosed(reSubscribe);
     });
     return () => {
       cancelled = true;
@@ -141,6 +158,7 @@
   // Watch for IPC stream-closed events (emitted by the Tauri relay) and
   // self-heal with exponential backoff.
   onMount(() => {
+    if (!daemonConfirmed) return;
     const unlistenP = listen<string>("ipc:stream-closed", () => {
       handleStreamClosed(reSubscribe);
     });

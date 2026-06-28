@@ -86,8 +86,9 @@
     }
   }
 
-  // Let the user choose where received files are saved. Defaults to ~/Downloads
-  // when unset; the picker gives full control over the location.
+  // Let the user choose where explicit Save… actions write their decrypted copy.
+  // Received attachments stay encrypted at rest; plaintext is only produced
+  // when the user clicks Open or Save…. Defaults to ~/Downloads when unset.
   async function chooseDownloadFolder() {
     try {
       const picked = await open({
@@ -217,10 +218,12 @@
 <section>
   <h2>Files</h2>
   <p class="hint">
-    Received files are saved to your <strong>Downloads</strong> folder by default.
-    Choose a different location here — Skattr never scatters files elsewhere.
+    Received attachments stay encrypted until you open or save them. When you
+    click <strong>Save…</strong>, the decrypted copy goes to your
+    <strong>Downloads</strong> folder by default — choose a different location
+    here.
   </p>
-  <button type="button" onclick={chooseDownloadFolder}>Choose download folder…</button>
+  <button type="button" onclick={chooseDownloadFolder}>Choose save folder…</button>
 </section>
 
 <section>

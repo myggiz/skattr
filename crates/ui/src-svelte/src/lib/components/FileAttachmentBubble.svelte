@@ -99,8 +99,17 @@
 
   async function doOpen() {
     if (!aidHex) return;
+    // Decrypt first; surface a clear error on failure rather than confusing it
+    // with an opener failure (they have different causes and different remedies).
+    let path: string;
     try {
-      const path = await decryptToCache();
+      path = await decryptToCache();
+    } catch {
+      toast.show("Couldn't open the attachment — it may be corrupted or unavailable.");
+      return;
+    }
+    // Decryption succeeded; attempt to open with the system handler.
+    try {
       await invoke("open_file", { path });
     } catch {
       const showFolder = await ask(
