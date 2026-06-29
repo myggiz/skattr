@@ -4,7 +4,60 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] - Phase 2.H (Windows port)
+## [Unreleased]
+
+_Nothing yet._
+
+## [v0.1.0] — 2026-06-29
+
+First public release of **Skattr** — a desktop-first, metadata-resistant peer-to-peer encrypted messenger. All traffic runs over Tor v3 onion services; there is no central server.
+
+### Highlights
+
+- **End-to-end encrypted 1:1 messaging over Tor.** Message encryption is MLS (RFC 9420 / OpenMLS); transport authentication is Noise_XK; the network layer is Tor v3 onion services via Arti. Identity is an Ed25519 keypair derived from a BIP39 seed phrase.
+- **First contact via signed invite links.** Generate a link or QR code; your contact pastes it or clicks the `skattr://` deep link.
+- **Offline delivery** through semi-trusted, self-hostable mailboxes. Messages and contact-card updates fall back to a mailbox automatically when a peer is unreachable.
+- **File attachments**, both online (direct) and offline (via mailbox), with metadata stripping. Received attachments are **encrypted at rest** — they are decrypted only when you explicitly **Open** (to a managed cache that is wiped on exit) or **Save** (to a path you choose). Nothing is written to your Downloads folder automatically.
+- **At-rest encryption** of the local message database (age) and the identity vault, plus backup and restore from your seed phrase.
+- **Desktop app** (Tauri 2 + SvelteKit) for Linux, macOS (Apple Silicon), and Windows, plus a **command-line client**. Full-text message search, retention controls, and a settings panel.
+
+### Verifying your download
+
+Releases are signed. Verify before installing:
+
+```bash
+minisign -Vm SHA256SUMS -p minisign.pub   # maintainer key ID EEDBFDA4BF232D38
+sha256sum -c SHA256SUMS
+```
+
+See `docs/install/` for per-platform instructions (Linux `.deb`/AppImage, macOS `.dmg`, Windows `.msi`).
+
+### Known limitations — please read
+
+This is an early release and has **not** had a third-party security audit. v0.1.0 deliberately ships **without**:
+
+- **Multi-member groups** — conversations are strictly 1:1 (2 members).
+- **Metadata-minimization defenses** — no message-size padding, send-timing jitter, or cover traffic beyond what Tor itself provides.
+- **Real onion-address rotation** — `RotateOnion` republishes the current address rather than changing it.
+- **Mailbox fallback for the first-contact handshake** — first contact is direct-only, so both peers must be online to complete it (ordinary messages and card updates do fall back to a mailbox).
+- **Garbage collection of received attachment chunks** — they are retained, encrypted, so the data directory grows over time.
+- **An encrypted vulnerability-reporting channel** — email `security@myggiz.net` in plaintext for now (a PGP key is planned after v0.1.0).
+
+See `docs/THREAT_MODEL.md` for the full security model and disclosures.
+
+### License
+
+Client GPLv3; mailbox server AGPLv3. © Myggiz AB.
+
+## [Development history]
+
+> The phase-by-phase sections below predate the v1.0 readiness audit that
+> reshaped the project. They document the original build (Era 1, Phases 0–2.H).
+> The audit-era security, offline-delivery, and attachment workstreams that
+> followed are summarized in the v0.1.0 entry above rather than re-logged here;
+> they are kept for historical reference.
+
+## Phase 2.H — Windows port
 
 ### Added
 - Windows support for the daemon IPC layer via Tokio Named Pipes.
@@ -45,7 +98,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Tauri auto-updater enablement.
 - macOS Intel matrix entry.
 
-## [v0.1.0] — 2026-05-04
+## Phase 2.G — packaging prep (2026-05-04, superseded)
 
 ### Added
 
@@ -80,7 +133,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 No changes. Phase 2.G is wire-format-NEUTRAL by design; the `wire_format_append_only` snapshot test is unchanged.
 
-## Unreleased
+## Phase 2.F — settings & history
 
 ### Added (Phase 2.F — settings & history)
 - Settings panel with five sidebar-nav sections (Identity / Mailboxes /
@@ -506,7 +559,7 @@ clean. `cargo fmt --check` clean.
 - `skattr send --fail-on-timeout` flips the 2 s inline-wait default from "exit 0 with `status=queued`" to "exit 8".
 - Integration tests: `cli_ipc_roundtrip.rs` (mocked transport), `cli_two_daemons.rs` (full invite→send flow, mocked transport; full decrypt round-trip is deferred because MLS Welcome-handoff is not yet symmetric), `cli_real_tor.rs` (`#[ignore]`-gated, real Arti).
 
-## [Unreleased]
+## Phase 0 — scaffold (historical)
 
 ### Added
 
