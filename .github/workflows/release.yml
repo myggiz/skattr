@@ -1,6 +1,9 @@
 name: Release
 
 on:
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
     inputs:
       tag:
@@ -25,7 +28,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ inputs.tag }}
+          ref: ${{ inputs.tag || github.ref_name }}
           fetch-depth: 0
 
       - name: Compute SOURCE_DATE_EPOCH from the tag commit
@@ -155,7 +158,15 @@ jobs:
         run: |
           set -euo pipefail
           DMG=$(ls bundles/*.dmg | head -1)
-          hdiutil attach "$DMG" -nobrowse -mountpoint /Volumes/skattr-mount
+          # The .dmg embeds a GPLv3 software license agreement (bundle.licenseFile),
+          # so hdiutil blocks on the SLA prompt in non-interactive CI and reports
+          # "attach canceled". Pipe `yes` to accept it. pipefail is disabled for
+          # this one line because `yes` exits with SIGPIPE once hdiutil closes its
+          # stdin; with pipefail off the pipe's status is hdiutil's, so `set -e`
+          # still catches a genuine attach failure.
+          set +o pipefail
+          yes | hdiutil attach "$DMG" -nobrowse -mountpoint /Volumes/skattr-mount
+          set -o pipefail
           cp -R /Volumes/skattr-mount/Skattr.app /tmp/Skattr.app
           hdiutil detach /Volumes/skattr-mount
           ls /tmp/Skattr.app/Contents/MacOS/
@@ -239,7 +250,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ inputs.tag }}
+          ref: ${{ inputs.tag || github.ref_name }}
 
       - name: Download all bundle artefacts
         uses: actions/download-artifact@v8
@@ -291,7 +302,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          TAG="${{ inputs.tag }}"
+          TAG="${{ inputs.tag || github.ref_name }}"
           # Extract the section for the current tag from CHANGELOG.md.
           # Convention: each release header is "## [TAG] — DATE" (em dash) or
           # "## [TAG] - DATE" (hyphen). Stop at the next "## [" header.
@@ -310,7 +321,7 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: ${{ inputs.tag }}
+          tag_name: ${{ inputs.tag || github.ref_name }}
           files: |
             dist/*.deb
             dist/*.AppImage
