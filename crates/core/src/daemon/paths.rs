@@ -29,7 +29,8 @@ pub fn data_dir() -> Result<PathBuf> {
     Ok(base.data_local_dir().join("skattr"))
 }
 
-/// Compose the IPC endpoint path under a resolved runtime `base`.
+/// Compose the IPC endpoint path under a resolved runtime `base`,
+/// appending `skattr/<ENDPOINT_FILENAME>`.
 #[cfg(unix)]
 fn ipc_endpoint_for_base(base: std::path::PathBuf) -> PathBuf {
     base.join("skattr")
@@ -39,18 +40,32 @@ fn ipc_endpoint_for_base(base: std::path::PathBuf) -> PathBuf {
 /// The default IPC endpoint path, in the platform **runtime** dir.
 ///
 /// - Unix (Linux/macOS): `$XDG_RUNTIME_DIR/skattr/ipc.sock`, falling back to
-///   `$TMPDIR/skattr/ipc.sock`, then `/tmp/skattr/ipc.sock`.
+///   `$TMPDIR/skattr/ipc.sock`, then `/tmp/skattr-<uid>/ipc.sock` (uid-scoped
+///   so two users on the same host never share a socket path).
 /// - Windows: `%TEMP%\skattr\ipc.endpoint` — the named-pipe *discovery* file
 ///   (the pipe itself is a kernel object, not a file).
 #[cfg(unix)]
 pub fn default_ipc_endpoint() -> Result<PathBuf> {
-    let base = std::env::var_os("XDG_RUNTIME_DIR")
+    // XDG_RUNTIME_DIR and TMPDIR both get the standard `skattr/<filename>`
+    // suffix. The bare-/tmp fallback uses a uid-scoped dir to prevent
+    // cross-user socket collisions on shared systems.
+    if let Some(xdg) = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty())
-        .or_else(|| std::env::var_os("TMPDIR").map(PathBuf::from))
+    {
+        return Ok(ipc_endpoint_for_base(xdg));
+    }
+    if let Some(tmpdir) = std::env::var_os("TMPDIR")
+        .map(PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| PathBuf::from("/tmp"));
-    Ok(ipc_endpoint_for_base(base))
+    {
+        return Ok(ipc_endpoint_for_base(tmpdir));
+    }
+    // SAFETY: getuid() is always safe to call — it has no preconditions and
+    // cannot fail.
+    #[allow(unsafe_code)]
+    let uid = unsafe { libc::getuid() };
+    Ok(PathBuf::from(format!("/tmp/skattr-{uid}")).join(crate::daemon::ipc::ENDPOINT_FILENAME))
 }
 
 #[cfg(windows)]

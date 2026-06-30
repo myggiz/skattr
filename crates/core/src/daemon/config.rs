@@ -206,7 +206,10 @@ impl Config {
                         break;
                     }
                 }
-                found.unwrap_or_else(|| Self::defaults().unwrap_or_else(|_| Self::fallback()))
+                match found {
+                    Some(c) => c,
+                    None => Self::defaults()?,
+                }
             }
         };
 

@@ -150,13 +150,24 @@ fn main() {
     // resolver so it is stable regardless of the Tauri app identifier
     // (identifier "net.myggiz.skattr" would give a different XDG path
     // and strand existing data).
-    let data_dir = match skattr_core::daemon::paths::data_dir() {
+    let data_dir = match skattr_core::daemon::data_dir() {
         Ok(d) => d,
         Err(e) => {
             eprintln!("fatal: cannot resolve data dir: {e}");
             std::process::exit(1);
         }
     };
+
+    // Run the idempotent legacy migration BEFORE reading persist_logs from
+    // config: on the first migrated launch a legacy ui.persist_logs_to_disk
+    // value lives in the old location. Without this early call the setting
+    // would be invisible and skattr.log would be created against the user's
+    // preference. The setup hook below calls migrate_legacy_into a second time;
+    // idempotency makes that a no-op.
+    if let Err(e) = skattr_core::daemon::migrate_legacy_into(&data_dir) {
+        eprintln!("fatal: data migration failed: {e}");
+        std::process::exit(1);
+    }
 
     // Optional on-disk log (default ON during pre-1.0 field-testing): writes
     // <data_dir>/skattr.log so problems can be diagnosed from a shared file —
@@ -248,7 +259,7 @@ fn main() {
         .setup(|app| {
             // The canonical data dir — shared resolver keeps this in sync with
             // the daemon and the CLI regardless of the Tauri app identifier.
-            let data_dir = skattr_core::daemon::paths::data_dir()
+            let data_dir = skattr_core::daemon::data_dir()
                 .map_err(|e| format!("resolve data dir: {e}"))?;
             std::fs::create_dir_all(&data_dir)
                 .map_err(|e| format!("create data dir: {e}"))?;
@@ -267,7 +278,7 @@ fn main() {
             // (~/.local/share/net.myggiz.skattr/skattr/ for data, ~/.config/skattr
             // for config) into the consolidated dir, so existing identities carry
             // over rather than being silently abandoned.
-            skattr_core::daemon::migrate::migrate_legacy_into(&data_dir)
+            skattr_core::daemon::migrate_legacy_into(&data_dir)
                 .map_err(|e| format!("data migration failed: {e}"))?;
 
             let state: tauri::State<daemon::AppState> = app.state();

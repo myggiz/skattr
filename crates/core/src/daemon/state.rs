@@ -12,7 +12,7 @@ use crate::daemon::commands::{Command, CommandResult};
 use crate::daemon::config::Config;
 use crate::daemon::events::Event;
 use crate::daemon::logs::LogSink;
-use crate::error::Result;
+use crate::error::{CoreError, Result};
 use crate::identity::derive::derive_storage_seed;
 use crate::identity::vault::Vault;
 use crate::transport::tor::{TorConfig, TorRuntime};
@@ -113,6 +113,17 @@ impl Daemon {
         use crate::storage::Pool;
 
         std::fs::create_dir_all(data_dir)?;
+
+        // Enforce 0700 on the data dir before trusting it: the Arti config
+        // below sets trust_dir_permissions=true (skips the ancestor check) on
+        // the assumption the data dir is private. create_dir_all() leaves mode
+        // to umask (often 0755), so a fresh CLI data dir could be world-readable.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(data_dir, std::fs::Permissions::from_mode(0o700))
+                .map_err(CoreError::Io)?;
+        }
 
         // Single-daemon guard: hold an OS advisory lock on <data_dir>/daemon.lock
         // for the whole run. A second daemon on the same data dir fails fast

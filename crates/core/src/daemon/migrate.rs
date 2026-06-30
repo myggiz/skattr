@@ -125,8 +125,18 @@ fn move_dir_contents(from: &Path, to: &Path) -> Result<(), MigrateError> {
                     source: copy_err,
                 });
             }
-            let _ = remove_path(&src);
-            let _ = e; // original rename error superseded by successful copy
+            // Copy succeeded; now remove the source so identity-bearing
+            // material is not silently left behind in the legacy location.
+            // A removal failure is propagated loudly — idempotency makes a
+            // retry safe (canonical already has the data, next run is a no-op).
+            if let Err(rm_err) = remove_path(&src) {
+                return Err(MigrateError::Move {
+                    from: from.to_path_buf(),
+                    name: name.to_string_lossy().into_owned(),
+                    source: rm_err,
+                });
+            }
+            let _ = e; // original rename error superseded by successful copy+remove
         }
     }
     Ok(())
