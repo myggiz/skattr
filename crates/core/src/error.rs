@@ -118,6 +118,10 @@ pub enum CoreError {
     /// CBOR decode problem.
     #[error("cbor decode: {0}")]
     CborDecode(String),
+
+    /// Another daemon already holds the single-daemon lock on this data dir.
+    #[error("another skattr daemon is already using this data directory")]
+    DaemonAlreadyRunning,
 }
 
 impl CoreError {

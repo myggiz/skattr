@@ -114,6 +114,32 @@ impl Daemon {
 
         std::fs::create_dir_all(data_dir)?;
 
+        // Single-daemon guard: hold an OS advisory lock on <data_dir>/daemon.lock
+        // for the whole run. A second daemon on the same data dir fails fast
+        // HERE — before the Pool is opened (`:136`) or Arti touches `arti/`/`hss`
+        // (`:187`) — rather than corrupting shared SQLite / Tor state or
+        // double-publishing the onion. The handle lives in `_daemon_lock` until
+        // this function returns; the OS also releases it on process death
+        // (incl. SIGKILL), so a hard kill leaves a cleanly re-lockable state
+        // with no stale-lock reclaim needed.
+        let _daemon_lock = match crate::daemon::lock::acquire(data_dir) {
+            Ok(g) => g,
+            Err(crate::daemon::lock::LockError::AlreadyRunning) => {
+                return Err(crate::error::CoreError::DaemonAlreadyRunning);
+            }
+            Err(crate::daemon::lock::LockError::Io(e)) => {
+                return Err(crate::error::CoreError::Io(e));
+            }
+        };
+
+        // Belt-and-suspenders: the authoritative on-disk paths (vault/Pool/
+        // arti/hs) already use the `data_dir` parameter, but a migrated
+        // config.toml could carry a stale absolute `data_dir`. Force the
+        // in-memory config to agree so config-derived paths (downloads,
+        // <data_dir>/skattr.log) can't be re-pointed at the old location.
+        let mut config = config;
+        config.data_dir = data_dir.to_path_buf();
+
         // Step 1: unlock vault → identity → derive storage seed.
         // `derive_storage_seed` consumes the identity key, so we open
         // the vault a second time to get a fresh copy for DaemonHandle.
@@ -819,6 +845,19 @@ mod tests {
     use super::*;
     use tokio::sync::oneshot;
     use zeroize::Zeroizing;
+
+    #[tokio::test]
+    async fn second_daemon_on_locked_data_dir_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        // Hold the lock as if a daemon were already running.
+        let _held = crate::daemon::lock::acquire(dir.path()).expect("first lock");
+        // The startup guard run_with_transport uses must surface AlreadyRunning.
+        let err = crate::daemon::lock::acquire(dir.path()).unwrap_err();
+        assert!(matches!(
+            err,
+            crate::daemon::lock::LockError::AlreadyRunning
+        ));
+    }
 
     #[test]
     fn wipe_open_cache_removes_decrypted_plaintext() {
