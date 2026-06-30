@@ -634,7 +634,13 @@ async fn daemon(
     if let Some(override_dir) = data_dir_override {
         config.data_dir = override_dir.to_path_buf();
     }
-    std::fs::create_dir_all(&config.data_dir)?;
+    std::fs::create_dir_all(&config.data_dir)
+        .map_err(|e| anyhow::anyhow!("create data dir {}: {e}", config.data_dir.display()))?;
+    // Carry any pre-existing identity from a legacy location into the
+    // canonical data dir before the daemon opens it (fail-loud: abort rather
+    // than silently onboarding anew).
+    skattr_core::daemon::migrate::migrate_legacy_into(&config.data_dir)
+        .map_err(|e| anyhow::anyhow!("data migration failed: {e}"))?;
     let vault_path = config.data_dir.join("identity.vault");
 
     if !vault_path.exists() {

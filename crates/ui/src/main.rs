@@ -131,61 +131,6 @@ fn set_close_to_tray(state: tauri::State<'_, CloseToTraySentinel>, enabled: bool
     state.0.store(enabled, Ordering::SeqCst);
 }
 
-/// One-time migration from the pre-consolidation split layout into
-/// `new_data_dir`: the old daemon data (`~/.local/share/net.myggiz.skattr/skattr`)
-/// and the old config (`~/.config/skattr/config.toml`) are moved in. No-op once
-/// the new dir already holds an identity vault, or if there is nothing to move.
-///
-/// Returns `Err` if a file from the old data directory cannot be renamed (data
-/// loss risk), so the caller can abort startup rather than silently continuing
-/// with an incomplete identity.  Config migration failures are best-effort only
-/// (a missing config is merely cosmetic).
-fn migrate_legacy_data(new_data_dir: &std::path::Path) -> Result<(), String> {
-    if new_data_dir.join("identity.vault").exists() {
-        return Ok(());
-    }
-    let home = match std::env::var_os("HOME") {
-        Some(h) => std::path::PathBuf::from(h),
-        None => return Ok(()),
-    };
-    let data_home = std::env::var_os("XDG_DATA_HOME")
-        .map(std::path::PathBuf::from)
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| home.join(".local/share"));
-    let old_data = data_home.join("net.myggiz.skattr").join("skattr");
-    if old_data.join("identity.vault").exists() {
-        let entries =
-            std::fs::read_dir(&old_data).map_err(|e| format!("migrate: read legacy dir: {e}"))?;
-        for entry in entries.flatten() {
-            let dst = new_data_dir.join(entry.file_name());
-            std::fs::rename(entry.path(), &dst).map_err(|e| {
-                format!(
-                    "migrate: rename {}: {e}",
-                    entry.file_name().to_string_lossy()
-                )
-            })?;
-        }
-        tracing::info!(
-            from = %old_data.display(),
-            to = %new_data_dir.display(),
-            "migrated legacy data into consolidated dir"
-        );
-    }
-    let config_home = std::env::var_os("XDG_CONFIG_HOME")
-        .map(std::path::PathBuf::from)
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| home.join(".config"));
-    let old_config = config_home.join("skattr").join("config.toml");
-    let new_config = new_data_dir.join("config.toml");
-    if old_config.exists() && !new_config.exists() {
-        // Config migration is best-effort: a missing config just means defaults.
-        if let Err(e) = std::fs::rename(&old_config, &new_config) {
-            tracing::warn!(error = %e, "migrate: could not move legacy config.toml (non-fatal)");
-        }
-    }
-    Ok(())
-}
-
 fn main() {
     let argv: Vec<String> = std::env::args().collect();
     if detect_smoke_test_flag(&argv) {
@@ -322,7 +267,8 @@ fn main() {
             // (~/.local/share/net.myggiz.skattr/skattr/ for data, ~/.config/skattr
             // for config) into the consolidated dir, so existing identities carry
             // over rather than being silently abandoned.
-            migrate_legacy_data(&data_dir).map_err(|e| format!("data migration failed: {e}"))?;
+            skattr_core::daemon::migrate::migrate_legacy_into(&data_dir)
+                .map_err(|e| format!("data migration failed: {e}"))?;
 
             let state: tauri::State<daemon::AppState> = app.state();
 
