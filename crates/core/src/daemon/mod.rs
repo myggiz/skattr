@@ -23,6 +23,7 @@ pub(crate) mod inbound;
 pub mod ipc;
 pub(crate) mod lock;
 pub mod logs;
+pub mod migrate;
 pub mod paths;
 pub(crate) mod retention;
 pub mod smoke;
