@@ -388,6 +388,11 @@ fn effective_data_dir(override_dir: Option<&std::path::Path>) -> Result<PathBuf>
 async fn init(data_dir_override: Option<&std::path::Path>) -> Result<()> {
     let data_dir = effective_data_dir(data_dir_override)?;
     std::fs::create_dir_all(&data_dir)?;
+    // Carry any pre-existing identity from a legacy location into the
+    // canonical data dir before the vault guard (fail-loud: abort rather
+    // than silently minting a fresh identity and orphaning the real one).
+    skattr_core::daemon::migrate::migrate_legacy_into(&data_dir)
+        .map_err(|e| anyhow::anyhow!("data migration failed: {e}"))?;
     let vault_path = data_dir.join("identity.vault");
 
     if vault_path.exists() {
@@ -476,6 +481,11 @@ async fn restore(seed_phrase: &str, data_dir_override: Option<&std::path::Path>)
 
     let data_dir = effective_data_dir(data_dir_override)?;
     std::fs::create_dir_all(&data_dir)?;
+    // Carry any pre-existing identity from a legacy location into the
+    // canonical data dir before the vault guard (fail-loud: abort rather
+    // than silently overwriting migrated history with a seed-restore).
+    skattr_core::daemon::migrate::migrate_legacy_into(&data_dir)
+        .map_err(|e| anyhow::anyhow!("data migration failed: {e}"))?;
     let vault_path = data_dir.join("identity.vault");
 
     if vault_path.exists() {
