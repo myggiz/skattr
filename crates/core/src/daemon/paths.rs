@@ -68,6 +68,10 @@ pub fn default_ipc_endpoint() -> Result<PathBuf> {
     Ok(PathBuf::from(format!("/tmp/skattr-{uid}")).join(crate::daemon::ipc::ENDPOINT_FILENAME))
 }
 
+/// The default IPC endpoint path, in the platform **runtime** dir.
+///
+/// Windows: `%TEMP%\skattr\ipc.endpoint` — the named-pipe *discovery* file
+/// (the pipe itself is a kernel object, not a file), kept out of the data dir.
 #[cfg(windows)]
 pub fn default_ipc_endpoint() -> Result<PathBuf> {
     Ok(std::env::temp_dir()
