@@ -8,6 +8,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 _Nothing yet._
 
+## [v0.1.1] — 2026-06-30
+
+A correctness/security patch release. The headline fix makes Skattr's on-disk state land in one canonical, per-user, admin-free location on every platform — fixing a blocker that prevented standard (non-admin) Windows users from onboarding at all.
+
+### Fixed
+
+- **Data lives in one canonical per-user directory.** State (identity vault, message DB, onion key, Tor state, logs, config) now resolves through a single source of truth to the platform-standard local data dir — `%LOCALAPPDATA%\skattr` (Windows), `~/.local/share/skattr` (Linux), `~/Library/Application Support/skattr` (macOS). This removes the previous current-directory fallback that, on a non-admin Windows install, tried to write beside the executable in `Program Files` and failed with `Access is denied (os error 5)`. The UI and CLI now share the same directory and identity.
+- **Existing identities are migrated, not orphaned.** On first launch of the fixed build, an identity created by an earlier build (e.g. under `Downloads\skattr`, the Windows `VirtualStore`, or the old `net.myggiz.skattr` path) is moved into the canonical directory — preserving the onion address, message history, and Tor hidden-service key. Migration is idempotent and fail-loud, and runs on every vault-creating path (`daemon`, `init`, `restore`, and the GUI).
+
+### Security
+
+- **Single-daemon lock.** A pure OS advisory lock on `<data_dir>/daemon.lock` prevents a second daemon from running against the same data directory (which could corrupt the shared database or double-publish the onion service). The lock auto-releases on process death, so a hard kill never leaves a stale lock.
+- **Private data directory.** The data directory is enforced to `0700` on Unix at every startup before any secret state is opened.
+- **Dependency advisory.** Bumped `anyhow` to 1.0.103 to pick up the fix for RUSTSEC-2026-0190.
+
 ## [v0.1.0] — 2026-06-29
 
 First public release of **Skattr** — a desktop-first, metadata-resistant peer-to-peer encrypted messenger. All traffic runs over Tor v3 onion services; there is no central server.
