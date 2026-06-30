@@ -116,8 +116,8 @@ impl Daemon {
 
         // Single-daemon guard: hold an OS advisory lock on <data_dir>/daemon.lock
         // for the whole run. A second daemon on the same data dir fails fast
-        // HERE — before the Pool is opened (`:136`) or Arti touches `arti/`/`hss`
-        // (`:187`) — rather than corrupting shared SQLite / Tor state or
+        // HERE — before the Pool is opened (`:162`) or Arti touches `arti/`/`hss`
+        // (`:213`) — rather than corrupting shared SQLite / Tor state or
         // double-publishing the onion. The handle lives in `_daemon_lock` until
         // this function returns; the OS also releases it on process death
         // (incl. SIGKILL), so a hard kill leaves a cleanly re-lockable state

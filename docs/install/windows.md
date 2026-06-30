@@ -98,9 +98,9 @@ take. Re-running the `.msi` install (Repair) typically fixes it.
 
 Settings → Apps → Skattr → Uninstall.
 
-User data under `%APPDATA%\myggiz\skattr` is **not** removed by
+User data under `%LOCALAPPDATA%\skattr` is **not** removed by
 uninstall by design — re-installing preserves your identity. To
-fully wipe, delete `%APPDATA%\myggiz\skattr` manually after
+fully wipe, delete `%LOCALAPPDATA%\skattr` manually after
 uninstall.
 
 ## Troubleshooting
@@ -108,7 +108,7 @@ uninstall.
 - **SmartScreen reappears every download.** Expected for unsigned
   bundles; Phase 5 Authenticode signing will silence it.
 - **Daemon won't start; UI hangs at "starting".** Check
-  `%APPDATA%\myggiz\skattr\ipc.endpoint` exists. If yes, delete it
+  `%TEMP%\skattr\ipc.endpoint` exists. If yes, delete it
   and relaunch — a stale entry from a prior crash can't be reused
   cross-process.
 - **"This app can't run on your PC".** You downloaded the x64
