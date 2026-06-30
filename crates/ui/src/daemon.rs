@@ -83,8 +83,10 @@ pub async fn start_in_process_cmd(state: tauri::State<'_, AppState>) -> Result<R
         Err(_) => Config::defaults().map_err(|e| format!("config: {e}"))?,
     };
     config.data_dir = data_dir.clone();
-    // Pin IPC socket to the well-known path so the CLI keeps working.
-    config.ipc_socket = Some(data_dir.join(skattr_core::daemon::ipc::ENDPOINT_FILENAME));
+    // IPC endpoint lives in the runtime dir (shared resolver), not the data dir.
+    // Leaving ipc_socket = None makes run_with_transport call
+    // Config::ipc_socket_or_default() -> paths::default_ipc_endpoint().
+    config.ipc_socket = None;
 
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<Ready>();
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();

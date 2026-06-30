@@ -187,11 +187,7 @@ enum Command {
     },
 }
 
-/// Resolve the IPC endpoint path with precedence flag > env > default.
-///
-/// On Unix the path is the AF_UNIX socket file; on Windows it is the
-/// daemon's discovery file (containing the named-pipe name).
-#[cfg(unix)]
+/// Resolve the IPC endpoint path with precedence flag > env > shared default.
 fn resolve_socket_path(flag: Option<&std::path::Path>) -> PathBuf {
     if let Some(p) = flag {
         return p.to_path_buf();
@@ -199,28 +195,8 @@ fn resolve_socket_path(flag: Option<&std::path::Path>) -> PathBuf {
     if let Some(env) = std::env::var_os("SKATTR_SOCKET") {
         return PathBuf::from(env);
     }
-    let base = std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("TMPDIR").map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from("/tmp"));
-    base.join("skattr")
-        .join(skattr_core::daemon::ipc::ENDPOINT_FILENAME)
-}
-
-#[cfg(windows)]
-fn resolve_socket_path(flag: Option<&std::path::Path>) -> PathBuf {
-    if let Some(p) = flag {
-        return p.to_path_buf();
-    }
-    if let Some(env) = std::env::var_os("SKATTR_SOCKET") {
-        return PathBuf::from(env);
-    }
-    directories::ProjectDirs::from("net", "myggiz", "skattr")
-        .map(|p| {
-            p.data_dir()
-                .join(skattr_core::daemon::ipc::ENDPOINT_FILENAME)
-        })
-        .unwrap_or_else(|| PathBuf::from(skattr_core::daemon::ipc::ENDPOINT_FILENAME))
+    skattr_core::daemon::paths::default_ipc_endpoint()
+        .unwrap_or_else(|_| PathBuf::from(skattr_core::daemon::ipc::ENDPOINT_FILENAME))
 }
 
 /// Connect or print a helpful error and exit with code 3. Returns a
@@ -406,7 +382,7 @@ fn effective_data_dir(override_dir: Option<&std::path::Path>) -> Result<PathBuf>
     if let Some(d) = override_dir {
         return Ok(d.to_path_buf());
     }
-    Ok(Config::defaults()?.data_dir)
+    Ok(skattr_core::daemon::paths::data_dir()?)
 }
 
 async fn init(data_dir_override: Option<&std::path::Path>) -> Result<()> {

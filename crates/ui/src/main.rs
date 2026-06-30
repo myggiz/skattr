@@ -131,25 +131,6 @@ fn set_close_to_tray(state: tauri::State<'_, CloseToTraySentinel>, enabled: bool
     state.0.store(enabled, Ordering::SeqCst);
 }
 
-/// The consolidated data dir (`~/.local/share/skattr`), computed from
-/// XDG_DATA_HOME / HOME so it is stable regardless of the Tauri app identifier.
-///
-/// With identifier `net.myggiz.skattr` Tauri's `app_data_dir()` would return
-/// `~/.local/share/net.myggiz.skattr` — stranding any existing identity data.
-/// Daemon-sensitive files (vault, DB, Arti state) always live under the
-/// env-derived `~/.local/share/skattr`; Tauri's identifier path is used only
-/// for webview caches and other Tauri-managed state.
-fn consolidated_data_dir() -> std::path::PathBuf {
-    let data_home = std::env::var_os("XDG_DATA_HOME")
-        .map(std::path::PathBuf::from)
-        .filter(|p| !p.as_os_str().is_empty())
-        .or_else(|| {
-            std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/share"))
-        })
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-    data_home.join("skattr")
-}
-
 /// One-time migration from the pre-consolidation split layout into
 /// `new_data_dir`: the old daemon data (`~/.local/share/net.myggiz.skattr/skattr`)
 /// and the old config (`~/.config/skattr/config.toml`) are moved in. No-op once
@@ -219,12 +200,18 @@ fn main() {
     // tracing layer and the daemon share the same ring buffer allocation.
     let log_sink = LogSink::new();
 
-    // The consolidated data dir (~/.local/share/skattr). Computed here from the
-    // environment because tracing is set up before the Tauri app handle exists.
-    // Deliberately env-based rather than using app_data_dir() so the path is
-    // identifier-independent (identifier "net.myggiz.skattr" would give a
-    // different XDG path and strand existing data).
-    let data_dir = consolidated_data_dir();
+    // The canonical data dir (~/.local/share/skattr on Linux/macOS,
+    // %LOCALAPPDATA%\skattr on Windows). Resolved via the shared path
+    // resolver so it is stable regardless of the Tauri app identifier
+    // (identifier "net.myggiz.skattr" would give a different XDG path
+    // and strand existing data).
+    let data_dir = match skattr_core::daemon::paths::data_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("fatal: cannot resolve data dir: {e}");
+            std::process::exit(1);
+        }
+    };
 
     // Optional on-disk log (default ON during pre-1.0 field-testing): writes
     // <data_dir>/skattr.log so problems can be diagnosed from a shared file —
@@ -314,12 +301,10 @@ fn main() {
             attachments::reveal_in_folder,
         ])
         .setup(|app| {
-            // Daemon-sensitive data always lives under the env-derived
-            // ~/.local/share/skattr regardless of the Tauri app identifier.
-            // Tauri's app_data_dir() would give ~/.local/share/net.myggiz.skattr
-            // with identifier "net.myggiz.skattr" and strand existing identity
-            // data, so we compute the path ourselves.
-            let data_dir = consolidated_data_dir();
+            // The canonical data dir — shared resolver keeps this in sync with
+            // the daemon and the CLI regardless of the Tauri app identifier.
+            let data_dir = skattr_core::daemon::paths::data_dir()
+                .map_err(|e| format!("resolve data dir: {e}"))?;
             std::fs::create_dir_all(&data_dir)
                 .map_err(|e| format!("create data dir: {e}"))?;
             #[cfg(unix)]
