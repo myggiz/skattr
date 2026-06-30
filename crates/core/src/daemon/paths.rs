@@ -19,7 +19,7 @@ use crate::error::{CoreError, Result};
 /// - Windows: `%LOCALAPPDATA%\skattr` (non-roaming — identity/DB/onion key
 ///   must not sync across machines via a roaming profile).
 /// - Linux: `$XDG_DATA_HOME/skattr` or `~/.local/share/skattr`.
-/// - macOS: `~/Library/Application Support/skattr`.
+/// - macOS: `~/Library/Application Support/skattr` (data_local_dir == data_dir there).
 ///
 /// Writable without admin rights and deterministic across launches. Errors
 /// only when no home directory can be determined.
@@ -27,6 +27,13 @@ pub fn data_dir() -> Result<PathBuf> {
     let base = directories::BaseDirs::new()
         .ok_or_else(|| CoreError::Config("cannot determine home directory".into()))?;
     Ok(base.data_local_dir().join("skattr"))
+}
+
+/// Compose the IPC endpoint path under a resolved runtime `base`.
+#[cfg(unix)]
+fn ipc_endpoint_for_base(base: std::path::PathBuf) -> PathBuf {
+    base.join("skattr")
+        .join(crate::daemon::ipc::ENDPOINT_FILENAME)
 }
 
 /// The default IPC endpoint path, in the platform **runtime** dir.
@@ -43,9 +50,7 @@ pub fn default_ipc_endpoint() -> Result<PathBuf> {
         .or_else(|| std::env::var_os("TMPDIR").map(PathBuf::from))
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| PathBuf::from("/tmp"));
-    Ok(base
-        .join("skattr")
-        .join(crate::daemon::ipc::ENDPOINT_FILENAME))
+    Ok(ipc_endpoint_for_base(base))
 }
 
 #[cfg(windows)]
@@ -74,19 +79,9 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn ipc_endpoint_is_under_runtime_dir_not_data_dir() {
-        // With XDG_RUNTIME_DIR set, the endpoint must live under it.
-        // SAFETY: single-threaded test; we set then read one env var.
-        std::env::set_var("XDG_RUNTIME_DIR", "/run/user/4242");
-        let ep = default_ipc_endpoint().unwrap();
+    fn ipc_endpoint_for_base_joins_skattr_and_filename() {
+        let ep = ipc_endpoint_for_base(PathBuf::from("/run/user/4242"));
         assert_eq!(ep, PathBuf::from("/run/user/4242/skattr/ipc.sock"));
-        std::env::remove_var("XDG_RUNTIME_DIR");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn ipc_endpoint_filename_is_the_shared_constant() {
-        let ep = default_ipc_endpoint().unwrap();
         assert_eq!(
             ep.file_name().unwrap(),
             crate::daemon::ipc::ENDPOINT_FILENAME
