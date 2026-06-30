@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Myggiz AB
 
-#![cfg_attr(test, allow(clippy::unwrap_used))]
+#![cfg_attr(test, allow(clippy::unwrap_used, unsafe_code))]
 
 //! One-time migration of an existing identity into the canonical data dir.
 //!
@@ -108,7 +108,11 @@ fn move_dir_contents(from: &Path, to: &Path) -> Result<(), MigrateError> {
         dir: from.to_path_buf(),
         source: e,
     })?;
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = entry.map_err(|e| MigrateError::ReadDir {
+            dir: from.to_path_buf(),
+            source: e,
+        })?;
         let name = entry.file_name();
         let dst = to.join(&name);
         let src = entry.path();
@@ -261,5 +265,48 @@ mod tests {
             !canonical.path().join(VAULT).exists(),
             "no vault must appear from nowhere"
         );
+    }
+
+    /// A move failure (canonical not writable) must surface as `MigrateError::Move`,
+    /// not be silently swallowed. The legacy vault must still be present.
+    #[cfg(unix)]
+    #[test]
+    fn move_failure_is_fail_loud() {
+        // SAFETY: getuid is always safe.
+        if unsafe { libc::getuid() } == 0 {
+            return; // root bypasses 0500 perms; injection wouldn't fire.
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let legacy = root.path().join("legacy");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("identity.vault"), b"vault").unwrap();
+        let canonical = root.path().join("canonical");
+        std::fs::create_dir_all(&canonical).unwrap();
+        // Make canonical read+execute only: rename INTO it and copy INTO it both fail.
+        std::fs::set_permissions(&canonical, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let err = migrate_from_candidates(&canonical, std::slice::from_ref(&legacy)).unwrap_err();
+        assert!(
+            matches!(err, MigrateError::Move { .. }),
+            "expected Move error, got {err:?}"
+        );
+        // Restore perms so tempdir cleanup can remove it.
+        std::fs::set_permissions(&canonical, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // The legacy vault must still be present (move did not silently succeed).
+        assert!(legacy.join("identity.vault").exists());
+    }
+
+    /// `copy_recursive` faithfully replicates a nested directory tree.
+    #[test]
+    fn copy_recursive_replicates_nested_tree() {
+        let root = tempfile::tempdir().unwrap();
+        let src = root.path().join("src");
+        std::fs::create_dir_all(src.join("a/b")).unwrap();
+        std::fs::write(src.join("a/b/file.txt"), b"hello").unwrap();
+        std::fs::write(src.join("top.txt"), b"top").unwrap();
+        let dst = root.path().join("dst");
+        copy_recursive(&src, &dst).unwrap();
+        assert_eq!(std::fs::read(dst.join("a/b/file.txt")).unwrap(), b"hello");
+        assert_eq!(std::fs::read(dst.join("top.txt")).unwrap(), b"top");
     }
 }
