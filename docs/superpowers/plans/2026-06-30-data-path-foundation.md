@@ -534,7 +534,7 @@ async fn second_daemon_on_locked_data_dir_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     // Hold the lock as if a daemon were already running.
     let _held = crate::daemon::lock::acquire(dir.path()).expect("first lock");
-    // The startup guard run_with_transport uses must surface AlreadyRunning.
+    // The startup guard run_with_sink uses must surface AlreadyRunning.
     let err = crate::daemon::lock::acquire(dir.path()).unwrap_err();
     assert!(matches!(err, crate::daemon::lock::LockError::AlreadyRunning));
 }
@@ -995,4 +995,9 @@ git commit -m "docs+chore: lock data-path foundation; grep guardrail; canonical-
 - **Runtime socket parent dir — already handled, no change.** Both `Server::bind` arms `create_dir_all` the endpoint's parent before binding: unix `ipc/server/unix.rs:33-34` (+chmod 0700), windows `ipc/server/windows.rs:158-159`. So moving the endpoint to `$XDG_RUNTIME_DIR/skattr/` (or `%TEMP%\skattr\`) binds cleanly even when the `skattr/` subdir doesn't exist yet.
 - **Stale `config.toml` `data_dir` — closed in Task 4.** `Config` serializes `data_dir` (no `#[serde(skip)]`; `save_to_disk` at `config.rs:333` writes it), but the authoritative paths use the `data_dir` *parameter* of `run_with_sink`, not `config.data_dir`. The UI overwrites `config.data_dir` post-load (`main.rs:352`, `daemon.rs:85`) and the CLI daemon uses `Config::defaults()` (resolver) without loading the migrated file. Task 4 additionally normalises `config.data_dir = data_dir` at the top of `run_with_sink` so config-derived paths (downloads, log) also can't be re-pointed by a migrated file.
 - **Headless workflow is `skattr daemon` first, then commands — intended.** Plain CLI commands (`send`/`list`/…) connect-or-error (exit code 3 with "Start it with: skattr daemon"); they do **not** auto-spawn a daemon. Correct for a systemd-managed box and avoids a connect-or-spawn race. Not a gap.
-- **Out of scope (do not add):** tray menu, default-quit, relocation pointer file, panic-delete, tmpfs/encrypted-volume support, stale-lock auto-reclaim (the OS lock makes the last one unnecessary by construction), CLI auto-spawn of a daemon.
+- **M-1 — migration runs in the frontends *before* the core daemon lock (accepted tradeoff, not a defect).** CLI/UI call `migrate_legacy_into` before `run_with_sink` acquires `<data_dir>/daemon.lock`, so two simultaneously-started processes could both enter migration in the narrow pre-lock window. We **deliberately decline** a lock-around-migration because the worst case is already bounded to a non-corrupting outcome by the migration's design:
+  - **Copy-before-remove ordering** — migration copies the legacy set into the canonical dir and verifies, then removes the legacy source; it never moves/renames or removes-before-verify, so state never exists in neither location.
+  - **Idempotent** — if `canonical/identity.vault` exists, migration is a no-op; a second process arriving after the first completed finds nothing to do.
+  - **Worst case under concurrency** is therefore a *one-time spurious abort*: the losing process hits a transient mid-copy conflict and exits, then retries cleanly because the now-completed migration is idempotent. No partial state, no corruption, no data loss — "one process exits and is restarted," not "the data dir is damaged."
+  - The daemon lock already serializes daemons past startup; this race is only the pre-lock window, and copy-before-remove + idempotency make it non-destructive. A lock around migration would add heavyweight serialization to prevent a self-healing, non-corrupting abort — cost without matching risk. (CodeRabbit PR #25 raised this; declined with this reasoning.)
+- **Out of scope (do not add):** tray menu, default-quit, relocation pointer file, panic-delete, tmpfs/encrypted-volume support, stale-lock auto-reclaim (the OS lock makes the last one unnecessary by construction), CLI auto-spawn of a daemon, lock-around-migration (see M-1).
