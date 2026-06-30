@@ -21,6 +21,7 @@ pub(crate) mod handle;
 pub mod hex;
 pub(crate) mod inbound;
 pub mod ipc;
+pub(crate) mod lock;
 pub mod logs;
 pub mod paths;
 pub(crate) mod retention;
