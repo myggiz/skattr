@@ -1,0 +1,95 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Myggiz AB
+
+//! The single source of truth for on-disk path resolution.
+//!
+//! Both frontends (UI and CLI) resolve the data directory and the IPC
+//! endpoint **only** through these functions. The canonical data dir is the
+//! platform *local* (non-roaming) data dir joined with the literal `skattr`
+//! — deliberately identifier-independent (no reverse-DNS, no `ProjectDirs`),
+//! so the path is identical regardless of the Tauri bundle id. The IPC
+//! endpoint lives in the platform runtime dir, never under the data dir.
+
+use std::path::PathBuf;
+
+use crate::error::{CoreError, Result};
+
+/// Canonical per-user data directory: `<local-data>/skattr`.
+///
+/// - Windows: `%LOCALAPPDATA%\skattr` (non-roaming — identity/DB/onion key
+///   must not sync across machines via a roaming profile).
+/// - Linux: `$XDG_DATA_HOME/skattr` or `~/.local/share/skattr`.
+/// - macOS: `~/Library/Application Support/skattr`.
+///
+/// Writable without admin rights and deterministic across launches. Errors
+/// only when no home directory can be determined.
+pub fn data_dir() -> Result<PathBuf> {
+    let base = directories::BaseDirs::new()
+        .ok_or_else(|| CoreError::Config("cannot determine home directory".into()))?;
+    Ok(base.data_local_dir().join("skattr"))
+}
+
+/// The default IPC endpoint path, in the platform **runtime** dir.
+///
+/// - Unix (Linux/macOS): `$XDG_RUNTIME_DIR/skattr/ipc.sock`, falling back to
+///   `$TMPDIR/skattr/ipc.sock`, then `/tmp/skattr/ipc.sock`.
+/// - Windows: `%TEMP%\skattr\ipc.endpoint` — the named-pipe *discovery* file
+///   (the pipe itself is a kernel object, not a file).
+#[cfg(unix)]
+pub fn default_ipc_endpoint() -> Result<PathBuf> {
+    let base = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .or_else(|| std::env::var_os("TMPDIR").map(PathBuf::from))
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| PathBuf::from("/tmp"));
+    Ok(base
+        .join("skattr")
+        .join(crate::daemon::ipc::ENDPOINT_FILENAME))
+}
+
+#[cfg(windows)]
+pub fn default_ipc_endpoint() -> Result<PathBuf> {
+    Ok(std::env::temp_dir()
+        .join("skattr")
+        .join(crate::daemon::ipc::ENDPOINT_FILENAME))
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn data_dir_ends_in_bare_skattr_no_identifier() {
+        let p = data_dir().expect("home should resolve in test env");
+        assert_eq!(p.file_name().unwrap(), "skattr");
+        // Identifier-independent: the reverse-DNS bundle id must not appear.
+        assert!(
+            !p.to_string_lossy().contains("net.myggiz"),
+            "data dir must not contain the bundle identifier: {}",
+            p.display()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ipc_endpoint_is_under_runtime_dir_not_data_dir() {
+        // With XDG_RUNTIME_DIR set, the endpoint must live under it.
+        // SAFETY: single-threaded test; we set then read one env var.
+        std::env::set_var("XDG_RUNTIME_DIR", "/run/user/4242");
+        let ep = default_ipc_endpoint().unwrap();
+        assert_eq!(ep, PathBuf::from("/run/user/4242/skattr/ipc.sock"));
+        std::env::remove_var("XDG_RUNTIME_DIR");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ipc_endpoint_filename_is_the_shared_constant() {
+        let ep = default_ipc_endpoint().unwrap();
+        assert_eq!(
+            ep.file_name().unwrap(),
+            crate::daemon::ipc::ENDPOINT_FILENAME
+        );
+    }
+}

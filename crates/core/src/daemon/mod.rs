@@ -22,6 +22,7 @@ pub mod hex;
 pub(crate) mod inbound;
 pub mod ipc;
 pub mod logs;
+pub mod paths;
 pub(crate) mod retention;
 pub mod smoke;
 pub mod state;
