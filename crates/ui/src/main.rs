@@ -131,80 +131,6 @@ fn set_close_to_tray(state: tauri::State<'_, CloseToTraySentinel>, enabled: bool
     state.0.store(enabled, Ordering::SeqCst);
 }
 
-/// The consolidated data dir (`~/.local/share/skattr`), computed from
-/// XDG_DATA_HOME / HOME so it is stable regardless of the Tauri app identifier.
-///
-/// With identifier `net.myggiz.skattr` Tauri's `app_data_dir()` would return
-/// `~/.local/share/net.myggiz.skattr` — stranding any existing identity data.
-/// Daemon-sensitive files (vault, DB, Arti state) always live under the
-/// env-derived `~/.local/share/skattr`; Tauri's identifier path is used only
-/// for webview caches and other Tauri-managed state.
-fn consolidated_data_dir() -> std::path::PathBuf {
-    let data_home = std::env::var_os("XDG_DATA_HOME")
-        .map(std::path::PathBuf::from)
-        .filter(|p| !p.as_os_str().is_empty())
-        .or_else(|| {
-            std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/share"))
-        })
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-    data_home.join("skattr")
-}
-
-/// One-time migration from the pre-consolidation split layout into
-/// `new_data_dir`: the old daemon data (`~/.local/share/net.myggiz.skattr/skattr`)
-/// and the old config (`~/.config/skattr/config.toml`) are moved in. No-op once
-/// the new dir already holds an identity vault, or if there is nothing to move.
-///
-/// Returns `Err` if a file from the old data directory cannot be renamed (data
-/// loss risk), so the caller can abort startup rather than silently continuing
-/// with an incomplete identity.  Config migration failures are best-effort only
-/// (a missing config is merely cosmetic).
-fn migrate_legacy_data(new_data_dir: &std::path::Path) -> Result<(), String> {
-    if new_data_dir.join("identity.vault").exists() {
-        return Ok(());
-    }
-    let home = match std::env::var_os("HOME") {
-        Some(h) => std::path::PathBuf::from(h),
-        None => return Ok(()),
-    };
-    let data_home = std::env::var_os("XDG_DATA_HOME")
-        .map(std::path::PathBuf::from)
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| home.join(".local/share"));
-    let old_data = data_home.join("net.myggiz.skattr").join("skattr");
-    if old_data.join("identity.vault").exists() {
-        let entries =
-            std::fs::read_dir(&old_data).map_err(|e| format!("migrate: read legacy dir: {e}"))?;
-        for entry in entries.flatten() {
-            let dst = new_data_dir.join(entry.file_name());
-            std::fs::rename(entry.path(), &dst).map_err(|e| {
-                format!(
-                    "migrate: rename {}: {e}",
-                    entry.file_name().to_string_lossy()
-                )
-            })?;
-        }
-        tracing::info!(
-            from = %old_data.display(),
-            to = %new_data_dir.display(),
-            "migrated legacy data into consolidated dir"
-        );
-    }
-    let config_home = std::env::var_os("XDG_CONFIG_HOME")
-        .map(std::path::PathBuf::from)
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| home.join(".config"));
-    let old_config = config_home.join("skattr").join("config.toml");
-    let new_config = new_data_dir.join("config.toml");
-    if old_config.exists() && !new_config.exists() {
-        // Config migration is best-effort: a missing config just means defaults.
-        if let Err(e) = std::fs::rename(&old_config, &new_config) {
-            tracing::warn!(error = %e, "migrate: could not move legacy config.toml (non-fatal)");
-        }
-    }
-    Ok(())
-}
-
 fn main() {
     let argv: Vec<String> = std::env::args().collect();
     if detect_smoke_test_flag(&argv) {
@@ -219,12 +145,29 @@ fn main() {
     // tracing layer and the daemon share the same ring buffer allocation.
     let log_sink = LogSink::new();
 
-    // The consolidated data dir (~/.local/share/skattr). Computed here from the
-    // environment because tracing is set up before the Tauri app handle exists.
-    // Deliberately env-based rather than using app_data_dir() so the path is
-    // identifier-independent (identifier "net.myggiz.skattr" would give a
-    // different XDG path and strand existing data).
-    let data_dir = consolidated_data_dir();
+    // The canonical data dir (~/.local/share/skattr on Linux/macOS,
+    // %LOCALAPPDATA%\skattr on Windows). Resolved via the shared path
+    // resolver so it is stable regardless of the Tauri app identifier
+    // (identifier "net.myggiz.skattr" would give a different XDG path
+    // and strand existing data).
+    let data_dir = match skattr_core::daemon::data_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("fatal: cannot resolve data dir: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    // Run the idempotent legacy migration BEFORE reading persist_logs from
+    // config: on the first migrated launch a legacy ui.persist_logs_to_disk
+    // value lives in the old location. Without this early call the setting
+    // would be invisible and skattr.log would be created against the user's
+    // preference. The setup hook below calls migrate_legacy_into a second time;
+    // idempotency makes that a no-op.
+    if let Err(e) = skattr_core::daemon::migrate_legacy_into(&data_dir) {
+        eprintln!("fatal: data migration failed: {e}");
+        std::process::exit(1);
+    }
 
     // Optional on-disk log (default ON during pre-1.0 field-testing): writes
     // <data_dir>/skattr.log so problems can be diagnosed from a shared file —
@@ -314,12 +257,10 @@ fn main() {
             attachments::reveal_in_folder,
         ])
         .setup(|app| {
-            // Daemon-sensitive data always lives under the env-derived
-            // ~/.local/share/skattr regardless of the Tauri app identifier.
-            // Tauri's app_data_dir() would give ~/.local/share/net.myggiz.skattr
-            // with identifier "net.myggiz.skattr" and strand existing identity
-            // data, so we compute the path ourselves.
-            let data_dir = consolidated_data_dir();
+            // The canonical data dir — shared resolver keeps this in sync with
+            // the daemon and the CLI regardless of the Tauri app identifier.
+            let data_dir = skattr_core::daemon::data_dir()
+                .map_err(|e| format!("resolve data dir: {e}"))?;
             std::fs::create_dir_all(&data_dir)
                 .map_err(|e| format!("create data dir: {e}"))?;
             #[cfg(unix)]
@@ -337,7 +278,8 @@ fn main() {
             // (~/.local/share/net.myggiz.skattr/skattr/ for data, ~/.config/skattr
             // for config) into the consolidated dir, so existing identities carry
             // over rather than being silently abandoned.
-            migrate_legacy_data(&data_dir).map_err(|e| format!("data migration failed: {e}"))?;
+            skattr_core::daemon::migrate_legacy_into(&data_dir)
+                .map_err(|e| format!("data migration failed: {e}"))?;
 
             let state: tauri::State<daemon::AppState> = app.state();
 

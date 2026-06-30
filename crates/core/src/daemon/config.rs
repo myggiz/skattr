@@ -125,12 +125,10 @@ impl Config {
             .map_err(|e| CoreError::Config(format!("parse {}: {e}", path.display())))
     }
 
-    /// Default config for a brand-new install — uses XDG directories.
+    /// Default config for a brand-new install — uses the shared path resolver.
     pub fn defaults() -> Result<Self> {
-        let dirs = directories::ProjectDirs::from("net", "myggiz", "skattr")
-            .ok_or_else(|| CoreError::Config("no home directory".into()))?;
         Ok(Self {
-            data_dir: dirs.data_dir().to_path_buf(),
+            data_dir: crate::daemon::paths::data_dir()?,
             ipc_socket: None,
             log_filter: default_log_filter(),
             history: HistoryConfig::default(),
@@ -163,45 +161,13 @@ impl Config {
         self.data_dir.join("downloads")
     }
 
-    /// Return the configured `ipc_socket` or a platform-appropriate default.
-    ///
-    /// Unix: `$XDG_RUNTIME_DIR/skattr/ipc.sock`, falling back to
-    /// `$TMPDIR/skattr/ipc.sock`, then `/tmp/skattr/ipc.sock`.
-    /// Windows: `%APPDATA%\myggiz\skattr\ipc.endpoint` via
-    /// `directories::ProjectDirs`.
-    #[cfg(unix)]
+    /// Return the configured `ipc_socket` or the platform default runtime
+    /// endpoint (resolved by `paths::default_ipc_endpoint`).
     pub fn ipc_socket_or_default(&self) -> Result<std::path::PathBuf> {
         if let Some(p) = &self.ipc_socket {
             return Ok(p.clone());
         }
-        let base = std::env::var_os("XDG_RUNTIME_DIR")
-            .map(std::path::PathBuf::from)
-            .or_else(|| std::env::var_os("TMPDIR").map(std::path::PathBuf::from))
-            .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
-        Ok(base
-            .join("skattr")
-            .join(crate::daemon::ipc::ENDPOINT_FILENAME))
-    }
-
-    /// Return the configured `ipc_socket` or a platform-appropriate default.
-    ///
-    /// Unix: `$XDG_RUNTIME_DIR/skattr/ipc.sock`, falling back to
-    /// `$TMPDIR/skattr/ipc.sock`, then `/tmp/skattr/ipc.sock`.
-    /// Windows: `%APPDATA%\myggiz\skattr\ipc.endpoint` via
-    /// `directories::ProjectDirs`.
-    #[cfg(windows)]
-    pub fn ipc_socket_or_default(&self) -> Result<std::path::PathBuf> {
-        if let Some(p) = &self.ipc_socket {
-            return Ok(p.clone());
-        }
-        let dir = directories::ProjectDirs::from("net", "myggiz", "skattr")
-            .map(|p| p.data_dir().to_path_buf())
-            .ok_or_else(|| {
-                CoreError::Io(std::io::Error::other(
-                    "directories::ProjectDirs::from failed (no APPDATA?)",
-                ))
-            })?;
-        Ok(dir.join(crate::daemon::ipc::ENDPOINT_FILENAME))
+        crate::daemon::paths::default_ipc_endpoint()
     }
 
     /// Load a config with the standard precedence:
@@ -240,7 +206,10 @@ impl Config {
                         break;
                     }
                 }
-                found.unwrap_or_else(|| Self::defaults().unwrap_or_else(|_| Self::fallback()))
+                match found {
+                    Some(c) => c,
+                    None => Self::defaults()?,
+                }
             }
         };
 

@@ -12,7 +12,7 @@ use crate::daemon::commands::{Command, CommandResult};
 use crate::daemon::config::Config;
 use crate::daemon::events::Event;
 use crate::daemon::logs::LogSink;
-use crate::error::Result;
+use crate::error::{CoreError, Result};
 use crate::identity::derive::derive_storage_seed;
 use crate::identity::vault::Vault;
 use crate::transport::tor::{TorConfig, TorRuntime};
@@ -113,6 +113,43 @@ impl Daemon {
         use crate::storage::Pool;
 
         std::fs::create_dir_all(data_dir)?;
+
+        // Enforce 0700 on the data dir before trusting it: the Arti config
+        // below sets trust_dir_permissions=true (skips the ancestor check) on
+        // the assumption the data dir is private. create_dir_all() leaves mode
+        // to umask (often 0755), so a fresh CLI data dir could be world-readable.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(data_dir, std::fs::Permissions::from_mode(0o700))
+                .map_err(CoreError::Io)?;
+        }
+
+        // Single-daemon guard: hold an OS advisory lock on <data_dir>/daemon.lock
+        // for the whole run. A second daemon on the same data dir fails fast
+        // HERE — before the Pool is opened (`:162`) or Arti touches `arti/`/`hss`
+        // (`:213`) — rather than corrupting shared SQLite / Tor state or
+        // double-publishing the onion. The handle lives in `_daemon_lock` until
+        // this function returns; the OS also releases it on process death
+        // (incl. SIGKILL), so a hard kill leaves a cleanly re-lockable state
+        // with no stale-lock reclaim needed.
+        let _daemon_lock = match crate::daemon::lock::acquire(data_dir) {
+            Ok(g) => g,
+            Err(crate::daemon::lock::LockError::AlreadyRunning) => {
+                return Err(crate::error::CoreError::DaemonAlreadyRunning);
+            }
+            Err(crate::daemon::lock::LockError::Io(e)) => {
+                return Err(crate::error::CoreError::Io(e));
+            }
+        };
+
+        // Belt-and-suspenders: the authoritative on-disk paths (vault/Pool/
+        // arti/hs) already use the `data_dir` parameter, but a migrated
+        // config.toml could carry a stale absolute `data_dir`. Force the
+        // in-memory config to agree so config-derived paths (downloads,
+        // <data_dir>/skattr.log) can't be re-pointed at the old location.
+        let mut config = config;
+        config.data_dir = data_dir.to_path_buf();
 
         // Step 1: unlock vault → identity → derive storage seed.
         // `derive_storage_seed` consumes the identity key, so we open
@@ -819,6 +856,19 @@ mod tests {
     use super::*;
     use tokio::sync::oneshot;
     use zeroize::Zeroizing;
+
+    #[tokio::test]
+    async fn second_daemon_on_locked_data_dir_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        // Hold the lock as if a daemon were already running.
+        let _held = crate::daemon::lock::acquire(dir.path()).expect("first lock");
+        // The startup guard run_with_transport uses must surface AlreadyRunning.
+        let err = crate::daemon::lock::acquire(dir.path()).unwrap_err();
+        assert!(matches!(
+            err,
+            crate::daemon::lock::LockError::AlreadyRunning
+        ));
+    }
 
     #[test]
     fn wipe_open_cache_removes_decrypted_plaintext() {

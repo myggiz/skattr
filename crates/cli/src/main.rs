@@ -187,40 +187,15 @@ enum Command {
     },
 }
 
-/// Resolve the IPC endpoint path with precedence flag > env > default.
-///
-/// On Unix the path is the AF_UNIX socket file; on Windows it is the
-/// daemon's discovery file (containing the named-pipe name).
-#[cfg(unix)]
-fn resolve_socket_path(flag: Option<&std::path::Path>) -> PathBuf {
+/// Resolve the IPC endpoint path with precedence flag > env > shared default.
+fn resolve_socket_path(flag: Option<&std::path::Path>) -> Result<PathBuf> {
     if let Some(p) = flag {
-        return p.to_path_buf();
+        return Ok(p.to_path_buf());
     }
     if let Some(env) = std::env::var_os("SKATTR_SOCKET") {
-        return PathBuf::from(env);
+        return Ok(PathBuf::from(env));
     }
-    let base = std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("TMPDIR").map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from("/tmp"));
-    base.join("skattr")
-        .join(skattr_core::daemon::ipc::ENDPOINT_FILENAME)
-}
-
-#[cfg(windows)]
-fn resolve_socket_path(flag: Option<&std::path::Path>) -> PathBuf {
-    if let Some(p) = flag {
-        return p.to_path_buf();
-    }
-    if let Some(env) = std::env::var_os("SKATTR_SOCKET") {
-        return PathBuf::from(env);
-    }
-    directories::ProjectDirs::from("net", "myggiz", "skattr")
-        .map(|p| {
-            p.data_dir()
-                .join(skattr_core::daemon::ipc::ENDPOINT_FILENAME)
-        })
-        .unwrap_or_else(|| PathBuf::from(skattr_core::daemon::ipc::ENDPOINT_FILENAME))
+    Ok(skattr_core::daemon::default_ipc_endpoint()?)
 }
 
 /// Connect or print a helpful error and exit with code 3. Returns a
@@ -228,7 +203,7 @@ fn resolve_socket_path(flag: Option<&std::path::Path>) -> PathBuf {
 async fn connect_or_exit(
     sock_flag: Option<&std::path::Path>,
 ) -> Result<skattr_core::daemon::IpcClient<skattr_core::daemon::ipc::IpcStream>> {
-    let path = resolve_socket_path(sock_flag);
+    let path = resolve_socket_path(sock_flag)?;
     match skattr_core::daemon::IpcClient::connect(&path).await {
         Ok(c) => Ok(c),
         Err(skattr_core::daemon::IpcClientError::DaemonNotRunning) => {
@@ -406,12 +381,17 @@ fn effective_data_dir(override_dir: Option<&std::path::Path>) -> Result<PathBuf>
     if let Some(d) = override_dir {
         return Ok(d.to_path_buf());
     }
-    Ok(Config::defaults()?.data_dir)
+    Ok(skattr_core::daemon::data_dir()?)
 }
 
 async fn init(data_dir_override: Option<&std::path::Path>) -> Result<()> {
     let data_dir = effective_data_dir(data_dir_override)?;
     std::fs::create_dir_all(&data_dir)?;
+    // Carry any pre-existing identity from a legacy location into the
+    // canonical data dir before the vault guard (fail-loud: abort rather
+    // than silently minting a fresh identity and orphaning the real one).
+    skattr_core::daemon::migrate_legacy_into(&data_dir)
+        .map_err(|e| anyhow::anyhow!("data migration failed: {e}"))?;
     let vault_path = data_dir.join("identity.vault");
 
     if vault_path.exists() {
@@ -500,6 +480,11 @@ async fn restore(seed_phrase: &str, data_dir_override: Option<&std::path::Path>)
 
     let data_dir = effective_data_dir(data_dir_override)?;
     std::fs::create_dir_all(&data_dir)?;
+    // Carry any pre-existing identity from a legacy location into the
+    // canonical data dir before the vault guard (fail-loud: abort rather
+    // than silently overwriting migrated history with a seed-restore).
+    skattr_core::daemon::migrate_legacy_into(&data_dir)
+        .map_err(|e| anyhow::anyhow!("data migration failed: {e}"))?;
     let vault_path = data_dir.join("identity.vault");
 
     if vault_path.exists() {
@@ -658,7 +643,13 @@ async fn daemon(
     if let Some(override_dir) = data_dir_override {
         config.data_dir = override_dir.to_path_buf();
     }
-    std::fs::create_dir_all(&config.data_dir)?;
+    std::fs::create_dir_all(&config.data_dir)
+        .map_err(|e| anyhow::anyhow!("create data dir {}: {e}", config.data_dir.display()))?;
+    // Carry any pre-existing identity from a legacy location into the
+    // canonical data dir before the daemon opens it (fail-loud: abort rather
+    // than silently onboarding anew).
+    skattr_core::daemon::migrate_legacy_into(&config.data_dir)
+        .map_err(|e| anyhow::anyhow!("data migration failed: {e}"))?;
     let vault_path = config.data_dir.join("identity.vault");
 
     if !vault_path.exists() {
@@ -1601,7 +1592,7 @@ mod tests {
         let flag = tmp.path().join("flag.sock");
         let env = tmp.path().join("env.sock");
         std::env::set_var("SKATTR_SOCKET", &env);
-        let got = resolve_socket_path(Some(&flag));
+        let got = resolve_socket_path(Some(&flag)).unwrap();
         assert_eq!(got.as_path(), flag);
         std::env::remove_var("SKATTR_SOCKET");
     }
@@ -1616,7 +1607,7 @@ mod tests {
         // Prevent a stale XDG_RUNTIME_DIR from a sibling test poisoning
         // the env-before-xdg precedence check.
         std::env::remove_var("XDG_RUNTIME_DIR");
-        let got = resolve_socket_path(None);
+        let got = resolve_socket_path(None).unwrap();
         assert_eq!(got, env);
         std::env::remove_var("SKATTR_SOCKET");
     }
@@ -1627,7 +1618,7 @@ mod tests {
     fn resolve_socket_path_xdg_fallback() {
         std::env::remove_var("SKATTR_SOCKET");
         std::env::set_var("XDG_RUNTIME_DIR", "/custom/run/1000");
-        let got = resolve_socket_path(None);
+        let got = resolve_socket_path(None).unwrap();
         assert_eq!(
             got,
             std::path::PathBuf::from("/custom/run/1000/skattr")
