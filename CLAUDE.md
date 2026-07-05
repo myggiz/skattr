@@ -455,8 +455,11 @@ XChaCha20-Poly1305 vault, HKDF). The daemon is driven by `Daemon::run` →
 `skattr_core::test_exports` gated on the `test-harness` feature, but **every
 audit-phase behavior is also proven through a live `run_with_transport`
 guardrail** (the audit's defining rule). `cargo clippy -D warnings` / `cargo
-test` / `cargo fmt --check` are green across the workspace; the CI matrix runs
-`ubuntu-latest` / `macos-latest` / `windows-latest` plus a `ui` job. The
+test` / `cargo fmt --check` are green across the workspace; CI (`ci.yml`) runs
+on `ubuntu-latest` only, plus a `ui` job. Windows-only compile/lint errors are
+caught by the local Windows build loop on myggdesk before tagging; macOS is not
+built in CI (no Mac hardware). `release.yml` builds/signs on `ubuntu-latest` +
+`windows-latest` at tag time (`.deb`/AppImage/`.msi`; no `.dmg`). The
 bootstrap prompt remains authoritative for file layout, module boundaries, and
 type signatures — match it exactly.
 
@@ -592,10 +595,14 @@ cargo run -p cli -- add <link>
 cargo run -p cli -- send <contact> <text>
 ```
 
-CI runs fmt + clippy + test on `ubuntu-latest`, `macos-latest`, and
-`windows-latest`, plus a dedicated `ui` job on `ubuntu-latest` for
-the Tauri 2 + SvelteKit crate. macOS x86_64 is still deferred —
-`macos-latest` is Apple Silicon only.
+CI (`ci.yml`) runs fmt + clippy + test on `ubuntu-latest` only, plus a
+dedicated `ui` job (also `ubuntu-latest`) for the Tauri 2 + SvelteKit crate and
+a `cargo-deny` job. Windows-only compile/lint errors are caught by the local
+Windows build loop on myggdesk before a release is tagged (the ubuntu-only CI
+gap is covered by the workflow, not an extra runner). macOS is not built or
+tested anywhere — no Mac hardware — though the macOS runtime seams remain in the
+code. `release.yml` builds and signs on `ubuntu-latest` + `windows-latest` at
+tag time, shipping `.deb`/AppImage/`.msi` (no prebuilt `.dmg`).
 
 ## When extending the design
 

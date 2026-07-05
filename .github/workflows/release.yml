@@ -22,8 +22,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Phase 2.H adds windows-latest (Named Pipes + WiX .msi).
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # ubuntu-latest → .deb/.AppImage; windows-latest → WiX .msi (Phase 2.H).
+        # macOS is intentionally dropped from releases: there is no Mac hardware
+        # to build or sign on. The macOS runtime seams stay in the code (it is
+        # still buildable from source on a Mac), but no prebuilt .dmg is shipped.
+        os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
@@ -108,8 +111,6 @@ jobs:
           if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
             cp target/release/bundle/deb/*.deb stage/
             cp target/release/bundle/appimage/*.AppImage stage/
-          elif [[ "${{ matrix.os }}" == "macos-latest" ]]; then
-            cp target/release/bundle/dmg/*.dmg stage/
           else
             cp target/release/bundle/msi/*.msi stage/
           fi
@@ -129,7 +130,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - name: Download bundles
@@ -152,25 +153,6 @@ jobs:
           sudo dpkg -i bundles/*.deb || sudo apt-get -f install -y
           which skattr-ui
 
-      - name: Install bundle (macOS .dmg)
-        if: matrix.os == 'macos-latest'
-        shell: bash
-        run: |
-          set -euo pipefail
-          DMG=$(ls bundles/*.dmg | head -1)
-          # The .dmg embeds a GPLv3 software license agreement (bundle.licenseFile),
-          # so hdiutil blocks on the SLA prompt in non-interactive CI and reports
-          # "attach canceled". Pipe `yes` to accept it. pipefail is disabled for
-          # this one line because `yes` exits with SIGPIPE once hdiutil closes its
-          # stdin; with pipefail off the pipe's status is hdiutil's, so `set -e`
-          # still catches a genuine attach failure.
-          set +o pipefail
-          yes | hdiutil attach "$DMG" -nobrowse -mountpoint /Volumes/skattr-mount
-          set -o pipefail
-          cp -R /Volumes/skattr-mount/Skattr.app /tmp/Skattr.app
-          hdiutil detach /Volumes/skattr-mount
-          ls /tmp/Skattr.app/Contents/MacOS/
-
       - name: Run smoke (Linux .deb)
         if: matrix.os == 'ubuntu-latest'
         shell: bash
@@ -181,17 +163,6 @@ jobs:
               --data-dir "$RUNNER_TEMP/smoke" \
               --timeout-secs 240
           echo "smoke OK on ubuntu-latest" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Run smoke (macOS)
-        if: matrix.os == 'macos-latest'
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/smoke"
-          /tmp/Skattr.app/Contents/MacOS/skattr-ui --smoke-test \
-              --data-dir "$RUNNER_TEMP/smoke" \
-              --timeout-secs 240
-          echo "smoke OK on macos-latest" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Install bundle (Windows .msi)
         if: matrix.os == 'windows-latest'
@@ -268,7 +239,7 @@ jobs:
         working-directory: dist
         run: |
           set -euo pipefail
-          sha256sum *.deb *.AppImage *.dmg *.msi | sort > SHA256SUMS
+          sha256sum *.deb *.AppImage *.msi | sort > SHA256SUMS
           cat SHA256SUMS
 
       - name: Install minisign
@@ -350,7 +321,6 @@ jobs:
           files: |
             dist/*.deb
             dist/*.AppImage
-            dist/*.dmg
             dist/*.msi
             dist/SHA256SUMS
             dist/SHA256SUMS.minisig

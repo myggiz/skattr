@@ -18,6 +18,15 @@ env:
   RUSTFLAGS: -D warnings
   RUST_BACKTRACE: 1
 
+# Platform coverage (intentional):
+#   - CI runs ubuntu-latest only. Windows-only compile/lint errors (e.g. a
+#     `#[cfg(windows)]` item needing its own doc comment) are caught by the
+#     local Windows build loop on myggdesk before a release is tagged, so the
+#     ubuntu-only CI gap is covered by the workflow, not by an extra CI runner.
+#   - macOS is not built or tested anywhere (no Mac hardware). The macOS runtime
+#     seams remain in the code (buildable from source), but no .dmg is shipped.
+#   - release.yml builds the signed .msi on windows-latest at tag time, so the
+#     Windows artifact is still validated in the release pipeline.
 jobs:
   check:
     name: fmt / clippy / test / build (ubuntu-latest)
