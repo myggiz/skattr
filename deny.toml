@@ -55,6 +55,22 @@ ignore = [
     "RUSTSEC-2025-0081",
     "RUSTSEC-2025-0098",
     "RUSTSEC-2025-0100",
+    # quick-xml XML-*parsing* DoS advisories (fixed in quick-xml >= 0.41).
+    # Two copies are hard-pinned below 0.41 by the Tauri 2.11.0 stack and
+    # cannot be bumped without a Tauri upgrade (`tauri = "=2.11.0"`):
+    #   - 0.39.2 via plist -> tauri-utils/tauri (requires "^0.39.2")
+    #   - 0.37.5 via tauri-winrt-notification -> notify-rust (requires "^0.37")
+    # Not reachable in our usage: both advisories require *parsing*
+    # attacker-controlled XML (a start tag with many duplicate attributes /
+    # namespace decls). Our paths only *emit* XML — plist handling is
+    # macOS-bundle build-time (and macOS is no longer built), and
+    # winrt-notification builds Windows toast XML from our own notification
+    # content, it does not parse untrusted XML. Revisit when Tauri bumps and
+    # the transitive quick-xml pins reach >= 0.41.
+    #   - RUSTSEC-2026-0194: quadratic run time on duplicate attribute names.
+    #   - RUSTSEC-2026-0195: unbounded namespace-declaration allocation (NsReader).
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
 ]
 
 [licenses]
