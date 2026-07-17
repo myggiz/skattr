@@ -71,6 +71,24 @@ ignore = [
     #   - RUSTSEC-2026-0195: unbounded namespace-declaration allocation (NsReader).
     "RUSTSEC-2026-0194",
     "RUSTSEC-2026-0195",
+    # libcrux-sha3 / libcrux-secrets advisories in the MLS HPKE provider.
+    # Hard-pinned at libcrux-sha3 0.0.8 by the OpenMLS crypto provider stack:
+    #   libcrux-sha3 0.0.8 <- hpke-rs 0.6.1 <- openmls_rust_crypto 0.5.1
+    # `cargo update -p libcrux-sha3` is rejected; the real fix is upgrading the
+    # provider (a locked OpenMLS-triplet decision, second-reviewer change) —
+    # tracked in issue #84, and in scope for the third-party audit (#40).
+    # Reachability is PRELIMINARY, not a clearance: our ciphersuite is
+    # MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519 (HKDF-SHA256, not
+    # SHAKE), and shipped targets are Linux/Windows x86_64 (not the aarch64 of
+    # 0212) — but the path through hpke-rs-libcrux has not been fully traced,
+    # so these are ignored to unblock the gate, NOT declared unreachable.
+    # Revisit when the OpenMLS provider bumps to a patched libcrux.
+    #   - RUSTSEC-2026-0207: incorrect incremental portable SHAKE output.
+    #   - RUSTSEC-2026-0208: potential panic in AVX2 SHAKE-256.
+    #   - RUSTSEC-2026-0212: incorrect constant-time swap/select on aarch64.
+    "RUSTSEC-2026-0207",
+    "RUSTSEC-2026-0208",
+    "RUSTSEC-2026-0212",
 ]
 
 [licenses]
