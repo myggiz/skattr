@@ -4,9 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [Unreleased] — targeting v0.1.2
 
-_Nothing yet._
+_In-progress patch line. The version is bumped per build for tracking; entries
+accumulate here and are stamped with a date when a build is cut._
+
+### Fixed
+
+- **The "can't-quit" trap** (#30, #31): the *close to tray* setting now
+  takes effect immediately instead of only after a restart, and the tray
+  icon's right-click menu (with **Quit**) no longer flashes away — a
+  left-click still toggles the window, but right-click leaves the menu open.
 
 ## [v0.1.1] — 2026-06-30
 

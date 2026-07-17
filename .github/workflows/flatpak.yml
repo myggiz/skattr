@@ -16,11 +16,11 @@ name: flatpak
 # Until then, this job keeps a cheap signal that the manifest hasn't been
 # grossly broken, without taxing CI with an unshippable ~GB sandbox build.
 
+# On-demand only — the weekly cron + master-push triggers are disabled to
+# conserve GitHub Actions minutes during the sub-version fix cycle. Run the
+# manifest rot-check manually (Actions tab → flatpak → "Run workflow") when
+# touching the Flatpak manifest or before a release. See CLAUDE.md.
 on:
-  push:
-    branches: [master]
-  schedule:
-    - cron: "0 6 * * 1"   # weekly, Monday 06:00 UTC — catch manifest rot
   workflow_dispatch: {}
 
 # Serialize per-ref so an overlapping push/schedule can't run two at once.

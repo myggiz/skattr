@@ -509,6 +509,14 @@ Personal/global standards live at `~/.claude/rules/standards/` (`rust.md`, `type
 - **TypeScript** (`**/*.{ts,tsx}`): `strict`; **no `any`, no `!`, no `ts-ignore`**; **branded types for IDs**, parse at the boundary; discriminated unions over optional-field soup; **`tsc --noEmit` + eslint are the done-gate**.
 - **Restraint** (everything): bias to the **smallest change that works**; **don't refactor/rename/tidy code you weren't asked about — say what you'd change and let the maintainer decide**; no speculative abstraction / single-impl interfaces / factories where a plain function does; no defensive handling for cases that can't happen (fail loudly); leave no dead code or TODO stubs; **if a rule makes the code worse here, say so and write the simpler version**; if the request is ambiguous, ask.
 
+### Build & release cadence (sub-versions) — local-first, on-demand CI
+
+To conserve GitHub Actions minutes during the sub-version fix cycle, **CI is verified locally, not by Actions on every push.**
+
+- **CI is on-demand.** `ci.yml` and `flatpak.yml` trigger on `workflow_dispatch` only (no auto PR/push runs). **The local gate is authoritative** — before calling any change done, run: `cargo fmt --all -- --check`, `cargo clippy --workspace --exclude skattr-ui --all-targets --features test-harness -- -D warnings`, `cargo test`, `cargo clippy -p skattr-ui --all-targets -- -D warnings`, and (for UI) `pnpm check` + `pnpm exec vitest run`, plus `cargo deny check`. The maintainer builds/tests the **Windows** target locally on a separate box. **CodeRabbit still reviews every PR** (it does not use Actions) — keep opening PRs.
+- **Run Actions deliberately, not by default.** Trigger a full CI run (Actions tab → CI → *Run workflow*) only when a change specifically warrants a cross-platform cross-check, or before a real release. Reserve the expensive tag-triggered `release.yml` (signed multi-platform build) for **major/blessed releases (1.0, 2.0, …)** or when explicitly requested — a local field-test build does **not** need a tag.
+- **Versioning: SemVer, patch-bump per build.** `MAJOR.MINOR.PATCH`, each component an **integer** (so `0.1.9 → 0.1.10 → 0.1.47`; there is no "`.9` wall" — you go to `1.0`/`2.0` by decision, not by running out). Bump **PATCH** for each field-test build (bugfixes), **MINOR** when a batch of features lands, **MAJOR** for a blessed/breaking milestone. A bump is a local edit to `Cargo.toml` (`workspace.package.version`) + `crates/ui/tauri.conf.json` (`version`) + `Cargo.lock` (via `cargo check`) + a `CHANGELOG.md` entry listing the issues that build closes (`#NN`). The git commit/issue links are the record; the version number is the build tracker.
+
 ## Model routing
 
 The Superpowers skills (notably `subagent-driven-development` and
