@@ -501,6 +501,14 @@ The work backlog lives in **GitHub issues** (`gh issue ...` on `myggiz/skattr`),
 - **Close the loop:** before starting a task, check for an existing issue; a PR that resolves issues references them (`Closes #NN`) so merge auto-closes them. When new work is agreed mid-session, file the issue first, then implement.
 - Don't re-file the known-limitation deferrals already catalogued in this file and in `docs/` unless promoting one to active work.
 
+### Global coding standards (also binding)
+
+Personal/global standards live at `~/.claude/rules/standards/` (`rust.md`, `typescript.md`, `restraints.md`) and are meant to auto-attach by path glob — but that mechanism doesn't always fire, so the load-bearing rules are mirrored here (they bind regardless):
+
+- **Rust** (`src/**/*.rs`): newtypes over primitives; model states as **enums, not bool flags**; **no `unwrap`/`expect` outside tests**; errors are **our types, never a vendor's**; **test-first** (the test must fail before the fix); **`clippy -D warnings` is the done-gate**. *Functional core / imperative shell:* **no I/O, clock, randomness, or env reads inside logic — take them as parameters and wire concretes up in `main`** (the review flagged several existing violations, e.g. `now_ms`/`paths`/`group.rs` RNG — fix these as we touch that code, don't retrofit wholesale).
+- **TypeScript** (`**/*.{ts,tsx}`): `strict`; **no `any`, no `!`, no `ts-ignore`**; **branded types for IDs**, parse at the boundary; discriminated unions over optional-field soup; **`tsc --noEmit` + eslint are the done-gate**.
+- **Restraint** (everything): bias to the **smallest change that works**; **don't refactor/rename/tidy code you weren't asked about — say what you'd change and let the maintainer decide**; no speculative abstraction / single-impl interfaces / factories where a plain function does; no defensive handling for cases that can't happen (fail loudly); leave no dead code or TODO stubs; **if a rule makes the code worse here, say so and write the simpler version**; if the request is ambiguous, ask.
+
 ## Model routing
 
 The Superpowers skills (notably `subagent-driven-development` and
