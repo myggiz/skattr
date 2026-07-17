@@ -4158,9 +4158,7 @@ mod tests {
 
         match result {
             CommandResult::MessageSent {
-                record: Some(rec),
-                status: _,
-                ..
+                record: Some(rec), ..
             } => {
                 assert!(rec.row_id > 0, "record.row_id must be set");
                 assert_eq!(rec.direction, Direction::Outgoing);

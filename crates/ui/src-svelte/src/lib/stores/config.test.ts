@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Myggiz AB
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 vi.mock("$lib/ipc/tauri", () => ({
   ipcClient: {
@@ -9,8 +9,48 @@ vi.mock("$lib/ipc/tauri", () => ({
   },
 }));
 
+vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+
 import { ipcClient } from "$lib/ipc/tauri";
-import { wipeAllData, exportBackup } from "./config";
+import { invoke } from "@tauri-apps/api/core";
+import { wipeAllData, exportBackup, patchConfig } from "./config";
+import type { ConfigPatch } from "$lib/ipc/types";
+
+const nullPatch: ConfigPatch = {
+  history_retention_days: null,
+  direct_timeout_secs: null,
+  notification_mode: null,
+  close_to_tray: null,
+  start_minimised: null,
+  persist_logs_to_disk: null,
+  download_dir: null,
+};
+
+describe("patchConfig — close_to_tray live sync (issue #31)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    (ipcClient.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+      resp: "ok",
+      data: null,
+    });
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it("updates the live tray sentinel after a successful flush that sets close_to_tray", async () => {
+    const p = patchConfig({ ...nullPatch, close_to_tray: true });
+    await vi.advanceTimersByTimeAsync(500);
+    await p;
+    expect(invoke).toHaveBeenCalledWith("set_close_to_tray", { enabled: true });
+  });
+
+  it("does not touch the tray sentinel when the patch omits close_to_tray", async () => {
+    const p = patchConfig({ ...nullPatch, start_minimised: true });
+    await vi.advanceTimersByTimeAsync(500);
+    await p;
+    expect(invoke).not.toHaveBeenCalledWith("set_close_to_tray", expect.anything());
+  });
+});
 
 describe("wipeAllData", () => {
   beforeEach(() => vi.clearAllMocks());

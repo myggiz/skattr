@@ -7,6 +7,7 @@
 // re-fetched from the daemon.
 
 import { writable, get } from "svelte/store";
+import { invoke } from "@tauri-apps/api/core";
 import type { ConfigSnapshot, ConfigPatch, LogRecord } from "$lib/ipc/types";
 import { ipcClient } from "$lib/ipc/tauri";
 import { unwrapOk } from "$lib/ipc/client";
@@ -94,6 +95,12 @@ export function patchConfig(patch: ConfigPatch): Promise<void> {
         const resp = await ipcClient.request({ cmd: "set_config", patch: toSend });
         if (resp.resp !== "ok") {
           throw new Error(`set_config failed: ${JSON.stringify(resp)}`);
+        }
+        // Keep the in-process close-to-tray sentinel in sync so the change
+        // takes effect without a restart (issue #31). The daemon persisted it
+        // above; this updates the synchronous close-button handler's mirror.
+        if (toSend.close_to_tray !== null) {
+          await invoke("set_close_to_tray", { enabled: toSend.close_to_tray });
         }
         resolve();
       } catch (e) {
