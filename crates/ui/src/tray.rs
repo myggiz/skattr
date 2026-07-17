@@ -14,7 +14,7 @@
 
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder},
-    tray::{TrayIconBuilder, TrayIconEvent},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Manager,
 };
 
@@ -75,7 +75,17 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
-            if let TrayIconEvent::Click { .. } = event {
+            // Only toggle on a left-click *release*. Matching any `Click`
+            // (issue #30) also fired on right-click — which opens the context
+            // menu — and the window `set_focus()` here dismissed the
+            // just-opened menu, making Quit unreachable. Filtering to
+            // Left+Up also drops an accidental double-toggle on press+release.
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
                 if let Some(w) = tray.app_handle().get_webview_window("main") {
                     if w.is_visible().unwrap_or(false) {
                         let _ = w.hide();
