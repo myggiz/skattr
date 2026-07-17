@@ -4159,7 +4159,6 @@ mod tests {
         match result {
             CommandResult::MessageSent {
                 record: Some(rec),
-                status: _,
                 ..
             } => {
                 assert!(rec.row_id > 0, "record.row_id must be set");
