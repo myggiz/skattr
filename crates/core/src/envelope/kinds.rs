@@ -22,7 +22,13 @@ pub enum Kind {
     },
     /// File attachment manifest (chunk hashes live in [`Self::File::manifest`]).
     File {
-        /// CBOR-encoded attachment manifest (raw bytes, base64 in JSON contexts).
+        /// CBOR-encoded attachment manifest. `serde_bytes` serializes this as a
+        /// CBOR byte *string* (~1 byte/byte) rather than an array of integers
+        /// (~1.9 bytes/byte); without it a large attachment's manifest nearly
+        /// doubles and overflows the 65519-byte transport frame cap (issue #75,
+        /// ADR 0011). JSON contexts (serde_json / ts-rs) are unaffected — bytes
+        /// still serialize as a number array, which the UI decoder expects.
+        #[serde(with = "serde_bytes")]
         #[ts(type = "string")]
         manifest: Vec<u8>,
     },
@@ -67,6 +73,74 @@ mod tests {
     use super::*;
     use crate::contact::card::{ContactCard, ContactCardBody};
     use crate::identity::{PublicKey, Signature};
+
+    #[allow(clippy::unwrap_used)]
+    #[test]
+    fn file_manifest_cbor_encodes_as_compact_byte_string() {
+        // The manifest rides in the MLS envelope as `Kind::File`. If it
+        // serializes as a CBOR *array of integers* (~1.9 bytes/byte) instead
+        // of a byte *string* (~1 byte/byte) it nearly doubles, and a large
+        // attachment's manifest then exceeds the 65519-byte transport frame
+        // cap and the send is silently dropped (issue #75). Every byte here is
+        // >= 24 so the array encoding would spend 2 CBOR bytes per element,
+        // making the distinction unambiguous.
+        let manifest: Vec<u8> = (0..1000).map(|i| 24 + (i % 200) as u8).collect();
+        let kind = Kind::File {
+            manifest: manifest.clone(),
+        };
+        let mut buf = Vec::new();
+        ciborium::into_writer(&kind, &mut buf).unwrap();
+
+        // Byte-string encoding: ~1000 + small header + enum-tag map overhead.
+        // Integer-array encoding would be ~2000+ and fail this bound.
+        assert!(
+            buf.len() < manifest.len() + 100,
+            "manifest encoded to {} bytes for a {}-byte payload — not a compact \
+             byte string (missing serde_bytes?)",
+            buf.len(),
+            manifest.len()
+        );
+
+        // And it must round-trip byte-identically.
+        let back: Kind = ciborium::from_reader(&buf[..]).unwrap();
+        assert!(
+            matches!(back, Kind::File { manifest: got } if got == manifest),
+            "manifest did not round-trip byte-identically",
+        );
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[test]
+    fn file_manifest_decodes_legacy_integer_array_encoding() {
+        // Backward-read compatibility (ADR 0011): `serde_bytes` on deserialize
+        // accepts BOTH a CBOR byte string and a u8 sequence, so a peer on the
+        // new encoding can still read a manifest sent under the old array
+        // encoding. Reproduce the old wire shape via a mirror enum whose
+        // `manifest` has no `serde_bytes` (thus encodes as an integer array),
+        // then decode it as the real `Kind`.
+        #[derive(Serialize)]
+        #[serde(tag = "kind", rename_all = "snake_case")]
+        enum LegacyKind {
+            File { manifest: Vec<u8> },
+        }
+        let manifest: Vec<u8> = (0..300).map(|i| 24 + (i % 200) as u8).collect();
+        let legacy = LegacyKind::File {
+            manifest: manifest.clone(),
+        };
+        let mut buf = Vec::new();
+        ciborium::into_writer(&legacy, &mut buf).unwrap();
+        // Sanity: the legacy form really is the bloated array encoding.
+        assert!(
+            buf.len() > manifest.len() + 200,
+            "legacy form should be an array"
+        );
+
+        let back: Kind = ciborium::from_reader(&buf[..]).unwrap();
+        assert!(
+            matches!(back, Kind::File { manifest: got } if got == manifest),
+            "manifest did not round-trip byte-identically",
+        );
+    }
 
     #[allow(clippy::unwrap_used)]
     #[test]

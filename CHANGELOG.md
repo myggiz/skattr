@@ -15,6 +15,13 @@ accumulate here and are stamped with a date when a build is cut._
   takes effect immediately instead of only after a restart, and the tray
   icon's right-click menu (with **Quit**) no longer flashes away — a
   left-click still toggles the window, but right-click leaves the menu open.
+- **Large attachments no longer silently fail to send** (#75, ADR 0011): the
+  file manifest is now encoded as a compact CBOR byte string instead of an
+  integer array, which nearly doubled it and pushed attachments above
+  ~15.6 MiB over the transport frame cap with no error. Files up to ~31 MiB now
+  send; a send failure is also logged instead of being silently discarded.
+  (Very large files above ~31 MiB still require the deferred manifest-chunking
+  path.)
 
 ## [v0.1.1] — 2026-06-30
 

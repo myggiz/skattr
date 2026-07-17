@@ -540,7 +540,14 @@ where
                     arm_failure(&mut first_failure_at);
                     continue;
                 };
-                if c.send(Frame::MlsApp(job.ciphertext)).await.is_err() {
+                if let Err(e) = c.send(Frame::MlsApp(job.ciphertext)).await {
+                    // Surface the failure instead of discarding it via
+                    // `.is_err()` (issue #75). An oversized frame (e.g. a
+                    // manifest above the Noise cap) is a permanent per-message
+                    // error, not a transient link failure; logging it makes it
+                    // diagnosable until sender-side delivery status (v1.1) can
+                    // surface it in the UI. Control flow is unchanged.
+                    tracing::warn!(err = %e, "peer: send failed; dropping connection");
                     let _ = job.ack_tx.send(Err(()));
                     conn = None;
                     drain_pending(&mut pending);
