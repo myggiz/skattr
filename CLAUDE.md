@@ -490,6 +490,17 @@ The `using-superpowers` skill itself enforces "invoke relevant skills BEFORE any
 
 **When a phase or task is complete: push the branch, open a PR, and babysit the build and CodeRabbit review until the build is green and all review findings are resolved.** CodeRabbit is a second pair of eyes on the whole change set — let it review everything to catch issues overlooked during development, even after local gates and whole-branch review pass. Address findings collaboratively: verify before applying, reject false positives with evidence, and resolve all threads before requesting merge.
 
+### Issue tracking (GitHub issues are the backlog)
+
+The work backlog lives in **GitHub issues** (`gh issue ...` on `myggiz/skattr`), not only in docs. Treat them as the source of truth for what to build next.
+
+- **Milestones** group the roadmap: **`v0.1.2`** (near-term product + cheap security/correctness fixes), **`v1.1`** (larger protocol/feature/perf work), **`polish`** (non-functional cleanup: dead code, duplication, doc drift, test hardening, UX polish). Add a milestone only when a genuinely new track appears.
+- **Topic labels**: `security`, `attachments`, `ci`, `tor`, `protocol`, `ux`, `data-path`, `performance`, `tech-debt`, `tests`, plus the defaults (`bug`, `enhancement`, `documentation`). Label by subsystem + kind.
+- **File findings as issues, don't let them rot in a doc.** Any review, audit, or brainstorming outcome that names concrete fixable work becomes issue(s) with a body that carries: context/source, `file:line`, the problem, a suggested direction (described, not pre-coded), and acceptance criteria. Reviews live in `docs/` (e.g. `docs/f_review.md`) *and* seed issues.
+- **Granularity:** one issue per substantive item; bundle a cluster of trivial one-liners that share a single fix-motion (all doc-drift, all dead-code) into **one checklist issue** (`- [ ]` per finding) so it's workable rather than 50 micro-issues. Cross-reference already-tracked issues instead of duplicating (e.g. "relates to #38").
+- **Close the loop:** before starting a task, check for an existing issue; a PR that resolves issues references them (`Closes #NN`) so merge auto-closes them. When new work is agreed mid-session, file the issue first, then implement.
+- Don't re-file the known-limitation deferrals already catalogued in this file and in `docs/` unless promoting one to active work.
+
 ## Model routing
 
 The Superpowers skills (notably `subagent-driven-development` and
