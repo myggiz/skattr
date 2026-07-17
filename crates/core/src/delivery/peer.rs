@@ -799,6 +799,10 @@ where
                                 .flatten();
                             let total = row.as_ref().map(|r| r.total_chunks as u32).unwrap_or(0);
                             let reply = if row.as_ref().map_or(true, |r| r.direction != "out") {
+                                tracing::debug!(
+                                    index,
+                                    "peer: nacking chunk request (unknown or not-outbound attachment)"
+                                );
                                 Frame::ChunkNack {
                                     attachment_id,
                                     index,
@@ -813,11 +817,24 @@ where
                                 )
                             };
                             if let Some(c) = conn.as_mut() {
-                                if c.send(reply).await.is_err() {
+                                if let Err(e) = c.send(reply).await {
+                                    tracing::warn!(
+                                        err = %e,
+                                        "peer: failed to send chunk reply; dropping connection"
+                                    );
                                     conn = None;
                                     drain_pending(&mut pending);
                                 }
                             }
+                        } else {
+                            // A peer asked us to serve a chunk but this actor has
+                            // no ChunkStore, so the request can only time out on
+                            // the requester's side. Log it so this failure mode
+                            // (issue #76) is diagnosable rather than silent.
+                            tracing::warn!(
+                                index,
+                                "peer: ChunkRequest received but no ChunkStore configured; cannot serve"
+                            );
                         }
                     }
                     Ok(Some(Frame::Chunk { attachment_id, index, ciphertext })) => {

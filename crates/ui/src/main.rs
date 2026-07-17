@@ -169,9 +169,12 @@ fn main() {
         std::process::exit(1);
     }
 
-    // Optional on-disk log (default ON during pre-1.0 field-testing): writes
-    // <data_dir>/skattr.log so problems can be diagnosed from a shared file —
-    // including from another machine. Controlled by ui.persist_logs_to_disk.
+    // Optional on-disk log. Default ON for the 0.1.x field-testing line
+    // (temporary — revert before 1.0, see #86): writes <data_dir>/skattr.log so
+    // testers can produce diagnostics without hunting for a setting. Controlled
+    // by ui.persist_logs_to_disk. The `unwrap_or` matches the shipped default
+    // (`default_persist_logs`) for the rare case where config load *and*
+    // defaults both fail.
     let persist_logs = {
         let p = data_dir.join("config.toml");
         skattr_core::daemon::Config::load(&p)

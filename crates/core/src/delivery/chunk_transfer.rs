@@ -192,11 +192,16 @@ pub(crate) fn serve_chunk_request(
             index,
             ciphertext: ct,
         },
-        Err(_) => Frame::ChunkNack {
-            attachment_id: *attachment_id,
-            index,
-            reason: NACK_STORE_READ,
-        },
+        Err(e) => {
+            // Surface the store-read failure (issue #77) rather than nacking
+            // silently — the requester only sees the opaque NACK_STORE_READ.
+            tracing::warn!(index, err = ?e, "serve_chunk_request: chunk store read failed");
+            Frame::ChunkNack {
+                attachment_id: *attachment_id,
+                index,
+                reason: NACK_STORE_READ,
+            }
+        }
     }
 }
 
