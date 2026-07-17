@@ -69,7 +69,10 @@ async fn settings_round_trip_persists_and_reloads() {
     );
     assert!(snap.close_to_tray, "default close_to_tray is true");
     assert!(!snap.start_minimised, "default start_minimised");
-    assert!(!snap.persist_logs_to_disk, "default persist_logs_to_disk");
+    assert!(
+        snap.persist_logs_to_disk,
+        "default persist_logs_to_disk (ON for 0.1.x field-testing, revert before 1.0 — #86)"
+    );
 
     // ── Apply full patch. ──
     let patch = ConfigPatch {

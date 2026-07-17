@@ -22,6 +22,12 @@ accumulate here and are stamped with a date when a build is cut._
   send; a send failure is also logged instead of being silently discarded.
   (Very large files above ~31 MiB still require the deferred manifest-chunking
   path.)
+- **Logs are usable for field-testing** (#77): on-disk logging now defaults
+  **ON** for the 0.1.x field-testing line (temporary — reverts to off before
+  1.0, #86), and the code comment no longer contradicts the actual default.
+  Previously-silent attachment-serve failure paths (missing chunk store, store
+  read errors, failed replies) now log, so a stalled chunk transfer is
+  diagnosable.
 
 ## [v0.1.1] — 2026-06-30
 
