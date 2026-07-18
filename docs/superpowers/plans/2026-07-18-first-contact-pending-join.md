@@ -291,50 +291,63 @@ git commit -m "feat(#93): block app sends while first contact is PendingJoin (cl
 
 ---
 
-### Task 4: `welcome_sweeper` — durable re-send + Ack→Active transition
+### Task 4: `welcome_sweeper` — durable re-send + Ack transition (row delete)
 
-The sole Welcome-delivery path: send due pending Welcomes, await Ack, and on Ack do the CAS + row-delete + self-card.
+> **Design note (revision):** `GroupState` is **not persisted** (`Group::load`
+> always returns `Active`), so the durable "pending" signal is the
+> **`pending_welcomes` row's existence**, not `GroupState`. Therefore the Ack
+> "becomes active" by **deleting the `pending_welcomes` row** — NOT by
+> `set_active` + save (which is a no-op on a load-`Active` group). Do not
+> load/save `GroupState` here.
+
+The sole Welcome-delivery path: send due pending Welcomes, await Ack, and on Ack delete the row + send the self-card.
 
 **Files:**
 - Create: `crates/core/src/delivery/welcome_sweep.rs`
 - Modify: `crates/core/src/delivery/mod.rs` (`pub(crate) mod welcome_sweep;`)
 
 **Interfaces:**
-- Consumes: `PendingWelcomeRepo` (Task 1), `Group::set_active` + `MlsGroupRepo` (Task 2 / `storage::groups`), `DeliveryHub::send_welcome(peer, welcome_bytes) -> Result<oneshot::Receiver<Result<(),()>>>` (existing, `delivery::hub`), `build_self_card` + `send_card_to_contact` (existing, `daemon::dispatch`).
+- Consumes: `PendingWelcomeRepo` (Task 1: `new`, `due`, `reschedule`, `delete`, `count`), `DeliveryHub::send_welcome(peer, welcome_bytes) -> Result<oneshot::Receiver<Result<(),()>>>` (existing, `delivery::hub`), `build_self_card` + `send_card_to_contact` (existing, `daemon::dispatch`).
 - Produces:
-  - `pub(crate) async fn run_welcome_sweep(pool: &Arc<Pool>, hub: &Arc<DeliveryHub>, handle: &DaemonHandle, now_ms: i64, batch: usize)` — one sweep pass: for each due row, send the Welcome, await the Ack (bounded timeout ~45s), on success `on_welcome_acked(...)`, else `reschedule` with backoff.
+  - `pub(crate) async fn run_welcome_sweep(pool: &Arc<Pool>, hub: &Arc<DeliveryHub>, handle: &DaemonHandle, now_ms: i64, batch: usize)` — one sweep pass: for each `PendingWelcomeRepo::due` row, `hub.send_welcome(peer, welcome_bytes)`, await the Ack (bounded timeout ~45s). On success call `on_welcome_acked(...)`; on failure/timeout `reschedule(peer, now + welcome_backoff_ms(attempts))`.
   - `pub(crate) fn welcome_backoff_ms(attempts: i64) -> i64` — bounded backoff (caps ~60_000 ms).
-  - `pub(crate) async fn on_welcome_acked(handle: &DaemonHandle, peer: &[u8;32])` — load group → `set_active` (CAS) → save → `PendingWelcomeRepo::delete(peer)` → send self-card → emit `Event::ContactUpdated`. Idempotent.
+  - `pub(crate) async fn on_welcome_acked(handle: &DaemonHandle, peer: &[u8;32])` — **`PendingWelcomeRepo::delete(peer)`** (the durable "now active") → send the self-card (`build_self_card` + `send_card_to_contact`) → emit `Event::ContactUpdated(peer)`. Idempotent: deleting an absent row is a no-op, so a second Ack is harmless. Do NOT touch `GroupState`.
 
 > Read `delivery::chunk_sweep::run_chunk_sweep` for the exact sweep-loop shape (due → act → reschedule) and the `tracing target:` convention, and `delivery::hub::send_welcome` for the ack-receiver type. Reuse them; do not re-invent.
 
-- [ ] **Step 1: Write a failing component test** in `welcome_sweep.rs` `#[cfg(test)]` that drives `on_welcome_acked` against a real `Pool` seeded with a `PendingJoin` group + a `pending_welcomes` row, and asserts: after the call, the group is `Active`, the row is gone, and a second call is a harmless no-op. (The full send/ack loop is covered by the Task 7 integration guardrail; here isolate the state transition.)
+- [ ] **Step 1: Write a failing component test** in `welcome_sweep.rs` `#[cfg(test)]` that seeds a real `Pool` with a `pending_welcomes` row for `peer`, calls the row-transition core, and asserts: the row is gone after, `send_message` is unblocked (no row → not pending), and a second call is a harmless no-op. Prefer testing a **free function** `finalize_welcome_ack(pool: &Pool, peer: &[u8;32]) -> Result<()>` that does the `PendingWelcomeRepo::delete` (the durable state work), with `on_welcome_acked` a thin wrapper adding the self-card/event I/O. Test the free function directly:
 
 ```rust
-#[tokio::test]
+#[test]
 #[allow(clippy::unwrap_used)]
-async fn on_welcome_acked_flips_active_and_deletes_row_idempotently() {
-    // build a DaemonHandle over an in-proc Pool with a PendingJoin group for `peer`
-    // + a pending_welcomes row (use the test harness helpers in daemon::dispatch tests
-    // or test_exports; see loopback_harness for constructing a handle).
-    // assert group PendingJoin + row present beforehand.
-    on_welcome_acked(&handle, &peer).await;
-    // group now Active, row deleted.
-    on_welcome_acked(&handle, &peer).await; // no-op, no panic
+fn finalize_welcome_ack_deletes_row_idempotently() {
+    let dir = tempfile::tempdir().unwrap();
+    let seed = crate::identity::Seed::generate().unwrap();
+    let pool = crate::storage::Pool::open(dir.path(), &seed).unwrap();
+    let repo = crate::storage::pending_welcomes::PendingWelcomeRepo::new(&pool);
+    let peer = [7u8; 32];
+    pool.transaction(|tx| {
+        crate::storage::pending_welcomes::PendingWelcomeRepo::insert_in_tx(
+            tx, &peer, &[1, 2, 3], &[9, 9, 9], 1_000, 1_000)
+    }).unwrap();
+    assert!(repo.is_pending(&peer).unwrap());
+    finalize_welcome_ack(&pool, &peer).unwrap();
+    assert!(!repo.is_pending(&peer).unwrap(), "row deleted → no longer pending");
+    finalize_welcome_ack(&pool, &peer).unwrap(); // idempotent, no error
 }
 ```
 
-> If constructing a bare `DaemonHandle` in a unit test is impractical, implement `on_welcome_acked`'s core as a free function taking `(&Pool, peer)` for the group+row work and test THAT directly; keep the self-card/event emission in the thin `on_welcome_acked` wrapper. Prefer the free-function split — it is cleaner to test and keeps I/O at the edge.
+> `PendingWelcomeRepo::is_pending(&[u8;32]) -> Result<bool>` was added in Task 3. Use it. Keep the self-card/event emission in the thin `on_welcome_acked` wrapper (I/O at the edge) so the durable transition is unit-testable in isolation.
 
 - [ ] **Step 2: Run — expect FAIL** (module/functions missing).
 
 Run: `. "$HOME/.cargo/env" && cargo test -p skattr-core --lib delivery::welcome_sweep`
 
-- [ ] **Step 3: Implement** `run_welcome_sweep`, `welcome_backoff_ms`, `on_welcome_acked` per the interfaces, mirroring `chunk_sweep`. Redaction-safe logs (`target: "skattr::delivery::welcome_sweep"`):
+- [ ] **Step 3: Implement** `run_welcome_sweep`, `welcome_backoff_ms`, `finalize_welcome_ack`, `on_welcome_acked` per the interfaces, mirroring `chunk_sweep`. Redaction-safe logs (`target: "skattr::delivery::welcome_sweep"`):
   - `debug!(due = n, "welcome-sweep: {n} pending welcomes due")`
   - `debug!(attempt, "welcome-sweep: re-sending pending welcome")`
-  - `info!("welcome: acked — group PendingJoin->Active")` inside `on_welcome_acked` when `set_active` returns true
-  - `warn!` (via `let _ = ... ` avoidance) on a genuine save/delete error — never swallow silently.
+  - `info!("welcome: acked — first contact now active")` inside `finalize_welcome_ack` after a successful delete
+  - `warn!` on a genuine reschedule/delete error — never swallow silently with a bare `let _ =`.
 
 - [ ] **Step 4: Run — expect PASS.**
 
@@ -348,48 +361,35 @@ git commit -m "feat(#93): welcome_sweeper — durable Welcome re-send + idempote
 
 ---
 
-### Task 5: Wire it in — `add_contact` persists the row + nudge; spawn the sweeper; remove the in-memory retry
+### Task 5: Wire it in — spawn the sweeper + nudge; remove the in-memory retry
+
+> **Note:** the `add_contact` genesis-txn insert of the `pending_welcomes` row
+> was already implemented in **Task 3** (it needed the durable pending signal to
+> block sends). So Task 5 does NOT re-add the insert. Task 5 = (a) delete the
+> obsolete in-memory retry spawn, (b) add the shared `welcome_nudge`, (c) spawn
+> the `welcome_sweep` task in `run_with_transport`.
 
 **Files:**
-- Modify: `crates/core/src/daemon/dispatch.rs:418-499` (`add_contact`): persist the `pending_welcomes` row inside the existing genesis transaction; **delete** the in-memory `tokio::spawn` retry block (`:440-499`); nudge the sweeper.
-- Modify: `crates/core/src/daemon/state.rs` (`run_with_transport`, near the `chunk_sweep_task` spawn `:438-455` and its `.abort()` at `:570`): spawn a `welcome_sweep` task on a tick + a `tokio::sync::Notify` nudge; drain on shutdown.
-- Modify: `crates/core/src/delivery/hub.rs` or `DaemonHandle` — add a shared `Arc<tokio::sync::Notify>` (`welcome_nudge`) so `add_contact` can wake the sweeper for a prompt first send. (Read where `DaemonHandle`/hub shared state lives; add one field.)
+- Modify: `crates/core/src/daemon/dispatch.rs` (`add_contact`): **delete** the in-memory `tokio::spawn` retry block (the `{ let hub = ...; tokio::spawn(async move { ... welcome: gave up ... }); }` that ends with `tracing::warn!("welcome: gave up re-delivering after all attempts")`). Keep the `pending_welcomes` insert Task 3 added. After the genesis txn commits, `handle.welcome_nudge.notify_one();` and log `tracing::info!("first-contact: welcome persisted for durable re-send")`.
+- Modify: `crates/core/src/daemon/state.rs` (`run_with_transport`, near the `chunk_sweep_task` spawn and its `.abort()` in shutdown): spawn a `welcome_sweep` task — a loop `select!`ing a `tokio::time::interval` (~5s) tick OR the `welcome_nudge`, calling `run_welcome_sweep(&pool, &hub, &handle, now_ms, 32)`. On first iteration log `welcome-sweep: resumed {PendingWelcomeRepo::count()} pending welcomes from durable state`. Abort/drain next to `chunk_sweep_task.abort()`.
+- Modify: `DaemonHandle` (wherever its shared fields live — `daemon::handle`/`hub`): add a `welcome_nudge: Arc<tokio::sync::Notify>` field, constructed once and shared with the sweeper task (clone the `Arc`).
 
 **Interfaces:**
-- Consumes: `PendingWelcomeRepo::insert_in_tx` (Task 1), `run_welcome_sweep` (Task 4).
-- Produces: after a successful `add_contact`, a `pending_welcomes` row exists (committed with the genesis) and the sweeper delivers/re-sends the Welcome; no in-memory retry remains.
+- Consumes: `run_welcome_sweep` (Task 4); the `pending_welcomes` insert (already in `add_contact` from Task 3).
+- Produces: `add_contact` nudges the sweeper; the sweeper is the sole Welcome-delivery path; no in-memory retry remains; a restart resumes pending welcomes from the durable table.
 
-- [ ] **Step 1: Write/adjust the failing test.** Extend an existing `add_contact` test (e.g. `add_contact_from_self_invite_persists_group_link_and_emits_event`, `dispatch.rs:2219`) to assert a `pending_welcomes` row is present after `add_contact` and the group is `PendingJoin`:
+- [ ] **Step 1: Write/adjust the failing test.** The `pending_welcomes` row after `add_contact` is already asserted by Task 3's test. Add a test that the in-memory retry spawn is gone and the nudge fires — practically, assert the loopback first-contact guardrail still completes via the sweeper (Step 4), and add a unit assertion that `handle.welcome_nudge` exists and `notify_one()` is called by `add_contact` (a `Notify` with a waiter set before the call resolves). If a direct nudge assertion is awkward, rely on the guardrail in Step 4 as the behavioral test and note it.
 
-```rust
-    // after add_contact succeeds:
-    let due = crate::storage::pending_welcomes::PendingWelcomeRepo::new(&handle.pool)
-        .due(i64::MAX, 10).unwrap();
-    assert_eq!(due.len(), 1, "add_contact must persist a pending_welcome");
-    // and the committer group is PendingJoin (not Active) until Ack
-```
+- [ ] **Step 2: Run — expect the guardrail to drive the sweeper.**
 
-- [ ] **Step 2: Run — expect FAIL** (no row inserted yet).
+Run: `. "$HOME/.cargo/env" && cargo test -p skattr-core --lib daemon::dispatch 2>&1 | grep -E "test result:|FAILED"`
 
-Run: `. "$HOME/.cargo/env" && cargo test -p skattr-core --lib daemon::dispatch::tests::add_contact 2>&1 | grep -E "test result:|FAILED|pending_welcome"`
+- [ ] **Step 3: Implement** per the Files list: delete the in-memory retry spawn; add `welcome_nudge` to `DaemonHandle`; spawn the sweeper in `run_with_transport`; nudge after the add_contact txn; boot-resume log.
 
-- [ ] **Step 3: Implement.**
-  - In the genesis transaction (`dispatch.rs:418-428`), after `contact_repo.set_group_id_in_tx(...)`, add:
-    ```rust
-            crate::storage::pending_welcomes::PendingWelcomeRepo::insert_in_tx(
-                tx, &inviter.0, &group_id, &welcome_bytes_for_row, now_ms(), now_ms(),
-            )?;
-    ```
-    (bind `let welcome_bytes_for_row = welcome.clone();` before the txn; `inviter` is the peer `PublicKey`, use its 32-byte array.)
-  - **Delete** the entire in-memory retry block (`dispatch.rs:440-499`, the `{ let hub = ...; tokio::spawn(async move { ... welcome: gave up ... }); }`). The sweeper now owns delivery + Ack handling + self-card.
-  - After the transaction commits, nudge: `handle.welcome_nudge.notify_one();`.
-  - Add a redaction-safe log: `tracing::info!("first-contact: group committed PendingJoin; welcome persisted for durable re-send");`
-  - In `run_with_transport` (`state.rs`), mirror the `chunk_sweep_task` block: a loop that `select!`s a tick (~5s) or the `welcome_nudge`, calls `run_welcome_sweep(&pool, &hub, &handle, now_ms(), 32)`, and on boot logs `welcome-sweep: resumed {PendingWelcomeRepo::count()} pending welcomes from durable state`. Abort/drain the task in the shutdown section next to `chunk_sweep_task.abort()`.
-
-- [ ] **Step 4: Run — expect PASS**, then the loopback first-contact guardrail must still pass (both peers online → immediate Ack → row deleted → Active):
+- [ ] **Step 4: Run — expect PASS**, then the loopback first-contact guardrail must still pass end-to-end **through the sweeper** (both peers online → sweeper sends Welcome → Ack → row deleted → sends unblocked):
 
 Run: `. "$HOME/.cargo/env" && cargo test -p skattr-core --lib daemon::dispatch && cargo test -p skattr-tests first_contact 2>&1 | grep -E "test result:|first_contact.*ok|FAILED"`
-Expected: PASS, and `first_contact_invite_add_then_bidirectional_over_loopback` still green.
+Expected: PASS, and `first_contact_invite_add_then_bidirectional_over_loopback` still green (now driven by the sweeper, not the deleted in-memory retry).
 
 - [ ] **Step 5: Lint + commit**
 
