@@ -1539,6 +1539,12 @@ where
 
     let repo = ContactRepo::new(&handle.pool);
     repo.set_hidden(&contact, true).map_err(map_err)?;
+
+    // #93: stop any durable first-contact Welcome re-send for this peer.
+    let _ = crate::storage::pending_welcomes::PendingWelcomeRepo::new(&handle.pool)
+        .delete(&contact.0)
+        .map_err(|e| tracing::warn!(error = %e, "remove_contact: pending_welcome cleanup failed"));
+
     let _ = handle.events_tx.send(Event::ContactUpdated(contact));
     Ok(CommandResult::Ok)
 }
@@ -5462,6 +5468,56 @@ mod tests {
         assert!(
             msg.contains("not connected yet"),
             "user-facing message must contain 'not connected yet', got: {msg}"
+        );
+    }
+
+    // ── Task 6 (#93): RemoveContact deletes pending Welcome ───────────────────
+
+    /// Removing a contact that is still in PendingJoin must delete the durable
+    /// pending_welcome row, so the re-send sweeper stops re-trying to deliver
+    /// the Welcome.
+    #[tokio::test]
+    async fn remove_contact_deletes_pending_welcome() {
+        let handle_a = test_handle();
+        handle_a.set_onion("alice-remove.onion".to_string());
+
+        let CommandResult::InviteCreated { url, .. } = execute_command(
+            handle_a.clone(),
+            Command::CreateInvite {
+                nickname: None,
+                ttl_secs: Some(3600),
+            },
+        )
+        .await
+        .unwrap() else {
+            panic!("expected InviteCreated");
+        };
+
+        let handle_b = test_handle_with_dialer();
+        let CommandResult::ContactAdded(summary) =
+            execute_command(handle_b.clone(), Command::AddContact { invite_url: url })
+                .await
+                .unwrap()
+        else {
+            panic!("expected ContactAdded");
+        };
+
+        // After AddContact, a pending_welcome row exists for Alice.
+        let repo = crate::storage::pending_welcomes::PendingWelcomeRepo::new(&handle_b.pool);
+        let due_before = repo.due(i64::MAX, 10).unwrap();
+        assert!(
+            !due_before.is_empty(),
+            "pending_welcome row must exist after add_contact"
+        );
+
+        // Remove the contact.
+        let _ = remove_contact(&handle_b, summary.pubkey).await.unwrap();
+
+        // After RemoveContact, the pending_welcome row must be gone.
+        let due_after = repo.due(i64::MAX, 10).unwrap();
+        assert!(
+            due_after.is_empty(),
+            "remove_contact must delete the pending_welcome"
         );
     }
 }
