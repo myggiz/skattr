@@ -144,6 +144,26 @@ impl<'p> PendingWelcomeRepo<'p> {
         })
     }
 
+    /// Returns `true` if a pending-welcome row exists for `peer` (i.e. the
+    /// first-contact flow is still in progress and the peer has not yet Ack'd).
+    /// Used by `send_message` to block app-frame sends while `PendingJoin` (#93).
+    pub fn is_pending(&self, peer: &[u8; 32]) -> Result<bool> {
+        self.pool.with(|c| {
+            let count: i64 = c
+                .query_row(
+                    "SELECT COUNT(*) FROM pending_welcomes WHERE peer_pubkey = ?1",
+                    rusqlite::params![&peer[..]],
+                    |r| r.get(0),
+                )
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!(
+                        "pending_welcomes is_pending: {e}"
+                    )))
+                })?;
+            Ok(count > 0)
+        })
+    }
+
     /// Total row count — used for the boot-resume log line.
     pub fn count(&self) -> Result<i64> {
         self.pool.with(|c| {

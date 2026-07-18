@@ -413,6 +413,12 @@ where
     // here and returns InviteConsumed without writing anything. A dial failure
     // (above) aborts before this txn, leaving ZERO writes → clean retry.
     let group_repo = MlsGroupRepo::new(&handle.pool);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    // Immediate first attempt; add_contact's spawn loop drives re-sends.
+    let initial_retry_at_ms = now_ms;
     handle
         .pool
         .transaction(|tx| {
@@ -424,6 +430,16 @@ where
             group.save_in_tx(&group_repo, tx)?;
             contact_repo.set_group_id_in_tx(tx, &inviter, &group_id)?;
             link.mark_consumed_in_tx(tx, &kp_repo)?;
+            // Record this peer as PendingJoin (#93 Task 3): blocks app-frame
+            // sends until the peer Acks the Welcome (set_active clears this row).
+            crate::storage::PendingWelcomeRepo::insert_in_tx(
+                tx,
+                &inviter.0,
+                &group_id,
+                &welcome,
+                initial_retry_at_ms,
+                now_ms,
+            )?;
             Ok(())
         })
         .map_err(map_err)?;
@@ -572,7 +588,25 @@ where
         .map_err(map_err)?
         .ok_or(IpcError::Daemon(DaemonErrorKind::GroupCorrupt))?;
 
-    // 3. Build envelope.
+    // 3. Guard: reject sends while the group is still PendingJoin (#93).
+    //
+    // `Group::load` always reconstructs state as `Active` (the GroupState is
+    // not persisted in the blob), so we check the durable `pending_welcomes`
+    // table instead: a row exists for `contact` iff we are the committer and
+    // the peer has not yet Ack'd the Welcome. App frames sent before the Ack
+    // would be undeliverable / lost. Surface a clear reason instead of a raw
+    // MLS error; the UI shows a "Connecting…" (pending_join) badge.
+    {
+        use crate::storage::PendingWelcomeRepo;
+        let pw_repo = PendingWelcomeRepo::new(&handle.pool);
+        if pw_repo.is_pending(&contact.0).map_err(map_err)? {
+            return Err(IpcError::Daemon(DaemonErrorKind::InvalidArgument {
+                message: "not connected yet — waiting for them to join".into(),
+            }));
+        }
+    }
+
+    // 4. Build envelope.
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
@@ -2797,6 +2831,12 @@ mod tests {
             panic!("expected ContactAdded");
         };
 
+        // Simulate the Welcome-Ack: clear the pending_welcomes row so
+        // send_message sees the group as Active (#93 Task 3).
+        crate::storage::PendingWelcomeRepo::new(&handle_b.pool)
+            .delete(&summary.pubkey.0)
+            .unwrap();
+
         // Bob sends to Alice (summary.pubkey == Alice's pubkey).
         let fut = execute_command(
             handle_b,
@@ -2847,6 +2887,12 @@ mod tests {
         else {
             panic!("expected ContactAdded");
         };
+
+        // Simulate the Welcome-Ack: clear the pending_welcomes row so
+        // send_message sees the group as Active (#93 Task 3).
+        crate::storage::PendingWelcomeRepo::new(&handle_b.pool)
+            .delete(&summary.pubkey.0)
+            .unwrap();
 
         // Bob sends to Alice; timeout at 3 s (matches the sibling test).
         let fut = execute_command(
@@ -4133,6 +4179,12 @@ mod tests {
             .unwrap()
             .expect("group_id present after AddContact");
 
+        // Simulate the Welcome-Ack: clear the pending_welcomes row so
+        // callers that call send_message see the group as Active (#93 Task 3).
+        crate::storage::PendingWelcomeRepo::new(handle.pool.as_ref())
+            .delete(&peer_pk.0)
+            .unwrap();
+
         (peer_pk, group_id)
     }
 
@@ -5403,6 +5455,71 @@ mod tests {
                 ))
             ),
             "OpenAttachment on pending row must return InvalidArgument, got {result:?}"
+        );
+    }
+
+    // ── Task 3 (#93): block app sends while PendingJoin ────────────────────────
+
+    /// Sending a message to a peer whose group is still `PendingJoin` (first
+    /// contact not yet Ack'd) must return a clean `InvalidArgument` error with
+    /// the exact "not connected yet" user-facing message — NOT a raw MLS error
+    /// and NOT silently enqueue an undeliverable ciphertext (#93).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn send_message_while_pending_join_returns_not_connected_yet() {
+        use crate::daemon::error_kind::DaemonErrorKind;
+        use crate::envelope::Kind;
+
+        // Bob's handle (sender). Alice creates an invite; Bob consumes it via
+        // AddContact — which now leaves Bob's genesis group in PendingJoin (#93
+        // Task 2). We do NOT call set_active() here — that is the whole point.
+        let handle_a = test_handle();
+        handle_a.set_onion("alice-pending.onion".to_string());
+
+        let CommandResult::InviteCreated { url, .. } = execute_command(
+            handle_a.clone(),
+            Command::CreateInvite {
+                nickname: None,
+                ttl_secs: Some(3600),
+            },
+        )
+        .await
+        .unwrap() else {
+            panic!("expected InviteCreated");
+        };
+
+        let handle_b = test_handle_with_dialer();
+        let CommandResult::ContactAdded(summary) =
+            execute_command(handle_b.clone(), Command::AddContact { invite_url: url })
+                .await
+                .unwrap()
+        else {
+            panic!("expected ContactAdded");
+        };
+
+        // At this point the group is PendingJoin: Alice has not Ack'd yet.
+        // send_message must reject with a clear error, not encrypt + enqueue.
+        let err = execute_command(
+            handle_b,
+            Command::SendMessage {
+                contact: summary.pubkey,
+                kind: Kind::Text { body: "hi".into() },
+            },
+        )
+        .await
+        .unwrap_err();
+
+        // Must be InvalidArgument, not GroupCorrupt / MLS error / Internal.
+        assert!(
+            matches!(
+                err,
+                IpcError::Daemon(DaemonErrorKind::InvalidArgument { .. })
+            ),
+            "expected InvalidArgument, got {err:?}"
+        );
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("not connected yet"),
+            "user-facing message must contain 'not connected yet', got: {msg}"
         );
     }
 }
