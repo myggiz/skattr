@@ -118,8 +118,37 @@ async fn handle_inbound_stream<S>(
                         }
                     }
                 }
-                _ => {
-                    tracing::warn!("accept: rejected inbound connection from unknown peer");
+                // Diagnostic split of the first-contact reject (#90). The four
+                // ways the single-frame carve-out read can fail all still
+                // reject + close — behavior is unchanged — but each logs a
+                // distinct, redaction-safe reason so a first contact that fails
+                // over real Tor is attributable. Never log frame payload bytes;
+                // `frame_type()` is a bare variant name, and `CoreError`'s
+                // Display is onion-/secret-free (same as the handshake log).
+                Ok(Ok(Some(other))) => {
+                    tracing::warn!(
+                        frame = ?other.frame_type(),
+                        "accept: rejected unknown peer — first frame was not a Welcome"
+                    );
+                    let _ = conn.close().await;
+                }
+                Ok(Ok(None)) => {
+                    tracing::warn!(
+                        "accept: rejected unknown peer — connection closed before any frame"
+                    );
+                    let _ = conn.close().await;
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(
+                        error = %e,
+                        "accept: rejected unknown peer — recv error before Welcome"
+                    );
+                    let _ = conn.close().await;
+                }
+                Err(_elapsed) => {
+                    tracing::warn!(
+                        "accept: rejected unknown peer — timed out waiting for Welcome frame"
+                    );
                     let _ = conn.close().await;
                 }
             }

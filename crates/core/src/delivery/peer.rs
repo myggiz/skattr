@@ -562,16 +562,31 @@ where
                 let Some(wj) = wj else { break; };
                 let synthetic_id = welcome_msg_id(&wj.welcome_bytes);
                 if !ensure_conn::<S>(peer, &mut conn, &dialer).await {
+                    // Dial to the peer's onion failed — the Welcome never left
+                    // this side (#90). Redaction-safe: no onion/pubkey logged.
+                    tracing::warn!(
+                        "peer: welcome not sent — could not establish a connection to peer"
+                    );
                     let _ = wj.ack_tx.send(Err(()));
                     arm_failure(&mut first_failure_at);
                     continue;
                 }
                 let Some(c) = conn.as_mut() else {
+                    tracing::warn!(
+                        "peer: welcome not sent — connection slot empty after ensure_conn"
+                    );
                     let _ = wj.ack_tx.send(Err(()));
                     arm_failure(&mut first_failure_at);
                     continue;
                 };
-                if c.send(Frame::MlsWelcome(wj.welcome_bytes)).await.is_err() {
+                if let Err(e) = c.send(Frame::MlsWelcome(wj.welcome_bytes)).await {
+                    // Connection was live but the Welcome frame write failed
+                    // (dropped mid-send) — #90. `TransportErrorKind` Display is
+                    // onion-/secret-free.
+                    tracing::warn!(
+                        err = %e,
+                        "peer: welcome send failed — frame write on live connection errored"
+                    );
                     let _ = wj.ack_tx.send(Err(()));
                     conn = None;
                     drain_pending(&mut pending);
