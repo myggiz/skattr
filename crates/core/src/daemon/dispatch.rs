@@ -4925,6 +4925,9 @@ mod tests {
         let mut bob_group =
             Group::create_solo(&handle.identity, None, None, MlsProvider::new()).unwrap();
         let (welcome, _commit) = bob_group.add_member(&alice_kp, None, None).unwrap();
+        // The genesis committer stays PendingJoin until the peer Acks (#93);
+        // this test drives real sends, so simulate the Ack to make it Active.
+        bob_group.set_active();
         let group_repo = MlsGroupRepo::new(&handle.pool);
         bob_group.save(&group_repo).unwrap();
         let gid = bob_group.id().0.clone();

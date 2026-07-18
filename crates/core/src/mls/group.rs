@@ -172,10 +172,25 @@ impl Group {
             CoreError::from(MlsErrorKind::Other(format!("mls: commit serialize: {e}")))
         })?;
 
-        self.state = GroupState::Active {
-            epoch: self.inner.epoch().as_u64(),
-        };
+        // First-contact committer: the group is NOT Active until the invited
+        // peer processes the Welcome and Acks (join). Staying PendingJoin here
+        // blocks app-frame sends (can_send()==false) so we never send MlsApp to
+        // a peer that hasn't joined — see #93. The Ack path calls set_active().
+        self.state = GroupState::PendingJoin;
         Ok((welcome_bytes, commit_bytes))
+    }
+
+    /// Transition PendingJoin -> Active on the peer's Welcome-Ack. Idempotent:
+    /// returns true if it flipped, false if already Active (or Corrupt). #93.
+    pub fn set_active(&mut self) -> bool {
+        if matches!(self.state, GroupState::PendingJoin) {
+            self.state = GroupState::Active {
+                epoch: self.inner.epoch().as_u64(),
+            };
+            true
+        } else {
+            false
+        }
     }
 
     /// Join an existing group from a TLS-serialized Welcome message.
@@ -668,7 +683,41 @@ mod tests {
         assert!(!welcome.is_empty());
         assert!(!commit.is_empty());
         assert_eq!(alice.epoch(), 1);
-        assert!(matches!(alice.state(), GroupState::Active { epoch: 1 }));
+        // Genesis committer stays PendingJoin until the peer Acks (#93).
+        assert!(matches!(alice.state(), GroupState::PendingJoin));
+    }
+
+    #[test]
+    fn add_member_leaves_pending_join_until_set_active() {
+        let pool = Pool::in_memory();
+        let kp_repo = crate::storage::KeyPackageRepo::new(&pool);
+
+        let alice_id = alice();
+        let bob_id = IdentityKey::generate().unwrap();
+        let bob_provider = MlsProvider::new();
+        let bob_kp = KeyPackage::generate(&bob_id, &bob_provider, &kp_repo).unwrap();
+
+        let mut g = Group::create_solo(&alice_id, None, None, MlsProvider::new()).unwrap();
+        let _ = g.add_member(&bob_kp, None, None).unwrap();
+
+        // Invitee/committer is NOT paired until the peer Acks the Welcome.
+        assert!(
+            matches!(g.state(), GroupState::PendingJoin),
+            "genesis must be PendingJoin"
+        );
+        assert!(
+            !g.state().can_send(),
+            "must not be able to send app frames while pending"
+        );
+
+        // Ack transition is a CAS.
+        assert!(
+            g.set_active(),
+            "first set_active flips PendingJoin -> Active"
+        );
+        assert!(matches!(g.state(), GroupState::Active { .. }));
+        assert!(g.state().can_send());
+        assert!(!g.set_active(), "second set_active is a no-op");
     }
 
     #[test]
@@ -729,6 +778,9 @@ mod tests {
         let mut alice = Group::create_solo(&alice_id, None, None, MlsProvider::new()).unwrap();
         let (welcome, _commit) = alice.add_member(&bob_kp, None, None).unwrap();
         let bob = Group::join_from_welcome(&bob_id, &welcome, None, None, bob_provider).unwrap();
+        // Simulate the Welcome-Ack: the committer becomes Active once the peer
+        // has joined, so this helper yields a fully-paired, sendable pair (#93).
+        alice.set_active();
         (alice, bob)
     }
 
@@ -783,6 +835,8 @@ mod tests {
             None,
             bob_provider,
         )?;
+        // Simulate the Welcome-Ack so the committer is Active (sendable) (#93).
+        alice.set_active();
         Ok((alice, bob))
     }
 
@@ -854,6 +908,10 @@ mod tests {
         assert_eq!(bob.epoch(), 1);
         assert_eq!(alice.epoch(), 1);
         assert_eq!(bob.id(), alice.id());
+
+        // Committer stays PendingJoin until the peer Acks (#93); simulate the
+        // Ack so bob can send in the round-trip below.
+        bob.set_active();
 
         // Round-trip both directions.
         let env = test_envelope("bound hello");
