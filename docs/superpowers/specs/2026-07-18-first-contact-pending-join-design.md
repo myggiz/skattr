@@ -7,6 +7,21 @@ teardown), f_review finding #4 (dead `PendingJoin` state).
 **Requires a second reviewer** (per CLAUDE.md). Decide during planning whether an
 ADR note is needed (first-contact state lifecycle; no wire-format change).
 
+> **Revision (2026-07-18, during implementation — user-approved).** Implementation
+> found that `GroupState` is **not persisted**: `Group::load` (group.rs:470)
+> always reconstructs `state = Active`, and `mls_groups` stores only
+> `(group_id, state_blob, epoch)` with no state column. So `PendingJoin` cannot
+> be the *durable* pending signal — it is lost on any save/reload (sweeper,
+> restart). **The durable source of truth is instead the `pending_welcomes` row
+> itself: a row exists ⟺ first contact is still pending.** That table already
+> exists (below) and is needed for the durable re-send, so its existence doubles
+> as the state flag — no redundant schema. Concretely: `send_message` blocks on
+> `PendingWelcomeRepo::is_pending(peer)`; the Ack "becomes active" by **deleting
+> the row** (not `set_active` + save, which is a no-op on a load-Active group);
+> the genesis `PendingJoin` + `set_active` remain only as in-session/in-memory
+> hygiene before the row commits. End behavior is identical to this spec; only
+> the durable substrate moves from `GroupState` to the `pending_welcomes` row.
+
 ---
 
 ## Problem
