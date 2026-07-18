@@ -1266,7 +1266,7 @@ where
 ///
 /// Bumps the persisted self-card version via `build_next_self_card`, so even
 /// if no send follows, the next publish picks up from the new version.
-fn build_self_card<S>(
+pub(crate) fn build_self_card<S>(
     handle: &Arc<DaemonHandle<S>>,
 ) -> std::result::Result<crate::contact::ContactCard, IpcError>
 where
@@ -1297,7 +1297,7 @@ where
 /// Encrypt `card` as a `ContactCardUpdate` for `peer`'s group and hand it to
 /// the hub. Best-effort: a missing-but-expected group is skipped silently; an
 /// encrypt / save / Group::load failure is logged and skipped.
-async fn send_card_to_contact<S>(
+pub(crate) async fn send_card_to_contact<S>(
     handle: &Arc<DaemonHandle<S>>,
     card: &crate::contact::ContactCard,
     peer: crate::identity::PublicKey,
