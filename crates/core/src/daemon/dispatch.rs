@@ -417,7 +417,7 @@ where
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
-    // Immediate first attempt; add_contact's spawn loop drives re-sends.
+    // Immediate first attempt; the durable `welcome_sweep` task drives re-sends.
     let initial_retry_at_ms = now_ms;
     handle
         .pool
@@ -446,73 +446,15 @@ where
 
     let _ = handle.events_tx.send(Event::ContactUpdated(inviter));
 
-    // Deliver the Welcome to the inviter, retrying until they ACK. First contact
-    // has no durable outbox for the Welcome, so a single flaky-Tor dial would
-    // lose it — leaving us with a contact the peer never joined (no retry, no
-    // fallback). Retry in the background with backoff so add_contact stays
-    // responsive. This is in-session only; cross-restart durability is a
-    // follow-up (the contact already persisted above, so a restart mid-retry
-    // currently needs a remove + re-add).
-    {
-        let hub = handle.hub.clone();
-        // Build our self-card BEFORE spawning so its version bump is persisted
-        // synchronously here; move it into the task and send it only AFTER the
-        // peer ACKs the Welcome (has joined the group), so the card can't be
-        // dropped for arriving before the peer is a group member. `IpcError`
-        // implements Debug (not Display); `?e` is correct here. It carries only
-        // DaemonErrorKind (counts / InvalidArgument message / unit variants) —
-        // no onion or pubkey.
-        let self_card = match build_self_card(handle) {
-            Ok(card) => Some(card),
-            Err(e) => {
-                tracing::warn!(?e, "add_contact: could not build self-card to send");
-                None
-            }
-        };
-        let handle_for_card = handle.clone();
-        let welcome_bytes = welcome.clone();
-        let peer = inviter;
-        tokio::spawn(async move {
-            let self_card = self_card;
-            // Immediate attempt, then increasing backoff (~6 min total). Tor
-            // hidden-service first contact is slow + flaky; give it room.
-            let backoffs_secs = [0u64, 5, 10, 20, 30, 45, 60, 60, 60, 60];
-            for (i, &wait) in backoffs_secs.iter().enumerate() {
-                if wait > 0 {
-                    tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
-                }
-                match hub.send_welcome(peer, welcome_bytes.clone()).await {
-                    Ok(ack_rx) => {
-                        match tokio::time::timeout(std::time::Duration::from_secs(45), ack_rx).await
-                        {
-                            Ok(Ok(Ok(()))) => {
-                                tracing::info!(attempt = i + 1, "welcome: acked by peer");
-                                // The peer has joined the group; now it is safe
-                                // to send our self-card for the reverse
-                                // direction. Best-effort: if it fails, the
-                                // inviter learns our onion on our next message.
-                                if let Some(card) = self_card.as_ref() {
-                                    send_card_to_contact(&handle_for_card, card, peer).await;
-                                }
-                                return;
-                            }
-                            other => {
-                                tracing::debug!(
-                                    attempt = i + 1,
-                                    ?other,
-                                    "welcome: not acked yet, retrying"
-                                );
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::debug!(?e, attempt = i + 1, "welcome: send failed, retrying");
-                    }
-                }
-            }
-            tracing::warn!("welcome: gave up re-delivering after all attempts");
-        });
-    }
+    // First-contact Welcome delivery is now durable (#93): the `pending_welcomes`
+    // row committed above is the sole record of "this peer has not yet Ack'd its
+    // Welcome". The `welcome_sweep` task (spawned in `run_with_transport`) is the
+    // SOLE Welcome-delivery path — it re-sends over Noise_XK, awaits the Ack, and
+    // on Ack deletes the row + sends the reverse-direction self-card. Nudge it so
+    // the first send happens immediately instead of on its next periodic tick;
+    // the row survives a restart, so cross-session resume is automatic.
+    handle.welcome_nudge.notify_one();
+    tracing::info!("first-contact: welcome persisted for durable re-send");
 
     Ok(CommandResult::ContactAdded(ContactSummary {
         pubkey: inviter,

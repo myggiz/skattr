@@ -481,6 +481,53 @@ where
     // root seed (which has already been consumed by derive_storage_seed).
     handle.set_backup_key(backup_key);
 
+    // The handle is fully configured; share it (Arc) so the durable Welcome
+    // sweeper and the IPC executor both reference the same subsystems.
+    let handle = Arc::new(handle);
+
+    // Durable first-contact Welcome sweeper (#93): the SOLE Welcome-delivery
+    // path. Sibling to `chunk_sweep_task` — a periodic tick OR a nudge from
+    // `add_contact` drives one `run_welcome_sweep` pass over the durable
+    // `pending_welcomes` table. Row-existence (not `GroupState`, which is not
+    // persisted) is the durable "first contact still pending" signal, so a
+    // restart resumes any un-Ack'd Welcomes.
+    let welcome_sweep_pool = pool.clone();
+    let welcome_sweep_hub = handle.hub.clone();
+    let welcome_sweep_handle = handle.clone();
+    let welcome_nudge = handle.welcome_nudge.clone();
+    let welcome_sweep_task = tokio::spawn(async move {
+        match crate::storage::PendingWelcomeRepo::new(&welcome_sweep_pool).count() {
+            Ok(count) => tracing::info!(
+                target: "skattr::delivery::welcome_sweep",
+                count,
+                "welcome-sweep: resumed {count} pending welcomes from durable state"
+            ),
+            Err(e) => tracing::warn!(
+                target: "skattr::delivery::welcome_sweep",
+                error = %e,
+                "welcome-sweep: could not count pending welcomes on boot"
+            ),
+        }
+        const SWEEP_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
+        let mut t = tokio::time::interval(SWEEP_EVERY);
+        t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = t.tick() => {}
+                _ = welcome_nudge.notified() => {}
+            }
+            let now = crate::daemon::clock::now_unix_millis();
+            crate::delivery::welcome_sweep::run_welcome_sweep(
+                &welcome_sweep_pool,
+                &welcome_sweep_hub,
+                &welcome_sweep_handle,
+                now,
+                32,
+            )
+            .await;
+        }
+    });
+
     // Log tap: forward every record from the ring buffer's broadcast channel
     // onto the daemon event bus so `EventFilter::Logs` subscribers receive
     // live tail. Terminates when the broadcast sender is dropped (process exit).
@@ -569,6 +616,10 @@ where
     // Stop the chunk-sweep task with the same teardown parity.
     chunk_sweep_task.abort();
     let _ = chunk_sweep_task.await;
+    // Stop the durable Welcome sweeper (#93) with the same teardown parity —
+    // an in-flight Welcome re-send must not race the transport teardown.
+    welcome_sweep_task.abort();
+    let _ = welcome_sweep_task.await;
     transport.shutdown().await?;
     // Server::drop removes the socket file automatically.
 
