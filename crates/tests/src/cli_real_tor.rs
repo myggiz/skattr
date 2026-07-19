@@ -11,8 +11,12 @@
 
 use std::path::Path;
 
-use skattr_core::daemon::{Command, CommandResult, Config, Daemon, IpcClient, Ready};
+use skattr_core::daemon::commands::MlsGroupStateLabel;
+use skattr_core::daemon::{
+    Command, CommandResult, Config, Daemon, IpcClient, IpcClientError, Ready,
+};
 use skattr_core::envelope::Kind;
+use skattr_core::identity::PublicKey;
 use tokio::sync::oneshot;
 use zeroize::Zeroizing;
 
@@ -74,6 +78,20 @@ async fn spawn_real_daemon(
 }
 
 // ---------------------------------------------------------------------------
+// IPC helper — fresh connection per call (IPC is one-shot per connection)
+// ---------------------------------------------------------------------------
+
+/// Execute one command against the daemon at `socket_path`.
+///
+/// The daemon IPC server is one-shot: after each `Execute` it writes the
+/// result, writes `Bye`, then closes. This matches how the production CLI
+/// works — one OS-level connection per command. A persistent `IpcClient`
+/// would see `Io(BrokenPipe)` on the second call.
+async fn exec(socket_path: &Path, cmd: Command) -> Result<CommandResult, IpcClientError> {
+    IpcClient::connect(socket_path).await?.execute(cmd).await
+}
+
+// ---------------------------------------------------------------------------
 // Test
 // ---------------------------------------------------------------------------
 
@@ -97,18 +115,19 @@ async fn full_flow_over_real_tor() {
     let (ready_b, shutdown_b, task_b) = spawn_real_daemon(tmp_b.path()).await;
     eprintln!("Bob ready — onion: {}", ready_b.onion);
 
-    // Connect IPC clients to both daemons.
-    let mut client_a = IpcClient::connect(&ready_a.ipc_socket).await.unwrap();
-    let mut client_b = IpcClient::connect(&ready_b.ipc_socket).await.unwrap();
+    let sock_a = &ready_a.ipc_socket;
+    let sock_b = &ready_b.ipc_socket;
 
     // --- Alice creates an invite ---
-    let invite_url = match client_a
-        .execute(Command::CreateInvite {
+    let invite_url = match exec(
+        sock_a,
+        Command::CreateInvite {
             nickname: None,
             ttl_secs: Some(3600),
-        })
-        .await
-        .unwrap()
+        },
+    )
+    .await
+    .unwrap()
     {
         CommandResult::InviteCreated { url, .. } => url,
         other => panic!("expected InviteCreated, got {other:?}"),
@@ -120,9 +139,12 @@ async fn full_flow_over_real_tor() {
     );
 
     // --- Bob adds Alice ---
+    //
+    // AddContact dials Alice's onion (embedded in the invite's ContactCard)
+    // to complete the two-PSK MLS genesis (ADR 0009). This requires live Tor.
     let summary = match tokio::time::timeout(
         std::time::Duration::from_secs(60),
-        client_b.execute(Command::AddContact { invite_url }),
+        exec(sock_b, Command::AddContact { invite_url }),
     )
     .await
     .expect("AddContact must complete within 60 s")
@@ -133,21 +155,32 @@ async fn full_flow_over_real_tor() {
     };
     eprintln!("Bob added Alice: pubkey={:?}", summary.pubkey);
 
+    // --- Wait for Bob's group with Alice to reach Active ---
+    //
+    // Since #93, AddContact leaves the MLS group PendingJoin on Bob's side.
+    // SendMessage is gated on the Welcome-Ack completing (group becomes Active).
+    // Over real Tor this takes several seconds; poll ListContacts until the
+    // group_state flips to Active, bounded at 120 s to distinguish the #90
+    // transport flake from a code regression.
+    wait_for_active(sock_b, summary.pubkey, std::time::Duration::from_secs(120)).await;
+
     // --- Bob sends a message to Alice ---
     //
     // We accept Queued OR Delivered: over real Tor, the hub actor will dial
     // Alice's onion and attempt delivery. If the circuit comes up within
     // the 2 s hub wait, we may get Delivered. Either way, the encrypt +
     // outbox path returned MessageSent, which is the assertion that counts.
-    let send_result = client_b
-        .execute(Command::SendMessage {
+    let send_result = exec(
+        sock_b,
+        Command::SendMessage {
             contact: summary.pubkey,
             kind: Kind::Text {
                 body: "hello-over-tor".into(),
             },
-        })
-        .await
-        .unwrap();
+        },
+    )
+    .await
+    .unwrap();
 
     match send_result {
         CommandResult::MessageSent { .. } => {
@@ -163,4 +196,47 @@ async fn full_flow_over_real_tor() {
     let _ = tokio::time::timeout(std::time::Duration::from_secs(30), task_a).await;
     let _ = tokio::time::timeout(std::time::Duration::from_secs(30), task_b).await;
     eprintln!("Done.");
+}
+
+// ---------------------------------------------------------------------------
+// Poll helper
+// ---------------------------------------------------------------------------
+
+/// Poll `ListContacts` on the daemon at `socket` until the contact identified
+/// by `peer` has `group_state == Active`, or until `timeout` elapses.
+///
+/// Panics with a clear diagnostic if the timeout fires — this distinguishes
+/// the #90 transport flake (first contact never completes over real Tor) from
+/// a code regression where the group stays PendingJoin indefinitely.
+async fn wait_for_active(socket: &Path, peer: PublicKey, timeout: std::time::Duration) {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let contacts = match exec(socket, Command::ListContacts).await.unwrap() {
+            CommandResult::Contacts(v) => v,
+            other => panic!("expected Contacts, got {other:?}"),
+        };
+        if let Some(entry) = contacts.iter().find(|s| s.pubkey == peer) {
+            if entry.group_state == Some(MlsGroupStateLabel::Active) {
+                eprintln!("Group with peer is Active — proceeding to send.");
+                return;
+            }
+            eprintln!(
+                "Group state is {:?} — waiting for Active…",
+                entry.group_state
+            );
+        } else {
+            eprintln!("Peer not yet in contact list — waiting…");
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            panic!(
+                "first-contact Welcome-Ack never completed within {:?} — \
+                 this is likely the #90 transport flake (DeliveryTimeout over real Tor), \
+                 not a code regression. Re-run with live Tor to confirm.",
+                timeout
+            );
+        }
+
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
 }
