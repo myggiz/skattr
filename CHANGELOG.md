@@ -11,6 +11,14 @@ accumulate here and are stamped with a date when a build is cut._
 
 ### Fixed
 
+- **First contact now recovers from a lost inviter Ack** (#93, ADR 0012): if
+  the inviter already joined but its acknowledgement was dropped, a re-sent
+  Welcome is idempotently re-Acked instead of rejected — the invitee's retry
+  now completes rather than stalling forever. Disclosed limitation: a *lost
+  first Welcome* delivered over a since-replaced circuit still does not recover
+  (the re-sent Welcome carries the original connection's `h_transport` and
+  cannot bind on a new circuit); the invitee stays "Connecting…" and keeps
+  retrying. Full recovery of this case is v1.1 (#90 Mode A).
 - **The "can't-quit" trap** (#30, #31): the *close to tray* setting now
   takes effect immediately instead of only after a restart, and the tray
   icon's right-click menu (with **Quit**) no longer flashes away — a
