@@ -19,7 +19,7 @@
 - Model MLS/first-contact states as enums, not bool flags where a state is introduced (existing `GroupState` pattern).
 - TDD: the test must fail before the implementation exists. Watch it fail for the right reason.
 - Migrations are `include_str!`'d SQL registered in `crates/core/src/storage/migrations.rs` keyed by an integer `version`; the highest existing is `0017_pending_welcomes` (version 17). The new one is version 18. The `SchemaTooNew` downgrade guard already handles the version bump.
-- **Protocol/auth rule (CLAUDE.md):** this change touches auth semantics. ADR 0011 is written first (Task 8), and the wiring task (Task 10) requires the **opus crypto/second reviewer**.
+- **Protocol/auth rule (CLAUDE.md):** this change touches auth semantics. ADR 0012 is written first (Task 8), and the wiring task (Task 10) requires the **opus crypto/second reviewer**.
 - Local gate is authoritative (CI is on-demand). Per-task gate: `. "$HOME/.cargo/env" && cargo fmt --all && cargo clippy -p skattr-core --all-targets --features test-harness -- -D warnings` then the task's `cargo test`. Full-workspace gate at the end.
 
 ## What is already committed (do NOT re-implement)
@@ -39,10 +39,10 @@ Tasks 1–6 on this branch: migration `0017_pending_welcomes` + `PendingWelcomeR
 
 ---
 
-### Task 8: ADR 0011 — first-contact idempotent re-Ack
+### Task 8: ADR 0012 — first-contact idempotent re-Ack
 
 **Files:**
-- Create: `docs/adr/0011-first-contact-idempotent-reack.md`
+- Create: `docs/adr/0012-first-contact-idempotent-reack.md`
 
 **Interfaces:** none (documentation). Written first per CLAUDE.md ("protocol changes need an ADR before code").
 
@@ -54,8 +54,8 @@ Tasks 1–6 on this branch: migration `0017_pending_welcomes` + `PendingWelcomeR
 - [ ] **Step 2: Commit**
 
 ```bash
-git add docs/adr/0011-first-contact-idempotent-reack.md
-git commit -m "docs(adr): ADR 0011 — first-contact idempotent re-Ack (#93)"
+git add docs/adr/0012-first-contact-idempotent-reack.md
+git commit -m "docs(adr): ADR 0012 — first-contact idempotent re-Ack (#93)"
 ```
 
 ---
@@ -149,7 +149,7 @@ git commit -m "feat(#93): first_contact_acks table + FirstContactAckRepo (kp_ref
 - [ ] **Step 1: Write the record on join.** In `welcome_join_persist`, inside the SAME transaction that runs `oi.mark_consumed_in_tx(tx, &kp_ref)?;` (`inbound.rs:584`), and ONLY when `expected_x25519` is `Some` (the first-contact/bootstrap path), add:
 
 ```rust
-            // #93 / ADR 0011: bind this consumed invite to the joining peer so a
+            // #93 / ADR 0012: bind this consumed invite to the joining peer so a
             // later re-sent Welcome (lost-Ack) can be re-Acked without re-joining.
             if let Some(x25519) = expected_x25519 {
                 crate::storage::first_contact_acks::FirstContactAckRepo::new(&self.pool)
@@ -191,7 +191,7 @@ git commit -m "feat(#93): first_contact_acks table + FirstContactAckRepo (kp_ref
 - [ ] **Step 4: Implement the pre-check** in `dispatch_welcome_bootstrap`, BEFORE the `welcome_join_persist` call:
 
 ```rust
-        // #93 / ADR 0011: idempotent re-Ack. If we already joined a first
+        // #93 / ADR 0012: idempotent re-Ack. If we already joined a first
         // contact under this welcome's kp_ref, and the SAME authenticated Noise
         // static key re-presents it (lost-Ack retry), re-Ack with the stored
         // identity WITHOUT re-running the MLS join. A kp_ref match with a
@@ -228,7 +228,7 @@ Expected: PASS including the two new tests and the pre-existing `dispatch_welcom
 ```bash
 . "$HOME/.cargo/env" && cargo fmt --all && cargo clippy -p skattr-core --all-targets --features test-harness -- -D warnings
 git add crates/core/src/daemon/inbound.rs
-git commit -m "feat(#93): responder idempotent re-Ack for a re-sent first-contact Welcome (ADR 0011)"
+git commit -m "feat(#93): responder idempotent re-Ack for a re-sent first-contact Welcome (ADR 0012)"
 ```
 
 ---
@@ -288,9 +288,9 @@ git commit -m "test(#93): non-loopback guardrail — first contact recovers afte
 
 **Interfaces:** none (docs + changelog).
 
-- [ ] **Step 1: Disclose the limitation.** In the threat model / limitations doc, add (next to the existing direct-only-Welcome limitation): *first-contact recovery self-heals a **lost Ack** (the responder re-Acks a re-sent Welcome, ADR 0011); it does **not** recover a **lost first Welcome** delivered over a since-replaced circuit — the re-sent Welcome carries the original connection's `h_transport` (ADR 0009) and cannot bind on a new connection. The invitee stays "Connecting…" and keeps retrying. Tracked with #90 Mode A; full recovery is v1.1.* Add the matching one-line entry to CLAUDE.md's Deferred-status section.
+- [ ] **Step 1: Disclose the limitation.** In the threat model / limitations doc, add (next to the existing direct-only-Welcome limitation): *first-contact recovery self-heals a **lost Ack** (the responder re-Acks a re-sent Welcome, ADR 0012); it does **not** recover a **lost first Welcome** delivered over a since-replaced circuit — the re-sent Welcome carries the original connection's `h_transport` (ADR 0009) and cannot bind on a new connection. The invitee stays "Connecting…" and keeps retrying. Tracked with #90 Mode A; full recovery is v1.1.* Add the matching one-line entry to CLAUDE.md's Deferred-status section.
 
-- [ ] **Step 2: CHANGELOG entry.** Add an entry referencing `#93` describing the responder idempotent re-Ack (ADR 0011) that fixes lost-Ack first-contact recovery, with the disclosed lost-Welcome limitation.
+- [ ] **Step 2: CHANGELOG entry.** Add an entry referencing `#93` describing the responder idempotent re-Ack (ADR 0012) that fixes lost-Ack first-contact recovery, with the disclosed lost-Welcome limitation.
 
 - [ ] **Step 3: Full local gate (authoritative).** Run and confirm all green:
 

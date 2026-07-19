@@ -4,7 +4,7 @@
 **Issue:** #93 (Mode B of #90). Supersedes the recovery model in
 `2026-07-18-first-contact-pending-join-design.md`.
 **Area:** MLS group lifecycle + first-contact delivery — **protocol/auth-adjacent.**
-**Requires ADR 0011 + the crypto/second reviewer** (per CLAUDE.md).
+**Requires ADR 0012 + the crypto/second reviewer** (per CLAUDE.md).
 
 ---
 
@@ -96,7 +96,7 @@ on the peer identity is sufficient; if the Welcome's group id is cheaply
 available it may be asserted as defense-in-depth, but the peer-identity match is
 the authority.
 
-### Why it is safe (auth reasoning for ADR 0011)
+### Why it is safe (auth reasoning for ADR 0012)
 
 - The peer is **Noise-authenticated** on the connection — an attacker cannot
   provoke a re-Ack addressed to a different identity.
@@ -168,7 +168,7 @@ Ack-drop.
 
 ## ADR
 
-**ADR 0011 — first-contact idempotent re-Ack.** Records: the responder re-Acks a
+**ADR 0012 — first-contact idempotent re-Ack.** Records: the responder re-Acks a
 first-contact Welcome from a peer it is already grouped with, skipping MLS
 processing; reuses `Frame::MlsWelcome`/`Frame::Ack` (no ADR-0006 wire change);
 the auth reasoning above; and the disclosed lost-Welcome limitation. The task
@@ -184,7 +184,7 @@ carrying the code change requires the opus crypto/second reviewer.
   planning).
 - `crates/tests/src/first_contact_welcome_dropped.rs` — retarget to drop the Ack;
   rename to reflect the lost-Ack scenario.
-- `docs/adr/0011-first-contact-idempotent-reack.md` (new).
+- `docs/adr/0012-first-contact-idempotent-reack.md` (new).
 - Threat model / limitations docs — disclose lost-Welcome-over-new-circuit.
 
 ## What is preserved (no change)
