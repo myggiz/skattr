@@ -295,6 +295,15 @@ where
     })
 }
 
+/// #90: the first-contact outbound onion dial succeeds only ~63% of the time
+/// per attempt over real Tor (measured; the Arti 0.44 bump does not help — see
+/// the #99 spike). This synchronous dial-first is the only fail-fast point in
+/// first contact, so it is retried up to `DIAL_ATTEMPTS` times, which compounds
+/// to ~95% (`1 − 0.37^3`).
+const DIAL_ATTEMPTS: usize = 3;
+/// Backoff between dial-first retries.
+const DIAL_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_secs(2);
+
 async fn add_contact<S>(
     handle: &Arc<DaemonHandle<S>>,
     invite_url: String,
@@ -353,22 +362,44 @@ where
     // connection for the Welcome (no second dial). The dial is MANDATORY —
     // first contact requires the connection anyway (to deliver the Welcome).
     let inviter_onion = link.body.card.body.onion.clone();
-    let h_transport = handle
+    // #90: the outbound onion dial is only ~63% reliable per attempt over real
+    // Tor, and this synchronous dial-first is the only fail-fast point in first
+    // contact (the #93 sweeper already retries the subsequent Welcome delivery).
+    // Retry it up to DIAL_ATTEMPTS times. Every attempt is a clean, zero-prior-
+    // writes dial (the dial runs before the invite-consuming transaction, 2.A),
+    // with a fresh h_transport; the genesis Commit below binds to the attempt
+    // that succeeded. On this path every error is a transport/handshake failure
+    // (the card is pre-verified and the onion comes from the invite), so any
+    // error is retryable.
+    let mut dial_result = handle
         .hub
         .connect_and_ingest_at(inviter, &inviter_onion)
-        .await
-        .map_err(|e| {
-            // First contact requires reaching the inviter now; a dial failure
-            // (offline / Tor flaky) is surfaced as DeliveryTimeout so the UI can
-            // show the "both must be online" guidance. Preserve a more specific
-            // kind if the underlying error already has one.
-            match e.kind() {
-                Some(k) => IpcError::Daemon(k),
-                None => {
-                    IpcError::Daemon(crate::daemon::error_kind::DaemonErrorKind::DeliveryTimeout)
-                }
-            }
-        })?;
+        .await;
+    for attempt in 1..DIAL_ATTEMPTS {
+        if dial_result.is_ok() {
+            break;
+        }
+        // Redaction-safe: attempt number only, no onion / peer / error payload.
+        tracing::warn!(
+            "first-contact: dial attempt {}/{} failed, retrying",
+            attempt,
+            DIAL_ATTEMPTS
+        );
+        tokio::time::sleep(DIAL_RETRY_BACKOFF).await;
+        dial_result = handle
+            .hub
+            .connect_and_ingest_at(inviter, &inviter_onion)
+            .await;
+    }
+    let h_transport = dial_result.map_err(|e| {
+        // Final failure after DIAL_ATTEMPTS: surface as DeliveryTimeout so the
+        // UI can show the "both must be online" guidance. Preserve a more
+        // specific kind if the underlying error already has one.
+        match e.kind() {
+            Some(k) => IpcError::Daemon(k),
+            None => IpcError::Daemon(crate::daemon::error_kind::DaemonErrorKind::DeliveryTimeout),
+        }
+    })?;
 
     let contact_repo = ContactRepo::new(&handle.pool);
     let contact = Contact {
@@ -1965,7 +1996,22 @@ mod tests {
     /// round-trip (no joiner present), only that the committer dial succeeds.
     /// The responder side is dropped immediately — the subsequent best-effort
     /// Welcome send over the conn just fails quietly, which is fine here.
-    struct StubDialer;
+    struct StubDialer {
+        /// Fail (return a retryable `Delivery::Timeout`) the first `fail_first`
+        /// dials, then succeed — lets the `add_contact` dial-retry (#90) be
+        /// exercised deterministically.
+        fail_first: usize,
+        count: std::sync::atomic::AtomicUsize,
+    }
+
+    impl StubDialer {
+        fn new(fail_first: usize) -> Self {
+            Self {
+                fail_first,
+                count: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
 
     #[async_trait::async_trait]
     impl OutboundDial<tokio::io::DuplexStream> for StubDialer {
@@ -1989,6 +2035,18 @@ mod tests {
             AuthenticatedConnection<tokio::io::DuplexStream>,
             zeroize::Zeroizing<[u8; 32]>,
         )> {
+            // #90: simulate a flaky transport — fail the first `fail_first`
+            // dials with a retryable delivery timeout so the dial-retry loop
+            // can be exercised.
+            if self
+                .count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                < self.fail_first
+            {
+                return Err(crate::error::CoreError::Delivery(
+                    crate::delivery::DeliveryErrorKind::Timeout,
+                ));
+            }
             // Build a self-consistent Noise_XK pair: the initiator must target
             // the responder's ACTUAL static (rs), so derive `peer_x` from the
             // throwaway responder identity — NOT from the real `peer` (we don't
@@ -2017,10 +2075,19 @@ mod tests {
     /// Like [`test_handle`] but with a working stub dialer wired into the hub,
     /// for tests that drive `add_contact` (whose dial is mandatory).
     fn test_handle_with_dialer() -> Arc<DaemonHandle<tokio::io::DuplexStream>> {
+        test_handle_with_flaky_dialer(0)
+    }
+
+    /// Like [`test_handle_with_dialer`] but the stub dialer fails the first
+    /// `fail_first` dials before succeeding — for exercising the #90 dial-retry.
+    fn test_handle_with_flaky_dialer(
+        fail_first: usize,
+    ) -> Arc<DaemonHandle<tokio::io::DuplexStream>> {
         let seed = Seed::generate().unwrap();
         let identity = IdentityKey::from_seed(&seed).unwrap();
         let pool = Arc::new(Pool::in_memory());
-        let dialer: Arc<dyn OutboundDial<tokio::io::DuplexStream>> = Arc::new(StubDialer);
+        let dialer: Arc<dyn OutboundDial<tokio::io::DuplexStream>> =
+            Arc::new(StubDialer::new(fail_first));
         let hub: Arc<DeliveryHub<tokio::io::DuplexStream>> =
             Arc::new(DeliveryHub::new_with_dialer(pool.clone(), dialer));
         let (events_tx, _) = broadcast::channel::<Event>(16);
@@ -2459,6 +2526,95 @@ mod tests {
         );
         let gid = repo2.get_group_id(&alice_pub).unwrap().unwrap();
         assert!(!gid.is_empty(), "retry persists the group_id");
+    }
+
+    #[tokio::test]
+    async fn add_contact_retries_flaky_dial_then_succeeds() {
+        // #90: the dial-first is flaky over real Tor. add_contact retries it up
+        // to DIAL_ATTEMPTS times; a dial that fails the first (DIAL_ATTEMPTS - 1)
+        // times then succeeds must complete first contact. (Without the retry,
+        // the single dial fails and this add would surface DeliveryTimeout.)
+        let handle_a = test_handle();
+        handle_a.set_onion("alice.onion".to_string());
+        let alice_pub = handle_a.identity.public();
+        let CommandResult::InviteCreated { url, .. } = execute_command(
+            handle_a.clone(),
+            Command::CreateInvite {
+                nickname: None,
+                ttl_secs: Some(3600),
+            },
+        )
+        .await
+        .unwrap() else {
+            panic!("expected InviteCreated");
+        };
+
+        let handle_b = test_handle_with_flaky_dialer(DIAL_ATTEMPTS - 1);
+        let ok = execute_command(handle_b.clone(), Command::AddContact { invite_url: url })
+            .await
+            .unwrap();
+        assert!(
+            matches!(ok, CommandResult::ContactAdded(_)),
+            "add_contact must retry the flaky dial and succeed on the last attempt"
+        );
+        let repo = ContactRepo::new(&handle_b.pool);
+        assert!(
+            repo.get(&alice_pub).unwrap().is_some(),
+            "contact persisted after the retried dial"
+        );
+        assert!(
+            crate::storage::PendingWelcomeRepo::new(&handle_b.pool)
+                .is_pending(&alice_pub.0)
+                .unwrap(),
+            "first contact is pending (awaiting the Ack) after a successful add"
+        );
+    }
+
+    #[tokio::test]
+    async fn add_contact_gives_up_after_dial_attempts() {
+        // A dial that fails ALL DIAL_ATTEMPTS → DeliveryTimeout, and (2.A
+        // atomicity, preserved across the retries) ZERO writes.
+        let handle_a = test_handle();
+        handle_a.set_onion("alice.onion".to_string());
+        let alice_pub = handle_a.identity.public();
+        let CommandResult::InviteCreated { url, .. } = execute_command(
+            handle_a.clone(),
+            Command::CreateInvite {
+                nickname: None,
+                ttl_secs: Some(3600),
+            },
+        )
+        .await
+        .unwrap() else {
+            panic!("expected InviteCreated");
+        };
+
+        let handle_b = test_handle_with_flaky_dialer(DIAL_ATTEMPTS);
+        let err = execute_command(handle_b.clone(), Command::AddContact { invite_url: url }).await;
+        assert!(
+            matches!(
+                err,
+                Err(IpcError::Daemon(
+                    crate::daemon::error_kind::DaemonErrorKind::DeliveryTimeout
+                ))
+            ),
+            "all-failed dial must surface DeliveryTimeout, got {err:?}"
+        );
+        let repo = ContactRepo::new(&handle_b.pool);
+        assert!(
+            repo.get(&alice_pub).unwrap().is_none(),
+            "no contact row after all dials fail"
+        );
+        assert!(
+            repo.latest_card(&alice_pub).unwrap().is_none(),
+            "no card after all dials fail"
+        );
+        assert!(
+            !crate::storage::PendingWelcomeRepo::new(&handle_b.pool)
+                .is_pending(&alice_pub.0)
+                .unwrap(),
+            "no pending_welcomes row after all dials fail"
+        );
     }
 
     #[tokio::test]
