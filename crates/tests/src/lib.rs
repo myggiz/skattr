@@ -40,6 +40,8 @@ mod delivery_kill_mid_message;
 #[cfg(test)]
 mod delivery_real_tor;
 #[cfg(test)]
+mod first_contact_ack_dropped;
+#[cfg(test)]
 mod first_contact_direct;
 #[cfg(test)]
 mod history_sweep;

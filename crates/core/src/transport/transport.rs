@@ -23,6 +23,9 @@ impl<S> InboundStreams<S> {
     }
 }
 
+/// Publish an onion + accept inbound streams, and dial outbound onions.
+/// Implemented by `ArtiTransport` (production) and `LoopbackTransport`
+/// (in-process, test-harness); drives `run_with_transport` without Tor in CI.
 #[async_trait::async_trait]
 pub trait Transport: Send + Sync + 'static {
     /// Concrete byte-stream type. Note: this associated type makes `Transport`

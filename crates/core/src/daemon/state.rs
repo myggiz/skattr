@@ -833,6 +833,100 @@ pub async fn run_loopback_with_mailbox(
     .await
 }
 
+/// Like [`run_loopback`], but drives the assembly over a caller-supplied
+/// `Transport` instead of constructing a plain [`LoopbackTransport`]. Used by
+/// the #93 first-contact-recovers-after-dropped-Welcome guardrail, which wraps
+/// a `LoopbackTransport` in a fault-injecting transport that drops the first
+/// post-handshake data frame (the Welcome) on the invitee's dialed connection.
+///
+/// Everything else is byte-identical to [`run_loopback`] (five vault opens →
+/// seed → pool → sweep task → `NoopMailboxFactory` → `run_with_transport`), so
+/// the whole production assembly (accept loop, delivery hub, welcome sweeper,
+/// IPC) runs unchanged over the wrapped transport.
+///
+/// Gated on `feature = "test-harness"`; production never reaches it.
+#[cfg(feature = "test-harness")]
+pub async fn run_loopback_with_transport<T>(
+    data_dir: &Path,
+    passphrase: &zeroize::Zeroizing<String>,
+    config: Config,
+    config_path: std::path::PathBuf,
+    transport: Arc<T>,
+    ready: oneshot::Sender<Ready>,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<()>
+where
+    T: crate::transport::Transport,
+    T::Stream: Sync,
+{
+    use crate::storage::Pool;
+
+    std::fs::create_dir_all(data_dir)?;
+
+    let vault_path = data_dir.join("identity.vault");
+    let (_vault, identity_for_seed) = Vault::open(&vault_path, passphrase.as_str())?;
+    let seed = derive_storage_seed(identity_for_seed)?;
+    let backup_key = crate::identity::derive::hkdf_expand::<32>(
+        seed.as_bytes(),
+        crate::identity::derive::INFO_BACKUP_V1,
+    )?;
+    let (_vault2, identity) = Vault::open(&vault_path, passphrase.as_str())?;
+    let (_vault3, identity_for_poller) = Vault::open(&vault_path, passphrase.as_str())?;
+    let (_vault4, identity_for_inbound) = Vault::open(&vault_path, passphrase.as_str())?;
+    let (_vault5, identity_for_transport) = Vault::open(&vault_path, passphrase.as_str())?;
+
+    let pool = Arc::new(Pool::open(data_dir, &seed)?);
+
+    match crate::storage::MessageRepo::new(&pool).backfill_body_text() {
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "body_text backfill failed"),
+    }
+    let n = crate::storage::MessageRepo::new(&pool).backfill_envelope_id()?;
+    if n > 0 {
+        tracing::info!(rows = n, "backfilled envelope_id for pre-1.H rows");
+    }
+
+    let config_arc = std::sync::Arc::new(tokio::sync::RwLock::new(config.clone()));
+
+    let (sweep_shutdown_tx, sweep_shutdown_rx) = tokio::sync::watch::channel(false);
+    let sweep_handle = crate::daemon::retention::spawn_sweep(
+        pool.clone(),
+        config_arc.clone(),
+        std::time::Duration::from_secs(3600),
+        sweep_shutdown_rx,
+    );
+
+    let (events_tx, _) = broadcast::channel::<Event>(EVENT_CHANNEL_CAPACITY);
+
+    let mailbox_factory: Arc<dyn crate::mailbox::poll::MailboxConnectFactory> =
+        Arc::new(NoopMailboxFactory);
+    let transport_identity = Arc::new(identity_for_transport);
+
+    run_with_transport(
+        transport,
+        pool,
+        identity,
+        identity_for_poller,
+        identity_for_inbound,
+        transport_identity,
+        seed,
+        backup_key,
+        data_dir,
+        config,
+        config_path,
+        config_arc,
+        events_tx,
+        mailbox_factory,
+        crate::mailbox::poll::PollCadence::default(),
+        LogSink::default(),
+        sweep_shutdown_tx,
+        sweep_handle,
+        ready,
+        shutdown,
+    )
+    .await
+}
+
 /// Best-effort wipe of the managed attachment open-cache
 /// (`<data_dir>/cache/open`). Decrypted plaintext lives here only while an
 /// attachment is open; clearing it at boot + clean shutdown keeps plaintext
