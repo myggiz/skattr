@@ -4,6 +4,7 @@
   import { onMount, onDestroy } from "svelte";
   import { logs, attachLogs, detachLogs } from "$lib/stores/logs";
   import { toast } from "$lib/stores/toast";
+  import { copyText } from "$lib/clipboard";
 
   onMount(() => {
     void attachLogs();
@@ -20,7 +21,7 @@
       )
       .join("\n");
     try {
-      await navigator.clipboard.writeText(text);
+      await copyText(text);
       toast.show("Logs copied");
     } catch (e) {
       toast.show(`Copy failed: ${e}`);

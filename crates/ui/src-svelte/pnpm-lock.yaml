@@ -5,9 +5,7 @@ settings:
   excludeLinksFromLockfile: false
 
 patchedDependencies:
-  esrap@1.4.9:
-    hash: eabcd92379774f8d9933cf21294ef6232e78176853746821c28e1d7fecf18560
-    path: patches/esrap@1.4.9.patch
+  esrap@1.4.9: eabcd92379774f8d9933cf21294ef6232e78176853746821c28e1d7fecf18560
 
 importers:
 
@@ -19,6 +17,9 @@ importers:
       '@tauri-apps/api':
         specifier: ~2.11.1
         version: 2.11.1
+      '@tauri-apps/plugin-clipboard-manager':
+        specifier: ^2.3.2
+        version: 2.3.2
       '@tauri-apps/plugin-deep-link':
         specifier: ~2.4.9
         version: 2.4.9
@@ -460,6 +461,9 @@ packages:
 
   '@tauri-apps/api@2.11.1':
     resolution: {integrity: sha512-M2FPuYND2m+wh5hfW9ZpSdxMPdEJovPBWwoHJmwUpysTYNHaOkVFN419m/K0LIgjb/7KU2vBgsUepJWugQCvAA==}
+
+  '@tauri-apps/plugin-clipboard-manager@2.3.2':
+    resolution: {integrity: sha512-CUlb5Hqi2oZbcZf4VUyUH53XWPPdtpw43EUpCza5HWZJwxEoDowFzNUDt1tRUXA8Uq+XPn17Ysfptip33sG4eQ==}
 
   '@tauri-apps/plugin-deep-link@2.4.9':
     resolution: {integrity: sha512-u0SKOUHnJ1wqeqXsDFq2+kASCBj9xxbG0g9XZWPy9SOmU4wXtp6b/wiYpm6oH6/5fBTQsLqnLhIvqLBRpgHJlA==}
@@ -1416,6 +1420,10 @@ snapshots:
   '@tanstack/virtual-core@3.10.9': {}
 
   '@tauri-apps/api@2.11.1': {}
+
+  '@tauri-apps/plugin-clipboard-manager@2.3.2':
+    dependencies:
+      '@tauri-apps/api': 2.11.1
 
   '@tauri-apps/plugin-deep-link@2.4.9':
     dependencies:

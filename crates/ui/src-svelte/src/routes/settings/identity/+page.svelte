@@ -6,6 +6,7 @@
   import { unwrapOk } from "$lib/ipc/client";
   import { getPassphraseAuditLatest } from "$lib/stores/config";
   import { toast } from "$lib/stores/toast";
+  import { copyText } from "$lib/clipboard";
   import ChangePassphraseDialog from "$lib/components/ChangePassphraseDialog.svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
 
@@ -36,7 +37,7 @@
 
   async function copy(s: string) {
     try {
-      await navigator.clipboard.writeText(s);
+      await copyText(s);
       toast.show("Copied");
     } catch (e) {
       toast.show(`Copy failed: ${e}`);
