@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Myggiz AB
 
-//! Two-daemon E2E: invite -> add -> send (Queued), all over a
+//! Two-daemon E2E: invite -> add -> send (blocked while pending), all over a
 //! mocked-transport harness.
 //!
 //! ## What this test covers
@@ -22,22 +22,21 @@
 //! Each test therefore creates a fresh `IpcClient` for every `execute()` call
 //! via `DaemonBundle::exec()`.
 //!
-//! ## Why the send returns Queued (and not Delivered)
+//! ## Why the send is blocked ("not connected yet")
 //!
 //! `AddContact` creates the 2-member MLS group **only on Bob's side**: Bob is
 //! the one consuming Alice's invite and running `Group::create_solo` +
-//! `Group::add_member`.  Alice has no group state to decrypt with — she only
-//! minted the invite and never received an MLS Welcome from Bob.
+//! `Group::add_member`.  Since #93, that genesis leaves Bob's group
+//! `PendingJoin` and persists a `pending_welcomes` row; `SendMessage` is gated
+//! on that row (`is_pending`) and returns `InvalidArgument("not connected yet")`
+//! until Bob sees Alice's Welcome-Ack.
 //!
-//! The true symmetric flow (Alice learns Bob's pubkey via a "Welcome handoff"
-//! round-trip) is handled by a real Tor deployment or a future symmetric
-//! invite protocol.  For now, even with both hubs wired and the Noise
-//! handshake complete, Bob's hub actor delivers the ciphertext to Alice's hub,
-//! but Alice's `InboundDispatch` returns `None` (no matching group → drops
-//! frame).  The ACK therefore never arrives and `DeliveryHub::send` times out
-//! after 2 s → `SendStatus::Queued`.
-//!
-//! This is the correct Phase 1.F test outcome.
+//! In this harness Alice never joins — her `InboundDispatch` has no group and
+//! never returns a Welcome-Ack — so first contact never completes and Bob stays
+//! `PendingJoin`.  The send is therefore correctly blocked at the guard (it
+//! never reaches delivery).  The true symmetric flow (Alice joins via the real
+//! `run_with_transport` accept loop and Acks) is exercised by the
+//! `first_contact_*` guardrails.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 

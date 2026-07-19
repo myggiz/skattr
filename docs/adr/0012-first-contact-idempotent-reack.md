@@ -7,8 +7,8 @@
 Welcome is rejected as an unknown `kp_ref`.
 **Relates:** ADR 0007 (first-contact Welcome carve-out + transport↔MLS identity
 binding); ADR 0009 (`h_transport` ↔ MLS binding); ADR 0006 (mailbox/wire
-protocol, frozen). Tied to #90 (Mode A circuit teardown) and #91 (invitee
-`PendingJoin` re-send).
+protocol, frozen). Tied to #90 (Mode A circuit teardown); this is part of the
+#93 first-contact-recovery work (invitee `PendingJoin` re-send).
 **Requires a second reviewer** (auth/protocol change, per CLAUDE.md). Written
 before the code (Tasks 9–11) per CLAUDE.md's "protocol changes need an ADR
 before code" rule.
@@ -37,7 +37,7 @@ oi.mark_consumed_in_tx(tx, &kp_ref)?;           // inbound.rs:584
 After that transaction commits, the responder is a full member and sends its
 `Frame::Ack`. **If that Ack is lost** — the concrete trigger is #90 Mode A,
 where the onion circuit that carried the Welcome is torn down before the Ack
-frame is flushed back — the invitee never leaves `PendingJoin` and, per #91,
+frame is flushed back — the invitee never leaves `PendingJoin` and, per #93,
 re-sends the **byte-identical** Welcome on a fresh connection.
 
 The re-sent Welcome now fails. The responder's Welcome path re-derives the
@@ -168,7 +168,7 @@ introduced. **ADR 0006 stays frozen.**
 
 ## Consequences
 
-- **Lost first-contact Ack self-heals.** The invitee's re-sent Welcome (#91) is
+- **Lost first-contact Ack self-heals.** The invitee's re-sent Welcome (#93) is
   answered from the durable record, the invitee's Ack resolves, and it leaves
   `PendingJoin` — closing the #93 permanent-stall.
 
