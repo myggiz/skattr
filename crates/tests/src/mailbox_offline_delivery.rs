@@ -72,6 +72,11 @@ fn paired_groups(
     let bob = Group::join_from_welcome(bob_id, &welcome, Some((&kp_ref, &psk)), None, bob_provider)
         .unwrap();
 
+    // Simulate Welcome-Ack: committer stays PendingJoin until the peer Acks
+    // (#93). set_active() restores the established-group precondition so the
+    // encrypt() call succeeds. Bob (joiner) is already Active.
+    alice.set_active();
+
     let alice_repo = MlsGroupRepo::new(alice_pool);
     let bob_repo = MlsGroupRepo::new(bob_pool);
     alice.save(&alice_repo).unwrap();

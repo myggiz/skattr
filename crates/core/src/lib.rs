@@ -72,9 +72,15 @@ pub mod test_exports {
         HANDSHAKE_TIMEOUT,
     };
     pub use crate::transport::{LoopbackNet, LoopbackTransport};
+    // #93 guardrail: the `Transport` trait + `InboundStreams` + `ONION_PORT` so a
+    // fault-injecting wrapper transport (drop-first-Ack) can be built in the test
+    // crate and drive the real assembly over a wrapped loopback transport.
+    pub use crate::transport::{InboundStreams, Transport, ONION_PORT};
     // Phase 1.C additions:
     pub use crate::mls::{Group, GroupId, GroupState, KeyPackage, MlsProvider};
     pub use crate::storage::{KeyPackageRepo, MlsGroupRepo};
+    // #93 guardrail: observe the durable first-contact-pending signal directly.
+    pub use crate::storage::PendingWelcomeRepo;
     // Phase 1.D additions:
     pub use crate::contact::{Contact, ContactCard, ContactCardBody};
     pub use crate::invite::{InviteLink, InviteLinkBody, InvitePsk};
@@ -185,6 +191,12 @@ pub mod test_exports {
     // `MailboxConnectFactory` argument.
     pub use crate::daemon::state::run_loopback_with_mailbox;
 
+    // #93 guardrail: loopback twin that drives the assembly over a
+    // caller-supplied `Transport` (a fault-injecting wrapper around
+    // `LoopbackTransport`), for the first-contact-recovers-after-dropped-Ack
+    // guardrail. Otherwise byte-identical to `run_loopback`.
+    pub use crate::daemon::state::run_loopback_with_transport;
+
     /// Adapt a cross-crate [`TestMailboxFactory`] into the crate-private
     /// `MailboxConnectFactory` the daemon assembly consumes, so the
     /// offline-fallback guardrail can hand its in-process mailbox factory to
@@ -195,6 +207,27 @@ pub mod test_exports {
         factory: std::sync::Arc<dyn TestMailboxFactory>,
     ) -> std::sync::Arc<dyn crate::mailbox::poll::MailboxConnectFactory> {
         std::sync::Arc::new(TestFactoryBridge::new(factory))
+    }
+
+    /// #93 guardrail: open `data_dir`'s pool exactly the way the daemon boots
+    /// (vault → `derive_storage_seed` → `Pool::open`) and report whether a
+    /// durable `pending_welcomes` row still exists for `peer` — i.e. first
+    /// contact is still in progress. Read-only; safe to call concurrently with a
+    /// running daemon (SQLite WAL allows readers).
+    pub fn first_contact_is_pending(
+        data_dir: &std::path::Path,
+        passphrase: &zeroize::Zeroizing<String>,
+        peer: &crate::identity::PublicKey,
+    ) -> crate::error::Result<bool> {
+        use crate::identity::derive::derive_storage_seed;
+        use crate::identity::vault::Vault;
+        use crate::storage::{PendingWelcomeRepo, Pool};
+
+        let vault_path = data_dir.join("identity.vault");
+        let (_v, id_for_seed) = Vault::open(&vault_path, passphrase.as_str())?;
+        let seed = derive_storage_seed(id_for_seed)?;
+        let pool = Pool::open(data_dir, &seed)?;
+        PendingWelcomeRepo::new(&pool).is_pending(&peer.0)
     }
 
     /// Phase 1B Task 10: seed two on-disk vaults as *already-established*

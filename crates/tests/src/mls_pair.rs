@@ -54,6 +54,11 @@ fn alice_bob_exchange_messages_and_survive_restart() {
         Group::join_from_welcome(&bob_id, &welcome, Some((&kp_ref, &psk)), None, bob_provider)
             .unwrap();
 
+    // Simulate the Welcome-Ack: the committer (alice) stays PendingJoin until
+    // the peer confirms receipt of the Welcome (#93). set_active() mirrors the
+    // real Ack path; bob (joiner) is already Active via join_from_welcome.
+    alice.set_active();
+
     assert_eq!(alice.epoch(), 1);
     assert_eq!(bob.epoch(), 1);
     assert_eq!(alice.id(), bob.id());

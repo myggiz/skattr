@@ -390,7 +390,13 @@ client-side mitigation goes in **4.C**.
   the first-contact `Welcome` frame (old Task 2.E.5); if the inviter is offline
   when the joiner sends the Welcome, first contact stalls. Deferred (touching it
   would extend the ADR 0006 freeze). Ordinary messages and ContactCard updates
-  do have mailbox fallback (2.C).
+  do have mailbox fallback (2.C). **Partial recovery shipped in #93 (ADR 0012):**
+  a **lost Ack** self-heals — if the inviter joined but its acknowledgement was
+  lost, a re-sent Welcome is idempotently re-Acked. A **lost first Welcome** over
+  a since-replaced circuit does **not** recover: the re-sent Welcome carries the
+  original connection's `h_transport` (ADR 0009) and cannot bind on a new
+  connection; the invitee stays "Connecting…" and keeps retrying (capped
+  backoff). Tracked with #90 Mode A; full recovery is v1.1.
 - **3.C completion is not atomic across lanes** — ❌ deferred (v1.1). The
   attachment-complete check (`received_indices().len() >= total` → reassemble +
   emit `AttachmentReceived` → `set_status('complete')`) is not atomic with the

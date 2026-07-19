@@ -207,7 +207,13 @@ These are absent in v1.0 by decision (see the
 - **First-contact requires both peers online.** The first-contact Welcome is
   delivered directly (no mailbox fallback); if the inviter is offline when the
   joiner sends the Welcome, first contact stalls until both are online. Ordinary
-  messages and ContactCard updates *do* have mailbox fallback. (D1)
+  messages and ContactCard updates *do* have mailbox fallback. (D1) **Partial
+  recovery shipped in v0.1.2 (#93, ADR 0012):** a *lost Ack* self-heals — if
+  the inviter joined but its acknowledgement was lost, a re-sent Welcome is
+  idempotently re-Acked. A *lost first Welcome* over a since-replaced circuit
+  does **not** recover: the re-sent Welcome carries the original connection's
+  `h_transport` (ADR 0009) and cannot bind on a new connection; the invitee
+  stays "Connecting…" and keeps retrying. Full recovery is v1.1 (#90 Mode A).
 - **Onion-address rotation is degenerate.** `Command::RotateOnion` bumps the
   self-card version and republishes the *current* onion; it does not generate a
   new address. True rotation is future work. (D2)

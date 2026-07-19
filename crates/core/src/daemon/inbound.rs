@@ -582,6 +582,15 @@ impl DaemonInbound {
             })?;
             kp_repo.mark_consumed_in_tx(tx, &kp_sha256)?;
             oi.mark_consumed_in_tx(tx, &kp_ref)?;
+            // #93 / ADR 0012: bind this consumed invite to the joining peer so a
+            // later re-sent Welcome (lost-Ack) can be re-Acked without re-joining.
+            // Only the first-contact/bootstrap path (`bind_x25519` Some) records
+            // this — the established-conn `dispatch_welcome` path has no
+            // authenticated fresh Noise static to pin.
+            if let Some(x25519) = bind_x25519 {
+                crate::storage::first_contact_acks::FirstContactAckRepo::new(&self.pool)
+                    .insert_in_tx(tx, &kp_ref, x25519, &derived.0, now)?;
+            }
             Ok(())
         })?;
 
@@ -648,6 +657,40 @@ impl InboundDispatch for DaemonInbound {
     }
 
     fn dispatch_welcome(&self, peer: PublicKey, welcome: &[u8]) -> Option<MessageId> {
+        // #93 / ADR 0012: idempotent re-Ack on the ESTABLISHED path. On a
+        // lost-Ack retry the invitee re-dials; the responder now resolves it as
+        // a KNOWN peer (the first join inserted it into `contacts`), so the
+        // re-sent Welcome routes here, NOT to `dispatch_welcome_bootstrap`. If we
+        // already joined a first contact under this welcome's kp_ref, and the
+        // already-authenticated `peer` (resolved via find_by_noise_x25519 —
+        // Ed25519 identity) equals the stored `peer_identity`, re-Ack with the
+        // stored message id WITHOUT re-running the MLS join (no
+        // outstanding_invites lookup, no PSK / h_transport derivation, no
+        // join_from_welcome, no group-state mutation). A kp_ref match with a
+        // different authenticated peer is a replay by another party — reject
+        // (do NOT fall through to a re-join: KeyPackage single-use is pinned to
+        // the one peer that first consumed the invite). On a Welcome parse error
+        // we skip the pre-check and fall through — a malformed Welcome is
+        // rejected by the existing join path.
+        if let Ok(kp_ref) = crate::mls::key_package::parse_welcome_kp_hash(welcome) {
+            match crate::storage::first_contact_acks::FirstContactAckRepo::new(&self.pool)
+                .lookup(&kp_ref)
+            {
+                Ok(Some(rec)) => {
+                    if rec.peer_identity == peer.0 {
+                        return Some(crate::delivery::peer::welcome_msg_id(welcome));
+                    }
+                    // Static text only: no pubkey logged (>= info bans them).
+                    tracing::warn!("inbound: welcome kp_ref reused by a different peer — rejected");
+                    return None;
+                }
+                Ok(None) => {} // fall through to the normal established join
+                Err(e) => {
+                    // A lookup error must NOT block a legitimate established Welcome.
+                    tracing::warn!(err = %e, "inbound: first_contact_acks lookup failed");
+                }
+            }
+        }
         // Welcome over an already-established connection: no binding check (the
         // connection is already attributed to `peer`); derive + persist, then
         // assert the derived identity matches the bound peer (defense in depth).
@@ -679,6 +722,32 @@ impl InboundDispatch for DaemonInbound {
         expected_x25519: &[u8; 32],
         h_transport: Option<&[u8; 32]>,
     ) -> Option<PublicKey> {
+        // #93 / ADR 0012: idempotent re-Ack. If we already joined a first
+        // contact under this welcome's kp_ref, and the SAME authenticated Noise
+        // static key re-presents it (lost-Ack retry), re-Ack with the stored
+        // identity WITHOUT re-running the MLS join (no outstanding_invites
+        // lookup, no PSK / h_transport derivation, no join_from_welcome, no
+        // group-state mutation). A kp_ref match with a different peer_x25519 is a
+        // replay by another peer — reject.
+        if let Ok(kp_ref) = crate::mls::key_package::parse_welcome_kp_hash(welcome) {
+            match crate::storage::first_contact_acks::FirstContactAckRepo::new(&self.pool)
+                .lookup(&kp_ref)
+            {
+                Ok(Some(rec)) => {
+                    if &rec.peer_x25519 == expected_x25519 {
+                        return Some(PublicKey(rec.peer_identity));
+                    }
+                    // Static text only: no pubkey / x25519 logged (>= info bans them).
+                    tracing::warn!("inbound: welcome kp_ref reused by a different peer — rejected");
+                    return None;
+                }
+                Ok(None) => {} // fall through to the normal first-contact join
+                Err(e) => {
+                    // A lookup error must NOT block a legitimate first join.
+                    tracing::warn!(err = %e, "inbound: first_contact_acks lookup failed");
+                }
+            }
+        }
         match self.welcome_join_persist(welcome, Some(expected_x25519), h_transport) {
             Ok(derived) => Some(derived),
             Err(_e) => {
@@ -1494,6 +1563,175 @@ mod tests {
             Err(_timeout) => {} // expected
             Ok(other) => panic!("unexpected event on binding mismatch: {other:?}"),
         }
+    }
+
+    /// #93 / ADR 0012: a re-sent first-contact Welcome from the SAME
+    /// authenticated peer (lost-Ack retry) must be re-Acked with the stored
+    /// identity WITHOUT re-running the MLS join. The invite is consumed on the
+    /// first join, so the OLD code returned `None` on the second call.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn resent_welcome_from_same_peer_reacks_without_rejoin() {
+        let pool = Arc::new(Pool::in_memory());
+        let (inbound, bob, welcome_bytes, _alice_kp_ref, _rx) = bootstrap_fixture(&pool);
+        let bob_pubkey = bob.public();
+        let expected_x25519 = bob.noise_static_public();
+
+        let first = crate::delivery::peer::InboundDispatch::dispatch_welcome_bootstrap(
+            &inbound,
+            &welcome_bytes,
+            &expected_x25519,
+            None,
+        );
+        assert_eq!(first, Some(bob_pubkey), "first join succeeds");
+
+        // Second, identical Welcome from the same authenticated peer: the invite
+        // is now consumed. New code re-Acks with the SAME identity, without
+        // re-joining.
+        let second = crate::delivery::peer::InboundDispatch::dispatch_welcome_bootstrap(
+            &inbound,
+            &welcome_bytes,
+            &expected_x25519,
+            None,
+        );
+        assert_eq!(
+            second,
+            Some(bob_pubkey),
+            "re-sent welcome is re-Acked with stored identity"
+        );
+    }
+
+    /// #93 / ADR 0012: the same `kp_ref` presented by a DIFFERENT authenticated
+    /// peer (a replay by another party) must be rejected — KeyPackage single-use
+    /// is pinned to the one peer that first consumed the invite.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn resent_welcome_from_different_peer_is_rejected() {
+        let pool = Arc::new(Pool::in_memory());
+        let (inbound, bob, welcome_bytes, _alice_kp_ref, _rx) = bootstrap_fixture(&pool);
+        let bob_pubkey = bob.public();
+        let expected_x25519 = bob.noise_static_public();
+
+        let first = crate::delivery::peer::InboundDispatch::dispatch_welcome_bootstrap(
+            &inbound,
+            &welcome_bytes,
+            &expected_x25519,
+            None,
+        );
+        assert_eq!(first, Some(bob_pubkey), "first join succeeds");
+
+        // A different authenticated peer replaying the same Welcome.
+        let mut other = expected_x25519;
+        other[0] ^= 0xFF;
+        let replay = crate::delivery::peer::InboundDispatch::dispatch_welcome_bootstrap(
+            &inbound,
+            &welcome_bytes,
+            &other,
+            None,
+        );
+        assert_eq!(
+            replay, None,
+            "kp_ref match but different peer_x25519 is rejected"
+        );
+    }
+
+    /// #93 / ADR 0012: the ESTABLISHED path (`dispatch_welcome`) must also
+    /// re-Ack. After a first-contact join (bootstrap), the invitee is a KNOWN
+    /// peer; its re-sent Welcome routes to `dispatch_welcome` (not the
+    /// bootstrap carve-out). The consumed invite means a re-join is impossible,
+    /// so the OLD code returned `None` (no Ack, permanent stall). New code
+    /// re-Acks from the durable `first_contact_acks` record — gated on the
+    /// authenticated Ed25519 `peer` matching the stored `peer_identity` —
+    /// WITHOUT re-joining.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn established_resent_welcome_from_same_peer_reacks_without_rejoin() {
+        let pool = Arc::new(Pool::in_memory());
+        let (inbound, bob, welcome_bytes, alice_kp_ref, _rx) = bootstrap_fixture(&pool);
+        let bob_pubkey = bob.public();
+        let expected_x25519 = bob.noise_static_public();
+
+        // First-contact join via the bootstrap path: records first_contact_acks.
+        let first = crate::delivery::peer::InboundDispatch::dispatch_welcome_bootstrap(
+            &inbound,
+            &welcome_bytes,
+            &expected_x25519,
+            None,
+        );
+        assert_eq!(first, Some(bob_pubkey), "first join succeeds");
+
+        // Invite is now consumed — a re-join is impossible.
+        let oi = crate::storage::OutstandingInviteRepo::new(&pool);
+        assert!(
+            oi.get_psk(&alice_kp_ref).unwrap().is_none(),
+            "invite consumed after first join"
+        );
+
+        // Bob's group state (epoch) before the established re-send.
+        let cr = crate::storage::ContactRepo::new(&pool);
+        let gid = cr
+            .get_group_id(&bob_pubkey)
+            .unwrap()
+            .unwrap_or_else(|| panic!("gid must be set"));
+        let group_repo = crate::storage::MlsGroupRepo::new(&pool);
+        let epoch_before = crate::mls::Group::load(&crate::mls::GroupId(gid.clone()), &group_repo)
+            .unwrap()
+            .unwrap_or_else(|| panic!("group must be loadable"))
+            .epoch();
+
+        // The re-sent Welcome now routes to the ESTABLISHED path with the
+        // resolved Ed25519 identity. Must re-Ack with the stored message id.
+        let second = crate::delivery::peer::InboundDispatch::dispatch_welcome(
+            &inbound,
+            bob_pubkey,
+            &welcome_bytes,
+        );
+        assert_eq!(
+            second,
+            Some(crate::delivery::peer::welcome_msg_id(&welcome_bytes)),
+            "established re-sent welcome is re-Acked with the stored message id"
+        );
+
+        // No re-join: epoch must be unchanged.
+        let epoch_after = crate::mls::Group::load(&crate::mls::GroupId(gid), &group_repo)
+            .unwrap()
+            .unwrap_or_else(|| panic!("group must be loadable"))
+            .epoch();
+        assert_eq!(
+            epoch_before, epoch_after,
+            "re-Ack must not advance the MLS epoch"
+        );
+    }
+
+    /// #93 / ADR 0012: on the ESTABLISHED path, the same `kp_ref` presented by a
+    /// DIFFERENT authenticated peer (Ed25519 identity) must be rejected — no
+    /// Ack, no re-join. KeyPackage single-use is pinned to the peer that first
+    /// consumed the invite.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn established_resent_welcome_from_different_peer_is_rejected() {
+        let pool = Arc::new(Pool::in_memory());
+        let (inbound, bob, welcome_bytes, _alice_kp_ref, _rx) = bootstrap_fixture(&pool);
+        let bob_pubkey = bob.public();
+        let expected_x25519 = bob.noise_static_public();
+
+        let first = crate::delivery::peer::InboundDispatch::dispatch_welcome_bootstrap(
+            &inbound,
+            &welcome_bytes,
+            &expected_x25519,
+            None,
+        );
+        assert_eq!(first, Some(bob_pubkey), "first join succeeds");
+
+        // A different authenticated Ed25519 peer presenting the same Welcome.
+        let mut other = bob_pubkey;
+        other.0[0] ^= 0xFF;
+        assert_ne!(other, bob_pubkey, "test setup: peers must differ");
+        let replay = crate::delivery::peer::InboundDispatch::dispatch_welcome(
+            &inbound,
+            other,
+            &welcome_bytes,
+        );
+        assert_eq!(
+            replay, None,
+            "established path: kp_ref match but different peer identity is rejected"
+        );
     }
 
     #[tokio::test]

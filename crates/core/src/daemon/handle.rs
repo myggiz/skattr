@@ -131,6 +131,12 @@ where
     /// `Mutex<Option<PathBuf>>` allows `take_wipe_target` to genuinely
     /// consume the signal so a second caller sees `None`.
     pub(crate) wipe_target: Arc<Mutex<Option<PathBuf>>>,
+    /// Wake signal for the durable first-contact Welcome sweeper (#93). Shared
+    /// (same Arc) with the `welcome_sweep` task spawned in `run_with_transport`.
+    /// `add_contact` calls `notify_one()` after committing the `pending_welcomes`
+    /// row so the sweeper sends the first Welcome immediately instead of waiting
+    /// for its next periodic tick. The sweeper is the SOLE Welcome-delivery path.
+    pub(crate) welcome_nudge: Arc<tokio::sync::Notify>,
 }
 
 impl<S> DaemonHandle<S>
@@ -171,6 +177,7 @@ where
             inbound: None,
             backup_key: None,
             wipe_target: Arc::new(Mutex::new(None)),
+            welcome_nudge: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -202,6 +209,7 @@ where
             inbound: None,
             backup_key: None,
             wipe_target: Arc::new(Mutex::new(None)),
+            welcome_nudge: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -240,6 +248,7 @@ where
             inbound: None,
             backup_key: None,
             wipe_target: Arc::new(Mutex::new(None)),
+            welcome_nudge: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -417,6 +426,7 @@ where
                 .as_deref()
                 .map(|b| zeroize::Zeroizing::new(*b)),
             wipe_target: self.wipe_target.clone(),
+            welcome_nudge: self.welcome_nudge.clone(),
         }
     }
 }

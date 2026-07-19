@@ -14,6 +14,7 @@ pub(crate) mod mailbox_sweeper;
 pub(crate) mod outbox;
 pub(crate) mod peer;
 pub(crate) mod receiver;
+pub(crate) mod welcome_sweep;
 
 #[cfg(feature = "test-harness")]
 pub mod kill_stream;

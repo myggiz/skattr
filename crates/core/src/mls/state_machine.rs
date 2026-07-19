@@ -19,7 +19,10 @@ pub enum GroupState {
         /// Current MLS epoch number.
         epoch: u64,
     },
-    /// We have a Welcome but haven't processed it yet.
+    /// The 2-party group is not yet fully established from our side: either we
+    /// (the joiner) hold a Welcome we haven't processed, or we (the committer)
+    /// committed the genesis but the invited peer has not joined/Ack'd yet.
+    /// `can_send()` is false here so no app frames go to a not-yet-joined peer.
     PendingJoin,
     /// State is irrecoverably corrupt; only option is recreate.
     Corrupt {

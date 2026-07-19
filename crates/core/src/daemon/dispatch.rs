@@ -413,6 +413,12 @@ where
     // here and returns InviteConsumed without writing anything. A dial failure
     // (above) aborts before this txn, leaving ZERO writes → clean retry.
     let group_repo = MlsGroupRepo::new(&handle.pool);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    // Immediate first attempt; the durable `welcome_sweep` task drives re-sends.
+    let initial_retry_at_ms = now_ms;
     handle
         .pool
         .transaction(|tx| {
@@ -424,79 +430,31 @@ where
             group.save_in_tx(&group_repo, tx)?;
             contact_repo.set_group_id_in_tx(tx, &inviter, &group_id)?;
             link.mark_consumed_in_tx(tx, &kp_repo)?;
+            // Record this peer as PendingJoin (#93 Task 3): blocks app-frame
+            // sends until the peer Acks the Welcome (set_active clears this row).
+            crate::storage::PendingWelcomeRepo::insert_in_tx(
+                tx,
+                &inviter.0,
+                &group_id,
+                &welcome,
+                initial_retry_at_ms,
+                now_ms,
+            )?;
             Ok(())
         })
         .map_err(map_err)?;
 
     let _ = handle.events_tx.send(Event::ContactUpdated(inviter));
 
-    // Deliver the Welcome to the inviter, retrying until they ACK. First contact
-    // has no durable outbox for the Welcome, so a single flaky-Tor dial would
-    // lose it — leaving us with a contact the peer never joined (no retry, no
-    // fallback). Retry in the background with backoff so add_contact stays
-    // responsive. This is in-session only; cross-restart durability is a
-    // follow-up (the contact already persisted above, so a restart mid-retry
-    // currently needs a remove + re-add).
-    {
-        let hub = handle.hub.clone();
-        // Build our self-card BEFORE spawning so its version bump is persisted
-        // synchronously here; move it into the task and send it only AFTER the
-        // peer ACKs the Welcome (has joined the group), so the card can't be
-        // dropped for arriving before the peer is a group member. `IpcError`
-        // implements Debug (not Display); `?e` is correct here. It carries only
-        // DaemonErrorKind (counts / InvalidArgument message / unit variants) —
-        // no onion or pubkey.
-        let self_card = match build_self_card(handle) {
-            Ok(card) => Some(card),
-            Err(e) => {
-                tracing::warn!(?e, "add_contact: could not build self-card to send");
-                None
-            }
-        };
-        let handle_for_card = handle.clone();
-        let welcome_bytes = welcome.clone();
-        let peer = inviter;
-        tokio::spawn(async move {
-            let self_card = self_card;
-            // Immediate attempt, then increasing backoff (~6 min total). Tor
-            // hidden-service first contact is slow + flaky; give it room.
-            let backoffs_secs = [0u64, 5, 10, 20, 30, 45, 60, 60, 60, 60];
-            for (i, &wait) in backoffs_secs.iter().enumerate() {
-                if wait > 0 {
-                    tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
-                }
-                match hub.send_welcome(peer, welcome_bytes.clone()).await {
-                    Ok(ack_rx) => {
-                        match tokio::time::timeout(std::time::Duration::from_secs(45), ack_rx).await
-                        {
-                            Ok(Ok(Ok(()))) => {
-                                tracing::info!(attempt = i + 1, "welcome: acked by peer");
-                                // The peer has joined the group; now it is safe
-                                // to send our self-card for the reverse
-                                // direction. Best-effort: if it fails, the
-                                // inviter learns our onion on our next message.
-                                if let Some(card) = self_card.as_ref() {
-                                    send_card_to_contact(&handle_for_card, card, peer).await;
-                                }
-                                return;
-                            }
-                            other => {
-                                tracing::debug!(
-                                    attempt = i + 1,
-                                    ?other,
-                                    "welcome: not acked yet, retrying"
-                                );
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::debug!(?e, attempt = i + 1, "welcome: send failed, retrying");
-                    }
-                }
-            }
-            tracing::warn!("welcome: gave up re-delivering after all attempts");
-        });
-    }
+    // First-contact Welcome delivery is now durable (#93): the `pending_welcomes`
+    // row committed above is the sole record of "this peer has not yet Ack'd its
+    // Welcome". The `welcome_sweep` task (spawned in `run_with_transport`) is the
+    // SOLE Welcome-delivery path — it re-sends over Noise_XK, awaits the Ack, and
+    // on Ack deletes the row + sends the reverse-direction self-card. Nudge it so
+    // the first send happens immediately instead of on its next periodic tick;
+    // the row survives a restart, so cross-session resume is automatic.
+    handle.welcome_nudge.notify_one();
+    tracing::info!("first-contact: welcome persisted for durable re-send");
 
     Ok(CommandResult::ContactAdded(ContactSummary {
         pubkey: inviter,
@@ -572,7 +530,25 @@ where
         .map_err(map_err)?
         .ok_or(IpcError::Daemon(DaemonErrorKind::GroupCorrupt))?;
 
-    // 3. Build envelope.
+    // 3. Guard: reject sends while the group is still PendingJoin (#93).
+    //
+    // `Group::load` always reconstructs state as `Active` (the GroupState is
+    // not persisted in the blob), so we check the durable `pending_welcomes`
+    // table instead: a row exists for `contact` iff we are the committer and
+    // the peer has not yet Ack'd the Welcome. App frames sent before the Ack
+    // would be undeliverable / lost. Surface a clear reason instead of a raw
+    // MLS error; the UI shows a "Connecting…" (pending_join) badge.
+    {
+        use crate::storage::PendingWelcomeRepo;
+        let pw_repo = PendingWelcomeRepo::new(&handle.pool);
+        if pw_repo.is_pending(&contact.0).map_err(map_err)? {
+            return Err(IpcError::Daemon(DaemonErrorKind::InvalidArgument {
+                message: "not connected yet — waiting for them to join".into(),
+            }));
+        }
+    }
+
+    // 4. Build envelope.
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
@@ -1232,7 +1208,7 @@ where
 ///
 /// Bumps the persisted self-card version via `build_next_self_card`, so even
 /// if no send follows, the next publish picks up from the new version.
-fn build_self_card<S>(
+pub(crate) fn build_self_card<S>(
     handle: &Arc<DaemonHandle<S>>,
 ) -> std::result::Result<crate::contact::ContactCard, IpcError>
 where
@@ -1263,7 +1239,7 @@ where
 /// Encrypt `card` as a `ContactCardUpdate` for `peer`'s group and hand it to
 /// the hub. Best-effort: a missing-but-expected group is skipped silently; an
 /// encrypt / save / Group::load failure is logged and skipped.
-async fn send_card_to_contact<S>(
+pub(crate) async fn send_card_to_contact<S>(
     handle: &Arc<DaemonHandle<S>>,
     card: &crate::contact::ContactCard,
     peer: crate::identity::PublicKey,
@@ -1563,6 +1539,12 @@ where
 
     let repo = ContactRepo::new(&handle.pool);
     repo.set_hidden(&contact, true).map_err(map_err)?;
+
+    // #93: stop any durable first-contact Welcome re-send for this peer.
+    let _ = crate::storage::pending_welcomes::PendingWelcomeRepo::new(&handle.pool)
+        .delete(&contact.0)
+        .map_err(|e| tracing::warn!(error = %e, "remove_contact: pending_welcome cleanup failed"));
+
     let _ = handle.events_tx.send(Event::ContactUpdated(contact));
     Ok(CommandResult::Ok)
 }
@@ -2797,6 +2779,12 @@ mod tests {
             panic!("expected ContactAdded");
         };
 
+        // Simulate the Welcome-Ack: clear the pending_welcomes row so
+        // send_message sees the group as Active (#93 Task 3).
+        crate::storage::PendingWelcomeRepo::new(&handle_b.pool)
+            .delete(&summary.pubkey.0)
+            .unwrap();
+
         // Bob sends to Alice (summary.pubkey == Alice's pubkey).
         let fut = execute_command(
             handle_b,
@@ -2847,6 +2835,12 @@ mod tests {
         else {
             panic!("expected ContactAdded");
         };
+
+        // Simulate the Welcome-Ack: clear the pending_welcomes row so
+        // send_message sees the group as Active (#93 Task 3).
+        crate::storage::PendingWelcomeRepo::new(&handle_b.pool)
+            .delete(&summary.pubkey.0)
+            .unwrap();
 
         // Bob sends to Alice; timeout at 3 s (matches the sibling test).
         let fut = execute_command(
@@ -4133,6 +4127,12 @@ mod tests {
             .unwrap()
             .expect("group_id present after AddContact");
 
+        // Simulate the Welcome-Ack: clear the pending_welcomes row so
+        // callers that call send_message see the group as Active (#93 Task 3).
+        crate::storage::PendingWelcomeRepo::new(handle.pool.as_ref())
+            .delete(&peer_pk.0)
+            .unwrap();
+
         (peer_pk, group_id)
     }
 
@@ -4925,6 +4925,9 @@ mod tests {
         let mut bob_group =
             Group::create_solo(&handle.identity, None, None, MlsProvider::new()).unwrap();
         let (welcome, _commit) = bob_group.add_member(&alice_kp, None, None).unwrap();
+        // The genesis committer stays PendingJoin until the peer Acks (#93);
+        // this test drives real sends, so simulate the Ack to make it Active.
+        bob_group.set_active();
         let group_repo = MlsGroupRepo::new(&handle.pool);
         bob_group.save(&group_repo).unwrap();
         let gid = bob_group.id().0.clone();
@@ -5400,6 +5403,121 @@ mod tests {
                 ))
             ),
             "OpenAttachment on pending row must return InvalidArgument, got {result:?}"
+        );
+    }
+
+    // ── Task 3 (#93): block app sends while PendingJoin ────────────────────────
+
+    /// Sending a message to a peer whose group is still `PendingJoin` (first
+    /// contact not yet Ack'd) must return a clean `InvalidArgument` error with
+    /// the exact "not connected yet" user-facing message — NOT a raw MLS error
+    /// and NOT silently enqueue an undeliverable ciphertext (#93).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn send_message_while_pending_join_returns_not_connected_yet() {
+        use crate::daemon::error_kind::DaemonErrorKind;
+        use crate::envelope::Kind;
+
+        // Bob's handle (sender). Alice creates an invite; Bob consumes it via
+        // AddContact — which now leaves Bob's genesis group in PendingJoin (#93
+        // Task 2). We do NOT call set_active() here — that is the whole point.
+        let handle_a = test_handle();
+        handle_a.set_onion("alice-pending.onion".to_string());
+
+        let CommandResult::InviteCreated { url, .. } = execute_command(
+            handle_a.clone(),
+            Command::CreateInvite {
+                nickname: None,
+                ttl_secs: Some(3600),
+            },
+        )
+        .await
+        .unwrap() else {
+            panic!("expected InviteCreated");
+        };
+
+        let handle_b = test_handle_with_dialer();
+        let CommandResult::ContactAdded(summary) =
+            execute_command(handle_b.clone(), Command::AddContact { invite_url: url })
+                .await
+                .unwrap()
+        else {
+            panic!("expected ContactAdded");
+        };
+
+        // At this point the group is PendingJoin: Alice has not Ack'd yet.
+        // send_message must reject with a clear error, not encrypt + enqueue.
+        let err = execute_command(
+            handle_b,
+            Command::SendMessage {
+                contact: summary.pubkey,
+                kind: Kind::Text { body: "hi".into() },
+            },
+        )
+        .await
+        .unwrap_err();
+
+        // Must be InvalidArgument, not GroupCorrupt / MLS error / Internal.
+        assert!(
+            matches!(
+                err,
+                IpcError::Daemon(DaemonErrorKind::InvalidArgument { .. })
+            ),
+            "expected InvalidArgument, got {err:?}"
+        );
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("not connected yet"),
+            "user-facing message must contain 'not connected yet', got: {msg}"
+        );
+    }
+
+    // ── Task 6 (#93): RemoveContact deletes pending Welcome ───────────────────
+
+    /// Removing a contact that is still in PendingJoin must delete the durable
+    /// pending_welcome row, so the re-send sweeper stops re-trying to deliver
+    /// the Welcome.
+    #[tokio::test]
+    async fn remove_contact_deletes_pending_welcome() {
+        let handle_a = test_handle();
+        handle_a.set_onion("alice-remove.onion".to_string());
+
+        let CommandResult::InviteCreated { url, .. } = execute_command(
+            handle_a.clone(),
+            Command::CreateInvite {
+                nickname: None,
+                ttl_secs: Some(3600),
+            },
+        )
+        .await
+        .unwrap() else {
+            panic!("expected InviteCreated");
+        };
+
+        let handle_b = test_handle_with_dialer();
+        let CommandResult::ContactAdded(summary) =
+            execute_command(handle_b.clone(), Command::AddContact { invite_url: url })
+                .await
+                .unwrap()
+        else {
+            panic!("expected ContactAdded");
+        };
+
+        // After AddContact, a pending_welcome row exists for Alice.
+        let repo = crate::storage::pending_welcomes::PendingWelcomeRepo::new(&handle_b.pool);
+        let due_before = repo.due(i64::MAX, 10).unwrap();
+        assert!(
+            !due_before.is_empty(),
+            "pending_welcome row must exist after add_contact"
+        );
+
+        // Remove the contact.
+        let _ = remove_contact(&handle_b, summary.pubkey).await.unwrap();
+
+        // After RemoveContact, the pending_welcome row must be gone.
+        let due_after = repo.due(i64::MAX, 10).unwrap();
+        assert!(
+            due_after.is_empty(),
+            "remove_contact must delete the pending_welcome"
         );
     }
 }
