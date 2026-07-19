@@ -4,13 +4,23 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — targeting v0.1.3
+## [Unreleased] — targeting v0.1.4
 
 _In-progress patch line. The version is bumped per build for tracking; entries
 accumulate here and are stamped with a date when a build is cut._
 
 ### Fixed
 
+- **First contact is reliable over flaky Tor** (#90): the outbound onion dial
+  succeeds only ~63% of the time per attempt over real Tor (measured; an Arti
+  0.44 bump does not help — #99). `add_contact`'s dial was a single attempt, so
+  a ~37% transient failure blocked first contact entirely. It now retries up to
+  3× (compounding to ~95%), which — combined with the #93 durable Welcome
+  re-send — makes first contact land reliably.
+- **Copy buttons work on Linux/Wayland** (#97): every "Copy" action (invite URL,
+  pubkey, onion, history export) was a silent no-op because `navigator.clipboard`
+  is restricted in the webkit2gtk webview; they now go through the Tauri
+  clipboard-manager plugin.
 - **First contact now recovers from a lost inviter Ack** (#93, ADR 0012): if
   the inviter already joined but its acknowledgement was dropped, a re-sent
   Welcome is idempotently re-Acked instead of rejected — the invitee's retry
