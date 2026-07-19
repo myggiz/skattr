@@ -20,6 +20,7 @@ pub(crate) use error_kind::StorageErrorKind;
 pub(crate) mod attachments;
 pub(crate) mod backup;
 pub(crate) mod contacts;
+pub(crate) mod first_contact_acks;
 pub(crate) mod groups;
 pub(crate) mod key_packages;
 pub(crate) mod mailboxes;
