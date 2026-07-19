@@ -5,6 +5,7 @@
   import { rename, archive } from "$lib/stores/contacts";
   import { setContactMuted } from "$lib/stores/config";
   import { toast } from "$lib/stores/toast";
+  import { copyText } from "$lib/clipboard";
   import ConfirmDialog from "./ConfirmDialog.svelte";
 
   interface Props {
@@ -29,7 +30,7 @@
   );
 
   async function copyToClipboard(value: string) {
-    await navigator.clipboard.writeText(value);
+    await copyText(value);
     toast.show("Copied");
   }
 

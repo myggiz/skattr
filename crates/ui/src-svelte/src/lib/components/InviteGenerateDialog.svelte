@@ -4,6 +4,7 @@
   import { ipcClient } from "$lib/ipc/tauri";
   import { renderInviteQr } from "$lib/stores/qr";
   import { toast } from "$lib/stores/toast";
+  import { copyText } from "$lib/clipboard";
 
   interface Props {
     onClose: () => void;
@@ -58,8 +59,12 @@
 
   async function copyUrl() {
     if (!url) return;
-    await navigator.clipboard.writeText(url);
-    toast.show("Copied");
+    try {
+      await copyText(url);
+      toast.show("Copied");
+    } catch (e) {
+      toast.show(`Copy failed: ${e}`);
+    }
   }
 
   function handleKey(e: KeyboardEvent) {

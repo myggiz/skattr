@@ -7,6 +7,7 @@
   import { unwrapOk } from '$lib/ipc/client';
   import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
   import { toast } from '$lib/stores/toast';
+  import { copyText } from '$lib/clipboard';
   import type { PublicKey } from '$lib/ipc/types';
 
   type ExportFormat = 'jsonl' | 'plaintext';
@@ -94,7 +95,7 @@
       }
 
       const blob = lines.join('');
-      await navigator.clipboard.writeText(blob);
+      await copyText(blob);
       toast.show(`Copied ${lines.length} lines (${format}) to clipboard`);
     } catch (e) {
       toast.show(`Export failed: ${e}`);

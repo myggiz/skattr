@@ -9,6 +9,7 @@
   import LogsViewer from "$lib/components/LogsViewer.svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
   import { toast } from "$lib/stores/toast";
+  import { copyText } from "$lib/clipboard";
 
   let showLogs = $state(false);
   let confirmStage1 = $state(false);
@@ -185,7 +186,7 @@
 
   async function copy(s: string) {
     try {
-      await navigator.clipboard.writeText(s);
+      await copyText(s);
       toast.show("Copied");
     } catch (e) {
       toast.show(`Copy failed: ${e}`);

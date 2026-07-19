@@ -21,8 +21,13 @@ vi.mock("$lib/stores/config", () => ({
   setContactMuted: vi.fn().mockResolvedValue(undefined),
 }));
 
+vi.mock("@tauri-apps/plugin-clipboard-manager", () => ({
+  writeText: vi.fn().mockResolvedValue(undefined),
+}));
+
 import { rename, archive } from "$lib/stores/contacts";
 import { toast } from "$lib/stores/toast";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 
 function fakeSummary(overrides: Partial<{ nickname: string | null }> = {}): import("$lib/ipc/types").ContactSummary {
   return {
@@ -45,10 +50,6 @@ function fakeSummary(overrides: Partial<{ nickname: string | null }> = {}): impo
 describe("ContactDetailsPanel", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    Object.defineProperty(navigator, "clipboard", {
-      writable: true,
-      value: { writeText: vi.fn().mockResolvedValue(undefined) },
-    });
   });
 
   it("renders pubkey short hash in 4…4 format", () => {
@@ -63,7 +64,7 @@ describe("ContactDetailsPanel", () => {
       props: { summary: fakeSummary() },
     });
     await fireEvent.click(getByText(/7aa2c4d1…/));
-    expect(navigator.clipboard.writeText).toHaveBeenCalledWith(FAKE_PK);
+    expect(writeText).toHaveBeenCalledWith(FAKE_PK);
     expect(toast.show).toHaveBeenCalledWith("Copied");
   });
 
