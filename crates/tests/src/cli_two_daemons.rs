@@ -44,7 +44,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use skattr_core::daemon::commands::{Direction, SendStatus};
+use skattr_core::daemon::commands::MlsGroupStateLabel;
 use skattr_core::daemon::error_kind::DaemonErrorKind;
 use skattr_core::daemon::events::Event;
 use skattr_core::daemon::ipc::wire::IpcError;
@@ -320,17 +320,11 @@ async fn full_flow_invite_add_send_queued() {
         "Bob must have a non-empty group_id for Alice"
     );
 
-    // Phase 2.E: Bob's group with Alice must be Active immediately after
-    // AddContact — Bob is the one who created the group, so it is already
-    // persisted in the MLS group repo.
-    //
-    // Alice's group_state cannot be asserted here because Alice uses
-    // NoopInbound (drops Welcome frames). The symmetric round-trip —
-    // Welcome propagation → Alice's group Active → bidirectional message
-    // exchange — is validated by the `welcome_propagation` integration
-    // test (real-Tor, #[ignore]-gated).
+    // Phase 2.E: Bob's group with Alice is Active in ListContacts (the group row
+    // was persisted by AddContact / add_member). Note: ListContacts resolves
+    // group_state from MlsGroupRepo (row present → Active), independently of the
+    // pending_welcomes send-guard introduced in #93.
     {
-        use skattr_core::daemon::commands::MlsGroupStateLabel;
         let bob_contacts = bob.exec(Command::ListContacts).await.unwrap();
         let alice_entry = match bob_contacts {
             CommandResult::Contacts(ref v) => {
@@ -343,14 +337,16 @@ async fn full_flow_invite_add_send_queued() {
         assert_eq!(
             alice_entry.group_state,
             Some(MlsGroupStateLabel::Active),
-            "Phase 2.E: Bob's group with Alice must be Active immediately after AddContact"
+            "Phase 2.E: Bob's group with Alice must be Active in ListContacts after AddContact"
         );
     }
 
-    // --- Bob sends to Alice ---
+    // --- Bob tries to send to Alice while PendingJoin ---
     //
-    // Expected: Queued — Alice's NoopInbound drops the frame → no ACK.
-    let send_result = tokio::time::timeout(
+    // #93 Task 3: SendMessage while PendingJoin must be rejected with a clear
+    // InvalidArgument error ("not connected yet"), not silently enqueued.
+    // The production send-guard checks pending_welcomes before encrypting.
+    let send_err = tokio::time::timeout(
         Duration::from_secs(4),
         bob.exec(Command::SendMessage {
             contact: alice_summary.pubkey,
@@ -360,40 +356,19 @@ async fn full_flow_invite_add_send_queued() {
         }),
     )
     .await
-    .expect("send_message must complete within 4 s (2 s hub wait + margin)")
-    .unwrap();
+    .expect("send_message must complete within 4 s")
+    .unwrap_err();
 
-    match send_result {
-        CommandResult::MessageSent {
-            message_id: _,
-            status: SendStatus::Queued,
-            record,
-        } => {
-            // Expected: enqueued but no ACK came (Alice has no group).
+    match send_err {
+        IpcClientError::Server(IpcError::Daemon(DaemonErrorKind::InvalidArgument {
+            ref message,
+        })) => {
             assert!(
-                record.is_some(),
-                "Phase 2.D: MessageSent must carry sender-side record"
+                message.contains("not connected yet"),
+                "#93: error message must say 'not connected yet', got: {message}"
             );
-            let rec = record.expect("record present");
-            assert!(rec.row_id > 0);
-            assert_eq!(rec.direction, Direction::Outgoing);
         }
-        CommandResult::MessageSent {
-            message_id: _,
-            status: SendStatus::Delivered,
-            record,
-        } => {
-            // Alice's side ACKed somehow — not wrong, just surprising.
-            eprintln!("NOTE: MessageSent returned Delivered (unexpected but not wrong)");
-            assert!(
-                record.is_some(),
-                "Phase 2.D: MessageSent must carry sender-side record"
-            );
-            let rec = record.expect("record present");
-            assert!(rec.row_id > 0);
-            assert_eq!(rec.direction, Direction::Outgoing);
-        }
-        other => panic!("expected MessageSent, got {other:?}"),
+        other => panic!("#93: expected InvalidArgument(not connected yet), got {other:?}"),
     }
 }
 

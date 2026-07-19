@@ -222,6 +222,11 @@ async fn remove_mailbox_drain_dispatches_held_deposit_into_storage() {
             .unwrap();
     // Persist Bob's group in his pool so DaemonInbound can resolve + decrypt.
     bob_group.save(&MlsGroupRepo::new(&pool)).unwrap();
+
+    // Simulate Welcome-Ack: alice_group (committer) stays PendingJoin until
+    // the peer Acks (#93). set_active() restores the established-group
+    // precondition so the encrypt() call below succeeds.
+    alice_group.set_active();
     let group_id_bytes = bob_group.id().0.clone();
 
     // Install Alice as a contact in Bob's pool, linked to the shared group,
