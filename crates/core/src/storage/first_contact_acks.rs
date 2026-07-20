@@ -51,6 +51,25 @@ impl<'p> FirstContactAckRepo<'p> {
         Ok(())
     }
 
+    /// Delete all first-contact-ack rows for `peer_identity` inside the
+    /// caller's transaction. Idempotent — no error if no rows match.
+    pub(crate) fn delete_by_peer_in_tx(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        peer_identity: &[u8; 32],
+    ) -> Result<()> {
+        tx.execute(
+            "DELETE FROM first_contact_acks WHERE peer_identity = ?1",
+            rusqlite::params![&peer_identity[..]],
+        )
+        .map_err(|e| {
+            CoreError::Storage(StorageErrorKind::Other(format!(
+                "delete first_contact_ack: {e}"
+            )))
+        })?;
+        Ok(())
+    }
+
     /// Look up a first-contact Ack by KeyPackageRef.
     pub fn lookup(&self, kp_ref: &[u8; 32]) -> Result<Option<FirstContactAck>> {
         self.pool.with(|c| {
@@ -137,5 +156,22 @@ mod tests {
         assert_eq!(got.peer_x25519, x);
         assert_eq!(got.peer_identity, id);
         assert!(repo.lookup(&[0u8; 32]).unwrap().is_none());
+    }
+
+    #[test]
+    fn delete_by_peer_in_tx_removes_ack_row() {
+        let p = pool();
+        let repo = FirstContactAckRepo::new(&p);
+        let kp = [0x11u8; 32];
+        let x = [0x22u8; 32];
+        let id = [0x33u8; 32];
+        p.transaction(|tx| {
+            repo.insert_in_tx(tx, &kp, &x, &id, 1_000).unwrap();
+            Ok(())
+        })
+        .unwrap();
+        assert!(repo.lookup(&kp).unwrap().is_some());
+        p.transaction(|tx| repo.delete_by_peer_in_tx(tx, &id)).unwrap();
+        assert!(repo.lookup(&kp).unwrap().is_none());
     }
 }

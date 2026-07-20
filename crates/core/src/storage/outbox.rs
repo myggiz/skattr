@@ -357,6 +357,25 @@ impl<'p> OutboxRepo<'p> {
         })
     }
 
+    /// Delete all outbox rows for `target` inside the caller's transaction.
+    /// Idempotent — no error if no rows match.
+    pub(crate) fn delete_by_target_in_tx(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        target: &[u8],
+    ) -> Result<()> {
+        tx.execute(
+            "DELETE FROM outbox WHERE target = ?1",
+            rusqlite::params![target],
+        )
+        .map_err(|e| {
+            CoreError::Storage(StorageErrorKind::Other(format!(
+                "delete outbox by target: {e}"
+            )))
+        })?;
+        Ok(())
+    }
+
     /// Delete a single outbox row by id. Returns `true` if a row was removed.
     /// Used by the fallback orchestrator after a successful mailbox deposit
     /// (the row's message has been "delivered" by the mailbox).
@@ -588,6 +607,23 @@ mod tests {
             }
             other => panic!("expected Storage(Other), got {other:?}"),
         }
+    }
+
+    #[test]
+    fn delete_by_target_in_tx_removes_all_target_rows() {
+        let pool = Pool::in_memory();
+        let repo = OutboxRepo::new(&pool);
+        let target = [0x55u8; 32];
+        repo.insert(&target, &[0xA1; 16], b"p1", 100).unwrap();
+        repo.insert(&target, &[0xA2; 16], b"p2", 100).unwrap();
+        // A different target — must survive.
+        repo.insert(&[0x66u8; 32], &[0xA3; 16], b"p3", 100)
+            .unwrap();
+        pool.transaction(|tx| repo.delete_by_target_in_tx(tx, &target))
+            .unwrap();
+        let remaining = repo.due(999, 10).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].target.as_slice(), &[0x66u8; 32]);
     }
 
     #[test]

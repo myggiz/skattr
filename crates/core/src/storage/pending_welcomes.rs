@@ -128,6 +128,25 @@ impl<'p> PendingWelcomeRepo<'p> {
         })
     }
 
+    /// Delete the row for `peer` inside the caller's transaction.
+    /// Idempotent — no error if the row is absent.
+    pub(crate) fn delete_in_tx(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        peer: &[u8; 32],
+    ) -> Result<()> {
+        tx.execute(
+            "DELETE FROM pending_welcomes WHERE peer_pubkey = ?1",
+            rusqlite::params![&peer[..]],
+        )
+        .map_err(|e| {
+            CoreError::Storage(StorageErrorKind::Other(format!(
+                "delete pending welcome: {e}"
+            )))
+        })?;
+        Ok(())
+    }
+
     /// Delete the row for `peer`. Idempotent — no error if the row is absent.
     pub fn delete(&self, peer: &[u8; 32]) -> Result<()> {
         self.pool.with_mut(|c| {
@@ -218,6 +237,20 @@ mod tests {
         assert_eq!(repo.count().unwrap(), 1);
         repo.delete(&peer).unwrap();
         repo.delete(&peer).unwrap(); // idempotent
+        assert_eq!(repo.count().unwrap(), 0);
+    }
+
+    #[test]
+    fn delete_in_tx_removes_pending_welcome_row() {
+        let p = pool();
+        let repo = PendingWelcomeRepo::new(&p);
+        let peer = [0xAAu8; 32];
+        p.transaction(|tx| {
+            PendingWelcomeRepo::insert_in_tx(tx, &peer, &[1, 2, 3], &[9, 9, 9], 1_000, 1_000)
+        })
+        .unwrap();
+        assert_eq!(repo.count().unwrap(), 1);
+        p.transaction(|tx| repo.delete_in_tx(tx, &peer)).unwrap();
         assert_eq!(repo.count().unwrap(), 0);
     }
 }
