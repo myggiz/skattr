@@ -319,10 +319,13 @@ async fn full_flow_invite_add_send_queued() {
         "Bob must have a non-empty group_id for Alice"
     );
 
-    // Phase 2.E: Bob's group with Alice is Active in ListContacts (the group row
-    // was persisted by AddContact / add_member). Note: ListContacts resolves
-    // group_state from MlsGroupRepo (row present → Active), independently of the
-    // pending_welcomes send-guard introduced in #93.
+    // #101: right after AddContact — before the Welcome→Ack round-trip clears the
+    // pending_welcomes send-guard — Bob's group with Alice is PendingJoin, not
+    // Active. ListContacts derives group_state from MlsGroupRepo (row present →
+    // Active) but overrides it to PendingJoin while the pending_welcomes row
+    // exists (#93 send-guard), so a not-yet-confirmed first contact is never
+    // reported as successfully connected. The send below confirms the same state:
+    // it is rejected with "not connected yet".
     {
         let bob_contacts = bob.exec(Command::ListContacts).await.unwrap();
         let alice_entry = match bob_contacts {
@@ -335,8 +338,9 @@ async fn full_flow_invite_add_send_queued() {
             alice_entry.expect("Bob must have Alice in contact list after AddContact");
         assert_eq!(
             alice_entry.group_state,
-            Some(MlsGroupStateLabel::Active),
-            "Phase 2.E: Bob's group with Alice must be Active in ListContacts after AddContact"
+            Some(MlsGroupStateLabel::PendingJoin),
+            "#101: Bob's group with Alice must be PendingJoin in ListContacts after \
+             AddContact, until the Welcome→Ack clears the send-guard"
         );
     }
 
