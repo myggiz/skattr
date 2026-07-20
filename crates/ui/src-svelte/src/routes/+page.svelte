@@ -262,10 +262,10 @@
     confirmLabel="Remove"
     danger={true}
     onConfirm={async () => {
-      const pubkey = activeSummary!.pubkey;
+      if (!activeSummary) return;
       removeConfirmOpen = false;
       try {
-        await removeContact(pubkey);
+        await removeContact(activeSummary.pubkey);
       } catch {
         toast.show("Failed to remove contact");
       }
