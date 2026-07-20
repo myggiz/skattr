@@ -1160,6 +1160,10 @@ async fn tail_follow(
                 let short: String = pk.0.iter().take(4).map(|b| format!("{b:02x}")).collect();
                 println!("contact updated: {short}");
             }
+            Event::ContactRemoved(pk) => {
+                let short: String = pk.0.iter().take(4).map(|b| format!("{b:02x}")).collect();
+                println!("contact removed: {short}");
+            }
             Event::TorStatusChanged(s) => {
                 eprintln!("tor: {s:?}");
             }

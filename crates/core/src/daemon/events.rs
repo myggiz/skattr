@@ -66,6 +66,10 @@ pub enum Event {
     },
     /// A contact's card / nickname / online state changed.
     ContactUpdated(PublicKey),
+    /// A contact was removed. For a pending/unconnected contact this is a
+    /// full local wipe (#109); for a connected contact it is a soft-archive.
+    /// Live UIs should drop the row on this event rather than re-fetch.
+    ContactRemoved(PublicKey),
     /// An outbound message's delivery state changed.
     DeliveryStatusChanged {
         /// Message id, mirrors the one returned when the send was queued.

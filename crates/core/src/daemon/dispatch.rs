@@ -1584,19 +1584,53 @@ async fn remove_contact<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    use crate::daemon::error_kind::DaemonErrorKind;
     use crate::daemon::events::Event;
-    use crate::storage::ContactRepo;
+    use crate::storage::first_contact_acks::FirstContactAckRepo;
+    use crate::storage::outbox::OutboxRepo;
+    use crate::storage::pending_welcomes::PendingWelcomeRepo;
+    use crate::storage::{ContactRepo, MessageRepo, MlsGroupRepo};
 
-    let repo = ContactRepo::new(&handle.pool);
-    repo.set_hidden(&contact, true).map_err(map_err)?;
+    let contact_repo = ContactRepo::new(&handle.pool);
+    if contact_repo.get(&contact).map_err(map_err)?.is_none() {
+        return Err(IpcError::Daemon(DaemonErrorKind::ContactNotFound));
+    }
 
-    // #93: stop any durable first-contact Welcome re-send for this peer.
-    let _ = crate::storage::pending_welcomes::PendingWelcomeRepo::new(&handle.pool)
-        .delete(&contact.0)
-        .map_err(|e| tracing::warn!(error = %e, "remove_contact: pending_welcome cleanup failed"));
+    let pending = PendingWelcomeRepo::new(&handle.pool)
+        .is_pending(&contact.0)
+        .map_err(map_err)?;
 
-    let _ = handle.events_tx.send(Event::ContactUpdated(contact));
-    Ok(CommandResult::Ok)
+    if pending {
+        // Hard purge (#109): wipe every peer-keyed row atomically so a fresh
+        // invite starts clean. group_id may be absent if add never linked one.
+        let group_id = contact_repo.get_group_id(&contact).map_err(map_err)?;
+        handle
+            .pool
+            .transaction(|tx| {
+                if let Some(gid) = group_id.as_deref() {
+                    MlsGroupRepo::new(&handle.pool).delete_in_tx(tx, gid)?;
+                    MessageRepo::new(&handle.pool).delete_by_group_in_tx(tx, gid)?;
+                }
+                PendingWelcomeRepo::new(&handle.pool).delete_in_tx(tx, &contact.0)?;
+                FirstContactAckRepo::new(&handle.pool).delete_by_peer_in_tx(tx, &contact.0)?;
+                OutboxRepo::new(&handle.pool).delete_by_target_in_tx(tx, &contact.0[..])?;
+                ContactRepo::new(&handle.pool).remove_in_tx(tx, &contact)?;
+                Ok(())
+            })
+            .map_err(map_err)?;
+    } else {
+        // Connected contact: soft-archive (unchanged pre-#109 behavior).
+        contact_repo.set_hidden(&contact, true).map_err(map_err)?;
+        // #93: stop any durable first-contact Welcome re-send for this peer.
+        let _ = PendingWelcomeRepo::new(&handle.pool)
+            .delete(&contact.0)
+            .map_err(
+                |e| tracing::warn!(error = %e, "remove_contact: pending_welcome cleanup failed"),
+            );
+    }
+
+    let _ = handle.events_tx.send(Event::ContactRemoved(contact));
+    Ok(CommandResult::ContactRemoved { hard: pending })
 }
 
 async fn set_contact_muted<S>(
@@ -4673,8 +4707,12 @@ mod tests {
         let r2 = execute_command(handle.clone(), Command::RemoveContact { contact: peer })
             .await
             .unwrap();
-        assert!(matches!(r1, CommandResult::Ok));
-        assert!(matches!(r2, CommandResult::Ok));
+        // This upserted-but-never-added contact has no pending_welcomes row, so
+        // it takes the soft path (#109 hard-purge is pending-only). The soft path
+        // stays idempotent: the row survives (hidden), so a second remove still
+        // finds it and soft-archives again — result `ContactRemoved { hard: false }`.
+        assert!(matches!(r1, CommandResult::ContactRemoved { hard: false }));
+        assert!(matches!(r2, CommandResult::ContactRemoved { hard: false }));
 
         // Default ListContacts filters them out.
         let listed = execute_command(handle.clone(), Command::ListContacts)
@@ -4755,6 +4793,326 @@ mod tests {
             blob_before, blob_after,
             "RemoveContact must not touch MLS state"
         );
+    }
+
+    // ── #109: state-aware RemoveContact hard-purge ──────────────────────────────
+
+    /// Count rows in `table` whose `col` blob column equals `key`.
+    fn count_where(pool: &crate::storage::Pool, table: &str, col: &str, key: &[u8]) -> i64 {
+        pool.with(|c| {
+            c.query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE {col} = ?1"),
+                rusqlite::params![key],
+                |r| r.get::<_, i64>(0),
+            )
+            .map_err(|e| {
+                crate::error::CoreError::Storage(crate::storage::StorageErrorKind::Other(
+                    e.to_string(),
+                ))
+            })
+        })
+        .unwrap()
+    }
+
+    /// Build an invitee (Bob) that has run `add_contact` against Alice's
+    /// invite and is still PendingJoin (a `pending_welcomes` row exists →
+    /// `is_pending == true`). Seeds one `outbox`, one `messages`, and one
+    /// `first_contact_acks` row keyed to Alice so all six peer-keyed tables
+    /// are populated. Returns `(bob_handle, alice_pubkey)`.
+    async fn pending_contact_fixture() -> (Arc<DaemonHandle<tokio::io::DuplexStream>>, PublicKey) {
+        use crate::envelope::Kind;
+        let handle_a = test_handle();
+        handle_a.set_onion("alice.onion".to_string());
+        let alice = handle_a.identity.public();
+        let CommandResult::InviteCreated { url, .. } = execute_command(
+            handle_a.clone(),
+            Command::CreateInvite {
+                nickname: None,
+                ttl_secs: Some(3600),
+            },
+        )
+        .await
+        .unwrap() else {
+            panic!("expected InviteCreated");
+        };
+
+        let handle_b = test_handle_with_dialer();
+        execute_command(handle_b.clone(), Command::AddContact { invite_url: url })
+            .await
+            .unwrap();
+
+        // add_contact left Bob PendingJoin: a contact row, an mls_groups row,
+        // a group_id link, and a pending_welcomes row (all keyed to Alice).
+        let gid = ContactRepo::new(&handle_b.pool)
+            .get_group_id(&alice)
+            .unwrap()
+            .unwrap();
+
+        // Seed the three remaining peer-keyed tables so the purge exercises all six.
+        handle_b
+            .pool
+            .transaction(|tx| {
+                crate::storage::outbox::OutboxRepo::new(&handle_b.pool).insert_in_tx(
+                    tx,
+                    &alice.0[..],
+                    &[0x11; 16],
+                    &[0x22, 0x33],
+                    0,
+                )?;
+                crate::storage::first_contact_acks::FirstContactAckRepo::new(&handle_b.pool)
+                    .insert_in_tx(tx, &[0x44; 32], &[0x55; 32], &alice.0, 0)?;
+                Ok(())
+            })
+            .unwrap();
+
+        let env = crate::envelope::Envelope {
+            v: 1,
+            id: crate::envelope::MessageId::generate(),
+            ts: 1_700_000_000,
+            reply_to: None,
+            kind: Kind::Text { body: "hi".into() },
+        };
+        crate::storage::MessageRepo::new(&handle_b.pool)
+            .insert(crate::storage::messages::InsertParams {
+                group_id: &gid,
+                sender: &alice.0,
+                envelope: &env,
+                mls_generation: 0,
+                ts_daemon_recv: env.ts,
+            })
+            .unwrap();
+
+        (handle_b, alice)
+    }
+
+    #[tokio::test]
+    async fn remove_contact_hard_purges_pending() {
+        let (handle, peer) = pending_contact_fixture().await;
+
+        // Sanity: rows exist before removal, across all six tables.
+        assert!(crate::storage::PendingWelcomeRepo::new(&handle.pool)
+            .is_pending(&peer.0)
+            .unwrap());
+        let gid = ContactRepo::new(&handle.pool)
+            .get_group_id(&peer)
+            .unwrap()
+            .unwrap();
+        assert!(crate::storage::MlsGroupRepo::new(&handle.pool)
+            .get(&gid)
+            .unwrap()
+            .is_some());
+        assert_eq!(count_where(&handle.pool, "outbox", "target", &peer.0), 1);
+        assert_eq!(count_where(&handle.pool, "messages", "group_id", &gid), 1);
+        assert_eq!(
+            count_where(&handle.pool, "first_contact_acks", "peer_identity", &peer.0),
+            1
+        );
+
+        let mut sub = handle.events_tx.subscribe();
+
+        let r = execute_command(handle.clone(), Command::RemoveContact { contact: peer })
+            .await
+            .unwrap();
+
+        // Reported hard, and every peer-keyed row is gone.
+        assert!(
+            matches!(r, CommandResult::ContactRemoved { hard: true }),
+            "expected hard ContactRemoved, got {r:?}"
+        );
+        assert!(ContactRepo::new(&handle.pool).get(&peer).unwrap().is_none());
+        assert!(crate::storage::MlsGroupRepo::new(&handle.pool)
+            .get(&gid)
+            .unwrap()
+            .is_none());
+        assert!(!crate::storage::PendingWelcomeRepo::new(&handle.pool)
+            .is_pending(&peer.0)
+            .unwrap());
+        assert_eq!(count_where(&handle.pool, "outbox", "target", &peer.0), 0);
+        assert_eq!(count_where(&handle.pool, "messages", "group_id", &gid), 0);
+        assert_eq!(
+            count_where(&handle.pool, "first_contact_acks", "peer_identity", &peer.0),
+            0
+        );
+
+        // ContactRemoved event fired.
+        match tokio::time::timeout(std::time::Duration::from_secs(1), sub.recv()).await {
+            Ok(Ok(Event::ContactRemoved(p))) => assert_eq!(p, peer),
+            other => panic!("expected ContactRemoved, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn remove_contact_soft_deletes_connected() {
+        // A connected (Active, not pending) contact keeps the pre-#109 soft path.
+        let handle = test_handle();
+        use crate::mls::key_package::KeyPackage;
+        use crate::mls::provider::MlsProvider;
+        let bob_id =
+            crate::identity::IdentityKey::from_seed(&crate::identity::Seed::generate().unwrap())
+                .unwrap();
+        let bob_provider = MlsProvider::new();
+        let kp_repo = crate::storage::KeyPackageRepo::new(&handle.pool);
+        let bob_kp = KeyPackage::generate(&bob_id, &bob_provider, &kp_repo).unwrap();
+        let mut group =
+            crate::mls::Group::create_solo(&handle.identity, None, None, MlsProvider::new())
+                .unwrap();
+        let _ = group.add_member(&bob_kp, None, None).unwrap();
+        let group_repo = crate::storage::MlsGroupRepo::new(&handle.pool);
+        group.save(&group_repo).unwrap();
+        let gid = group.id().0.clone();
+
+        let bob_pk = bob_id.public();
+        let repo = ContactRepo::new(&handle.pool);
+        repo.upsert(&crate::contact::Contact {
+            identity: bob_pk,
+            display_name: None,
+            added_at: 0,
+            card: None,
+            muted: false,
+        })
+        .unwrap();
+        repo.set_group_id(&bob_pk, &gid).unwrap();
+        // No pending_welcomes row → is_pending == false → soft path.
+
+        let r = execute_command(handle.clone(), Command::RemoveContact { contact: bob_pk })
+            .await
+            .unwrap();
+        assert!(
+            matches!(r, CommandResult::ContactRemoved { hard: false }),
+            "expected soft ContactRemoved, got {r:?}"
+        );
+
+        // Soft: contact still present but hidden; MLS group + messages preserved.
+        let c = repo.get(&bob_pk).unwrap().expect("contact still present");
+        assert_eq!(c.identity, bob_pk);
+        assert_eq!(
+            count_where(&handle.pool, "contacts", "identity_pubkey", &bob_pk.0),
+            1,
+            "soft-deleted contact row still present"
+        );
+        let hidden: i64 = handle
+            .pool
+            .with(|conn| {
+                conn.query_row(
+                    "SELECT hidden FROM contacts WHERE identity_pubkey = ?1",
+                    rusqlite::params![&bob_pk.0[..]],
+                    |r| r.get::<_, i64>(0),
+                )
+                .map_err(|e| {
+                    crate::error::CoreError::Storage(crate::storage::StorageErrorKind::Other(
+                        e.to_string(),
+                    ))
+                })
+            })
+            .unwrap();
+        assert_eq!(hidden, 1, "soft-delete sets hidden");
+        assert!(crate::storage::MlsGroupRepo::new(&handle.pool)
+            .get(&gid)
+            .unwrap()
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn remove_contact_unknown_returns_not_found() {
+        let handle = test_handle();
+        let err = execute_command(
+            handle,
+            Command::RemoveContact {
+                contact: PublicKey([0xEE; 32]),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            IpcError::Daemon(crate::daemon::error_kind::DaemonErrorKind::ContactNotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn remove_contact_pending_is_idempotent() {
+        // Hard removal is terminal: after the purge the contact is gone, so a
+        // second RemoveContact hits the ContactNotFound guard (unlike the old
+        // always-Ok soft-delete for a still-present contact).
+        let (handle, peer) = pending_contact_fixture().await;
+
+        let r1 = execute_command(handle.clone(), Command::RemoveContact { contact: peer })
+            .await
+            .unwrap();
+        assert!(
+            matches!(r1, CommandResult::ContactRemoved { hard: true }),
+            "expected hard ContactRemoved, got {r1:?}"
+        );
+
+        let err = execute_command(handle.clone(), Command::RemoveContact { contact: peer })
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            IpcError::Daemon(crate::daemon::error_kind::DaemonErrorKind::ContactNotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn fresh_add_after_purge_starts_clean() {
+        // After a hard purge, a fresh invite→add for the same inviter succeeds
+        // and leaves exactly one clean set of rows (no leftover-row collision).
+        let handle_a = test_handle();
+        handle_a.set_onion("alice.onion".to_string());
+        let alice = handle_a.identity.public();
+
+        let make_invite = || {
+            let handle_a = handle_a.clone();
+            async move {
+                let CommandResult::InviteCreated { url, .. } = execute_command(
+                    handle_a,
+                    Command::CreateInvite {
+                        nickname: None,
+                        ttl_secs: Some(3600),
+                    },
+                )
+                .await
+                .unwrap() else {
+                    panic!("expected InviteCreated");
+                };
+                url
+            }
+        };
+
+        let handle_b = test_handle_with_dialer();
+        let url1 = make_invite().await;
+        execute_command(handle_b.clone(), Command::AddContact { invite_url: url1 })
+            .await
+            .unwrap();
+
+        // Hard-purge the pending contact.
+        let r = execute_command(handle_b.clone(), Command::RemoveContact { contact: alice })
+            .await
+            .unwrap();
+        assert!(
+            matches!(r, CommandResult::ContactRemoved { hard: true }),
+            "expected hard ContactRemoved, got {r:?}"
+        );
+        assert!(ContactRepo::new(&handle_b.pool)
+            .get(&alice)
+            .unwrap()
+            .is_none());
+
+        // Re-add with a fresh invite (single-use KP means a new invite is needed).
+        let url2 = make_invite().await;
+        let res = execute_command(handle_b.clone(), Command::AddContact { invite_url: url2 }).await;
+        assert!(
+            matches!(res, Ok(CommandResult::ContactAdded(_))),
+            "fresh add after purge must succeed, got {res:?}"
+        );
+        // Exactly one contact + one pending_welcomes row for Alice.
+        assert!(ContactRepo::new(&handle_b.pool)
+            .get(&alice)
+            .unwrap()
+            .is_some());
+        assert!(crate::storage::PendingWelcomeRepo::new(&handle_b.pool)
+            .is_pending(&alice.0)
+            .unwrap());
     }
 
     // ── Task 13: set_contact_muted dispatcher ──────────────────────────────────
