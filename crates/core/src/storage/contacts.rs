@@ -157,6 +157,22 @@ impl<'p> ContactRepo<'p> {
         Ok(contacts)
     }
 
+    /// Transactional companion to [`remove`](Self::remove). Deletes by
+    /// identity pubkey inside the caller's `tx`; `onion_addresses` rows
+    /// cascade via the FK.
+    pub(crate) fn remove_in_tx(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        identity: &PublicKey,
+    ) -> Result<()> {
+        tx.execute(
+            "DELETE FROM contacts WHERE identity_pubkey = ?1",
+            rusqlite::params![&identity.0[..]],
+        )
+        .map_err(|e| CoreError::Storage(StorageErrorKind::Other(format!("delete contact: {e}"))))?;
+        Ok(())
+    }
+
     /// Delete by identity pubkey. `onion_addresses` rows cascade via FK.
     pub(crate) fn remove(&self, identity: &PublicKey) -> Result<()> {
         self.pool.with_mut(|c| {
@@ -719,6 +735,27 @@ mod tests {
             })
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn remove_in_tx_deletes_contact_and_cascades_onions() {
+        let pool = Pool::in_memory();
+        let repo = ContactRepo::new(&pool);
+        let alice = sample_contact(0x05);
+        repo.upsert(&alice).unwrap();
+        repo.add_onion(&alice.identity, "zzzz.onion", 100).unwrap();
+
+        pool.transaction(|tx| repo.remove_in_tx(tx, &alice.identity))
+            .unwrap();
+
+        assert!(repo.get(&alice.identity).unwrap().is_none());
+        let count: i64 = pool
+            .with(|c| {
+                c.query_row("SELECT COUNT(*) FROM onion_addresses", [], |r| r.get(0))
+                    .map_err(|e| CoreError::Storage(StorageErrorKind::Other(e.to_string())))
+            })
+            .unwrap();
+        assert_eq!(count, 0, "onion rows must cascade-delete inside the tx");
     }
 
     use crate::contact::card::{ContactCard, ContactCardBody};

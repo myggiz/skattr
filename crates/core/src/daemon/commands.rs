@@ -561,6 +561,13 @@ pub enum CommandResult {
     Subscribed,
     /// No-payload acknowledgement (rotate, shutdown, etc.).
     Ok,
+    /// Result of `RemoveContact`. `hard = true` means the contact was
+    /// pending/unconnected and its local state was fully wiped (#109);
+    /// `hard = false` means a connected contact was soft-archived.
+    ContactRemoved {
+        /// Whether the removal was a full hard wipe (pending) vs soft archive.
+        hard: bool,
+    },
     /// [`Command::SearchMessages`] completed.
     SearchResults(Vec<SearchHitRecord>),
     /// [`Command::MarkRead`] completed.

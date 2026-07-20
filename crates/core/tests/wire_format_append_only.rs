@@ -81,6 +81,7 @@ fn command_result_variant_tag(r: &CommandResult) -> &'static str {
         CommandResult::Subscribed => "subscribed",
         CommandResult::AttachmentDecrypted { .. } => "attachment_decrypted",
         CommandResult::AttachmentAvailability { .. } => "attachment_availability",
+        CommandResult::ContactRemoved { .. } => "contact_removed",
     }
 }
 
@@ -134,6 +135,7 @@ fn expected_command_result_variant_set() -> Vec<&'static str> {
         "attachment_decrypted",
         "config",
         "contact_added",
+        "contact_removed",
         "contacts",
         "daemon_info",
         "export_page",

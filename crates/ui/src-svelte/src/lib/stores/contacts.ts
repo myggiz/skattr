@@ -41,6 +41,12 @@ export async function refreshContacts(): Promise<void> {
   }
 }
 
+/** Remove a contact from the store by pubkey (hex). Used on the
+ *  `contact_removed` event so the row disappears without a full refetch. */
+export function dropContact(pubkey: string): void {
+  contacts.update((cs) => cs.filter((c) => !pubkeyEq(c.pubkey, pubkey)));
+}
+
 export const expandedPubkey: Writable<string | null> = writable(null);
 
 export function toggleExpanded(pubkey: string): void {
@@ -57,6 +63,19 @@ export async function rename(contact: string, nickname: string | null): Promise<
     throw new Error("rename_contact failed");
   }
   await refreshContacts();
+}
+
+/** Remove a pending contact via the daemon. The daemon hard-wipes local state
+ *  (#109); the `contact_removed` event then drops it from the store, so we do
+ *  not refetch here. */
+export async function removeContact(contact: string): Promise<void> {
+  const resp = await ipcClient.request({
+    cmd: "remove_contact",
+    contact,
+  } as any);
+  if (resp.resp !== "ok") {
+    throw new Error("remove_contact failed");
+  }
 }
 
 export async function archive(contact: string): Promise<void> {

@@ -165,6 +165,12 @@ enum Command {
         /// Path to the local file to send.
         path: String,
     },
+    /// Remove a contact. A pending/unconnected contact is wiped completely
+    /// (so a fresh invite can be added); a connected contact is archived.
+    Remove {
+        /// Contact identifier (display name or hex prefix of identity pubkey).
+        contact: String,
+    },
     /// Full-text search over message history.
     Search {
         /// Query — free-form, tokenize-and-AND on the daemon side.
@@ -374,6 +380,7 @@ async fn main() -> Result<()> {
             before,
             keep_last,
         } => prune(contact.as_deref(), before, keep_last, socket.as_deref()).await,
+        Command::Remove { contact } => remove(&contact, socket.as_deref(), json).await,
     }
 }
 
@@ -1160,6 +1167,10 @@ async fn tail_follow(
                 let short: String = pk.0.iter().take(4).map(|b| format!("{b:02x}")).collect();
                 println!("contact updated: {short}");
             }
+            Event::ContactRemoved(pk) => {
+                let short: String = pk.0.iter().take(4).map(|b| format!("{b:02x}")).collect();
+                println!("contact removed: {short}");
+            }
             Event::TorStatusChanged(s) => {
                 eprintln!("tor: {s:?}");
             }
@@ -1555,6 +1566,45 @@ async fn prune(
     }
 }
 
+async fn remove(
+    contact_prefix: &str,
+    sock_flag: Option<&std::path::Path>,
+    _json: bool,
+) -> Result<()> {
+    use skattr_core::daemon::{Command as CoreCommand, CommandResult};
+
+    let mut client = connect_or_exit(sock_flag).await?;
+
+    let rows = match client.execute(CoreCommand::ListContacts).await {
+        Ok(CommandResult::Contacts(rows)) => rows,
+        Ok(other) => anyhow::bail!("unexpected result: {other:?}"),
+        Err(e) => exit_on_ipc_error(e),
+    };
+    let pubkey = match resolve_contact(&rows, contact_prefix) {
+        Ok(pk) => pk,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(6);
+        }
+    };
+
+    let result = match client
+        .execute(CoreCommand::RemoveContact { contact: pubkey })
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => exit_on_ipc_error(e),
+    };
+    match result {
+        CommandResult::ContactRemoved { hard: true } => {
+            println!("removed {contact_prefix} (local state wiped)")
+        }
+        CommandResult::ContactRemoved { hard: false } => println!("archived {contact_prefix}"),
+        other => anyhow::bail!("unexpected result: {other:?}"),
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -1867,6 +1917,13 @@ mod tests {
         assert!(out.contains("merge conflict"));
         assert!(out.contains("epoch=7"));
         assert!(out.contains("ababab")); // first chars of message id
+    }
+
+    #[test]
+    fn remove_subcommand_parses() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from(["skattr", "remove", "alice"]).unwrap();
+        assert!(matches!(cli.cmd, Command::Remove { contact } if contact == "alice"));
     }
 
     #[test]

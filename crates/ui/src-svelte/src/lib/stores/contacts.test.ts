@@ -14,7 +14,7 @@ vi.mock("$lib/ipc/tauri", () => ({
 }));
 
 import { ipcClient } from "$lib/ipc/tauri";
-import { rename, archive, toggleExpanded, expandedPubkey } from "./contacts";
+import { rename, archive, removeContact, toggleExpanded, expandedPubkey, contacts, dropContact } from "./contacts";
 import { get } from "svelte/store";
 
 describe("isConnecting", () => {
@@ -71,6 +71,17 @@ describe("contacts store", () => {
     });
   });
 
+  it("removeContact issues remove_contact for the pubkey without refreshing", async () => {
+    vi.clearAllMocks();
+    await removeContact("aa".repeat(32));
+    expect(ipcClient.request).toHaveBeenCalledWith({
+      cmd: "remove_contact",
+      contact: "aa".repeat(32),
+    });
+    // Must NOT call list_contacts — the contact_removed event drives the store drop
+    expect(ipcClient.request).not.toHaveBeenCalledWith({ cmd: "list_contacts" });
+  });
+
   it("toggleExpanded enforces single-select", () => {
     toggleExpanded("aa");
     expect(get(expandedPubkey)).toBe("aa");
@@ -78,5 +89,16 @@ describe("contacts store", () => {
     expect(get(expandedPubkey)).toBe("bb");
     toggleExpanded("bb");
     expect(get(expandedPubkey)).toBeNull();
+  });
+});
+
+describe("dropContact", () => {
+  it("removes the matching contact by pubkey", () => {
+    contacts.set([
+      { pubkey: "aa", nickname: "A" } as any,
+      { pubkey: "bb", nickname: "B" } as any,
+    ]);
+    dropContact("aa");
+    expect(get(contacts).map((c: any) => c.pubkey)).toEqual(["bb"]);
   });
 });

@@ -67,6 +67,22 @@ impl<'p> MlsGroupRepo<'p> {
         })
     }
 
+    /// Delete the serialized state for `group_id` inside the caller's tx.
+    pub(crate) fn delete_in_tx(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        group_id: &[u8],
+    ) -> Result<()> {
+        tx.execute(
+            "DELETE FROM mls_groups WHERE group_id = ?1",
+            rusqlite::params![group_id],
+        )
+        .map_err(|e| {
+            CoreError::Storage(StorageErrorKind::Other(format!("delete mls group: {e}")))
+        })?;
+        Ok(())
+    }
+
     /// Enumerate all known groups as `(group_id, epoch)` pairs.
     pub(crate) fn list(&self) -> Result<Vec<(Vec<u8>, u64)>> {
         self.pool.with(|c| {
@@ -123,6 +139,17 @@ mod tests {
         let pool = Pool::in_memory();
         let repo = MlsGroupRepo::new(&pool);
         assert!(repo.get(&[0x99; 32]).unwrap().is_none());
+    }
+
+    #[test]
+    fn delete_in_tx_removes_group_row() {
+        let pool = Pool::in_memory();
+        let repo = MlsGroupRepo::new(&pool);
+        repo.put(b"gid-1", b"blob", 0).unwrap();
+        assert!(repo.get(b"gid-1").unwrap().is_some());
+        pool.transaction(|tx| repo.delete_in_tx(tx, b"gid-1"))
+            .unwrap();
+        assert!(repo.get(b"gid-1").unwrap().is_none());
     }
 
     #[test]

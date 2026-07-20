@@ -687,6 +687,26 @@ impl<'p> MessageRepo<'p> {
         })
     }
 
+    /// Delete all messages for `group_id` inside the caller's transaction.
+    /// The `messages_ad_text` AFTER DELETE trigger auto-syncs the FTS5 index.
+    /// Idempotent — no error if no rows match.
+    pub(crate) fn delete_by_group_in_tx(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        group_id: &[u8],
+    ) -> Result<()> {
+        tx.execute(
+            "DELETE FROM messages WHERE group_id = ?1",
+            rusqlite::params![group_id],
+        )
+        .map_err(|e| {
+            CoreError::Storage(StorageErrorKind::Other(format!(
+                "delete messages by group: {e}"
+            )))
+        })?;
+        Ok(())
+    }
+
     /// Return the most recently inserted message in `group_id`, or
     /// `None` if the group is empty. Used by `dispatch::list_contacts`
     /// to populate `ContactSummary::last_message_preview` and
@@ -1835,5 +1855,55 @@ mod tests {
         .unwrap();
         let page = repo.recent_before(&gid, 999_999, 10).unwrap();
         assert_eq!(page.len(), 1, "should return rows older than orphan cursor");
+    }
+
+    #[test]
+    fn delete_by_group_in_tx_removes_rows_and_syncs_fts() {
+        let pool = Pool::in_memory();
+        let repo = MessageRepo::new(&pool);
+        let gid = [0xEEu8; 32];
+        let other_gid = [0xFFu8; 32];
+
+        // Insert messages in the target group and one in an unrelated group.
+        for body in &["first message", "second message"] {
+            repo.insert(InsertParams {
+                group_id: &gid,
+                sender: &[0u8; 32],
+                envelope: &sample_envelope(body),
+                mls_generation: 0,
+                ts_daemon_recv: 0,
+            })
+            .unwrap();
+        }
+        repo.insert(InsertParams {
+            group_id: &other_gid,
+            sender: &[0u8; 32],
+            envelope: &sample_envelope("other group"),
+            mls_generation: 0,
+            ts_daemon_recv: 0,
+        })
+        .unwrap();
+
+        pool.transaction(|tx| repo.delete_by_group_in_tx(tx, &gid))
+            .unwrap();
+
+        // Target group rows gone; other group row untouched.
+        assert!(repo.recent(&gid, 10).unwrap().is_empty());
+        assert_eq!(repo.recent(&other_gid, 10).unwrap().len(), 1);
+
+        // FTS index consistent: no hits for the deleted group's content.
+        let fts_hits: i64 = pool
+            .with(|c| {
+                c.query_row(
+                    "SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH 'first'",
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(|e| {
+                    crate::error::CoreError::Storage(StorageErrorKind::Other(e.to_string()))
+                })
+            })
+            .unwrap();
+        assert_eq!(fts_hits, 0, "ad trigger must cascade FTS deletes");
     }
 }

@@ -294,6 +294,7 @@ fn event_matches(event: &Event, filter: Option<&EventFilter>) -> bool {
             true
         }
         (EventFilter::Contact(_), Event::ContactUpdated(_)) => true,
+        (EventFilter::Contact(peer), Event::ContactRemoved(contact)) => contact == peer,
         (EventFilter::Contact(peer), Event::ContactCardReceived { contact, .. }) => contact == peer,
         (EventFilter::Messages { contact: None }, Event::MessageReceived { .. }) => true,
         (EventFilter::Messages { contact: Some(c) }, Event::MessageReceived { contact, .. }) => {
