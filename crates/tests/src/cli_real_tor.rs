@@ -11,12 +11,10 @@
 
 use std::path::Path;
 
-use skattr_core::daemon::commands::MlsGroupStateLabel;
 use skattr_core::daemon::{
     Command, CommandResult, Config, Daemon, IpcClient, IpcClientError, Ready,
 };
 use skattr_core::envelope::Kind;
-use skattr_core::identity::PublicKey;
 use tokio::sync::oneshot;
 use zeroize::Zeroizing;
 
@@ -143,11 +141,11 @@ async fn full_flow_over_real_tor() {
     // AddContact dials Alice's onion (embedded in the invite's ContactCard)
     // to complete the two-PSK MLS genesis (ADR 0009). This requires live Tor.
     let summary = match tokio::time::timeout(
-        std::time::Duration::from_secs(60),
+        std::time::Duration::from_secs(120),
         exec(sock_b, Command::AddContact { invite_url }),
     )
     .await
-    .expect("AddContact must complete within 60 s")
+    .expect("AddContact must complete within 120 s")
     .unwrap()
     {
         CommandResult::ContactAdded(s) => s,
@@ -155,38 +153,45 @@ async fn full_flow_over_real_tor() {
     };
     eprintln!("Bob added Alice: pubkey={:?}", summary.pubkey);
 
-    // --- Wait for Bob's group with Alice to reach Active ---
+    // --- Poll SendMessage until first contact TRULY completes ---
     //
-    // Since #93, AddContact leaves the MLS group PendingJoin on Bob's side.
-    // SendMessage is gated on the Welcome-Ack completing (group becomes Active).
-    // Over real Tor this takes several seconds; poll ListContacts until the
-    // group_state flips to Active, bounded at 120 s to distinguish the #90
-    // transport flake from a code regression.
-    wait_for_active(sock_b, summary.pubkey, std::time::Duration::from_secs(120)).await;
-
-    // --- Bob sends a message to Alice ---
-    //
-    // We accept Queued OR Delivered: over real Tor, the hub actor will dial
-    // Alice's onion and attempt delivery. If the circuit comes up within
-    // the 2 s hub wait, we may get Delivered. Either way, the encrypt +
-    // outbox path returned MessageSent, which is the assertion that counts.
-    let send_result = exec(
-        sock_b,
-        Command::SendMessage {
-            contact: summary.pubkey,
-            kind: Kind::Text {
-                body: "hello-over-tor".into(),
+    // Since #93, AddContact leaves Bob's group PendingJoin; SendMessage is gated
+    // on the durable `pending_welcomes` row (the send-guard) until the Welcome-
+    // Ack completes and the row is cleared. We poll the send itself — the
+    // authoritative end-to-end signal — rather than ListContacts.group_state,
+    // which list_contacts derives from Group::load and ALWAYS reports Active
+    // (#101), making a group_state poll a no-op. "not connected yet" ⇒ still
+    // pending (the sweeper's Welcome delivery + Alice's Ack haven't finished);
+    // MessageSent ⇒ first contact complete + the message went out. Bounded 120 s.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    loop {
+        let r = exec(
+            sock_b,
+            Command::SendMessage {
+                contact: summary.pubkey,
+                kind: Kind::Text {
+                    body: "hello-over-tor".into(),
+                },
             },
-        },
-    )
-    .await
-    .unwrap();
-
-    match send_result {
-        CommandResult::MessageSent { .. } => {
-            eprintln!("MessageSent returned — test passed.");
+        )
+        .await;
+        match r {
+            Ok(CommandResult::MessageSent { .. }) => {
+                eprintln!("MessageSent — first contact complete.");
+                break;
+            }
+            Ok(other) => panic!("expected MessageSent, got {other:?}"),
+            Err(e) if format!("{e:?}").contains("not connected yet") => {
+                if std::time::Instant::now() >= deadline {
+                    panic!(
+                        "first contact never completed within 120 s (send still blocked \
+                         'not connected yet') — Welcome delivery / Ack stalled"
+                    );
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            }
+            Err(e) => panic!("SendMessage failed unexpectedly: {e:?}"),
         }
-        other => panic!("expected MessageSent, got {other:?}"),
     }
 
     // --- Graceful shutdown ---
@@ -201,42 +206,3 @@ async fn full_flow_over_real_tor() {
 // ---------------------------------------------------------------------------
 // Poll helper
 // ---------------------------------------------------------------------------
-
-/// Poll `ListContacts` on the daemon at `socket` until the contact identified
-/// by `peer` has `group_state == Active`, or until `timeout` elapses.
-///
-/// Panics with a clear diagnostic if the timeout fires — this distinguishes
-/// the #90 transport flake (first contact never completes over real Tor) from
-/// a code regression where the group stays PendingJoin indefinitely.
-async fn wait_for_active(socket: &Path, peer: PublicKey, timeout: std::time::Duration) {
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        let contacts = match exec(socket, Command::ListContacts).await.unwrap() {
-            CommandResult::Contacts(v) => v,
-            other => panic!("expected Contacts, got {other:?}"),
-        };
-        if let Some(entry) = contacts.iter().find(|s| s.pubkey == peer) {
-            if entry.group_state == Some(MlsGroupStateLabel::Active) {
-                eprintln!("Group with peer is Active — proceeding to send.");
-                return;
-            }
-            eprintln!(
-                "Group state is {:?} — waiting for Active…",
-                entry.group_state
-            );
-        } else {
-            eprintln!("Peer not yet in contact list — waiting…");
-        }
-
-        if tokio::time::Instant::now() >= deadline {
-            panic!(
-                "first-contact Welcome-Ack never completed within {:?} — \
-                 this is likely the #90 transport flake (DeliveryTimeout over real Tor), \
-                 not a code regression. Re-run with live Tor to confirm.",
-                timeout
-            );
-        }
-
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-    }
-}
