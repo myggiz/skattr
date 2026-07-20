@@ -13,7 +13,8 @@
   import InviteGenerateDialog from "$lib/components/InviteGenerateDialog.svelte";
   import AddContactDialog from "$lib/components/AddContactDialog.svelte";
   import Toast from "$lib/components/Toast.svelte";
-  import { contacts, refreshContacts, expandedPubkey, toggleExpanded, pendingState, dropContact } from "$lib/stores/contacts";
+  import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
+  import { contacts, refreshContacts, expandedPubkey, toggleExpanded, pendingState, dropContact, removeContact } from "$lib/stores/contacts";
   import { now } from "$lib/stores/now";
   import { conversation, openConversationFromSummary, appendMessage } from "$lib/stores/conversation";
   import { torStatus } from "$lib/stores/tor_status";
@@ -23,11 +24,13 @@
   import { ipcClient } from "$lib/ipc/tauri";
   import { connection, handleStreamClosed } from "$lib/stores/connection";
   import { pubkeyEq } from "$lib/pubkey";
+  import { toast } from "$lib/stores/toast";
   import { listen } from "@tauri-apps/api/event";
   import type { ContactSummary, PublicKey } from "$lib/ipc/types";
 
   let inviteOpen = $state(false);
   let addOpen = $state(false);
+  let removeConfirmOpen = $state(false);
   // URL pre-filled when the dialog is opened via a skattr:// deep-link.
   let addInitialUrl = $state("");
   // Subscription teardown bookkeeping. The live subscription is started from
@@ -222,6 +225,17 @@
     </header>
     {#if $conversation.contact !== null}
       <VirtualMessageList items={$conversation.messages} />
+      {#if activeSummary?.group_state === "pending_join"}
+        <div class="pending-actions">
+          <button
+            type="button"
+            class="remove-btn"
+            onclick={() => (removeConfirmOpen = true)}
+          >
+            Remove
+          </button>
+        </div>
+      {/if}
       <Composer contact={$conversation.contact} disabled={composerDisabled} {disabledReason} />
     {:else}
       <p class="empty">Select a contact</p>
@@ -240,6 +254,25 @@
 {/if}
 
 <Toast />
+
+{#if removeConfirmOpen && activeSummary?.group_state === "pending_join"}
+  <ConfirmDialog
+    title="Remove pending contact?"
+    body="This clears the local invite attempt so you can start over. The contact will be removed immediately."
+    confirmLabel="Remove"
+    danger={true}
+    onConfirm={async () => {
+      const pubkey = activeSummary!.pubkey;
+      removeConfirmOpen = false;
+      try {
+        await removeContact(pubkey);
+      } catch {
+        toast.show("Failed to remove contact");
+      }
+    }}
+    onCancel={() => (removeConfirmOpen = false)}
+  />
+{/if}
 
 {#if $connection.state !== "live"}
   <div class="reconnect-banner" role="status" aria-live="polite">
@@ -304,5 +337,20 @@
     cursor: pointer;
     padding: 0;
     text-decoration: underline;
+  }
+  .pending-actions {
+    display: flex;
+    justify-content: flex-end;
+    padding: var(--s-1) var(--s-3);
+    border-top: 1px solid var(--bg-elevated);
+  }
+  .remove-btn {
+    padding: 6px var(--s-2);
+    background: var(--danger);
+    color: var(--text);
+    border: none;
+    border-radius: 4px;
+    font: var(--t-ui);
+    cursor: pointer;
   }
 </style>

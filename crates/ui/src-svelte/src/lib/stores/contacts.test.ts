@@ -14,7 +14,7 @@ vi.mock("$lib/ipc/tauri", () => ({
 }));
 
 import { ipcClient } from "$lib/ipc/tauri";
-import { rename, archive, toggleExpanded, expandedPubkey, contacts, dropContact } from "./contacts";
+import { rename, archive, removeContact, toggleExpanded, expandedPubkey, contacts, dropContact } from "./contacts";
 import { get } from "svelte/store";
 
 describe("isConnecting", () => {
@@ -69,6 +69,17 @@ describe("contacts store", () => {
       cmd: "remove_contact",
       contact: "bb".repeat(32),
     });
+  });
+
+  it("removeContact issues remove_contact for the pubkey without refreshing", async () => {
+    vi.clearAllMocks();
+    await removeContact("aa".repeat(32));
+    expect(ipcClient.request).toHaveBeenCalledWith({
+      cmd: "remove_contact",
+      contact: "aa".repeat(32),
+    });
+    // Must NOT call list_contacts — the contact_removed event drives the store drop
+    expect(ipcClient.request).not.toHaveBeenCalledWith({ cmd: "list_contacts" });
   });
 
   it("toggleExpanded enforces single-select", () => {
