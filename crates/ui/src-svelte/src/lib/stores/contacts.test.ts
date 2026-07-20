@@ -14,7 +14,7 @@ vi.mock("$lib/ipc/tauri", () => ({
 }));
 
 import { ipcClient } from "$lib/ipc/tauri";
-import { rename, archive, toggleExpanded, expandedPubkey } from "./contacts";
+import { rename, archive, toggleExpanded, expandedPubkey, contacts, dropContact } from "./contacts";
 import { get } from "svelte/store";
 
 describe("isConnecting", () => {
@@ -78,5 +78,16 @@ describe("contacts store", () => {
     expect(get(expandedPubkey)).toBe("bb");
     toggleExpanded("bb");
     expect(get(expandedPubkey)).toBeNull();
+  });
+});
+
+describe("dropContact", () => {
+  it("removes the matching contact by pubkey", () => {
+    contacts.set([
+      { pubkey: "aa", nickname: "A" } as any,
+      { pubkey: "bb", nickname: "B" } as any,
+    ]);
+    dropContact("aa");
+    expect(get(contacts).map((c: any) => c.pubkey)).toEqual(["bb"]);
   });
 });

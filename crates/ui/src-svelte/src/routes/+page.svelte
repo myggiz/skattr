@@ -13,7 +13,7 @@
   import InviteGenerateDialog from "$lib/components/InviteGenerateDialog.svelte";
   import AddContactDialog from "$lib/components/AddContactDialog.svelte";
   import Toast from "$lib/components/Toast.svelte";
-  import { contacts, refreshContacts, expandedPubkey, toggleExpanded, pendingState } from "$lib/stores/contacts";
+  import { contacts, refreshContacts, expandedPubkey, toggleExpanded, pendingState, dropContact } from "$lib/stores/contacts";
   import { now } from "$lib/stores/now";
   import { conversation, openConversationFromSummary, appendMessage } from "$lib/stores/conversation";
   import { torStatus } from "$lib/stores/tor_status";
@@ -140,6 +140,13 @@
         // Welcome made us join a group. Refresh the list so it appears without a
         // manual restart.
         void refreshContacts();
+      } else if (e.event === "contact_removed") {
+        // A contact was removed (pending wipe or archive). Drop the row; if it
+        // was the open conversation, close it.
+        dropContact(e.data);
+        if (pubkeyEq($conversation.contact, e.data)) {
+          conversation.update((s) => ({ ...s, contact: null, messages: [] }));
+        }
       }
     });
   }

@@ -41,6 +41,12 @@ export async function refreshContacts(): Promise<void> {
   }
 }
 
+/** Remove a contact from the store by pubkey (hex). Used on the
+ *  `contact_removed` event so the row disappears without a full refetch. */
+export function dropContact(pubkey: string): void {
+  contacts.update((cs) => cs.filter((c) => !pubkeyEq(c.pubkey, pubkey)));
+}
+
 export const expandedPubkey: Writable<string | null> = writable(null);
 
 export function toggleExpanded(pubkey: string): void {
