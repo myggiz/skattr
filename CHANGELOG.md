@@ -4,13 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — targeting v0.1.4
+## [Unreleased] — targeting v0.1.5
 
 _In-progress patch line. The version is bumped per build for tracking; entries
 accumulate here and are stamped with a date when a build is cut._
 
 ### Fixed
 
+- **An unconfirmed contact no longer looks successfully added** (#101): a first
+  contact that hasn't completed (the peer hasn't accepted the invite) was shown
+  as a normal contact, because `list_contacts` mis-reported it as `Active`. It
+  now reads honestly — a de-emphasised "Connecting…" for the first two minutes,
+  then "Not connected yet — they haven't accepted your invite," and messaging
+  stays blocked until they connect.
 - **First contact is reliable over flaky Tor** (#90): the outbound onion dial
   succeeds only ~63% of the time per attempt over real Tor (measured; an Arti
   0.44 bump does not help — #99). `add_contact`'s dial was a single attempt, so
