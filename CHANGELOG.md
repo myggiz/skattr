@@ -4,13 +4,23 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — targeting v0.1.6
+## [Unreleased] — targeting v0.1.7
 
 _In-progress patch line. The version is bumped per build for tracking; entries
 accumulate here and are stamped with a date when a build is cut._
 
 ### Fixed
 
+- **A stuck "Connecting…" contact can now be removed** (#109): an unconnected
+  first-contact attempt that never completed had no delete path in the UI or
+  CLI, so a poisoned attempt could not be cleared to retry. `RemoveContact` is
+  now state-aware — a pending/unconnected contact is **fully wiped** (its MLS
+  group, pending Welcome, first-contact acks, queued frames, messages, and
+  contact row, all in one atomic transaction) so a fresh invite starts clean,
+  while a connected contact still archives with its history preserved. Adds a
+  Remove action + confirm dialog in the UI and a `skattr remove <contact>` CLI
+  subcommand. (Groundwork for the #107/#108 first-contact reliability fixes,
+  which need this escape hatch to be testable.)
 - **An unconfirmed contact no longer looks successfully added** (#101): a first
   contact that hasn't completed (the peer hasn't accepted the invite) was shown
   as a normal contact, because `list_contacts` mis-reported it as `Active`. It
