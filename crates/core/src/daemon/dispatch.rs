@@ -164,6 +164,23 @@ where
                 None => None,
             };
 
+        // #101: a saved genesis group always loads Active (GroupState is not
+        // persisted, #93), so Active here does NOT mean first contact completed.
+        // The durable truth is the pending_welcomes row — a row exists iff the
+        // peer has not yet Ack'd the Welcome. Override an otherwise-Active state
+        // to PendingJoin while that row is present (same signal send_message's
+        // guard uses), so a pending contact reads as unconfirmed, not added.
+        let group_state = match group_state {
+            Some(crate::daemon::commands::MlsGroupStateLabel::Active)
+                if crate::storage::PendingWelcomeRepo::new(&handle.pool)
+                    .is_pending(&c.identity.0)
+                    .map_err(map_err)? =>
+            {
+                Some(crate::daemon::commands::MlsGroupStateLabel::PendingJoin)
+            }
+            other => other,
+        };
+
         let last_read_row_id: Option<i64> = match group_id.as_deref() {
             Some(gid) => read_repo.get(gid).map_err(map_err)?,
             None => None,
@@ -496,7 +513,9 @@ where
         unread_count: 0,
         last_message_preview: None,
         last_ts_recv: None,
-        group_state: None,
+        // #101: first contact is PendingJoin until the peer Acks — the
+        // pending_welcomes row was just inserted in the genesis transaction.
+        group_state: Some(crate::daemon::commands::MlsGroupStateLabel::PendingJoin),
         last_read_row_id: None,
         muted: false,
         peer_mailboxes: Vec::new(),
@@ -2614,6 +2633,68 @@ mod tests {
                 .is_pending(&alice_pub.0)
                 .unwrap(),
             "no pending_welcomes row after all dials fail"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_contacts_reports_pending_join_while_is_pending() {
+        let handle_a = test_handle();
+        handle_a.set_onion("alice.onion".to_string());
+        let alice = handle_a.identity.public();
+        let CommandResult::InviteCreated { url, .. } = execute_command(
+            handle_a.clone(),
+            Command::CreateInvite {
+                nickname: None,
+                ttl_secs: Some(3600),
+            },
+        )
+        .await
+        .unwrap() else {
+            panic!("expected InviteCreated");
+        };
+
+        let handle_b = test_handle_with_dialer();
+        execute_command(handle_b.clone(), Command::AddContact { invite_url: url })
+            .await
+            .unwrap();
+
+        // The genesis group IS saved, so Group::load is Active — but the
+        // pending_welcomes row exists, so list_contacts must report PendingJoin.
+        let CommandResult::Contacts(list) =
+            execute_command(handle_b.clone(), Command::ListContacts)
+                .await
+                .unwrap()
+        else {
+            panic!("expected Contacts");
+        };
+        let entry = list
+            .iter()
+            .find(|s| s.pubkey == alice)
+            .expect("alice listed");
+        assert_eq!(
+            entry.group_state,
+            Some(crate::daemon::commands::MlsGroupStateLabel::PendingJoin),
+            "a pending first contact must report PendingJoin, not Active"
+        );
+
+        // After the Ack (pending_welcomes row deleted), it reports Active.
+        crate::storage::PendingWelcomeRepo::new(&handle_b.pool)
+            .delete(&alice.0)
+            .unwrap();
+        let CommandResult::Contacts(list2) =
+            execute_command(handle_b.clone(), Command::ListContacts)
+                .await
+                .unwrap()
+        else {
+            panic!("expected Contacts");
+        };
+        let e2 = list2
+            .iter()
+            .find(|s| s.pubkey == alice)
+            .expect("alice listed");
+        assert_eq!(
+            e2.group_state,
+            Some(crate::daemon::commands::MlsGroupStateLabel::Active)
         );
     }
 
