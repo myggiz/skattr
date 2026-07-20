@@ -1566,7 +1566,11 @@ async fn prune(
     }
 }
 
-async fn remove(contact_prefix: &str, sock_flag: Option<&std::path::Path>, _json: bool) -> Result<()> {
+async fn remove(
+    contact_prefix: &str,
+    sock_flag: Option<&std::path::Path>,
+    _json: bool,
+) -> Result<()> {
     use skattr_core::daemon::{Command as CoreCommand, CommandResult};
 
     let mut client = connect_or_exit(sock_flag).await?;
