@@ -141,11 +141,11 @@ async fn full_flow_over_real_tor() {
     // AddContact dials Alice's onion (embedded in the invite's ContactCard)
     // to complete the two-PSK MLS genesis (ADR 0009). This requires live Tor.
     let summary = match tokio::time::timeout(
-        std::time::Duration::from_secs(120),
+        std::time::Duration::from_secs(200),
         exec(sock_b, Command::AddContact { invite_url }),
     )
     .await
-    .expect("AddContact must complete within 120 s")
+    .expect("AddContact must complete within 200 s")
     .unwrap()
     {
         CommandResult::ContactAdded(s) => s,

@@ -316,8 +316,8 @@ where
 /// per attempt over real Tor (measured; the Arti 0.44 bump does not help — see
 /// the #99 spike). This synchronous dial-first is the only fail-fast point in
 /// first contact, so it is retried up to `DIAL_ATTEMPTS` times, which compounds
-/// to ~95% (`1 − 0.37^3`).
-const DIAL_ATTEMPTS: usize = 3;
+/// to ~99% (`1 − 0.37^5`).
+const DIAL_ATTEMPTS: usize = 5;
 /// Backoff between dial-first retries.
 const DIAL_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_secs(2);
 
