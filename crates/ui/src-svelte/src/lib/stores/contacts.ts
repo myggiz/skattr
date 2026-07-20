@@ -9,6 +9,24 @@ export function isConnecting(c: ContactSummary): boolean {
   return c.group_state === "pending_join";
 }
 
+/** Grace window (seconds) before a still-pending first contact escalates from
+ *  "Connecting…" to the honest "Not connected yet" state. First contact over
+ *  Tor legitimately takes ~30–90 s. */
+export const CONNECTING_GRACE_SECS = 120;
+
+/** Display state for a not-yet-confirmed first contact (#101), or null if the
+ *  contact is not pending. `nowSecs` is unix seconds; `added_at` is when first
+ *  contact started (unix seconds), so `now − added_at` is how long it's been
+ *  pending. */
+export function pendingState(
+  c: ContactSummary,
+  nowSecs: number,
+): "connecting" | "unconfirmed" | null {
+  if (c.group_state !== "pending_join") return null;
+  const elapsed = Math.max(0, nowSecs - Number(c.added_at));
+  return elapsed < CONNECTING_GRACE_SECS ? "connecting" : "unconfirmed";
+}
+
 import { ipcClient } from "$lib/ipc/tauri";
 import { unwrapOk } from "$lib/ipc/client";
 
