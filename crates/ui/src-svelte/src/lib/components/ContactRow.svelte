@@ -2,7 +2,8 @@
 <!-- Copyright (C) 2026 Myggiz AB -->
 <script lang="ts">
   import type { ContactSummary } from "$lib/ipc/types";
-  import { isConnecting } from "$lib/stores/contacts";
+  import { pendingState } from "$lib/stores/contacts";
+  import { now } from "$lib/stores/now";
 
   let { summary, active = false, expanded = false, onclick, onToggleExpanded }: {
     summary: ContactSummary;
@@ -11,6 +12,11 @@
     onclick?: () => void;
     onToggleExpanded?: () => void;
   } = $props();
+
+  // #101: an unconfirmed first contact reads as "Connecting…" during a grace
+  // window, then "Not connected yet" once it's been pending too long. Re-derives
+  // as the `now` store ticks so a stuck contact escalates without a daemon event.
+  let pstate = $derived(pendingState(summary, $now));
 
   function shortHash(pk: string): string {
     return pk.length > 8 ? pk.slice(0, 8) : pk;
@@ -29,11 +35,16 @@
 </script>
 
 <div class="row-wrap">
-  <button class="row" class:active onclick={onclick}>
+  <button class="row" class:active class:pending={pstate !== null} onclick={onclick}>
     <div class="title">
       {summary.nickname ?? shortHash(summary.pubkey)}
-      {#if isConnecting(summary)}
-        <span class="connecting-badge" title="First contact still connecting">Connecting…</span>
+      {#if pstate === "connecting"}
+        <span class="pending-badge" title="First contact still connecting">Connecting…</span>
+      {:else if pstate === "unconfirmed"}
+        <span
+          class="pending-badge unconfirmed"
+          title="They haven't accepted your invite yet — still trying to reach them"
+        >Not connected yet</span>
       {/if}
       {#if summary.muted}
         <span class="mute-icon" title="Muted" aria-label="Muted">🔕</span>
@@ -81,7 +92,11 @@
   .row:hover, .row.active { background: var(--bg-elevated); }
   .title { font-weight: 500; display: flex; align-items: center; gap: 4px; }
   .mute-icon { color: var(--text-muted, #888); font-size: 0.85em; }
-  .connecting-badge { color: var(--text-muted, #888); font-size: 0.75em; font-weight: 400; }
+  /* #101: a pending (unconfirmed) first contact is de-emphasised so it never
+     reads as a normal, successfully-added contact. */
+  .row.pending { opacity: 0.6; }
+  .pending-badge { color: var(--text-muted, #888); font-size: 0.75em; font-weight: 400; }
+  .pending-badge.unconfirmed { color: var(--warning, #c90); }
   .meta { display: flex; justify-content: space-between; color: var(--text-muted); font: var(--t-ui); }
   .preview { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 200px; }
   .badge {
