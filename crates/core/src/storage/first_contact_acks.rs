@@ -171,7 +171,8 @@ mod tests {
         })
         .unwrap();
         assert!(repo.lookup(&kp).unwrap().is_some());
-        p.transaction(|tx| repo.delete_by_peer_in_tx(tx, &id)).unwrap();
+        p.transaction(|tx| repo.delete_by_peer_in_tx(tx, &id))
+            .unwrap();
         assert!(repo.lookup(&kp).unwrap().is_none());
     }
 }

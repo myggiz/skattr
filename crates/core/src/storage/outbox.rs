@@ -617,8 +617,7 @@ mod tests {
         repo.insert(&target, &[0xA1; 16], b"p1", 100).unwrap();
         repo.insert(&target, &[0xA2; 16], b"p2", 100).unwrap();
         // A different target — must survive.
-        repo.insert(&[0x66u8; 32], &[0xA3; 16], b"p3", 100)
-            .unwrap();
+        repo.insert(&[0x66u8; 32], &[0xA3; 16], b"p3", 100).unwrap();
         pool.transaction(|tx| repo.delete_by_target_in_tx(tx, &target))
             .unwrap();
         let remaining = repo.due(999, 10).unwrap();

@@ -169,9 +169,7 @@ impl<'p> ContactRepo<'p> {
             "DELETE FROM contacts WHERE identity_pubkey = ?1",
             rusqlite::params![&identity.0[..]],
         )
-        .map_err(|e| {
-            CoreError::Storage(StorageErrorKind::Other(format!("delete contact: {e}")))
-        })?;
+        .map_err(|e| CoreError::Storage(StorageErrorKind::Other(format!("delete contact: {e}"))))?;
         Ok(())
     }
 

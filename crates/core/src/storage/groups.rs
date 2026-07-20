@@ -147,7 +147,8 @@ mod tests {
         let repo = MlsGroupRepo::new(&pool);
         repo.put(b"gid-1", b"blob", 0).unwrap();
         assert!(repo.get(b"gid-1").unwrap().is_some());
-        pool.transaction(|tx| repo.delete_in_tx(tx, b"gid-1")).unwrap();
+        pool.transaction(|tx| repo.delete_in_tx(tx, b"gid-1"))
+            .unwrap();
         assert!(repo.get(b"gid-1").unwrap().is_none());
     }
 
