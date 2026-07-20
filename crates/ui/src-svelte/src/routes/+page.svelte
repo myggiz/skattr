@@ -13,7 +13,8 @@
   import InviteGenerateDialog from "$lib/components/InviteGenerateDialog.svelte";
   import AddContactDialog from "$lib/components/AddContactDialog.svelte";
   import Toast from "$lib/components/Toast.svelte";
-  import { contacts, refreshContacts, expandedPubkey, toggleExpanded } from "$lib/stores/contacts";
+  import { contacts, refreshContacts, expandedPubkey, toggleExpanded, pendingState } from "$lib/stores/contacts";
+  import { now } from "$lib/stores/now";
   import { conversation, openConversationFromSummary, appendMessage } from "$lib/stores/conversation";
   import { torStatus } from "$lib/stores/tor_status";
   import { recordDeliveryStatus, hex16ToString } from "$lib/stores/delivery";
@@ -82,7 +83,9 @@
       : activeSummary.group_state === "corrupt"
         ? "Conversation unavailable"
         : activeSummary.group_state === "pending_join"
-          ? "Joining group…"
+          ? (pendingState(activeSummary, $now) === "unconfirmed"
+              ? "They haven't accepted your invite yet — you can't message them until they connect."
+              : "Connecting… waiting for them to accept your invite.")
           : activeSummary.group_state === null || activeSummary.group_state === undefined
             ? "Setting up conversation…"
             : undefined,

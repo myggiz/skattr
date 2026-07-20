@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Myggiz AB
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { isConnecting } from "./contacts";
+import { isConnecting, pendingState } from "./contacts";
 
 vi.mock("$lib/ipc/tauri", () => ({
   ipcClient: {
@@ -26,6 +26,27 @@ describe("isConnecting", () => {
   });
   it("false when null", () => {
     expect(isConnecting({ group_state: null } as any)).toBe(false);
+  });
+});
+
+describe("pendingState", () => {
+  it("connecting within the grace window", () => {
+    expect(
+      pendingState({ group_state: "pending_join", added_at: 1000n } as any, 1000 + 30),
+    ).toBe("connecting");
+  });
+  it("unconfirmed after the grace window", () => {
+    expect(
+      pendingState({ group_state: "pending_join", added_at: 1000n } as any, 1000 + 200),
+    ).toBe("unconfirmed");
+  });
+  it("null for an active contact", () => {
+    expect(pendingState({ group_state: "active", added_at: 0n } as any, 99999)).toBeNull();
+  });
+  it("clamps negative elapsed to connecting", () => {
+    expect(
+      pendingState({ group_state: "pending_join", added_at: 5000n } as any, 1000),
+    ).toBe("connecting");
   });
 });
 
