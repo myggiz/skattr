@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — targeting v0.1.5
+## [Unreleased] — targeting v0.1.6
 
 _In-progress patch line. The version is bumped per build for tracking; entries
 accumulate here and are stamped with a date when a build is cut._
@@ -20,8 +20,9 @@ accumulate here and are stamped with a date when a build is cut._
 - **First contact is reliable over flaky Tor** (#90): the outbound onion dial
   succeeds only ~63% of the time per attempt over real Tor (measured; an Arti
   0.44 bump does not help — #99). `add_contact`'s dial was a single attempt, so
-  a ~37% transient failure blocked first contact entirely. It now retries up to
-  3× (compounding to ~95%), which — combined with the #93 durable Welcome
+  a ~37% transient failure blocked first contact entirely. It now retries the
+  dial up to 5× (#106; compounding to ~99% — a local 2-CLI real-Tor loop went
+  6/9 at 3× to 6/6 at 5×), which — combined with the #93 durable Welcome
   re-send — makes first contact land reliably.
 - **Copy buttons work on Linux/Wayland** (#97): every "Copy" action (invite URL,
   pubkey, onion, history export) was a silent no-op because `navigator.clipboard`
