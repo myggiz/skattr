@@ -434,6 +434,12 @@ pub struct ContactSummary {
     /// no mailboxes or whose card is missing.
     #[serde(default)]
     pub peer_mailboxes: Vec<String>,
+    /// #107: the first-contact Welcome exceeded MAX_WELCOME_AGE without an Ack.
+    /// The contact is still pending (never Active) but cannot complete — the UI
+    /// prompts remove + re-invite. false for any non-pending or still-retrying
+    /// contact.
+    #[serde(default)]
+    pub welcome_failed: bool,
 }
 
 /// Wire-safe projection of a persisted message row.
@@ -748,6 +754,7 @@ mod tests {
                 last_read_row_id: None,
                 muted: false,
                 peer_mailboxes: Vec::new(),
+                welcome_failed: false,
             }]),
             CommandResult::Messages(vec![MessageRecord {
                 row_id: 0, // row_id irrelevant in this test
@@ -843,6 +850,7 @@ mod tests {
             last_read_row_id: None,
             muted: false,
             peer_mailboxes: Vec::new(),
+            welcome_failed: false,
         };
         let mut buf = Vec::new();
         ciborium::ser::into_writer(&s, &mut buf).unwrap();
@@ -867,6 +875,7 @@ mod tests {
             last_read_row_id: Some(42),
             muted: false,
             peer_mailboxes: Vec::new(),
+            welcome_failed: false,
         };
         let back: ContactSummary = roundtrip(&s);
         assert_eq!(back.pubkey.0, [7; 32]);

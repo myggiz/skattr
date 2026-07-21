@@ -34,6 +34,13 @@ const ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
 /// ~60_000 ms so an offline inviter is retried at most once a minute.
 const BACKOFF_MS: &[i64] = &[5_000, 15_000, 30_000, 60_000];
 
+/// #107: bound first-contact Welcome re-sends. A first contact that hasn't
+/// Ack'd within this age is marked failed (the sweep stops; the UI surfaces
+/// "couldn't connect — remove & re-invite"), instead of retrying forever — a
+/// circuit-rebind (`Psk(KeyNotFound)`) is permanent and no retry count helps,
+/// while a genuinely slow peer still gets up to this long. 24 h.
+const MAX_WELCOME_AGE_MS: i64 = 24 * 60 * 60 * 1_000;
+
 /// Bounded backoff (ms) for the `attempts`-th pending-Welcome re-send.
 ///
 /// `attempts` is the row's current attempt count (0 on the first send).
@@ -161,6 +168,19 @@ pub(crate) async fn run_welcome_sweep<S>(
 
         if acked {
             on_welcome_acked(handle, &row.peer).await;
+        } else if now_ms.saturating_sub(row.created_at) >= MAX_WELCOME_AGE_MS {
+            tracing::warn!(
+                target: "skattr::delivery::welcome_sweep",
+                attempts = row.attempts,
+                "welcome-sweep: first contact exceeded MAX_WELCOME_AGE; marking failed"
+            );
+            if let Err(e) = repo.mark_failed(&row.peer) {
+                tracing::warn!(
+                    target: "skattr::delivery::welcome_sweep",
+                    error = %e,
+                    "welcome-sweep: mark_failed failed"
+                );
+            }
         } else {
             let next = now_ms.saturating_add(welcome_backoff_ms(row.attempts));
             if let Err(e) = repo.reschedule(&row.peer, next) {
@@ -178,6 +198,85 @@ pub(crate) async fn run_welcome_sweep<S>(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    /// Build a minimal rig for sweep tests: in-memory pool, a hub with no real
+    /// transport (dial always fails → ack_tx.send(Err(())) immediately → not-acked
+    /// branch runs), and a DaemonHandle.
+    fn sweep_rig() -> (
+        Arc<crate::storage::Pool>,
+        Arc<DeliveryHub<tokio::io::DuplexStream>>,
+        Arc<DaemonHandle<tokio::io::DuplexStream>>,
+    ) {
+        let pool = Arc::new(crate::storage::Pool::in_memory());
+        let hub = Arc::new(DeliveryHub::new(pool.clone()));
+        let seed = crate::identity::Seed::generate().unwrap();
+        let identity = crate::identity::IdentityKey::from_seed(&seed).unwrap();
+        let (events_tx, _) = tokio::sync::broadcast::channel(16);
+        let handle = Arc::new(DaemonHandle::new(
+            pool.clone(),
+            hub.clone(),
+            identity,
+            events_tx,
+        ));
+        (pool, hub, handle)
+    }
+
+    /// Over-age, never-acked: sweep must mark the row failed and stop retrying.
+    #[tokio::test]
+    async fn sweep_marks_failed_after_max_age() {
+        let (pool, hub, handle) = sweep_rig();
+        let peer = [0x22u8; 32];
+        let created_at = 0i64; // far in the past
+        pool.transaction(|tx| {
+            crate::storage::pending_welcomes::PendingWelcomeRepo::insert_in_tx(
+                tx, &peer, b"gid", b"welcome", 0, created_at,
+            )
+        })
+        .unwrap();
+
+        let now = MAX_WELCOME_AGE_MS + 1; // row age exceeds the cap
+        run_welcome_sweep(&pool, &hub, &handle, now, 16).await;
+
+        let repo = crate::storage::pending_welcomes::PendingWelcomeRepo::new(&pool);
+        assert!(
+            repo.is_failed(&peer).unwrap(),
+            "over-age unacked welcome must be marked failed"
+        );
+        assert!(
+            repo.is_pending(&peer).unwrap(),
+            "row kept so contact stays PendingJoin"
+        );
+        // A second pass sees nothing due (failed rows are excluded from due()).
+        assert_eq!(repo.due(now + 1, 16).unwrap().len(), 0);
+    }
+
+    /// Under max age, never-acked: sweep must reschedule (not fail) the row.
+    #[tokio::test]
+    async fn sweep_reschedules_within_max_age() {
+        let (pool, hub, handle) = sweep_rig();
+        let peer = [0x33u8; 32];
+        let now = 10_000i64;
+        pool.transaction(|tx| {
+            crate::storage::pending_welcomes::PendingWelcomeRepo::insert_in_tx(
+                tx,
+                &peer,
+                b"gid",
+                b"welcome",
+                0,
+                now - 1_000, // created 1 s ago — well under MAX_WELCOME_AGE_MS
+            )
+        })
+        .unwrap();
+
+        run_welcome_sweep(&pool, &hub, &handle, now, 16).await;
+
+        let repo = crate::storage::pending_welcomes::PendingWelcomeRepo::new(&pool);
+        assert!(
+            !repo.is_failed(&peer).unwrap(),
+            "young unacked welcome must NOT be failed yet"
+        );
+        assert!(repo.is_pending(&peer).unwrap());
+    }
 
     #[test]
     fn finalize_welcome_ack_deletes_row_idempotently() {

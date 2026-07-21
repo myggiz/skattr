@@ -48,6 +48,15 @@ describe("pendingState", () => {
       pendingState({ group_state: "pending_join", added_at: 5000n } as any, 1000),
     ).toBe("connecting");
   });
+  it("returns 'failed' when welcome_failed is true, regardless of elapsed", () => {
+    const c = { group_state: "pending_join", added_at: 0, welcome_failed: true } as any;
+    expect(pendingState(c, 5)).toBe("failed");
+    expect(pendingState(c, 10_000)).toBe("failed");
+  });
+  it("unaffected when welcome_failed is false", () => {
+    const c = { group_state: "pending_join", added_at: 0, welcome_failed: false } as any;
+    expect(pendingState(c, 5)).toBe("connecting");
+  });
 });
 
 describe("contacts store", () => {

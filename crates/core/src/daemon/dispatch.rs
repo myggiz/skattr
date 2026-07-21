@@ -192,6 +192,10 @@ where
             .map(|card| card.body.mailboxes.clone())
             .unwrap_or_default();
 
+        let welcome_failed = crate::storage::PendingWelcomeRepo::new(&handle.pool)
+            .is_failed(&c.identity.0)
+            .map_err(map_err)?;
+
         summaries.push(ContactSummary {
             pubkey: c.identity,
             nickname: c.display_name,
@@ -205,6 +209,7 @@ where
             last_read_row_id,
             muted: c.muted,
             peer_mailboxes,
+            welcome_failed,
         });
     }
 
@@ -519,6 +524,7 @@ where
         last_read_row_id: None,
         muted: false,
         peer_mailboxes: Vec::new(),
+        welcome_failed: false,
     }))
 }
 
@@ -2756,6 +2762,70 @@ mod tests {
         assert_eq!(
             e2.group_state,
             Some(crate::daemon::commands::MlsGroupStateLabel::Active)
+        );
+    }
+
+    #[tokio::test]
+    async fn list_contacts_reports_welcome_failed() {
+        use crate::storage::PendingWelcomeRepo;
+
+        let handle_a = test_handle();
+        handle_a.set_onion("alice.onion".to_string());
+        let alice = handle_a.identity.public();
+        let CommandResult::InviteCreated { url, .. } = execute_command(
+            handle_a.clone(),
+            Command::CreateInvite {
+                nickname: None,
+                ttl_secs: Some(3600),
+            },
+        )
+        .await
+        .unwrap() else {
+            panic!("expected InviteCreated");
+        };
+
+        let handle_b = test_handle_with_dialer();
+        execute_command(handle_b.clone(), Command::AddContact { invite_url: url })
+            .await
+            .unwrap();
+
+        // Not failed yet → welcome_failed = false, still PendingJoin.
+        let CommandResult::Contacts(list) =
+            execute_command(handle_b.clone(), Command::ListContacts)
+                .await
+                .unwrap()
+        else {
+            panic!("expected Contacts");
+        };
+        let s0 = list
+            .iter()
+            .find(|s| s.pubkey == alice)
+            .expect("alice listed");
+        assert!(!s0.welcome_failed);
+        assert_eq!(
+            s0.group_state,
+            Some(crate::daemon::commands::MlsGroupStateLabel::PendingJoin)
+        );
+
+        // Mark failed → welcome_failed = true, still PendingJoin.
+        PendingWelcomeRepo::new(&handle_b.pool)
+            .mark_failed(&alice.0)
+            .unwrap();
+        let CommandResult::Contacts(list2) =
+            execute_command(handle_b.clone(), Command::ListContacts)
+                .await
+                .unwrap()
+        else {
+            panic!("expected Contacts");
+        };
+        let s1 = list2
+            .iter()
+            .find(|s| s.pubkey == alice)
+            .expect("alice listed");
+        assert!(s1.welcome_failed);
+        assert_eq!(
+            s1.group_state,
+            Some(crate::daemon::commands::MlsGroupStateLabel::PendingJoin)
         );
     }
 
