@@ -206,6 +206,52 @@ mod tests {
         finalize_welcome_ack(&pool, &peer).unwrap(); // idempotent, no error
     }
 
+    /// Ordering invariant for #108: `on_welcome_acked` calls `finalize_welcome_ack`
+    /// **before** sending the self-card (via `send_card_to_contact`).  The
+    /// `is_peer_pending` gate in `send_card_to_contact` must therefore see the
+    /// row as gone — otherwise the post-Ack card would be silently skipped.
+    ///
+    /// This test proves the ordering at the DB level: `finalize_welcome_ack`
+    /// makes `is_pending` false before any card-send I/O would be attempted.
+    /// (The live async `on_welcome_acked` is not exercised here to avoid
+    /// transport dependencies; the sequential call order in its body is the
+    /// contract.)
+    #[test]
+    fn finalize_welcome_ack_clears_pending_before_card_send_would_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let seed = crate::identity::Seed::generate().unwrap();
+        let pool = crate::storage::Pool::open(dir.path(), &seed).unwrap();
+        let repo = crate::storage::pending_welcomes::PendingWelcomeRepo::new(&pool);
+        let peer = [0x42u8; 32];
+
+        pool.transaction(|tx| {
+            crate::storage::pending_welcomes::PendingWelcomeRepo::insert_in_tx(
+                tx,
+                &peer,
+                &[1u8; 32],
+                &[0xAB, 0xCD],
+                5_000,
+                0,
+            )
+        })
+        .unwrap();
+
+        // Gate is ON before ack.
+        assert!(
+            repo.is_pending(&peer).unwrap(),
+            "row present → is_pending must be true before ack"
+        );
+
+        // `on_welcome_acked` calls `finalize_welcome_ack` first; simulate that.
+        finalize_welcome_ack(&pool, &peer).unwrap();
+
+        // Gate is OFF immediately after — the card-send path sees no pending row.
+        assert!(
+            !repo.is_pending(&peer).unwrap(),
+            "#108 ordering: is_pending must be false after finalize so send_card_to_contact is not gated out"
+        );
+    }
+
     #[test]
     fn welcome_backoff_caps_at_60s() {
         assert_eq!(welcome_backoff_ms(0), 5_000);

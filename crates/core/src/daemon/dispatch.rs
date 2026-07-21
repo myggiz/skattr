@@ -6270,6 +6270,75 @@ mod tests {
         );
     }
 
+    /// `Command::RotateOnion` calls `publish_self_card_update`, which iterates
+    /// ALL contacts.  A pending contact (unacked first-contact Welcome) must
+    /// receive NO card (group `state_blob` unchanged), while a connected
+    /// contact still receives one (blob changes) — proving the gate works at
+    /// the broadcast level (#108).
+    #[tokio::test]
+    async fn card_broadcast_skips_pending_contact_only() {
+        use crate::storage::MlsGroupRepo;
+        // `test_handle_with_mailbox` wires the `poller_ctrl` channel that
+        // `publish_self_card_update` requires; `UnreachableFactory` suffices
+        // because no mailbox send path is exercised here.
+        let (handle, _ctrl_rx) = test_handle_with_mailbox(Arc::new(UnreachableFactory));
+        handle.set_onion("broadcast-test.onion".to_string());
+
+        // Pending contact: real linked group + a pending_welcomes row.
+        let (pending_pk, pending_gid) = seed_connected_contact(&handle, 0xAA);
+        insert_pending_for_test(&handle, &pending_pk.0);
+        // Connected contact: real linked group, NO pending row.
+        let (conn_pk, conn_gid) = seed_connected_contact(&handle, 0xBB);
+        let _ = (pending_pk, conn_pk); // IDs consumed; only gids needed below.
+
+        let pend_before = MlsGroupRepo::new(&handle.pool).get(&pending_gid).unwrap();
+        let conn_before = MlsGroupRepo::new(&handle.pool).get(&conn_gid).unwrap();
+
+        // RotateOnion drives `publish_self_card_update` over all contacts.
+        let res = execute_command(handle.clone(), Command::RotateOnion)
+            .await
+            .unwrap();
+        assert!(matches!(res, CommandResult::Ok), "expected Ok, got {res:?}");
+
+        let pend_after = MlsGroupRepo::new(&handle.pool).get(&pending_gid).unwrap();
+        let conn_after = MlsGroupRepo::new(&handle.pool).get(&conn_gid).unwrap();
+
+        assert_eq!(
+            pend_before, pend_after,
+            "#108: pending contact gets NO card — group blob must be unchanged"
+        );
+        assert_ne!(
+            conn_before, conn_after,
+            "connected contact still receives the broadcast card — blob must change"
+        );
+    }
+
+    /// After the pending_welcomes row is cleared (simulating the Ack that
+    /// `finalize_welcome_ack` performs), `send_card_to_contact` must send the
+    /// card — the gate must not over-block (#108).
+    #[tokio::test]
+    async fn card_sends_after_pending_cleared() {
+        use crate::storage::{MlsGroupRepo, PendingWelcomeRepo};
+        let handle = test_handle();
+        handle.set_onion("post-ack-test.onion".to_string());
+        let card = build_self_card(&handle).unwrap();
+
+        let (pk, gid) = seed_connected_contact(&handle, 0xDD);
+        insert_pending_for_test(&handle, &pk.0);
+
+        // Simulate the Ack: delete the pending_welcomes row, exactly as
+        // `finalize_welcome_ack` does on the happy path.
+        PendingWelcomeRepo::new(&handle.pool).delete(&pk.0).unwrap();
+
+        let before = MlsGroupRepo::new(&handle.pool).get(&gid).unwrap();
+        send_card_to_contact(&handle, &card, pk).await;
+        let after = MlsGroupRepo::new(&handle.pool).get(&gid).unwrap();
+        assert_ne!(
+            before, after,
+            "after Ack (pending row cleared) the card must be sent — gate must not over-block"
+        );
+    }
+
     /// `send_file` announces via `send_message` and therefore inherits the
     /// pending guard (#108). A `SendFile` to a pending contact must surface
     /// the same "not connected yet" `InvalidArgument` rejection and write no
