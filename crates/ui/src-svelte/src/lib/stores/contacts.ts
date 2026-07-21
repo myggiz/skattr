@@ -21,8 +21,9 @@ export const CONNECTING_GRACE_SECS = 120;
 export function pendingState(
   c: ContactSummary,
   nowSecs: number,
-): "connecting" | "unconfirmed" | null {
+): "connecting" | "unconfirmed" | "failed" | null {
   if (c.group_state !== "pending_join") return null;
+  if (c.welcome_failed) return "failed";
   const elapsed = Math.max(0, nowSecs - Number(c.added_at));
   return elapsed < CONNECTING_GRACE_SECS ? "connecting" : "unconfirmed";
 }

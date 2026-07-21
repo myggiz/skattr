@@ -86,9 +86,11 @@
       : activeSummary.group_state === "corrupt"
         ? "Conversation unavailable"
         : activeSummary.group_state === "pending_join"
-          ? (pendingState(activeSummary, $now) === "unconfirmed"
-              ? "They haven't accepted your invite yet — you can't message them until they connect."
-              : "Connecting… waiting for them to accept your invite.")
+          ? (pendingState(activeSummary, $now) === "failed"
+              ? "Couldn't connect to this contact. Remove it and send a new invite to try again."
+              : pendingState(activeSummary, $now) === "unconfirmed"
+                ? "They haven't accepted your invite yet — you can't message them until they connect."
+                : "Connecting… waiting for them to accept your invite.")
           : activeSummary.group_state === null || activeSummary.group_state === undefined
             ? "Setting up conversation…"
             : undefined,

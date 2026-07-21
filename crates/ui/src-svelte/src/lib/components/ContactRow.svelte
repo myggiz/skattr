@@ -45,6 +45,11 @@
           class="pending-badge unconfirmed"
           title="They haven't accepted your invite yet — still trying to reach them"
         >Not connected yet</span>
+      {:else if pstate === "failed"}
+        <span
+          class="pending-badge failed"
+          title="Couldn't connect — remove and send a new invite to try again"
+        >Couldn't connect</span>
       {/if}
       {#if summary.muted}
         <span class="mute-icon" title="Muted" aria-label="Muted">🔕</span>
@@ -97,6 +102,7 @@
   .row.pending { opacity: 0.6; }
   .pending-badge { color: var(--text-muted, #888); font-size: 0.75em; font-weight: 400; }
   .pending-badge.unconfirmed { color: var(--warning, #c90); }
+  .pending-badge.failed { color: var(--danger, #c33); }
   .meta { display: flex; justify-content: space-between; color: var(--text-muted); font: var(--t-ui); }
   .preview { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 200px; }
   .badge {
