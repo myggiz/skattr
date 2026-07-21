@@ -4,13 +4,22 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — targeting v0.1.8
+## [Unreleased] — targeting v0.1.9
 
 _In-progress patch line. The version is bumped per build for tracking; entries
 accumulate here and are stamped with a date when a build is cut._
 
 ### Fixed
 
+- **A stuck first contact no longer says "Connecting…" forever** (#107): the
+  durable Welcome re-send (added for offline delivery) replayed bytes bound to
+  the original Tor connection, so after a circuit change it could never
+  complete — leaving a contact stuck as "Connecting…" indefinitely. It now
+  gives up cleanly after 24 hours and shows *"Couldn't connect — remove it and
+  send a new invite to try again,"* so you can recover (Remove, #109 → fresh
+  invite over a new connection). The contact stays un-messageable until it
+  actually connects (never falsely shown as added). Automatic recovery of this
+  case is a disclosed v1.1 item.
 - **A never-connected first contact no longer floods the peer with undeliverable
   frames** (#108): while a first-contact Welcome was unacked, the ContactCard
   broadcast (on onion rotation or card updates) still encrypted and sent MLS
