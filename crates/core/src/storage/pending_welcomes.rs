@@ -20,6 +20,8 @@ pub struct PendingWelcomeDue {
     pub welcome_bytes: Vec<u8>,
     /// Number of send attempts so far.
     pub attempts: i64,
+    /// Unix-ms timestamp when the row was first inserted.
+    pub created_at: i64,
 }
 
 /// Repository for the `pending_welcomes` table.
@@ -60,14 +62,15 @@ impl<'p> PendingWelcomeRepo<'p> {
         Ok(())
     }
 
-    /// Return rows whose `next_retry_at <= now_ms`, oldest first, up to `limit`.
+    /// Return rows whose `next_retry_at <= now_ms` and `failed = 0`,
+    /// oldest first, up to `limit`.
     pub fn due(&self, now_ms: i64, limit: usize) -> Result<Vec<PendingWelcomeDue>> {
         self.pool.with(|c| {
             let mut stmt = c
                 .prepare(
-                    "SELECT peer_pubkey, group_id, welcome_bytes, attempts \
+                    "SELECT peer_pubkey, group_id, welcome_bytes, attempts, created_at \
                      FROM pending_welcomes \
-                     WHERE next_retry_at <= ?1 \
+                     WHERE next_retry_at <= ?1 AND failed = 0 \
                      ORDER BY next_retry_at ASC LIMIT ?2",
                 )
                 .map_err(|e| {
@@ -81,7 +84,8 @@ impl<'p> PendingWelcomeRepo<'p> {
                     let group_id: Vec<u8> = r.get(1)?;
                     let welcome_bytes: Vec<u8> = r.get(2)?;
                     let attempts: i64 = r.get(3)?;
-                    Ok((peer_bytes, group_id, welcome_bytes, attempts))
+                    let created_at: i64 = r.get(4)?;
+                    Ok((peer_bytes, group_id, welcome_bytes, attempts, created_at))
                 })
                 .map_err(|e| {
                     CoreError::Storage(StorageErrorKind::Other(format!(
@@ -90,11 +94,12 @@ impl<'p> PendingWelcomeRepo<'p> {
                 })?;
             let mut out = Vec::new();
             for row in rows {
-                let (peer_bytes, group_id, welcome_bytes, attempts) = row.map_err(|e| {
-                    CoreError::Storage(StorageErrorKind::Other(format!(
-                        "pending_welcomes due row: {e}"
-                    )))
-                })?;
+                let (peer_bytes, group_id, welcome_bytes, attempts, created_at) =
+                    row.map_err(|e| {
+                        CoreError::Storage(StorageErrorKind::Other(format!(
+                            "pending_welcomes due row: {e}"
+                        )))
+                    })?;
                 if peer_bytes.len() == 32 {
                     let mut peer = [0u8; 32];
                     peer.copy_from_slice(&peer_bytes);
@@ -103,10 +108,42 @@ impl<'p> PendingWelcomeRepo<'p> {
                         group_id,
                         welcome_bytes,
                         attempts,
+                        created_at,
                     });
                 }
             }
             Ok(out)
+        })
+    }
+
+    /// Mark a pending Welcome failed (#107): the sweep stops retrying it. The row
+    /// is kept so `is_pending` stays true (contact stays PendingJoin, not Active).
+    pub fn mark_failed(&self, peer: &[u8; 32]) -> Result<()> {
+        self.pool.with_mut(|c| {
+            c.execute(
+                "UPDATE pending_welcomes SET failed = 1 WHERE peer_pubkey = ?1",
+                rusqlite::params![&peer[..]],
+            )
+            .map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!("mark_failed: {e}")))
+            })?;
+            Ok(())
+        })
+    }
+
+    /// Whether the pending Welcome for `peer` has been marked failed (#107).
+    pub fn is_failed(&self, peer: &[u8; 32]) -> Result<bool> {
+        self.pool.with(|c| {
+            let n: i64 = c
+                .query_row(
+                    "SELECT COUNT(*) FROM pending_welcomes WHERE peer_pubkey = ?1 AND failed = 1",
+                    rusqlite::params![&peer[..]],
+                    |r| r.get(0),
+                )
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!("is_failed: {e}")))
+                })?;
+            Ok(n > 0)
         })
     }
 
@@ -238,6 +275,25 @@ mod tests {
         repo.delete(&peer).unwrap();
         repo.delete(&peer).unwrap(); // idempotent
         assert_eq!(repo.count().unwrap(), 0);
+    }
+
+    #[test]
+    fn mark_failed_sets_flag_and_due_skips_failed() {
+        let p = pool();
+        let repo = PendingWelcomeRepo::new(&p);
+        let peer = [0x11u8; 32];
+        p.transaction(|tx| {
+            PendingWelcomeRepo::insert_in_tx(tx, &peer, b"gid", b"welcome", 0, 100)
+        })
+        .unwrap();
+        assert!(!repo.is_failed(&peer).unwrap());
+        // due() returns it (next_retry_at <= now).
+        assert_eq!(repo.due(i64::MAX, 10).unwrap().len(), 1);
+        repo.mark_failed(&peer).unwrap();
+        assert!(repo.is_failed(&peer).unwrap());
+        // is_pending stays true (row still exists) but due() skips it.
+        assert!(repo.is_pending(&peer).unwrap());
+        assert_eq!(repo.due(i64::MAX, 10).unwrap().len(), 0);
     }
 
     #[test]
