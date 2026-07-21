@@ -1709,6 +1709,7 @@ mod tests {
             last_read_row_id: None,
             muted: false,
             peer_mailboxes: Vec::new(),
+            welcome_failed: false,
         }];
         let out = render_contacts_human(&rows);
         assert!(out.contains("alice"));
@@ -1735,6 +1736,7 @@ mod tests {
                 last_read_row_id: None,
                 muted: false,
                 peer_mailboxes: Vec::new(),
+                welcome_failed: false,
             },
             ContactSummary {
                 pubkey: PublicKey([0xCD; 32]),
@@ -1749,6 +1751,7 @@ mod tests {
                 last_read_row_id: None,
                 muted: false,
                 peer_mailboxes: Vec::new(),
+                welcome_failed: false,
             },
         ];
         let pk = resolve_contact(&rows, "ab").unwrap();
@@ -1774,6 +1777,7 @@ mod tests {
                 last_read_row_id: None,
                 muted: false,
                 peer_mailboxes: Vec::new(),
+                welcome_failed: false,
             },
             ContactSummary {
                 pubkey: PublicKey({
@@ -1792,6 +1796,7 @@ mod tests {
                 last_read_row_id: None,
                 muted: false,
                 peer_mailboxes: Vec::new(),
+                welcome_failed: false,
             },
         ];
         let err = resolve_contact(&rows, "ab").unwrap_err();

@@ -43,6 +43,7 @@ function fakeSummary(overrides: Partial<{ nickname: string | null }> = {}): impo
     last_read_row_id: null,
     muted: false,
     peer_mailboxes: [],
+    welcome_failed: false,
     ...overrides,
   };
 }
