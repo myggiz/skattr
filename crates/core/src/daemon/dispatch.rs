@@ -6367,22 +6367,6 @@ mod tests {
             "pending SendFile must be rejected, got {r:?}"
         );
 
-        // No attachment rows written for this peer.
-        let rows = handle
-            .pool
-            .with(|conn| {
-                conn.query_row(
-                    "SELECT COUNT(*) FROM attachments WHERE direction = 'out'",
-                    [],
-                    |r| r.get::<_, i64>(0),
-                )
-                .map_err(|e| {
-                    crate::error::CoreError::Storage(crate::storage::StorageErrorKind::Other(
-                        e.to_string(),
-                    ))
-                })
-            })
-            .unwrap();
         // The attachment repo insert happens BEFORE the send_message call in
         // send_file, so we verify send_message was blocked (no outbox row for
         // this peer) by checking outbox is empty.
@@ -6399,7 +6383,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             outbox_rows, 0,
-            "no outbox row written when send_file is blocked on pending peer (rows={rows})"
+            "no outbox row written when send_file is blocked on pending peer"
         );
     }
 }
