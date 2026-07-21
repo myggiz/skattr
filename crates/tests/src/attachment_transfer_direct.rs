@@ -366,3 +366,138 @@ async fn attachment_roundtrip_multichunk_over_loopback() {
     let _ = tokio::time::timeout(Duration::from_secs(30), task_a).await;
     let _ = tokio::time::timeout(Duration::from_secs(30), task_b).await;
 }
+
+/// #76 reproduction — **sender-dials-first** topology.
+///
+/// The passing test above has the *receiver* (Bob) run `add_contact`, so the
+/// receiver holds the dialed conn and pulls chunks over its own outbound
+/// connection — the only path with coverage. In production the **sender** often
+/// holds the dialed conn (it dialed to deliver the `Kind::File` manifest), so
+/// the receiver must pull back over a purely *accepted* connection. Field repro
+/// (v0.1.9, both machines): manifest arrives, text works both ways, but the
+/// receiver's `ChunkRequest` never reaches the sender's serve arm → 30 s
+/// "request timeout", zero chunks. This test drives that topology deterministically
+/// over loopback: Bob adds Alice (Bob dials), Bob warms its outbound conn + clears
+/// its send-guard with a text, then **Bob sends the file to Alice** — so Alice
+/// (receiver) is on the accepted side. Expected to FAIL (timeout) until #76 is fixed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn attachment_sender_dials_first_over_loopback() {
+    use skattr_core::envelope::Kind;
+
+    let tmp_a = tempfile::tempdir().unwrap();
+    let tmp_b = tempfile::tempdir().unwrap();
+    init_vault(tmp_a.path());
+    init_vault(tmp_b.path());
+
+    let net = LoopbackNet::new();
+    let pw = Zeroizing::new(PASSPHRASE.to_string());
+    let alice_download_dir = tmp_a.path().join("downloads");
+
+    let (ready_a_rx, shutdown_a_tx, task_a) = spawn_daemon(
+        tmp_a.path(),
+        "alice.onion",
+        net.clone(),
+        pw.clone(),
+        alice_download_dir.clone(),
+    );
+    let (ready_b_rx, shutdown_b_tx, task_b) = spawn_daemon(
+        tmp_b.path(),
+        "bob.onion",
+        net.clone(),
+        pw.clone(),
+        tmp_b.path().join("downloads"),
+    );
+    let ready_a: Ready = tokio::time::timeout(Duration::from_secs(60), ready_a_rx)
+        .await
+        .expect("Alice ready within 60 s")
+        .expect("Alice ready_tx open");
+    let ready_b: Ready = tokio::time::timeout(Duration::from_secs(60), ready_b_rx)
+        .await
+        .expect("Bob ready within 60 s")
+        .expect("Bob ready_tx open");
+
+    // --- First contact: Alice invites, BOB adds (Bob dials Alice) ---
+    let mut client_a = IpcClient::connect(&ready_a.ipc_socket).await.unwrap();
+    let invite_url = match client_a
+        .execute(Command::CreateInvite {
+            nickname: None,
+            ttl_secs: Some(600),
+        })
+        .await
+        .unwrap()
+    {
+        CommandResult::InviteCreated { url, .. } => url,
+        other => panic!("expected InviteCreated, got {other:?}"),
+    };
+    let mut client_b = IpcClient::connect(&ready_b.ipc_socket).await.unwrap();
+    let alice_pubkey = match client_b
+        .execute(Command::AddContact { invite_url })
+        .await
+        .unwrap()
+    {
+        CommandResult::ContactAdded(s) => s.pubkey,
+        other => panic!("expected ContactAdded, got {other:?}"),
+    };
+    let mut client_b_info = IpcClient::connect(&ready_b.ipc_socket).await.unwrap();
+    let bob_pubkey = match client_b_info.execute(Command::DaemonInfo).await.unwrap() {
+        CommandResult::DaemonInfo { local_pubkey, .. } => local_pubkey,
+        other => panic!("expected DaemonInfo, got {other:?}"),
+    };
+
+    // Alice (responder) joins from the Welcome.
+    wait_for_group_active(&ready_a.ipc_socket, bob_pubkey, Duration::from_secs(30)).await;
+
+    // Bob is the committer: its group stays PendingJoin (send-guarded) until
+    // Alice Acks the Welcome. Poll-send a text Bob→Alice until it succeeds —
+    // this both confirms first contact completed AND warms Bob's outbound conn
+    // to Alice (so the file send below is genuinely sender-dials-first).
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let mut c = IpcClient::connect(&ready_b.ipc_socket).await.unwrap();
+        let r = c
+            .execute(Command::SendMessage {
+                contact: alice_pubkey,
+                kind: Kind::Text {
+                    body: "warm".into(),
+                },
+            })
+            .await;
+        match r {
+            Ok(CommandResult::MessageSent { .. }) => break,
+            _ if tokio::time::Instant::now() >= deadline => {
+                panic!("Bob's first contact never completed (send still guarded)")
+            }
+            _ => tokio::time::sleep(Duration::from_millis(500)).await,
+        }
+    }
+
+    // Alice (receiver) subscribes before the send.
+    let mut alice_sub = IpcClient::connect(&ready_a.ipc_socket).await.unwrap();
+    alice_sub.subscribe(EventFilter::All).await.unwrap();
+
+    // Bob (SENDER, the dialer) sends a file to Alice (RECEIVER, accepted side).
+    let payload = deterministic_payload(200 * 1024); // ≥3 chunks
+    let src = tmp_b.path().join("payload.bin");
+    std::fs::write(&src, &payload).unwrap();
+    let mut send_b = IpcClient::connect(&ready_b.ipc_socket).await.unwrap();
+    let id = match send_b
+        .execute(Command::SendFile {
+            contact: alice_pubkey,
+            path: src.to_string_lossy().to_string(),
+        })
+        .await
+        .unwrap()
+    {
+        CommandResult::FileQueued { attachment_id, .. } => attachment_id.to_string(),
+        other => panic!("expected FileQueued, got {other:?}"),
+    };
+
+    // #76: the receiver (accepted side) must complete the pull. FAILS by timeout
+    // until fixed. 30 s is ample over loopback if the pull works.
+    wait_for_attachment(&mut alice_sub, bob_pubkey, &id, Duration::from_secs(30)).await;
+
+    let _ = shutdown_a_tx.send(());
+    let _ = shutdown_b_tx.send(());
+    let _ = tokio::time::timeout(Duration::from_secs(30), task_a).await;
+    let _ = tokio::time::timeout(Duration::from_secs(30), task_b).await;
+}
