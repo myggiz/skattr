@@ -2797,7 +2797,10 @@ mod tests {
         else {
             panic!("expected Contacts");
         };
-        let s0 = list.iter().find(|s| s.pubkey == alice).expect("alice listed");
+        let s0 = list
+            .iter()
+            .find(|s| s.pubkey == alice)
+            .expect("alice listed");
         assert!(!s0.welcome_failed);
         assert_eq!(
             s0.group_state,

@@ -282,10 +282,8 @@ mod tests {
         let p = pool();
         let repo = PendingWelcomeRepo::new(&p);
         let peer = [0x11u8; 32];
-        p.transaction(|tx| {
-            PendingWelcomeRepo::insert_in_tx(tx, &peer, b"gid", b"welcome", 0, 100)
-        })
-        .unwrap();
+        p.transaction(|tx| PendingWelcomeRepo::insert_in_tx(tx, &peer, b"gid", b"welcome", 0, 100))
+            .unwrap();
         assert!(!repo.is_failed(&peer).unwrap());
         // due() returns it (next_retry_at <= now).
         assert_eq!(repo.due(i64::MAX, 10).unwrap().len(), 1);
