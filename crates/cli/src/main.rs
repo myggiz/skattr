@@ -886,6 +886,11 @@ async fn send(
         }
     };
 
+    // The IPC server closes a non-subscribed connection after one Execute
+    // (server/mod.rs: `is_terminal = subscribed.is_none() …`), so the resolve
+    // `ListContacts` above already closed `client`. Reconnect for the action
+    // Execute — one OS-level connection per Execute (see cli_real_tor's exec()).
+    let mut client = connect_or_exit(sock_flag).await?;
     let result = match client
         .execute(CoreCommand::SendMessage {
             contact: pubkey,
@@ -957,6 +962,8 @@ async fn send_file_cmd(
         }
     };
 
+    // Reconnect: the resolve `ListContacts` closed the one-shot connection.
+    let mut client = connect_or_exit(sock_flag).await?;
     let result = match client
         .execute(CoreCommand::SendFile {
             contact: pubkey,
@@ -1588,6 +1595,8 @@ async fn remove(
         }
     };
 
+    // Reconnect: the resolve `ListContacts` closed the one-shot connection.
+    let mut client = connect_or_exit(sock_flag).await?;
     let result = match client
         .execute(CoreCommand::RemoveContact { contact: pubkey })
         .await
