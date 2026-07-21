@@ -2,12 +2,12 @@
 
 **Issue:** myggiz/skattr#107
 **Milestone:** v1.1
-**Status:** design — **two approaches presented; decision pending** (user chose "design both, decide at the spec", 2026-07-21)
+**Status:** **Approach A chosen** (2026-07-21). Approach B disclosed as the future
+deeper fix. The plan implements Approach A.
 **Branch:** `107-welcome-rebuild`
 
-> **Decision point (fill at review):** Approach **A** (bounded-retry → clean-fail
-> → re-invite) or Approach **B** (full auto-rebuild). Recommendation below: **A
-> for v1.1 now, B disclosed as a future deeper fix.**
+> **Decision (made):** Approach **A** — bounded-retry → clean-fail → re-invite.
+> Approach B (full auto-rebuild) is disclosed below and deferred.
 
 ## Problem (recap)
 
