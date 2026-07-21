@@ -4,13 +4,21 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — targeting v0.1.7
+## [Unreleased] — targeting v0.1.8
 
 _In-progress patch line. The version is bumped per build for tracking; entries
 accumulate here and are stamped with a date when a build is cut._
 
 ### Fixed
 
+- **A never-connected first contact no longer floods the peer with undeliverable
+  frames** (#108): while a first-contact Welcome was unacked, the ContactCard
+  broadcast (on onion rotation or card updates) still encrypted and sent MLS
+  application frames on the not-yet-joined group — which the peer could only
+  reject as `WrongGroupId`. Now a single invariant is enforced everywhere: while
+  a contact is pending (unacked Welcome), **no** outbound MLS application frame
+  is emitted for it (text, ContactCard, or attachment), for any kind. The card
+  is delivered automatically once the peer joins. No protocol change.
 - **A stuck "Connecting…" contact can now be removed** (#109): an unconnected
   first-contact attempt that never completed had no delete path in the UI or
   CLI, so a poisoned attempt could not be cleared to retry. `RemoveContact` is
