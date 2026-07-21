@@ -522,6 +522,16 @@ where
     }))
 }
 
+/// A first-contact Welcome to `peer` is still unacked (#93/#108): the local
+/// MLS group exists but MUST NOT emit outbound application frames yet. The
+/// single source of truth for the pending-gate, shared by every emitter.
+fn is_peer_pending(
+    pool: &crate::storage::Pool,
+    peer: &crate::identity::PublicKey,
+) -> crate::error::Result<bool> {
+    crate::storage::PendingWelcomeRepo::new(pool).is_pending(&peer.0)
+}
+
 async fn send_message<S>(
     handle: &Arc<DaemonHandle<S>>,
     contact: crate::identity::PublicKey,
@@ -580,7 +590,7 @@ where
         .map_err(map_err)?
         .ok_or(IpcError::Daemon(DaemonErrorKind::GroupCorrupt))?;
 
-    // 3. Guard: reject sends while the group is still PendingJoin (#93).
+    // 3. Guard: reject sends while the group is still PendingJoin (#93/#108).
     //
     // `Group::load` always reconstructs state as `Active` (the GroupState is
     // not persisted in the blob), so we check the durable `pending_welcomes`
@@ -588,14 +598,10 @@ where
     // the peer has not yet Ack'd the Welcome. App frames sent before the Ack
     // would be undeliverable / lost. Surface a clear reason instead of a raw
     // MLS error; the UI shows a "Connecting…" (pending_join) badge.
-    {
-        use crate::storage::PendingWelcomeRepo;
-        let pw_repo = PendingWelcomeRepo::new(&handle.pool);
-        if pw_repo.is_pending(&contact.0).map_err(map_err)? {
-            return Err(IpcError::Daemon(DaemonErrorKind::InvalidArgument {
-                message: "not connected yet — waiting for them to join".into(),
-            }));
-        }
+    if is_peer_pending(&handle.pool, &contact).map_err(map_err)? {
+        return Err(IpcError::Daemon(DaemonErrorKind::InvalidArgument {
+            message: "not connected yet — waiting for them to join".into(),
+        }));
     }
 
     // 4. Build envelope.
@@ -1299,6 +1305,27 @@ pub(crate) async fn send_card_to_contact<S>(
     use crate::envelope::{Envelope, Kind, MessageId};
     use crate::mls::group::{Group, GroupId};
     use crate::storage::{ContactRepo, MlsGroupRepo};
+
+    // #108: a group with an unacked first-contact Welcome must emit no app
+    // frames. Skip silently — the post-Ack self-card (welcome_sweep) re-delivers.
+    match is_peer_pending(&handle.pool, &peer) {
+        Ok(true) => {
+            tracing::debug!(
+                target: "skattr::daemon::dispatch",
+                "card-send: peer has an unacked Welcome; skipping"
+            );
+            return;
+        }
+        Ok(false) => {}
+        Err(e) => {
+            tracing::warn!(
+                target: "skattr::daemon::dispatch",
+                err = %e,
+                "card-send: is_pending check failed; skipping"
+            );
+            return;
+        }
+    }
 
     // 2-member-group lookup: skip contacts not yet linked (a missing/empty
     // group_id for a not-yet-linked contact is a normal, expected skip).
@@ -6113,6 +6140,250 @@ mod tests {
         assert!(
             due_after.is_empty(),
             "remove_contact must delete the pending_welcome"
+        );
+    }
+
+    // ── Issue #108: shared is_peer_pending predicate gates all app-frame emitters
+
+    /// Build a real 2-member MLS group for `tag`-differentiated peer, upsert
+    /// the contact row, link group_id. Returns `(peer_pubkey, group_id_bytes)`.
+    /// No `pending_welcomes` row is inserted — caller decides.
+    fn seed_connected_contact(
+        handle: &Arc<DaemonHandle<tokio::io::DuplexStream>>,
+        tag: u8,
+    ) -> (crate::identity::PublicKey, Vec<u8>) {
+        use crate::mls::key_package::KeyPackage;
+        use crate::mls::provider::MlsProvider;
+        use crate::storage::{ContactRepo, MlsGroupRepo};
+
+        let peer_seed_bytes = [tag; 32];
+        let peer_seed = crate::identity::Seed::from_bytes(peer_seed_bytes);
+        let peer_id = crate::identity::IdentityKey::from_seed(&peer_seed).unwrap();
+        let peer_provider = MlsProvider::new();
+        let kp_repo = crate::storage::KeyPackageRepo::new(&handle.pool);
+        let peer_kp = KeyPackage::generate(&peer_id, &peer_provider, &kp_repo).unwrap();
+
+        let mut group =
+            crate::mls::Group::create_solo(&handle.identity, None, None, MlsProvider::new())
+                .unwrap();
+        let _ = group.add_member(&peer_kp, None, None).unwrap();
+        let group_repo = MlsGroupRepo::new(&handle.pool);
+        group.save(&group_repo).unwrap();
+        let gid = group.id().0.clone();
+
+        let peer_pk = peer_id.public();
+        let repo = ContactRepo::new(&handle.pool);
+        repo.upsert(&crate::contact::Contact {
+            identity: peer_pk,
+            display_name: None,
+            added_at: 0,
+            card: None,
+            muted: false,
+        })
+        .unwrap();
+        repo.set_group_id(&peer_pk, &gid).unwrap();
+
+        (peer_pk, gid)
+    }
+
+    /// Insert a `pending_welcomes` row for `peer` using the same path as
+    /// `add_contact` (inside a pool transaction).
+    fn insert_pending_for_test(
+        handle: &Arc<DaemonHandle<tokio::io::DuplexStream>>,
+        peer: &[u8; 32],
+    ) {
+        use crate::storage::PendingWelcomeRepo;
+        handle
+            .pool
+            .transaction(|tx| {
+                PendingWelcomeRepo::insert_in_tx(
+                    tx,
+                    peer,
+                    &[0u8; 32], // dummy group_id (not used by is_pending)
+                    &[],        // dummy welcome_bytes
+                    0,          // next_retry_at (due immediately)
+                    0,          // now_ms
+                )
+            })
+            .unwrap();
+    }
+
+    /// `send_card_to_contact` must skip (no ratchet advance) for a peer whose
+    /// first-contact Welcome is still unacked, and must send (ratchet advances)
+    /// for a connected peer with no pending row (#108).
+    #[tokio::test]
+    async fn send_card_to_contact_skips_pending_peer() {
+        use crate::storage::MlsGroupRepo;
+        let handle = test_handle();
+        handle.set_onion("card-skip-test.onion".to_string());
+        let card = build_self_card(&handle).unwrap();
+
+        // Pending contact: real linked group + a pending_welcomes row.
+        let (pending_pk, pending_gid) = seed_connected_contact(&handle, 0xAA);
+        insert_pending_for_test(&handle, &pending_pk.0);
+
+        let before = MlsGroupRepo::new(&handle.pool).get(&pending_gid).unwrap();
+        send_card_to_contact(&handle, &card, pending_pk).await;
+        let after = MlsGroupRepo::new(&handle.pool).get(&pending_gid).unwrap();
+        assert_eq!(
+            before, after,
+            "pending peer's group ratchet must NOT advance (card skipped)"
+        );
+
+        // Connected contact: same setup, NO pending row → card must send (blob changes).
+        let (conn_pk, conn_gid) = seed_connected_contact(&handle, 0xBB);
+        let before_c = MlsGroupRepo::new(&handle.pool).get(&conn_gid).unwrap();
+        send_card_to_contact(&handle, &card, conn_pk).await;
+        let after_c = MlsGroupRepo::new(&handle.pool).get(&conn_gid).unwrap();
+        assert_ne!(
+            before_c, after_c,
+            "connected peer must receive the card (ratchet advances)"
+        );
+    }
+
+    /// `send_message` to a pending peer must still return the same
+    /// `InvalidArgument` / "not connected yet" error after the refactor to use
+    /// the shared `is_peer_pending` predicate (#108).
+    #[tokio::test]
+    async fn send_message_to_pending_peer_still_rejected() {
+        use crate::daemon::error_kind::DaemonErrorKind;
+        use crate::envelope::Kind;
+        let handle = test_handle();
+        let (pk, _gid) = seed_connected_contact(&handle, 0xCC);
+        insert_pending_for_test(&handle, &pk.0);
+        let r = execute_command(
+            handle,
+            Command::SendMessage {
+                contact: pk,
+                kind: Kind::Text { body: "hi".into() },
+            },
+        )
+        .await;
+        assert!(
+            matches!(
+                r,
+                Err(IpcError::Daemon(DaemonErrorKind::InvalidArgument {
+                    ref message
+                })) if message.contains("not connected yet")
+            ),
+            "pending send must be rejected, got {r:?}"
+        );
+    }
+
+    /// `Command::RotateOnion` calls `publish_self_card_update`, which iterates
+    /// ALL contacts.  A pending contact (unacked first-contact Welcome) must
+    /// receive NO card (group `state_blob` unchanged), while a connected
+    /// contact still receives one (blob changes) — proving the gate works at
+    /// the broadcast level (#108).
+    #[tokio::test]
+    async fn card_broadcast_skips_pending_contact_only() {
+        use crate::storage::MlsGroupRepo;
+        // `test_handle_with_mailbox` wires the `poller_ctrl` channel that
+        // `publish_self_card_update` requires; `UnreachableFactory` suffices
+        // because no mailbox send path is exercised here.
+        let (handle, _ctrl_rx) = test_handle_with_mailbox(Arc::new(UnreachableFactory));
+        handle.set_onion("broadcast-test.onion".to_string());
+
+        // Pending contact: real linked group + a pending_welcomes row.
+        let (pending_pk, pending_gid) = seed_connected_contact(&handle, 0xAA);
+        insert_pending_for_test(&handle, &pending_pk.0);
+        // Connected contact: real linked group, NO pending row.
+        let (conn_pk, conn_gid) = seed_connected_contact(&handle, 0xBB);
+        let _ = (pending_pk, conn_pk); // IDs consumed; only gids needed below.
+
+        let pend_before = MlsGroupRepo::new(&handle.pool).get(&pending_gid).unwrap();
+        let conn_before = MlsGroupRepo::new(&handle.pool).get(&conn_gid).unwrap();
+
+        // RotateOnion drives `publish_self_card_update` over all contacts.
+        let res = execute_command(handle.clone(), Command::RotateOnion)
+            .await
+            .unwrap();
+        assert!(matches!(res, CommandResult::Ok), "expected Ok, got {res:?}");
+
+        let pend_after = MlsGroupRepo::new(&handle.pool).get(&pending_gid).unwrap();
+        let conn_after = MlsGroupRepo::new(&handle.pool).get(&conn_gid).unwrap();
+
+        assert_eq!(
+            pend_before, pend_after,
+            "#108: pending contact gets NO card — group blob must be unchanged"
+        );
+        assert_ne!(
+            conn_before, conn_after,
+            "connected contact still receives the broadcast card — blob must change"
+        );
+    }
+
+    /// After the pending_welcomes row is cleared (simulating the Ack that
+    /// `finalize_welcome_ack` performs), `send_card_to_contact` must send the
+    /// card — the gate must not over-block (#108).
+    #[tokio::test]
+    async fn card_sends_after_pending_cleared() {
+        use crate::storage::{MlsGroupRepo, PendingWelcomeRepo};
+        let handle = test_handle();
+        handle.set_onion("post-ack-test.onion".to_string());
+        let card = build_self_card(&handle).unwrap();
+
+        let (pk, gid) = seed_connected_contact(&handle, 0xDD);
+        insert_pending_for_test(&handle, &pk.0);
+
+        // Simulate the Ack: delete the pending_welcomes row, exactly as
+        // `finalize_welcome_ack` does on the happy path.
+        PendingWelcomeRepo::new(&handle.pool).delete(&pk.0).unwrap();
+
+        let before = MlsGroupRepo::new(&handle.pool).get(&gid).unwrap();
+        send_card_to_contact(&handle, &card, pk).await;
+        let after = MlsGroupRepo::new(&handle.pool).get(&gid).unwrap();
+        assert_ne!(
+            before, after,
+            "after Ack (pending row cleared) the card must be sent — gate must not over-block"
+        );
+    }
+
+    /// `send_file` announces via `send_message` and therefore inherits the
+    /// pending guard (#108). A `SendFile` to a pending contact must surface
+    /// the same "not connected yet" `InvalidArgument` rejection and write no
+    /// attachment rows for that peer.
+    #[tokio::test]
+    async fn send_file_to_pending_peer_is_blocked() {
+        use crate::daemon::error_kind::DaemonErrorKind;
+        use crate::storage::attachments::AttachmentRepo;
+        let handle = test_handle();
+        let (pk, _gid) = seed_connected_contact(&handle, 0xDD);
+        insert_pending_for_test(&handle, &pk.0);
+
+        // Write a tiny temp file so the fs read in send_file doesn't fail first.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), b"hello").unwrap();
+        let path = tmp.path().to_string_lossy().to_string();
+
+        let r = execute_command(handle.clone(), Command::SendFile { contact: pk, path }).await;
+        assert!(
+            matches!(
+                r,
+                Err(IpcError::Daemon(DaemonErrorKind::InvalidArgument {
+                    ref message
+                })) if message.contains("not connected yet")
+            ),
+            "pending SendFile must be rejected, got {r:?}"
+        );
+
+        // The attachment repo insert happens BEFORE the send_message call in
+        // send_file, so we verify send_message was blocked (no outbox row for
+        // this peer) by checking outbox is empty.
+        let outbox_rows = handle
+            .pool
+            .with(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM outbox", [], |r| r.get::<_, i64>(0))
+                    .map_err(|e| {
+                        crate::error::CoreError::Storage(crate::storage::StorageErrorKind::Other(
+                            e.to_string(),
+                        ))
+                    })
+            })
+            .unwrap();
+        assert_eq!(
+            outbox_rows, 0,
+            "no outbox row written when send_file is blocked on pending peer"
         );
     }
 }
