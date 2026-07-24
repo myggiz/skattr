@@ -102,3 +102,54 @@ async fn ipc_unknown_command_returns_typed_error() {
         "expected Server(UnknownCommand), got {err:?}"
     );
 }
+
+/// A NON-subscribed connection is one-shot: the server closes it after a single
+/// `Execute` (`ipc/server/mod.rs`: `is_terminal = subscribed.is_none() …`), so a
+/// second `Execute` on the same connection fails. This is the contract behind
+/// the CLI reconnect fix — `send`/`send_file`/`remove`/`tail`/`search`/`export`/
+/// `prune`/`chat` resolve a contact via `ListContacts` (Execute #1) then act
+/// (Execute #2), so they MUST reconnect between the two or the second Execute
+/// broken-pipes (Linux `os 32` / Windows `os 232`). Regression guard for #116.
+#[tokio::test]
+async fn non_subscribed_connection_is_one_shot_second_execute_fails() {
+    let handle = build_handle();
+
+    let (client_io, server_io) = tokio::io::duplex(1024 * 1024);
+    let exec: Arc<dyn CommandExecutor> = Arc::new(ExecShim(handle.clone()));
+    let events_tx = handle.events_tx.clone();
+    tokio::spawn(async move {
+        handle_connection(server_io, exec, events_tx).await;
+    });
+
+    let mut client = IpcClient::from_stream(client_io);
+    // First Execute succeeds; the server then writes Bye and closes the conn.
+    let first = client.execute(Command::ListContacts).await.unwrap();
+    assert!(matches!(first, CommandResult::Contacts(_)));
+    // Second Execute on the SAME connection must fail (the socket is closed) —
+    // reproducing the exact bug that broke every resolve-then-act CLI command.
+    let second = client.execute(Command::ListContacts).await;
+    assert!(
+        second.is_err(),
+        "non-subscribed connection must be one-shot: the 2nd Execute must fail, got {second:?}"
+    );
+}
+
+/// The reconnect fix's positive path: two SEPARATE connections each do one
+/// Execute successfully — the pattern every resolve-then-act CLI command now
+/// uses (resolve on one connection, act on a fresh one).
+#[tokio::test]
+async fn two_connections_each_execute_succeed() {
+    let handle = build_handle();
+
+    for _ in 0..2 {
+        let (client_io, server_io) = tokio::io::duplex(1024 * 1024);
+        let exec: Arc<dyn CommandExecutor> = Arc::new(ExecShim(handle.clone()));
+        let events_tx = handle.events_tx.clone();
+        tokio::spawn(async move {
+            handle_connection(server_io, exec, events_tx).await;
+        });
+        let mut client = IpcClient::from_stream(client_io);
+        let res = client.execute(Command::ListContacts).await.unwrap();
+        assert!(matches!(res, CommandResult::Contacts(_)));
+    }
+}

@@ -1025,7 +1025,7 @@ async fn tail(
     }
 
     let mut client = connect_or_exit(sock_flag).await?;
-    let target = resolve_optional_contact(&mut client, contact_prefix).await?;
+    let target = resolve_optional_contact(sock_flag, contact_prefix).await?;
 
     let result = match client
         .execute(CoreCommand::RecentMessages {
@@ -1054,13 +1054,18 @@ async fn tail(
 }
 
 async fn resolve_optional_contact(
-    client: &mut skattr_core::daemon::IpcClient<skattr_core::daemon::ipc::IpcStream>,
+    sock_flag: Option<&std::path::Path>,
     prefix: Option<&str>,
 ) -> Result<Option<skattr_core::identity::PublicKey>> {
     use skattr_core::daemon::{Command as CoreCommand, CommandResult};
     let Some(prefix) = prefix else {
         return Ok(None);
     };
+    // Own connection: the IPC server closes a non-subscribed connection after
+    // one Execute (server/mod.rs: `is_terminal = subscribed.is_none() …`), so
+    // resolving on the caller's client would close it before the caller's own
+    // action Execute. Resolve on a throwaway connection instead.
+    let mut client = connect_or_exit(sock_flag).await?;
     let rows_result = match client.execute(CoreCommand::ListContacts).await {
         Ok(r) => r,
         Err(e) => exit_on_ipc_error(e),
@@ -1128,7 +1133,7 @@ async fn tail_follow(
     use skattr_core::daemon::{Command as CoreCommand, CommandResult, IpcClientError};
 
     let mut client = connect_or_exit(sock_flag).await?;
-    let target = resolve_optional_contact(&mut client, contact_prefix).await?;
+    let target = resolve_optional_contact(sock_flag, contact_prefix).await?;
 
     // 1. Dump recent.
     let recent = match client
@@ -1147,7 +1152,10 @@ async fn tail_follow(
         print!("{}", render_messages_human(&rows));
     }
 
-    // 2. Subscribe.
+    // 2. Subscribe. Reconnect first: RecentMessages above closed the one-shot
+    // connection. A subscribed connection is kept open (Execute is no longer
+    // terminal), so this fresh one persists for the event stream below.
+    let mut client = connect_or_exit(sock_flag).await?;
     let filter = EventFilter::Messages { contact: target };
     match client.subscribe(filter).await {
         Ok(()) => {}
@@ -1236,6 +1244,11 @@ async fn chat(contact_prefix: &str, sock_flag: Option<&std::path::Path>) -> Resu
         }
     };
 
+    // Reconnect: the resolve `ListContacts` closed the one-shot connection. A
+    // subscribed connection is kept open (Execute is no longer terminal), so
+    // this fresh one persists for the event stream + the interleaved
+    // SendMessage Executes in the loop below.
+    let mut client = connect_or_exit(sock_flag).await?;
     // Subscribe for incoming messages from this peer.
     match client.subscribe(EventFilter::Contact(pubkey)).await {
         Ok(()) => {}
@@ -1280,7 +1293,13 @@ async fn chat(contact_prefix: &str, sock_flag: Option<&std::path::Path>) -> Resu
                 if trimmed.is_empty() {
                     continue;
                 }
-                let res = client
+                // Send on a SEPARATE one-shot connection — the subscribed
+                // `client` above is for the inbound event stream only.
+                // `IpcClient::execute` on a subscribed connection does not
+                // interleave cleanly (it would block on the event stream), so
+                // each send gets its own fresh connection.
+                let mut send_client = connect_or_exit(sock_flag).await?;
+                let res = send_client
                     .execute(CoreCommand::SendMessage {
                         contact: pubkey,
                         kind: Kind::Text { body: trimmed },
@@ -1356,6 +1375,9 @@ async fn search(
         None
     };
 
+    // Reconnect: a contact-filtered search resolved via `ListContacts`, which
+    // closed the one-shot connection. Harmless when no filter was given.
+    let mut client = connect_or_exit(sock_flag).await?;
     let resp = match client
         .execute(CoreCommand::SearchMessages {
             query,
@@ -1466,6 +1488,10 @@ async fn export(
     let mut first_record = true;
     let mut after_id: Option<i64> = None;
     loop {
+        // Reconnect each iteration: the IPC server closes a non-subscribed
+        // connection after one Execute, so each paged ExportHistory (and the
+        // prior resolve `ListContacts`) needs its own connection.
+        let mut client = connect_or_exit(sock_flag).await?;
         let resp = match client
             .execute(CoreCommand::ExportHistory {
                 contact: pk,
@@ -1553,6 +1579,9 @@ async fn prune(
 
     let before_ts_recv = before.map(|s| parse_rfc3339_to_unix(&s)).transpose()?;
 
+    // Reconnect: a contact-filtered prune resolved via `ListContacts`, closing
+    // the one-shot connection. Harmless when no filter was given.
+    let mut client = connect_or_exit(sock_flag).await?;
     let resp = match client
         .execute(CoreCommand::PruneHistory {
             contact: resolved_pk,
