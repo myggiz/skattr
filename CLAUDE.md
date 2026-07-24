@@ -177,9 +177,15 @@ into 3.A → 3.B → 3.C → 3.D.
   machine, `serve_chunk_request`, `sanitize_filename`, `unique_download_path`)
   is driven inside the per-peer `delivery::peer` actor (serve / windowed-fetch
   N=8 / one-attachment-per-peer FIFO / in-session resume via `ReplaceConn` →
-  `reissue` / 30 s request timeout). Receiver auto-fetches → reassembles to a
-  config `download_dir` (default `<data_dir>/downloads`) → emits
-  `Event::{AttachmentReceived,AttachmentProgress,AttachmentFailed}`.
+  `reissue` / 30 s request timeout). Receiver auto-fetches → **stages the
+  encrypted chunks in the `ChunkStore` (encrypted-at-rest; NOT reassembled to
+  `download_dir`)** → emits
+  `Event::{AttachmentReceived,AttachmentProgress,AttachmentFailed}` — where
+  `AttachmentReceived` signals *availability*. Plaintext is produced only on an
+  explicit `SaveAttachment`/`OpenAttachment` (`attachment_available_cmd` reports
+  a received attachment available iff its row is `direction="in", status="complete"`,
+  i.e. iff `finalize_rx` ran). An empty `download_dir` after a receive is expected,
+  not a failure. Verified two-machine over real Tor in v0.1.10 (see #76).
   **`CHUNK_SIZE` is 48 KiB** (reduced from 3.A's 256 KiB so one chunk fits one
   Noise message — `connection::send` caps inner frames at 65 519 B; a regression
   guard `chunk_frame_worst_case_fits_noise_max_outer` locks it). No new
