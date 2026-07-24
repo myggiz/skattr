@@ -4,13 +4,20 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — targeting v0.1.9
+## [Unreleased] — targeting v0.1.10
 
 _In-progress patch line. The version is bumped per build for tracking; entries
 accumulate here and are stamped with a date when a build is cut._
 
 ### Fixed
 
+- **CLI commands that target a contact no longer fail with a broken pipe**
+  (#116): `send`, `send-file`, `remove`, `tail`, `chat`, `search`, `export`, and
+  `prune` resolve the contact (one IPC request) and then act (a second request),
+  but the daemon's IPC connection is single-request, so the second request hit a
+  closed socket (`os error 32`/`232`). Each command now opens a fresh connection
+  per request. The daemon and the desktop app were unaffected; this was
+  CLI-only. Co-diagnosed across a live Linux⇄Windows CLI test-bus.
 - **A stuck first contact no longer says "Connecting…" forever** (#107): the
   durable Welcome re-send (added for offline delivery) replayed bytes bound to
   the original Tor connection, so after a circuit change it could never
