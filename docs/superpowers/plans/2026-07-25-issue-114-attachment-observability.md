@@ -771,7 +771,7 @@ The PR body must include the actual gate output (not a claim that it passed) and
 
 No gaps.
 
-**2. Placeholder scan:** No TBD/TODO. Every code step carries literal code. Two steps intentionally instruct verification of an existing signature before use (`recordDeliveryStatus` in Task 4 Step 1; the CSS variable in Step 4) — these are guarded with the exact `grep` to run and a stated fallback, not open-ended "figure it out" instructions.
+**2. Placeholder scan:** No TBD/TODO. Every code step carries literal code. Two "verify this yourself" hedges in the first draft (the `recordDeliveryStatus` signature and the `.delivered` CSS variable) were resolved against the source and replaced with the exact values: `recordDeliveryStatus(messageHex: string, status: DeliveryStatus)` with the capitalised `"Delivered"` wire literal, and `--text-muted` plus the outgoing-bubble override mirroring `.fsize`.
 
 **3. Type consistency:** `ServedTracker::{record, is_new, forget}` are defined in Task 1 and used with identical signatures in Tasks 2 and 3. `attachment_progress(attachment_id, count, total)` matches the existing trait signature `(&self, [u8; 16], u32, u32)` — `record` returns `u32` and `total` is `u32` in the arm, so no casts are needed. Svelte derivations `sendComplete` / `sending` / `sentPct` are defined once in Task 4 Step 3 and used under those exact names in Step 4.
 
