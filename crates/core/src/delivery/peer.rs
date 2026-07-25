@@ -519,6 +519,9 @@ where
     // per peer; later begins queue FIFO. `None` chunk_store/download_dir
     // (test constructors) disables all chunk handling.
     let mut active_rx: Option<crate::delivery::chunk_transfer::ChunkRx> = None;
+    // Sender-side served-index state, so we can report honest outbound
+    // progress. Per-actor and in-memory: resets on reconnect (#114).
+    let mut served = crate::delivery::chunk_transfer::ServedTracker::default();
     let mut rx_queue: std::collections::VecDeque<crate::delivery::chunk_transfer::AttachmentBegin> =
         std::collections::VecDeque::new();
     let chunk_enabled = chunk_store.is_some() && download_dir.is_some();
@@ -831,6 +834,10 @@ where
                                     total,
                                 )
                             };
+                            // Only a real Chunk reply counts as served — a nack
+                            // means we could not serve this index.
+                            let served_this_reply =
+                                matches!(reply, Frame::Chunk { .. }).then_some(index);
                             if let Some(c) = conn.as_mut() {
                                 if let Err(e) = c.send(reply).await {
                                     tracing::warn!(
@@ -839,6 +846,11 @@ where
                                     );
                                     conn = None;
                                     drain_pending(&mut pending);
+                                } else if let Some(i) = served_this_reply {
+                                    let count = served.record(&attachment_id, i);
+                                    if let Some(d) = inbound.as_ref() {
+                                        d.attachment_progress(attachment_id, count, total);
+                                    }
                                 }
                             }
                         } else {
@@ -959,6 +971,7 @@ where
                         if let Some(store) = chunk_store.as_ref() {
                             let _ = store.remove(&attachment_id);
                         }
+                        served.forget(&attachment_id);
                         // 3.C: a direct completion cancels the offline lane.
                         let _ = crate::storage::attachments::AttachmentDepositRepo::new(&pool)
                             .delete_for_attachment(&attachment_id);
