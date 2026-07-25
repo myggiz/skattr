@@ -137,6 +137,12 @@ where
         }
         let reqs = rx.next_requests();
         let aid = rx.attachment_id();
+        let (_, total) = rx.progress();
+        tracing::info!(
+            aid = %hex::encode(aid),
+            total,
+            "attachment: fetching from peer"
+        );
         let _ = send_chunk_requests(conn, aid, &reqs).await;
         return Some(rx);
     }
@@ -168,6 +174,13 @@ async fn finalize_rx<S>(
             return;
         }
     };
+    let (_, total) = rx.progress();
+    tracing::info!(
+        aid = %hex::encode(aid),
+        total,
+        won,
+        "attachment: transfer complete"
+    );
     if won {
         // Encrypted-at-rest: do NOT reassemble and do NOT remove chunks here.
         // The chunks stay in the ChunkStore; plaintext is produced only on an
@@ -816,6 +829,13 @@ where
                                 .ok()
                                 .flatten();
                             let total = row.as_ref().map(|r| r.total_chunks as u32).unwrap_or(0);
+                            if served.is_new(&attachment_id) {
+                                tracing::info!(
+                                    aid = %hex::encode(attachment_id),
+                                    total,
+                                    "attachment: serving to peer"
+                                );
+                            }
                             let reply = if row.as_ref().map_or(true, |r| r.direction != "out") {
                                 tracing::debug!(
                                     index,
@@ -882,6 +902,13 @@ where
                                     let _ = repo.mark_received(&attachment_id, index);
                                     rx.on_received(index);
                                     let (recv, total) = rx.progress();
+                                    tracing::debug!(
+                                        aid = %hex::encode(attachment_id),
+                                        index,
+                                        received = recv,
+                                        total,
+                                        "attachment: chunk received"
+                                    );
                                     if let Some(d) = inbound.as_ref() {
                                         // Throttle: every 8th chunk or on completion.
                                         if recv % 8 == 0 || recv == total {
@@ -965,6 +992,10 @@ where
                     }
                     Ok(Some(Frame::AttachmentComplete { attachment_id })) => {
                         last_traffic = tokio::time::Instant::now();
+                        tracing::info!(
+                            aid = %hex::encode(attachment_id),
+                            "attachment: delivery acked by peer"
+                        );
                         // Sender side: receiver confirmed receipt → finalize the out row + GC.
                         let repo = crate::storage::attachments::AttachmentRepo::new(&pool);
                         let _ = repo.set_status(&attachment_id, "complete");

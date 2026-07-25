@@ -222,11 +222,19 @@ pub(crate) fn serve_chunk_request(
         };
     }
     match store.get_chunk(attachment_id, index) {
-        Ok(ct) => Frame::Chunk {
-            attachment_id: *attachment_id,
-            index,
-            ciphertext: ct,
-        },
+        Ok(ct) => {
+            tracing::debug!(
+                aid = %hex::encode(attachment_id),
+                index,
+                bytes = ct.len(),
+                "attachment: served chunk"
+            );
+            Frame::Chunk {
+                attachment_id: *attachment_id,
+                index,
+                ciphertext: ct,
+            }
+        }
         Err(e) => {
             // Surface the store-read failure (issue #77) rather than nacking
             // silently — the requester only sees the opaque NACK_STORE_READ.
