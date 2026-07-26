@@ -178,8 +178,10 @@ impl ChunkRx {
 /// because chunk requests arrive windowed and out of order, and may be retried
 /// — either shortcut would report a progress figure that overstates reality.
 ///
-/// In-memory and per-actor: this resets on reconnect, which is acceptable for a
-/// progress indicator (see the design's "no durable sender progress" exclusion).
+/// In-memory and per-actor: this persists across reconnects within the owning
+/// actor's lifetime (a redial does not clear it) and is dropped only on actor
+/// teardown or `forget` at completion — acceptable for a progress indicator
+/// (see the design's "no durable sender progress" exclusion).
 #[derive(Default)]
 pub(crate) struct ServedTracker {
     served: HashMap<[u8; 16], std::collections::HashSet<u32>>,

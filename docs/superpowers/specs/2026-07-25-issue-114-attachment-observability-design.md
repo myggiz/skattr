@@ -151,7 +151,9 @@ exists to remove.
 
 **Lifecycle.** The entry is removed when the sender's `AttachmentComplete` arm runs
 for that attachment (alongside the existing `store.remove` / deposit-prune). The
-map is per-actor in-memory state, so it resets on reconnect; see §6.
+map is per-actor in-memory state: it persists across reconnects within the
+actor's lifetime (a redial does not clear it) and is dropped only on actor
+teardown or that `forget` at completion; see §6.
 
 **Emit only on a successfully sent chunk** — not on a nack, not when the send
 errored (that path already drops the connection).
@@ -167,7 +169,7 @@ outgoing file bubble:
 |---|---|
 | `xferState` present and not complete | `Sending N/M` (progress row, same component as receive) |
 | `xferState.status === "complete"` | `Delivered` |
-| no `xferState` (pre-first-chunk, or post-restart) | existing `DeliveryIcon` fallback — unchanged behavior |
+| no `xferState` (pre-first-chunk, or post-restart) | `DeliveryIcon` fallback, capped: a `delivered` wire status renders as `sent`, since the manifest ack is not proof the file transferred |
 
 The `DeliveryIcon` is *not* removed: it remains the fallback when no transfer state
 exists. It is simply no longer allowed to claim "Delivered" while a transfer is in

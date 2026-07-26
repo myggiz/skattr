@@ -272,8 +272,9 @@ describe("FileAttachmentBubble", () => {
       props: { record: fileRecord("outgoing") },
     });
     await findByText("photo.jpg");
+    // Drive the store the way the real attachment_progress dispatcher does —
+    // markAvailable is a receiver-only mutation no outgoing code path performs.
     applyProgress(AID, 12, 12);
-    markAvailable(AID, { filename: "photo.jpg", mime: "image/jpeg", size: 2048 });
     await tick();
     await findByText("Delivered");
     // The in-flight progress row is gone.

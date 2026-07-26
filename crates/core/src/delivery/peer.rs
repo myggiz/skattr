@@ -533,7 +533,9 @@ where
     // (test constructors) disables all chunk handling.
     let mut active_rx: Option<crate::delivery::chunk_transfer::ChunkRx> = None;
     // Sender-side served-index state, so we can report honest outbound
-    // progress. Per-actor and in-memory: resets on reconnect (#114).
+    // progress. Per-actor and in-memory: persists across reconnects within
+    // this actor's lifetime (redials do not clear it), and is dropped only
+    // on actor teardown or `forget` at completion (#114).
     let mut served = crate::delivery::chunk_transfer::ServedTracker::default();
     let mut rx_queue: std::collections::VecDeque<crate::delivery::chunk_transfer::AttachmentBegin> =
         std::collections::VecDeque::new();
@@ -829,13 +831,6 @@ where
                                 .ok()
                                 .flatten();
                             let total = row.as_ref().map(|r| r.total_chunks as u32).unwrap_or(0);
-                            if served.is_new(&attachment_id) {
-                                tracing::info!(
-                                    aid = %hex::encode(attachment_id),
-                                    total,
-                                    "attachment: serving to peer"
-                                );
-                            }
                             let reply = if row.as_ref().map_or(true, |r| r.direction != "out") {
                                 tracing::debug!(
                                     index,
@@ -847,6 +842,13 @@ where
                                     reason: crate::delivery::chunk_transfer::NACK_UNKNOWN_ATTACHMENT,
                                 }
                             } else {
+                                if served.is_new(&attachment_id) {
+                                    tracing::info!(
+                                        aid = %hex::encode(attachment_id),
+                                        total,
+                                        "attachment: serving to peer"
+                                    );
+                                }
                                 crate::delivery::chunk_transfer::serve_chunk_request(
                                     store,
                                     &attachment_id,

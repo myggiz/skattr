@@ -83,7 +83,11 @@
   // Sender side: chunk-transfer state supersedes the manifest-ack delivery
   // icon. The manifest is MLS-acked before any chunk moves, so the icon alone
   // must never read as "the file arrived" (#114).
-  let sendComplete = $derived(isOutgoing && xferState?.status === "complete");
+  let sendComplete = $derived(
+    isOutgoing &&
+      (xferState?.status === "complete" ||
+        (xferState !== undefined && xferState.total > 0 && xferState.received >= xferState.total)),
+  );
   // "queued" is the decode-time seed state (applyManifest fires on mount for
   // both directions, before any chunk moves) — it must not read as sending.
   let sending = $derived(
