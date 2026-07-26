@@ -42,6 +42,7 @@ vi.mock("$lib/attachments", async (importOriginal) => {
 
 import FileAttachmentBubble from "./FileAttachmentBubble.svelte";
 import { attachments, applyProgress, markAvailable } from "$lib/stores/attachments";
+import { delivery, recordDeliveryStatus } from "$lib/stores/delivery";
 import type { MessageRecord } from "$lib/ipc/types";
 
 const AID = "ab".repeat(16);
@@ -61,6 +62,7 @@ function fileRecord(direction: "incoming" | "outgoing"): MessageRecord {
 
 beforeEach(() => {
   attachments.set(new Map());
+  delivery.set(new Map());
   invokeMock.mockReset();
   ipcRequestMock.mockReset();
   saveMock.mockReset();
@@ -249,5 +251,55 @@ describe("FileAttachmentBubble", () => {
     expect(invokeMock).not.toHaveBeenCalled();
     expect(queryByText(/unavailable/i)).toBeNull();
     expect(queryByText("myfile.pdf")).not.toBeNull();
+  });
+
+  test("outgoing bubble shows chunk progress, not Delivered, while serving", async () => {
+    const { container, findByText } = render(FileAttachmentBubble, {
+      props: { record: fileRecord("outgoing") },
+    });
+    await findByText("photo.jpg");
+    applyProgress(AID, 3, 12);
+    await tick();
+    // Progress row rendered with the served/total figure.
+    expect(container.querySelector(".progress")).not.toBeNull();
+    await findByText("Sending 3/12");
+    // Must NOT claim the transfer finished.
+    expect(container.textContent).not.toContain("Delivered");
+  });
+
+  test("outgoing bubble shows Delivered once the transfer completes", async () => {
+    const { container, findByText } = render(FileAttachmentBubble, {
+      props: { record: fileRecord("outgoing") },
+    });
+    await findByText("photo.jpg");
+    // Drive the store the way the real attachment_progress dispatcher does —
+    // markAvailable is a receiver-only mutation no outgoing code path performs.
+    applyProgress(AID, 12, 12);
+    await tick();
+    await findByText("Delivered");
+    // The in-flight progress row is gone.
+    expect(container.querySelector(".progress")).toBeNull();
+  });
+
+  test("manifest ack alone does not claim the file transferred (#114 regression)", async () => {
+    // The manifest message is MLS-acked before any chunk moves. With no
+    // transfer state, the bubble may show the delivery icon but must not
+    // assert the transfer completed.
+    // ts-rs emits DeliveryStatus as "Queued" | "Delivered" | "Deposited"
+    // | { "Failed": string } — the capitalised literal is the wire value.
+    recordDeliveryStatus("cd".repeat(16), "Delivered");
+    const { container, findByText } = render(FileAttachmentBubble, {
+      props: { record: fileRecord("outgoing") },
+    });
+    await findByText("photo.jpg");
+    await tick();
+    expect(container.textContent).not.toContain("Delivered");
+    expect(container.querySelector(".progress")).toBeNull();
+    // The pre-transfer fallback icon is still rendered, but the manifest ack
+    // must be capped: a "Delivered" wire status may never render as the
+    // delivered checkmark on a file bubble before the transfer completes.
+    expect(container.querySelector(".icon")).not.toBeNull();
+    expect(container.querySelector(".icon.delivered")).toBeNull();
+    expect(container.querySelector(".icon.sent")).not.toBeNull();
   });
 });

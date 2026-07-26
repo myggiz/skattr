@@ -137,6 +137,12 @@ where
         }
         let reqs = rx.next_requests();
         let aid = rx.attachment_id();
+        let (_, total) = rx.progress();
+        tracing::info!(
+            aid = %hex::encode(aid),
+            total,
+            "attachment: fetching from peer"
+        );
         let _ = send_chunk_requests(conn, aid, &reqs).await;
         return Some(rx);
     }
@@ -168,6 +174,13 @@ async fn finalize_rx<S>(
             return;
         }
     };
+    let (_, total) = rx.progress();
+    tracing::info!(
+        aid = %hex::encode(aid),
+        total,
+        won,
+        "attachment: transfer complete"
+    );
     if won {
         // Encrypted-at-rest: do NOT reassemble and do NOT remove chunks here.
         // The chunks stay in the ChunkStore; plaintext is produced only on an
@@ -519,6 +532,11 @@ where
     // per peer; later begins queue FIFO. `None` chunk_store/download_dir
     // (test constructors) disables all chunk handling.
     let mut active_rx: Option<crate::delivery::chunk_transfer::ChunkRx> = None;
+    // Sender-side served-index state, so we can report honest outbound
+    // progress. Per-actor and in-memory: persists across reconnects within
+    // this actor's lifetime (redials do not clear it), and is dropped only
+    // on actor teardown or `forget` at completion (#114).
+    let mut served = crate::delivery::chunk_transfer::ServedTracker::default();
     let mut rx_queue: std::collections::VecDeque<crate::delivery::chunk_transfer::AttachmentBegin> =
         std::collections::VecDeque::new();
     let chunk_enabled = chunk_store.is_some() && download_dir.is_some();
@@ -824,6 +842,13 @@ where
                                     reason: crate::delivery::chunk_transfer::NACK_UNKNOWN_ATTACHMENT,
                                 }
                             } else {
+                                if served.is_new(&attachment_id) {
+                                    tracing::info!(
+                                        aid = %hex::encode(attachment_id),
+                                        total,
+                                        "attachment: serving to peer"
+                                    );
+                                }
                                 crate::delivery::chunk_transfer::serve_chunk_request(
                                     store,
                                     &attachment_id,
@@ -831,6 +856,10 @@ where
                                     total,
                                 )
                             };
+                            // Only a real Chunk reply counts as served — a nack
+                            // means we could not serve this index.
+                            let served_this_reply =
+                                matches!(reply, Frame::Chunk { .. }).then_some(index);
                             if let Some(c) = conn.as_mut() {
                                 if let Err(e) = c.send(reply).await {
                                     tracing::warn!(
@@ -839,6 +868,11 @@ where
                                     );
                                     conn = None;
                                     drain_pending(&mut pending);
+                                } else if let Some(i) = served_this_reply {
+                                    let count = served.record(&attachment_id, i);
+                                    if let Some(d) = inbound.as_ref() {
+                                        d.attachment_progress(attachment_id, count, total);
+                                    }
                                 }
                             }
                         } else {
@@ -870,6 +904,13 @@ where
                                     let _ = repo.mark_received(&attachment_id, index);
                                     rx.on_received(index);
                                     let (recv, total) = rx.progress();
+                                    tracing::debug!(
+                                        aid = %hex::encode(attachment_id),
+                                        index,
+                                        received = recv,
+                                        total,
+                                        "attachment: chunk received"
+                                    );
                                     if let Some(d) = inbound.as_ref() {
                                         // Throttle: every 8th chunk or on completion.
                                         if recv % 8 == 0 || recv == total {
@@ -953,12 +994,17 @@ where
                     }
                     Ok(Some(Frame::AttachmentComplete { attachment_id })) => {
                         last_traffic = tokio::time::Instant::now();
+                        tracing::info!(
+                            aid = %hex::encode(attachment_id),
+                            "attachment: delivery acked by peer"
+                        );
                         // Sender side: receiver confirmed receipt → finalize the out row + GC.
                         let repo = crate::storage::attachments::AttachmentRepo::new(&pool);
                         let _ = repo.set_status(&attachment_id, "complete");
                         if let Some(store) = chunk_store.as_ref() {
                             let _ = store.remove(&attachment_id);
                         }
+                        served.forget(&attachment_id);
                         // 3.C: a direct completion cancels the offline lane.
                         let _ = crate::storage::attachments::AttachmentDepositRepo::new(&pool)
                             .delete_for_attachment(&attachment_id);

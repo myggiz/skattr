@@ -80,13 +80,38 @@
   let complete = $derived(!isOutgoing && (xferState?.status === "complete" || xferState?.available === true));
   let failed = $derived(!isOutgoing && xferState?.status === "failed");
 
+  // Sender side: chunk-transfer state supersedes the manifest-ack delivery
+  // icon. The manifest is MLS-acked before any chunk moves, so the icon alone
+  // must never read as "the file arrived" (#114).
+  let sendComplete = $derived(
+    isOutgoing &&
+      (xferState?.status === "complete" ||
+        (xferState !== undefined && xferState.total > 0 && xferState.received >= xferState.total)),
+  );
+  // "queued" is the decode-time seed state (applyManifest fires on mount for
+  // both directions, before any chunk moves) — it must not read as sending.
+  let sending = $derived(
+    isOutgoing && xferState !== undefined && xferState.status !== "queued" && !sendComplete,
+  );
+  let sentPct = $derived(
+    xferState && xferState.total > 0 ? `${xferState.received}/${xferState.total}` : null,
+  );
+
   let pct = $derived(
     xferState && xferState.total > 0 ? Math.round((xferState.received / xferState.total) * 100) : 0,
   );
   let indeterminate = $derived(receiving && (!xferState || xferState.total === 0));
 
+  // A file's manifest ack means the request arrived, not the file. Never show
+  // the delivered checkmark until the chunk transfer itself completed (#114).
+  function capFileDelivery(
+    s: "pending" | "sent" | "delivered" | "failed",
+  ): "pending" | "sent" | "delivered" | "failed" {
+    return s === "delivered" ? "sent" : s;
+  }
+
   let deliveryStatus = $derived(
-    isOutgoing ? deliveryToIconStatus($delivery.get(hex16ToString(record.message_id))) : null,
+    isOutgoing ? capFileDelivery(deliveryToIconStatus($delivery.get(hex16ToString(record.message_id)))) : null,
   );
 
   // Returns the managed-cache plaintext path, or throws.
@@ -161,7 +186,9 @@
       <span class="ficon">{@html iconGlyph}</span>
       <span class="fname">{filename}</span>
       {#if size !== undefined}<span class="fsize">{formatBytes(size)}</span>{/if}
-      {#if isOutgoing && deliveryStatus}
+      {#if isOutgoing && sendComplete}
+        <span class="delivered">Delivered</span>
+      {:else if isOutgoing && !sending && deliveryStatus}
         <DeliveryIcon status={deliveryStatus} />
       {/if}
       {#if complete}
@@ -181,6 +208,15 @@
         {:else}
           <div class="bar" style={`width:${pct}%`}></div>
           <span class="label">Downloading {pct}%</span>
+        {/if}
+      </div>
+    {/if}
+    {#if sending}
+      <div class="progress">
+        {#if sentPct}
+          <span class="label">Sending {sentPct}</span>
+        {:else}
+          <span class="label">Sending…</span>
         {/if}
       </div>
     {/if}
@@ -216,4 +252,6 @@
   .progress .bar { height: 100%; background: var(--accent); transition: width 0.2s; }
   .progress .label { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font: var(--t-ui); color: var(--text); }
   .failed { color: var(--danger); font: var(--t-ui); }
+  .delivered { color: var(--text-muted); font: var(--t-ui); }
+  .file-bubble.outgoing .delivered { color: rgba(255, 255, 255, 0.7); }
 </style>

@@ -171,6 +171,43 @@ impl ChunkRx {
     }
 }
 
+/// Sender-side mirror of [`ChunkRx`]: tracks which chunk indices we have
+/// actually served, per attachment, so the sender can report honest progress.
+///
+/// Distinct indices are tracked (not a bare counter, not `max(index) + 1`)
+/// because chunk requests arrive windowed and out of order, and may be retried
+/// — either shortcut would report a progress figure that overstates reality.
+///
+/// In-memory and per-actor: this persists across reconnects within the owning
+/// actor's lifetime (a redial does not clear it) and is dropped only on actor
+/// teardown or `forget` at completion — acceptable for a progress indicator
+/// (see the design's "no durable sender progress" exclusion).
+#[derive(Default)]
+pub(crate) struct ServedTracker {
+    served: HashMap<[u8; 16], std::collections::HashSet<u32>>,
+}
+
+impl ServedTracker {
+    /// Record `index` as served for `attachment_id`; returns the new count of
+    /// distinct indices served for that attachment.
+    pub(crate) fn record(&mut self, attachment_id: &[u8; 16], index: u32) -> u32 {
+        let set = self.served.entry(*attachment_id).or_default();
+        set.insert(index);
+        set.len() as u32
+    }
+
+    /// True when nothing has been served yet for `attachment_id` — used to log
+    /// the once-per-transfer "serving" milestone exactly once.
+    pub(crate) fn is_new(&self, attachment_id: &[u8; 16]) -> bool {
+        !self.served.contains_key(attachment_id)
+    }
+
+    /// Drop all state for a finished attachment.
+    pub(crate) fn forget(&mut self, attachment_id: &[u8; 16]) {
+        self.served.remove(attachment_id);
+    }
+}
+
 /// Serve one chunk request from the staged `ChunkStore`. Returns a `Chunk`
 /// frame on success or a `ChunkNack` on out-of-range / read error.
 pub(crate) fn serve_chunk_request(
@@ -187,11 +224,19 @@ pub(crate) fn serve_chunk_request(
         };
     }
     match store.get_chunk(attachment_id, index) {
-        Ok(ct) => Frame::Chunk {
-            attachment_id: *attachment_id,
-            index,
-            ciphertext: ct,
-        },
+        Ok(ct) => {
+            tracing::debug!(
+                aid = %hex::encode(attachment_id),
+                index,
+                bytes = ct.len(),
+                "attachment: served chunk"
+            );
+            Frame::Chunk {
+                attachment_id: *attachment_id,
+                index,
+                ciphertext: ct,
+            }
+        }
         Err(e) => {
             // Surface the store-read failure (issue #77) rather than nacking
             // silently — the requester only sees the opaque NACK_STORE_READ.
@@ -364,5 +409,62 @@ mod tests {
             }
             other => panic!("expected chunk, got {other:?}"),
         }
+    }
+
+    const AID_A: [u8; 16] = [0xA1; 16];
+    const AID_B: [u8; 16] = [0xB2; 16];
+
+    #[test]
+    fn served_tracker_counts_sequential_serves() {
+        let mut t = ServedTracker::default();
+        assert_eq!(t.record(&AID_A, 0), 1);
+        assert_eq!(t.record(&AID_A, 1), 2);
+        assert_eq!(t.record(&AID_A, 2), 3);
+    }
+
+    #[test]
+    fn served_tracker_counts_distinct_not_max_index() {
+        // Out-of-order arrival: index 5 first, then 0. Count is 1 then 2 —
+        // never 6 (which `max(index)+1` would wrongly report).
+        let mut t = ServedTracker::default();
+        assert_eq!(t.record(&AID_A, 5), 1);
+        assert_eq!(t.record(&AID_A, 0), 2);
+    }
+
+    #[test]
+    fn served_tracker_ignores_duplicate_index() {
+        // A retried request for an already-served index must not advance.
+        let mut t = ServedTracker::default();
+        assert_eq!(t.record(&AID_A, 3), 1);
+        assert_eq!(t.record(&AID_A, 3), 1);
+        assert_eq!(t.record(&AID_A, 4), 2);
+    }
+
+    #[test]
+    fn served_tracker_keeps_attachments_separate() {
+        let mut t = ServedTracker::default();
+        assert_eq!(t.record(&AID_A, 0), 1);
+        assert_eq!(t.record(&AID_B, 0), 1);
+        assert_eq!(t.record(&AID_A, 1), 2);
+    }
+
+    #[test]
+    fn served_tracker_is_new_only_before_first_record() {
+        let mut t = ServedTracker::default();
+        assert!(t.is_new(&AID_A));
+        t.record(&AID_A, 0);
+        assert!(!t.is_new(&AID_A));
+        // A different attachment is still new.
+        assert!(t.is_new(&AID_B));
+    }
+
+    #[test]
+    fn served_tracker_forget_drops_state() {
+        let mut t = ServedTracker::default();
+        t.record(&AID_A, 0);
+        t.record(&AID_A, 1);
+        t.forget(&AID_A);
+        assert!(t.is_new(&AID_A));
+        assert_eq!(t.record(&AID_A, 7), 1);
     }
 }
