@@ -4,13 +4,26 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — targeting v0.1.10
+## [Unreleased] — targeting v0.1.11
 
 _In-progress patch line. The version is bumped per build for tracking; entries
 accumulate here and are stamped with a date when a build is cut._
 
 ### Fixed
 
+- **A file you send no longer says "Delivered" before it has actually
+  transferred** (#114): the sending side showed the delivery tick as soon as the
+  recipient acknowledged the *message* carrying the file's details — which
+  happens before a single byte of the file moves. A transfer that stalled at the
+  first chunk therefore looked complete. The sender now shows real progress
+  (*"Sending 3/12"*) and only reports *"Delivered"* once the recipient confirms
+  the whole file arrived; until then the tick can never read as delivered. Also
+  makes stalled transfers diagnosable: the file-transfer path previously logged
+  **nothing** on success at any level — a stalled transfer and a perfect one
+  produced identical (empty) logs, which is why diagnosing #76 took two machines
+  and disk forensics. It now logs a handful of lines per transfer on both ends,
+  carrying only a transfer id and chunk counts — never filenames, keys, or onion
+  addresses.
 - **CLI commands that target a contact no longer fail with a broken pipe**
   (#116): `send`, `send-file`, `remove`, `tail`, `chat`, `search`, `export`, and
   `prune` resolve the contact (one IPC request) and then act (a second request),
