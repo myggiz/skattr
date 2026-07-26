@@ -294,7 +294,11 @@ describe("FileAttachmentBubble", () => {
     await tick();
     expect(container.textContent).not.toContain("Delivered");
     expect(container.querySelector(".progress")).toBeNull();
-    // The pre-transfer fallback icon is still rendered.
+    // The pre-transfer fallback icon is still rendered, but the manifest ack
+    // must be capped: a "Delivered" wire status may never render as the
+    // delivered checkmark on a file bubble before the transfer completes.
     expect(container.querySelector(".icon")).not.toBeNull();
+    expect(container.querySelector(".icon.delivered")).toBeNull();
+    expect(container.querySelector(".icon.sent")).not.toBeNull();
   });
 });

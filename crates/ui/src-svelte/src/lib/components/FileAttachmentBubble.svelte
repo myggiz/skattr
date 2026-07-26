@@ -98,8 +98,16 @@
   );
   let indeterminate = $derived(receiving && (!xferState || xferState.total === 0));
 
+  // A file's manifest ack means the request arrived, not the file. Never show
+  // the delivered checkmark until the chunk transfer itself completed (#114).
+  function capFileDelivery(
+    s: "pending" | "sent" | "delivered" | "failed",
+  ): "pending" | "sent" | "delivered" | "failed" {
+    return s === "delivered" ? "sent" : s;
+  }
+
   let deliveryStatus = $derived(
-    isOutgoing ? deliveryToIconStatus($delivery.get(hex16ToString(record.message_id))) : null,
+    isOutgoing ? capFileDelivery(deliveryToIconStatus($delivery.get(hex16ToString(record.message_id)))) : null,
   );
 
   // Returns the managed-cache plaintext path, or throws.
