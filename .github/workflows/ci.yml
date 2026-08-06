@@ -3,9 +3,9 @@ name: CI
 # On-demand only — to conserve GitHub Actions minutes during the sub-version
 # fix cycle. Verification is done locally (maintainer runs the Rust + UI gates
 # on Linux; Windows builds are produced/tested locally on a separate box).
-# CodeRabbit still reviews every PR (it does not use Actions). Trigger a full CI
-# run manually (Actions tab → CI → "Run workflow") before a real release, or
-# when a change specifically warrants cross-checking. See CLAUDE.md.
+# Trigger a full CI run manually (Actions tab → CI → "Run workflow") before a
+# real release, or when a change specifically warrants cross-checking.
+# See CLAUDE.md.
 on:
   workflow_dispatch:
 
