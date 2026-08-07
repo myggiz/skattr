@@ -1,7 +1,16 @@
 # ADR 0009 — `h_transport` ↔ MLS binding via dial-first genesis two-PSK commit
 
-**Status:** Proposed
-**Date:** 2026-06-13
+**Status:** Accepted — **shipped and mandatory.** Implemented in Phase 2.A
+(merge `bc71f32`) as the dial-first two-PSK genesis commit described below.
+The binding is active on the sole production genesis path: the invitee derives
+`h_transport` from the live Noise session and injects it alongside the invite
+PSK (`daemon/dispatch.rs`, `Group::create_solo` + `add_member`), and the
+inviter registers the identical transcript value before `join_from_welcome`
+(`daemon/accept.rs` → `daemon/inbound.rs`). A joiner that cannot resolve the
+binding PSK fails the join; negative tests in `mls/group.rs` and
+`dispatch_welcome_bootstrap_rejects_binding_mismatch` lock this in. Treat it as
+a required security control, not an option.
+**Date:** 2026-06-13 (accepted 2026-08-07 after verifying the shipped code)
 **Context:** Phase 2.A (MLS ratchet & binding integrity). Implements the
 audit's T1-1 and, in the same construction, fixes T2-8 (per-invite PSK
 uniqueness).

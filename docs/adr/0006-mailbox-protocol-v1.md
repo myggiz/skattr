@@ -112,3 +112,25 @@ The merge PR satisfies all six layers from the spec:
   silently breaks signatures across versions, so the `dispatch::handle_*`
   tuple expressions are load-bearing and should be flagged in any
   future refactor.
+
+---
+
+## Clarifying note (2026-08-07, non-normative — no wire change)
+
+The *Wire types* table above writes `ciphertext: bytes`. Read "bytes" as
+**"opaque payload"**, not as CBOR major type 2 (byte string).
+
+As implemented, `Deposit.ciphertext` and `PendingDeposit.ciphertext` are plain
+`Vec<u8>` with **no `#[serde(with = "serde_bytes")]`** (`mailbox/protocol.rs`).
+Under `ciborium` that encodes as a CBOR *array of integers* — roughly 1.9 bytes
+on the wire per payload byte — rather than a compact byte string. This is the
+same inflation ADR 0011 was written to fix for the attachment manifest.
+
+It matters more than it used to: Phase 3.C deposits every offline attachment
+chunk through this path, so offline attachment transfer pays the ~1.9× overhead.
+
+**This is not fixable inside v1.** Adding `serde_bytes` changes the encoding and
+is therefore an incompatible wire change — it belongs to a future v2 alongside
+any other batched breaking changes. The note is recorded here so the discrepancy
+between the table's wording and the shipped encoding is not mistaken for a bug,
+and so v2 picks it up deliberately.

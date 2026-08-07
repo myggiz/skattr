@@ -48,7 +48,9 @@ pub struct InviteLinkBody {
     /// Single-use MLS KeyPackage (binary, TLS-codec bytes from 1.C).
     #[serde(with = "serde_bytes")]
     pub key_package: Vec<u8>,
-    /// 32-byte one-time secret mixed into Noise PSK + first MLS Commit.
+    /// 32-byte one-time secret injected as an external MLS PSK into the genesis
+    /// Commit (with the `h_transport` binding PSK — ADR 0009). Not used at the
+    /// Noise layer: production runs plain `Noise_XK` with `psk = None`.
     pub psk: [u8; 32],
     /// Unix timestamp (seconds) after which the invite is invalid.
     pub expires_at: i64,

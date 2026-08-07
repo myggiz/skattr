@@ -141,7 +141,9 @@ pub enum Frame {
         /// Reason code: 0 unknown attachment, 1 index out of range, 2 store read error.
         reason: u8,
     },
-    /// The receiver has all chunks and has reassembled the file.
+    /// The receiver has all chunks and has verified them against the manifest.
+    /// Not a reassembly signal: chunks stay encrypted in the `ChunkStore` until
+    /// an explicit `SaveAttachment` / `OpenAttachment`.
     AttachmentComplete {
         /// 16-byte attachment id.
         attachment_id: [u8; 16],

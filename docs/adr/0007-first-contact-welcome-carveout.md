@@ -1,10 +1,14 @@
 # ADR 0007 — First-contact Welcome carve-out + transport↔MLS identity binding
 
-**Status:** Accepted — carve-out + binding implemented in Phase 1B (Task 9). The
-full first-contact invite→add→first-message flow it enables (Welcome-arm
-dial-on-demand, inviter-onion bootstrapping, card exchange) is deferred to
-**Phase 1C**; this ADR is its down-payment.
+**Status:** Accepted — **fully shipped.**
 **Date:** 2026-06-12
+
+> **History (resolved):** the carve-out + binding landed in Phase 1B (Task 9),
+> and this ADR was originally accepted as a "down-payment" while the full
+> first-contact `invite → add → first-message` flow it enables (Welcome-arm
+> dial-on-demand, inviter-onion bootstrapping, card exchange) was still deferred
+> to Phase 1C. **Phase 1C shipped** (merge `5c0b827`), so that deferral is
+> closed — nothing in this ADR is outstanding.
 **Context:** Phase 1B (direct P2P transport wiring). Surfaced by the Phase 1B
 regression guardrail (`crates/tests/src/daemon_run_direct.rs`).
 **Supersedes/relates:** Phase 2.E Welcome propagation; the inbound accept loop

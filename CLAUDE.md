@@ -456,8 +456,10 @@ chunk-deposit sweeper), `mls::group` (two-PSK genesis +
 `can_receive`), `mailbox::{client, codec, poll, auth}` (the v1-protocol client),
 and `storage::{pool (Option<Connection> + WAL-safe close + Drop +
 sentinel/re-encrypt-on-boot), passphrase_audit, outstanding_invites,
-read_state}`. Migrations run through `0016` (`0015_attachments` in Phase 3.A;
-`0016_attachment_deposits` + the `attachments.peer` column in Phase 3.C). ADRs 0007 (first-contact Welcome
+read_state}`. Migrations run through `0019` (`0015_attachments` in Phase 3.A;
+`0016_attachment_deposits` + the `attachments.peer` column in Phase 3.C;
+`0017_pending_welcomes`, `0018_first_contact_acks`, `0019_pending_welcome_failed`
+from the #93/#107 first-contact recovery work). ADRs 0007 (first-contact Welcome
 carve-out), 0008 (invite embeds ContactCard), and 0009 (`h_transport`↔MLS
 binding) anchor the audit-era protocol decisions.
 
@@ -568,13 +570,13 @@ These are decided and changing them has cascading consequences. Full rationale l
 - **Edition / toolchain:** Rust 2021, stable, pinned via `rust-toolchain.toml`.
 - **Async runtime:** Tokio (Arti requires it).
 - **Tor:** Arti (`arti-client` + `tor-hsservice`). Fallback to shelling out to system `tor` is documented in workstream 0.C but **not** something to architect around unless Arti blocks you.
-- **Noise pattern:** `Noise_XK_25519_ChaChaPoly_BLAKE2s` (via `snow`). Identity keys are the Noise static keys — **distinct from onion service keys** (see design §1.1).
+- **Noise pattern:** `Noise_XK_25519_ChaChaPoly_BLAKE2s` (via `snow`) — plain XK, `psk = None` at every production call site. (A `Noise_XKpsk3_…` constant exists but no production path selects it; the invite PSK is applied at the MLS layer, not in Noise.) Identity keys are the Noise static keys — **distinct from onion service keys** (see design §1.1).
 - **MLS ciphersuite:** `MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519`. Note: the design doc mentions a 256-bit variant in prose; the bootstrap prompt and Phase 1 decision lock the 128-bit variant — use the 128-bit one.
-- **Crypto libraries:** RustCrypto (`ed25519-dalek`, `x25519-dalek`, `chacha20poly1305`). Argon2id params: `m=64MiB, t=3, p=4`.
-- **Seed phrase:** BIP39. Derivation path: `seed → HKDF("skattr-identity-v1") → ed25519 seed → keypair`. Domain-separate every HKDF use.
+- **Crypto libraries:** `ed25519-dalek`, `chacha20poly1305` (XChaCha20-Poly1305), `argon2`, `hkdf`, `sha2`, `blake2`, plus `age` for at-rest encryption. Argon2id params: `m=64MiB, t=3, p=4` (written per-file into the vault CBOR, so a file's own params govern its decrypt). `x25519-dalek` is a declared dep, but production X25519 runs through `snow`'s resolver and a hand-derived static — our own use of the crate is a derivation cross-check test.
+- **Seed phrase:** BIP39 — the 32-byte root secret is *entropy-encoded* as 24 words (no BIP39 passphrase, no PBKDF2 stretching stage). Derivation: `HKDF-SHA256(salt=∅, ikm=seed, info="skattr-identity-v1") → ed25519 seed → keypair`. Domain-separate every HKDF use (eight distinct `INFO_*` constants live in `identity/derive.rs`).
 - **Wire serialization:** CBOR via `ciborium`. Config: TOML.
 - **Storage:** `rusqlite` (bundled) with WAL mode + app-level encryption via `age`. Migrations are `include_str!`'d SQL keyed by a `schema_version` table.
-- **Errors:** `thiserror` in libraries, `anyhow` in binaries. **No `unwrap()` / `expect()` in library code** — use `?` and typed errors.
+- **Errors:** `thiserror` in libraries, `anyhow` in binaries. **No `unwrap()` / `expect()` in library code** — use `?` and typed errors. Enforced by `clippy::unwrap_used`/`expect_used` + `-D warnings`. Three deliberate exceptions exist, each with a local `#[allow]` and a SAFETY comment (compile-time-constant regexes in `daemon/logs.rs`, invite-URL serialization in `daemon/commands.rs`, a bounds-checked cast in `transport/frame.rs`); add one only with the same justification.
 - **Logging:** `tracing` + `tracing-subscriber`. Never log pubkeys, onions, or message contents at `info` level or higher; redaction by default.
 - **Invite URI scheme:** `skattr://invite/v1#...` (fragment-based to avoid referer leaks).
 - **Transport↔MLS binding:** `h_transport = HKDF(noise_handshake_hash, "skattr-binding-v1")` is injected as external PSK into the first MLS Commit. Preserve this binding when refactoring either layer.

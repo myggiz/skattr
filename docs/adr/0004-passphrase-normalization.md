@@ -38,9 +38,15 @@ Rationale:
 ## Consequences
 
 - **Good:** No crypto-adjacent normalization code to audit.
-- **Bad:** Non-ASCII passphrases can lock users out if their input
-  method changes. Mitigation: the Phase 2 UI will ship an NFC
-  normalization pass on the passphrase-entry textbox.
+- **Bad — UNMITIGATED as of v0.1.x.** Non-ASCII passphrases can lock users out
+  if their input method changes. An earlier revision of this ADR stated the
+  mitigation as fact ("the Phase 2 UI will ship an NFC normalization pass on the
+  passphrase-entry textbox"). **That pass was never implemented** — there is no
+  normalization anywhere in `crates/ui/src-svelte/src`, and the vault uses
+  `passphrase.as_bytes()` verbatim (`identity/vault.rs`). The risk is therefore
+  live, and the "ASCII passphrases recommended" guidance below is currently the
+  only protection. Corrected 2026-08-07; shipping the normalization pass (or
+  formally accepting the risk) is tracked as outstanding work.
 - Docstring on `derive_aead_key` and the restore/init CLI surfaces
   will state: "ASCII passphrases recommended; non-ASCII entries are
   used verbatim and will not round-trip across OSes with different
