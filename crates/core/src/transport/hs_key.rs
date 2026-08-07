@@ -25,6 +25,31 @@ use crate::transport::TransportErrorKind;
 /// Raw bytes of a v3 HS signing key (Ed25519 secret).
 pub(crate) type HsSecretBytes = Zeroizing<[u8; 32]>;
 
+/// Fixed scrypt work factor (`N = 2^12`) for at-rest HS-key encryption.
+///
+/// The age passphrase is a full-entropy 256-bit HKDF-derived key (hex-encoded),
+/// so scrypt's low-entropy-passphrase stretching is security-irrelevant here.
+/// We pin a fast, deterministic factor instead of age's device-speed
+/// auto-calibration (`Encryptor::with_user_passphrase` → `Recipient::new`): a
+/// factor tuned to a fast/idle machine at write time gets rejected by age's
+/// decrypt-side guard on a slower/loaded machine at read time, which can lock a
+/// user out of their own key.
+///
+/// The factor is deliberately *low*, not merely fixed. scrypt's cost is
+/// `128 * N * r` bytes and proportional CPU (`r = 8`), so `2^18` would spend
+/// ~256 MiB and real time on **every** boot and shutdown — `pool.rs` encrypts
+/// the DB on close and re-encrypts crash residue on boot. Against a 256-bit
+/// key that work buys nothing: the same reasoning that makes the factor
+/// security-irrelevant also means it should sit near the floor. `2^12` costs
+/// ~4 MiB and milliseconds.
+const AGE_WORK_FACTOR: u8 = 12;
+
+/// Ceiling accepted on decrypt (`N = 2^22`). A fixed bound replaces age's
+/// per-device default (`target_scrypt_work_factor() + 4`, recomputed each read),
+/// so legacy files written with a device-calibrated factor (observed up to 20)
+/// are always accepted regardless of the reading machine's speed.
+const AGE_MAX_WORK_FACTOR: u8 = 22;
+
 /// Create or load the HS signing key at `path`, deriving the at-rest
 /// encryption key from `seed`.
 ///
@@ -56,7 +81,13 @@ fn derive_storage_key(seed: &Seed) -> Result<Zeroizing<[u8; 32]>> {
 fn save(path: &Path, seed: &Seed, bytes: &[u8; 32]) -> Result<()> {
     let key = derive_storage_key(seed)?;
     let passphrase = age::secrecy::SecretString::from(hex::encode(key.as_ref()));
-    let encryptor = age::Encryptor::with_user_passphrase(passphrase);
+    let mut recipient = age::scrypt::Recipient::new(passphrase);
+    recipient.set_work_factor(AGE_WORK_FACTOR);
+    let encryptor =
+        age::Encryptor::with_recipients(std::iter::once(&recipient as &dyn age::Recipient))
+            .map_err(|e| {
+                CoreError::Transport(TransportErrorKind::Other(format!("age recipients: {e}")))
+            })?;
 
     let mut ciphertext = Vec::new();
     let mut writer = encryptor
@@ -94,7 +125,8 @@ fn load(path: &Path, seed: &Seed) -> Result<HsSecretBytes> {
         )));
     }
 
-    let identity = age::scrypt::Identity::new(passphrase);
+    let mut identity = age::scrypt::Identity::new(passphrase);
+    identity.set_max_work_factor(AGE_MAX_WORK_FACTOR);
     let mut reader = decryptor
         .decrypt(std::iter::once(&identity as &dyn age::Identity))
         .map_err(|e| {
@@ -147,6 +179,65 @@ mod tests {
             matches!(result, Err(CoreError::Transport(_))),
             "different seed must fail to decrypt"
         );
+    }
+
+    #[test]
+    fn save_pins_fixed_work_factor() {
+        // Regression: save() must write a fixed scrypt work factor, not age's
+        // device-calibrated one (`with_user_passphrase`). A device-tuned factor
+        // written on an idle machine is what the decrypt guard later rejects on
+        // a loaded machine. Assert the on-disk age header carries AGE_WORK_FACTOR.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("hs.key.age");
+        let seed = Seed::generate().unwrap();
+        load_or_create(&path, &seed).unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        let header = String::from_utf8_lossy(&bytes[..bytes.len().min(160)]);
+        let line = header
+            .lines()
+            .find(|l| l.starts_with("-> scrypt"))
+            .expect("age scrypt stanza present");
+        let log_n: u8 = line
+            .rsplit(' ')
+            .next()
+            .and_then(|s| s.parse().ok())
+            .expect("work factor parses");
+        assert_eq!(
+            log_n, AGE_WORK_FACTOR,
+            "save must pin a fixed work factor, not device-calibrate"
+        );
+    }
+
+    #[test]
+    fn load_accepts_legacy_high_work_factor_file() {
+        // Regression: a key file written with a higher (device-calibrated) work
+        // factor than we now pin must still decrypt — this is the exact failure
+        // that bricked existing data dirs (files at log_n 19/20). Craft such a
+        // file directly and prove load() reads it via the fixed max ceiling.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("hs.key.age");
+        let seed = Seed::generate().unwrap();
+
+        let key = derive_storage_key(&seed).unwrap();
+        let passphrase = age::secrecy::SecretString::from(hex::encode(key.as_ref()));
+        let mut recipient = age::scrypt::Recipient::new(passphrase);
+        recipient.set_work_factor(20); // highest factor observed on real data dirs
+        let encryptor =
+            age::Encryptor::with_recipients(std::iter::once(&recipient as &dyn age::Recipient))
+                .unwrap();
+        let secret = generate();
+        let mut ciphertext = Vec::new();
+        {
+            use std::io::Write;
+            let mut writer = encryptor.wrap_output(&mut ciphertext).unwrap();
+            writer.write_all(secret.as_ref()).unwrap();
+            writer.finish().unwrap();
+        }
+        std::fs::write(&path, &ciphertext).unwrap();
+
+        let loaded = load(&path, &seed).unwrap();
+        assert_eq!(loaded.as_ref(), secret.as_ref());
     }
 
     #[test]

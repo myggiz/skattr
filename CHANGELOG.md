@@ -4,12 +4,24 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — targeting v0.1.11
+## [Unreleased] — targeting v0.1.12
 
 _In-progress patch line. The version is bumped per build for tracking; entries
 accumulate here and are stamped with a date when a build is cut._
 
 ### Fixed
+
+- **The app could refuse to start on a slower or busy machine, unable to open
+  its own encrypted data** (#121): the identity key, message database, and
+  backups are encrypted at rest with `age`, which was left to auto-pick how much
+  work decryption should cost based on how fast the machine was when the file was
+  *written*. Opening the same file later on a slower — or merely busier — machine
+  could then be rejected as "too much work" (observed: _"Decryption would take
+  around 64 seconds"_), locking the user out of their own identity, history, and
+  backups. Encryption now uses a fixed, fast work factor and decryption accepts a
+  fixed ceiling, so a file that was written always opens regardless of machine
+  speed or load. Existing data dirs keep working unchanged — no re-key, same
+  `.onion` address.
 
 - **A file you send no longer says "Delivered" before it has actually
   transferred** (#114): the sending side showed the delivery tick as soon as the

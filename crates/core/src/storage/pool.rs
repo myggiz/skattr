@@ -308,6 +308,20 @@ fn apply_pragmas(conn: &rusqlite::Connection) -> Result<()> {
     Ok(())
 }
 
+/// Fixed scrypt work factor (`N = 2^12`) for the at-rest DB. The passphrase is a
+/// full-entropy derived key, so scrypt stretching is security-irrelevant; we pin
+/// a fast, deterministic factor rather than age's device-speed auto-calibration,
+/// whose output a slower/loaded machine's decrypt guard later rejects. The
+/// factor is kept near the floor because this path runs on every close and on
+/// every boot (crash-residue re-encrypt). See `transport::hs_key` for the full
+/// rationale.
+const AGE_WORK_FACTOR: u8 = 12;
+
+/// Ceiling accepted on decrypt (`N = 2^22`) — a fixed bound in place of age's
+/// per-device default, so a DB written with a higher device-calibrated factor is
+/// always readable regardless of the reading machine's speed.
+const AGE_MAX_WORK_FACTOR: u8 = 22;
+
 fn decrypt_db(encrypted: &Path, plaintext: &Path, passphrase: &Zeroizing<String>) -> Result<()> {
     let ciphertext = std::fs::read(encrypted)?;
     let decryptor = age::Decryptor::new_buffered(&ciphertext[..])
@@ -317,9 +331,10 @@ fn decrypt_db(encrypted: &Path, plaintext: &Path, passphrase: &Zeroizing<String>
             "unexpected age recipient type on storage DB".into(),
         )));
     }
-    let identity = age::scrypt::Identity::new(age::secrecy::SecretString::from(
+    let mut identity = age::scrypt::Identity::new(age::secrecy::SecretString::from(
         passphrase.as_str().to_string(),
     ));
+    identity.set_max_work_factor(AGE_MAX_WORK_FACTOR);
     let mut reader = decryptor
         .decrypt(std::iter::once(&identity as &dyn age::Identity))
         .map_err(|e| CoreError::Storage(StorageErrorKind::Other(format!("age decrypt: {e}"))))?;
@@ -363,9 +378,15 @@ fn remove_plaintext_artifacts(working: &Path, sentinel: &Path) {
 
 fn encrypt_db(plaintext: &Path, encrypted: &Path, passphrase: &Zeroizing<String>) -> Result<()> {
     let plaintext_bytes = std::fs::read(plaintext)?;
-    let encryptor = age::Encryptor::with_user_passphrase(age::secrecy::SecretString::from(
+    let mut recipient = age::scrypt::Recipient::new(age::secrecy::SecretString::from(
         passphrase.as_str().to_string(),
     ));
+    recipient.set_work_factor(AGE_WORK_FACTOR);
+    let encryptor =
+        age::Encryptor::with_recipients(std::iter::once(&recipient as &dyn age::Recipient))
+            .map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!("age recipients: {e}")))
+            })?;
 
     let mut ciphertext = Vec::new();
     let mut writer = encryptor
