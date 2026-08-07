@@ -25,7 +25,7 @@ use crate::transport::TransportErrorKind;
 /// Raw bytes of a v3 HS signing key (Ed25519 secret).
 pub(crate) type HsSecretBytes = Zeroizing<[u8; 32]>;
 
-/// Fixed scrypt work factor (`N = 2^18`) for at-rest HS-key encryption.
+/// Fixed scrypt work factor (`N = 2^12`) for at-rest HS-key encryption.
 ///
 /// The age passphrase is a full-entropy 256-bit HKDF-derived key (hex-encoded),
 /// so scrypt's low-entropy-passphrase stretching is security-irrelevant here.
@@ -34,7 +34,15 @@ pub(crate) type HsSecretBytes = Zeroizing<[u8; 32]>;
 /// factor tuned to a fast/idle machine at write time gets rejected by age's
 /// decrypt-side guard on a slower/loaded machine at read time, which can lock a
 /// user out of their own key.
-const AGE_WORK_FACTOR: u8 = 18;
+///
+/// The factor is deliberately *low*, not merely fixed. scrypt's cost is
+/// `128 * N * r` bytes and proportional CPU (`r = 8`), so `2^18` would spend
+/// ~256 MiB and real time on **every** boot and shutdown — `pool.rs` encrypts
+/// the DB on close and re-encrypts crash residue on boot. Against a 256-bit
+/// key that work buys nothing: the same reasoning that makes the factor
+/// security-irrelevant also means it should sit near the floor. `2^12` costs
+/// ~4 MiB and milliseconds.
+const AGE_WORK_FACTOR: u8 = 12;
 
 /// Ceiling accepted on decrypt (`N = 2^22`). A fixed bound replaces age's
 /// per-device default (`target_scrypt_work_factor() + 4`, recomputed each read),

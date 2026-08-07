@@ -308,12 +308,14 @@ fn apply_pragmas(conn: &rusqlite::Connection) -> Result<()> {
     Ok(())
 }
 
-/// Fixed scrypt work factor (`N = 2^18`) for the at-rest DB. The passphrase is a
+/// Fixed scrypt work factor (`N = 2^12`) for the at-rest DB. The passphrase is a
 /// full-entropy derived key, so scrypt stretching is security-irrelevant; we pin
 /// a fast, deterministic factor rather than age's device-speed auto-calibration,
-/// whose output a slower/loaded machine's decrypt guard later rejects. See
-/// `transport::hs_key` for the full rationale.
-const AGE_WORK_FACTOR: u8 = 18;
+/// whose output a slower/loaded machine's decrypt guard later rejects. The
+/// factor is kept near the floor because this path runs on every close and on
+/// every boot (crash-residue re-encrypt). See `transport::hs_key` for the full
+/// rationale.
+const AGE_WORK_FACTOR: u8 = 12;
 
 /// Ceiling accepted on decrypt (`N = 2^22`) — a fixed bound in place of age's
 /// per-device default, so a DB written with a higher device-calibrated factor is

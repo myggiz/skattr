@@ -35,12 +35,12 @@ use crate::identity::Seed;
 
 const BACKUP_FILES: &[&str] = &["identity.vault", "hs.key.age", "skattr.sqlite.age"];
 
-/// Fixed scrypt work factor (`N = 2^18`) for the outer backup layer. As with the
+/// Fixed scrypt work factor (`N = 2^12`) for the outer backup layer. As with the
 /// other at-rest files, the passphrase is a full-entropy derived key, so we pin a
-/// deterministic factor instead of age's device-speed auto-calibration — which a
-/// slower/loaded machine's decrypt guard can later reject. See
+/// low, deterministic factor instead of age's device-speed auto-calibration —
+/// which a slower/loaded machine's decrypt guard can later reject. See
 /// `transport::hs_key` for the full rationale.
-const AGE_WORK_FACTOR: u8 = 18;
+const AGE_WORK_FACTOR: u8 = 12;
 
 /// Ceiling accepted on decrypt (`N = 2^22`) — a fixed bound in place of age's
 /// per-device default, so an archive written on a faster machine restores on a
