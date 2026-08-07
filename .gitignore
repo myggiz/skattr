@@ -29,3 +29,6 @@ proptest-regressions/
 
 # Git worktrees managed by superpowers:using-git-worktrees
 /.worktrees/
+
+# Machine-specific local build helper (exFAT/Windows workaround, personal paths)
+build-ui-local.ps1
