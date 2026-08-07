@@ -35,6 +35,18 @@ use crate::identity::Seed;
 
 const BACKUP_FILES: &[&str] = &["identity.vault", "hs.key.age", "skattr.sqlite.age"];
 
+/// Fixed scrypt work factor (`N = 2^18`) for the outer backup layer. As with the
+/// other at-rest files, the passphrase is a full-entropy derived key, so we pin a
+/// deterministic factor instead of age's device-speed auto-calibration — which a
+/// slower/loaded machine's decrypt guard can later reject. See
+/// `transport::hs_key` for the full rationale.
+const AGE_WORK_FACTOR: u8 = 18;
+
+/// Ceiling accepted on decrypt (`N = 2^22`) — a fixed bound in place of age's
+/// per-device default, so an archive written on a faster machine restores on a
+/// slower one regardless of speed (backups are explicitly cross-machine).
+const AGE_MAX_WORK_FACTOR: u8 = 22;
+
 /// Build a gzip-compressed tar of `members` (each is `(source_path,
 /// archive_name)`), age-encrypt the tarball under `passphrase`, and
 /// atomically write the result to `out_path`.
@@ -62,9 +74,17 @@ fn write_encrypted_archive(
     }
 
     // Age-encrypt the gzipped tarball.
-    let encryptor = age::Encryptor::with_user_passphrase(age::secrecy::SecretString::from(
+    let mut recipient = age::scrypt::Recipient::new(age::secrecy::SecretString::from(
         passphrase.as_str().to_string(),
     ));
+    recipient.set_work_factor(AGE_WORK_FACTOR);
+    let encryptor =
+        age::Encryptor::with_recipients(std::iter::once(&recipient as &dyn age::Recipient))
+            .map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!(
+                    "age recipients backup: {e}"
+                )))
+            })?;
 
     let mut ciphertext = Vec::new();
     let mut writer = encryptor.wrap_output(&mut ciphertext).map_err(|e| {
@@ -159,9 +179,10 @@ pub(crate) fn import_backup(archive_path: &Path, data_dir: &Path, seed: &Seed) -
             "unexpected age recipient type on backup".into(),
         )));
     }
-    let identity = age::scrypt::Identity::new(age::secrecy::SecretString::from(
+    let mut identity = age::scrypt::Identity::new(age::secrecy::SecretString::from(
         passphrase.as_str().to_string(),
     ));
+    identity.set_max_work_factor(AGE_MAX_WORK_FACTOR);
     let mut reader = decryptor
         .decrypt(std::iter::once(&identity as &dyn age::Identity))
         .map_err(|e| {
