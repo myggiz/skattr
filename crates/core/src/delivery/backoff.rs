@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Exponential backoff with ±25 % jitter, capped at 5 minutes.
 //!

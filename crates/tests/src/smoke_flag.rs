@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Phase 2.G: end-to-end test of `skattr-ui --smoke-test`. Spawns the
 //! UI binary as a subprocess (so the argv branch + tokio runtime

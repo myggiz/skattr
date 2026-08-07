@@ -12,7 +12,7 @@
 
 - **Spec:** `docs/superpowers/specs/2026-06-17-phase-3b-direct-attachment-transfer-design.md`. **ADR:** `docs/adr/0010-attachment-transport-frames.md`. Branch: `phase-3b-direct-attachment-transfer`.
 - **Audit rule (defining):** every behavior must be proven through real `Daemon::run` / `run_with_transport` over loopback — NOT via `test_exports`. The guardrail tasks enforce this.
-- **License header on every `.rs` file:** `// SPDX-License-Identifier: GPL-3.0-or-later` then `// Copyright (C) 2026 Myggiz AB` (GPLv3 for `core`/`cli`/`tests`).
+- **License header on every `.rs` file:** `// SPDX-License-Identifier: GPL-3.0-or-later` then `// Copyright (C) 2026 Myggiz B.V.` (GPLv3 for `core`/`cli`/`tests`).
 - **No `unwrap()`/`expect()` in library code** (`crates/core`, `crates/cli`) — use `?` and typed errors. Tests may use them under the existing `#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]` on test modules.
 - **Use `todo!()` never `unimplemented!()`.** All secret/key material zeroizes (3.A already handles `file_key` via `Zeroizing` in `chunk_key_material`).
 - **Frame free bytes start at `0x0B`** (`0x0A` is `Error`). Decoder rejects unknown types — that is correct and load-bearing.
@@ -292,7 +292,7 @@ git commit -m "feat(3.B): add chunk-transfer frame types 0x0B-0x0E"
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Direct attachment chunk-transfer engine (Phase 3.B).
 //!
@@ -1495,7 +1495,7 @@ git commit -m "feat(3.B): Command::SendFile handler + CLI send-file"
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Phase 3.B guardrail: a multi-chunk file round-trips byte-identically
 //! between two real daemons over loopback, metadata stripped.

@@ -1,5 +1,5 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later
--- Copyright (C) 2026 Myggiz AB
+-- Copyright (C) 2026 Myggiz B.V.
 --
 -- Skattr storage schema, version 8.
 -- Phase 2.B mailbox client: status tracking on `mailboxes`, target-kind

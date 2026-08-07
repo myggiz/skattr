@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! The single source of truth for on-disk path resolution.
 //!

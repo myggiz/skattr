@@ -73,7 +73,7 @@ Expected: all 14 tests in `daemon::ipc::server` pass (today's `server.rs` has 13
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::panic))]
 
@@ -171,7 +171,7 @@ mod tests {
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 #![cfg(unix)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::panic))]
@@ -292,7 +292,7 @@ git commit -m "refactor(ipc): split server.rs into server/{mod,unix}.rs"
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::panic))]
 
@@ -377,7 +377,7 @@ mod tests {
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 #![cfg(unix)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::panic))]
@@ -464,7 +464,7 @@ git commit -m "refactor(ipc): split client.rs into client/{mod,unix}.rs"
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! CLI ↔ daemon IPC transport.
 //!
@@ -730,7 +730,7 @@ git commit -m "build(core): add windows-sys dep for Win32 SID + DACL FFI"
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 #![cfg(target_os = "windows")]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::panic))]
@@ -787,7 +787,7 @@ pub(crate) fn check_peer_sid(_peer: &[u8], _expected: &[u8]) -> io::Result<()> {
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 #![cfg(target_os = "windows")]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::panic))]

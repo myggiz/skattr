@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Integration test: Alice mints invite → Bob parses + verifies +
 //! records + marks consumed. No Tor, no Noise, no MLS — just the

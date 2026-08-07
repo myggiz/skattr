@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Phase 2.E end-to-end: paired daemons over real Tor exchange an invite,
 //! add the contact, propagate the Welcome back to Alice, and round-trip a

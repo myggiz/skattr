@@ -140,7 +140,7 @@ Write `crates/core/src/storage/migrations/0008_mailbox_status_and_outbox_target_
 
 ```sql
 -- SPDX-License-Identifier: GPL-3.0-or-later
--- Copyright (C) 2026 Myggiz AB
+-- Copyright (C) 2026 Myggiz B.V.
 --
 -- Skattr storage schema, version 8.
 -- Phase 2.B mailbox client: status tracking on `mailboxes`, target-kind
@@ -208,7 +208,7 @@ Create `crates/core/src/storage/mailboxes.rs` with the test stubs first (no impl
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -668,7 +668,7 @@ Add to `crates/core/src/mailbox/auth.rs`:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Wire-frozen helpers shared by `core::mailbox::client` and
 //! `crates/mailbox`. Moving these here keeps the digest construction
@@ -823,7 +823,7 @@ Write an integration test that depends on both crates:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 use bytes::BytesMut;
 use skattr_core::mailbox::codec::{MailboxFrame as ClientFrame, MailboxFrameCodec as ClientCodec};
@@ -936,7 +936,7 @@ Replace the contents of `client.rs` with:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Client side of the v1 mailbox protocol.
 
@@ -1425,7 +1425,7 @@ Replace the contents of `scheduler.rs` (and rename to `poll.rs`; update `mod.rs`
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Adaptive polling scheduler for our mailboxes.
 //!
@@ -1851,7 +1851,7 @@ git commit -m "envelope: Kind::ContactCardUpdate + inbound dispatch"
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Self-published ContactCard helpers used by RotateOnion / AddMailbox /
 //! RemoveMailbox.
@@ -2385,7 +2385,7 @@ git commit -m "daemon: ListMailboxes reads MailboxRepo"
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Alice → offline Bob via mailbox; Bob comes online; ACK reaches Alice.
 

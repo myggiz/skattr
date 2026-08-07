@@ -16,7 +16,7 @@
 - **The daemon lock is a *pure* OS advisory lock on a held-open handle.** Acquire/refuse is decided **only** by the OS lock call (`flock(LOCK_EX|LOCK_NB)` / `LockFileEx(LOCKFILE_EXCLUSIVE_LOCK|LOCKFILE_FAIL_IMMEDIATELY)`). **Never** gate on the lockfile's existence or on a pid written inside it — the kernel auto-releases on process death (incl. SIGKILL / Task Manager), so a hard kill must leave a cleanly re-lockable state. Stale-lock reclaim is therefore out of scope (the OS does it).
 - **Second daemon must error clearly and exit, not block.** The error must distinguish "another instance is already running" from any other lock failure (IO/permission).
 - **Migration is fail-loud on partial failure.** If a legacy identity is found but the move fails midway, return an error and abort startup — never fall through to fresh onboarding (that is the silent-identity-loss trap).
-- **License header on every new `.rs` file:** `// SPDX-License-Identifier: GPL-3.0-or-later` / `// Copyright (C) 2026 Myggiz AB`.
+- **License header on every new `.rs` file:** `// SPDX-License-Identifier: GPL-3.0-or-later` / `// Copyright (C) 2026 Myggiz B.V.`.
 - **No `unwrap()`/`expect()` in library (`core`) code** outside `#[cfg(test)]`. Use `?` and typed errors.
 - **Verify before claiming done:** `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, `cargo test` must pass. Prefix cargo with `. "$HOME/.cargo/env" &&`.
 
@@ -67,7 +67,7 @@ Create `crates/core/src/daemon/paths.rs`:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! The single source of truth for on-disk path resolution.
 //!
@@ -334,7 +334,7 @@ Create `crates/core/src/daemon/lock.rs`:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! A pure OS advisory lock guaranteeing one daemon per data directory.
 //!
@@ -624,7 +624,7 @@ Create `crates/core/src/daemon/migrate.rs`:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! One-time migration of an existing identity into the canonical data dir.
 //!

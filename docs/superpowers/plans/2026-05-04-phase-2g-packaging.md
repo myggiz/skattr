@@ -219,7 +219,7 @@ Add to a new file `crates/core/src/daemon/smoke.rs`:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Smoke-test entry point for release artefacts.
 //!
@@ -1111,7 +1111,7 @@ Create `crates/tests/src/smoke_flag.rs`:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Phase 2.G: end-to-end test of `skattr-ui --smoke-test`. Spawns the
 //! UI binary as a subprocess (so the argv branch + tokio runtime
@@ -1332,8 +1332,8 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
   },
   "bundle": {
     "active": true,
-    "publisher": "Myggiz AB",
-    "copyright": "© 2026 Myggiz AB",
+    "publisher": "Myggiz B.V.",
+    "copyright": "© 2026 Myggiz B.V.",
     "license": "GPL-3.0-or-later",
     "licenseFile": "../../LICENSE-GPL3",
     "shortDescription": "Metadata-resistant P2P encrypted messenger.",
@@ -2562,7 +2562,7 @@ Create `packaging/flatpak/net.myggiz.skattr.metainfo.xml`:
   <url type="homepage">https://skattr.org</url>
   <url type="bugtracker">https://github.com/myggiz/skattr/issues</url>
   <url type="vcs-browser">https://github.com/myggiz/skattr</url>
-  <developer_name>Myggiz AB</developer_name>
+  <developer_name>Myggiz B.V.</developer_name>
   <categories>
     <category>Network</category>
     <category>InstantMessaging</category>

@@ -13,7 +13,7 @@
 - **Spec:** `docs/superpowers/specs/2026-06-22-phase-3c-offline-attachment-transfer-design.md`. **No ADR** — reuses frozen ADR 0006 unchanged. Branch: `phase-3c-offline-attachment-transfer`.
 - **Audit rule (defining):** prove behavior through real `Daemon::run` / `run_with_transport` over loopback + a real `MailboxServer` — NOT `test_exports` transport shortcuts. The guardrail tasks enforce this, modeled on `crates/tests/src/mailbox_offline_delivery.rs`.
 - **Frozen — do NOT touch:** `crates/core/src/mailbox/{protocol,codec,client,auth}.rs` and `crates/mailbox/` server/`policy.rs`. Chunks reuse `MailboxClient::deposit` as-is.
-- **License header on every `.rs` file:** `// SPDX-License-Identifier: GPL-3.0-or-later` then `// Copyright (C) 2026 Myggiz AB`.
+- **License header on every `.rs` file:** `// SPDX-License-Identifier: GPL-3.0-or-later` then `// Copyright (C) 2026 Myggiz B.V.`.
 - **No `unwrap()`/`expect()` in library code** (`crates/core`) — use `?`/typed errors; test modules use the existing `#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]`. Use `todo!()` never `unimplemented!()`. Secrets zeroize.
 - **Constants (3.C):** `MAX_OFFLINE_ATTACHMENT_BYTES = 10 * 1024 * 1024` (10 MiB); `OFFLINE_FALLBACK_STALL_SECS = 90` (deferral before chunk deposits become due — gives the direct 3.B lane a head start); `CHUNK_SWEEP_BATCH = 30` (per-tick deposits per attachment, ≤ `per_conn_deposits_per_min`). Reuse `CHUNK_SIZE = 48 KiB`. Deposit-all + receiver dedups via `received_indices`.
 - **Storage pool idioms:** `pool.with(|c| …)` read, `pool.with_mut(|c| …)` write, `pool.transaction(|tx| …)` atomic. Map rusqlite errors to `CoreError::Storage(StorageErrorKind::Other(format!(…)))`.
@@ -589,7 +589,7 @@ git commit -m "feat(3.C): receiver dispatch_attachment_chunk (hash-match) + poll
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Phase 3.C: deposit due attachment chunks into recipients' mailboxes.
 //!
@@ -874,7 +874,7 @@ git commit -m "feat(3.C): wire ChunkStore/download_dir into DaemonInbound; spawn
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Phase 3.C guardrail: an offline peer receives a multi-chunk file via the
 //! mailbox, byte-identical, metadata stripped — through real run_with_transport

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Phase 1B regression guardrail: two real daemon assemblies exchange
 //! messages in BOTH directions over the production wiring.

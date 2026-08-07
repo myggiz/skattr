@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Phase 2.C: end-to-end first-run integration. Bootstraps a real
 //! Tor-backed daemon via `Daemon::run`, drives `Command::DaemonInfo`

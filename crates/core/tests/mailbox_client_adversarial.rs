@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Adversarial mailbox-client regression suite. Each scenario exercises
 //! one class of mailbox-side misbehavior and asserts the client surfaces

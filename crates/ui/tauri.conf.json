@@ -27,8 +27,8 @@
   },
   "bundle": {
     "active": true,
-    "publisher": "Myggiz AB",
-    "copyright": "© 2026 Myggiz AB",
+    "publisher": "Myggiz B.V.",
+    "copyright": "© 2026 Myggiz B.V.",
     "license": "GPL-3.0-or-later",
     "licenseFile": "../../LICENSE-GPL3",
     "shortDescription": "Metadata-resistant P2P encrypted messenger.",

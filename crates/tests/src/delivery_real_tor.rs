@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Integration test over real Arti: two daemons bootstrap, Bob publishes
 //! an onion, Alice dials, both sides run Noise_XK + MLS, and Alice sends

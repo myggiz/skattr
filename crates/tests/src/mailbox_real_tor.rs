@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Real-Tor smoke test: spawn the `skattr-mailbox` binary, publish a
 //! v3 onion, drive a Deposit + Challenge round-trip from a client

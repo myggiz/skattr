@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Property tests for the mailbox protocol invariants. Spec §"Test
 //! plan / 2. Property" — every property here is a freeze-bar item.

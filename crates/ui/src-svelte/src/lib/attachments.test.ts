@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 import { describe, expect, test, vi, beforeEach } from "vitest";
 
 // Mock the Tauri core module before importing the SUT.

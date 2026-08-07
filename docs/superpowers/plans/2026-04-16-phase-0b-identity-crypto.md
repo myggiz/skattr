@@ -157,7 +157,7 @@ Replace the existing file header/use block so the final file top is:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Domain-separated key derivation helpers.
 //!
@@ -1379,7 +1379,7 @@ Create `crates/core/tests/identity_roundtrip.rs`:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! End-to-end identity round-trip.
 //!
@@ -1758,7 +1758,7 @@ Create `crates/core/fuzz/fuzz_targets/vault_parser.rs`:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Fuzz harness for the on-disk vault parser.
 //!

@@ -64,7 +64,7 @@ Replace the entire body of `crates/core/src/mailbox/protocol.rs` with the placeh
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Wire types shared between `skattr-core` (client, 2.B) and
 //! `skattr-mailbox` (server, 2.A).
@@ -504,7 +504,7 @@ workspace = true
 
 ```rust
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as
@@ -552,7 +552,7 @@ Replace `crates/mailbox/src/main.rs` with:
 
 ```rust
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! `skattr-mailbox` binary entry point. Real wiring lands in Task 15.
 
@@ -582,7 +582,7 @@ Without these, `lib.rs` won't compile. Each is a one-liner that gets filled out 
 `crates/mailbox/src/config.rs`:
 ```rust
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Mailbox server configuration. Filled in by Task 5.
 
@@ -599,7 +599,7 @@ pub struct MailboxConfig {
 `crates/mailbox/src/error.rs`:
 ```rust
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Mailbox error taxonomy. Filled in by Task 4.
 
@@ -633,7 +633,7 @@ pub enum TransportErrorKind { Placeholder }
 `crates/mailbox/src/policy.rs`:
 ```rust
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Operator caps + token-bucket rate limiter. Filled in by Task 9.
 
@@ -649,7 +649,7 @@ pub struct TokenBucket;
 `crates/mailbox/src/store.rs`:
 ```rust
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! SQLite-backed deposit store. Filled in by Tasks 6–7.
 
@@ -662,7 +662,7 @@ pub struct Store;
 `crates/mailbox/src/auth.rs`:
 ```rust
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Challenge nonce table. Filled in by Task 8.
 
@@ -675,7 +675,7 @@ pub struct Challenges;
 `crates/mailbox/src/codec.rs`:
 ```rust
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Mailbox frame codec. Filled in by Task 3.
 
@@ -688,7 +688,7 @@ pub struct MailboxFrameCodec;
 `crates/mailbox/src/dispatch.rs`:
 ```rust
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Per-frame request handlers. Filled in by Task 10.
 
@@ -698,7 +698,7 @@ pub struct MailboxFrameCodec;
 `crates/mailbox/src/health.rs`:
 ```rust
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! UDS healthcheck server. Filled in by Task 13.
 
@@ -708,7 +708,7 @@ pub struct MailboxFrameCodec;
 `crates/mailbox/src/server.rs`:
 ```rust
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Per-stream FSM + accept loop. Filled in by Task 11.
 
@@ -760,7 +760,7 @@ Replace `crates/mailbox/src/codec.rs` with the body below (tests included).
 
 ```rust
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Mailbox frame codec.
 //!
@@ -1156,7 +1156,7 @@ Replace `crates/mailbox/src/error.rs` with:
 
 ```rust
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Error taxonomy for the mailbox server.
 //!
@@ -1482,7 +1482,7 @@ Replace `crates/mailbox/src/config.rs` with:
 
 ```rust
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Mailbox server configuration.
 //!
@@ -1720,7 +1720,7 @@ Replace `crates/mailbox/src/policy.rs` with a temporary fuller stub (Task 9 will
 
 ```rust
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Operator caps + token-bucket rate limiter (final shape in Task 9).
 
@@ -1819,7 +1819,7 @@ Create `crates/mailbox/src/migrations.rs`:
 
 ```rust
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Forward-only schema-migration runner. Mirrors the `core::storage`
 //! pattern: `include_str!`'d SQL files keyed by a monotonic version.
@@ -1986,7 +1986,7 @@ Replace `crates/mailbox/src/store.rs` with:
 
 ```rust
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! SQLite-backed deposit store.
 //!
@@ -2363,7 +2363,7 @@ Replace `crates/mailbox/src/auth.rs` with:
 
 ```rust
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Challenge-response auth.
 //!
@@ -2680,7 +2680,7 @@ Replace `crates/mailbox/src/policy.rs` with:
 
 ```rust
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Operator caps + token-bucket rate limiter.
 
@@ -2961,7 +2961,7 @@ Replace `crates/mailbox/src/dispatch.rs` with:
 
 ```rust
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Pure per-frame request handlers.
 //!
@@ -3414,7 +3414,7 @@ Replace `crates/mailbox/src/server.rs` with:
 
 ```rust
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Per-stream accept loop and the top-level [`MailboxServer`] handle.
 //!
@@ -3728,7 +3728,7 @@ EOF
 
 ```rust
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Periodic background tasks: deposit expiry, challenge nonce
 //! sweep, and aggregate metrics emission.
@@ -3912,7 +3912,7 @@ Replace `crates/mailbox/src/health.rs` with:
 
 ```rust
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Local-only Unix-domain healthcheck server.
 //!
@@ -4147,7 +4147,7 @@ EOF
 
 ```rust
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Arti + tor-hsservice glue (binary-only).
 //!
@@ -4288,7 +4288,7 @@ Replace `crates/mailbox/src/main.rs` with:
 
 ```rust
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as
@@ -4417,7 +4417,7 @@ Create `crates/mailbox/tests/property.rs`:
 
 ```rust
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Property tests for the mailbox protocol invariants. Spec §"Test
 //! plan / 2. Property" — every property here is a freeze-bar item.
@@ -4635,7 +4635,7 @@ These four files cover every variant of `protocol::ErrorCode`. Each test calls i
 
 ```rust
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Adversarial coverage for HashMismatch / InvalidSignature / NonceExpired.
 
@@ -4777,7 +4777,7 @@ async fn nonce_replay_rejected() {
 
 ```rust
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Adversarial coverage for TooLarge / TtlTooLong / TtlTooShort /
 //! RateLimited / RecipientFull / UnsupportedVersion.
@@ -4963,7 +4963,7 @@ async fn recipient_full_rejected_when_no_evictable_rows() {
 
 ```rust
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Concurrent-delete races + cap eviction ordering.
 
@@ -5025,7 +5025,7 @@ fn cap_eviction_evicts_oldest_expired_first() {
 
 ```rust
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Malformed CBOR and unknown frames yield ErrorCode::MalformedRequest.
 
@@ -5309,7 +5309,7 @@ EOF
 
 ```rust
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! 24-hour soak driver. `#[ignore]`-gated; run on a developer
 //! workstation as part of the freeze-PR validation, not on CI:
@@ -5468,7 +5468,7 @@ EOF
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Real-Tor smoke test: spawn the `skattr-mailbox` binary, publish a
 //! v3 onion, drive a Deposit + Challenge round-trip from a client
@@ -5997,7 +5997,7 @@ The spec mandates: no identity pubkeys, full hashes, ciphertexts, or deposit_ids
 
 ```rust
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Asserts the mailbox's `info`/`warn`/`error`-level log lines never
 //! contain a full 64-hex pubkey, full 32-byte hash, ciphertext, or

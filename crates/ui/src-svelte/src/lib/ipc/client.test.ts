@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 // Contract tests for IpcClient interface and unwrapOk helper.
 // TauriTransport framing is verified via a lightweight in-process stub.
 

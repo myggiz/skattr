@@ -95,7 +95,7 @@ Replace the entire contents of `crates/core/src/mls/state_machine.rs` with:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Explicit group lifecycle states.
 //!
@@ -153,7 +153,7 @@ Replace the entire contents of `crates/core/src/mls/mod.rs` with:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! MLS (RFC 9420) integration.
 //!
@@ -195,7 +195,7 @@ Replace the entire contents of `crates/core/src/mls/group.rs` with a stub that c
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Thin wrapper over `openmls::group::MlsGroup`.
 //!
@@ -308,7 +308,7 @@ Create `crates/core/src/mls/provider.rs`:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! `OpenMlsRustCrypto` wrapper with snapshot / load for persistence.
 
@@ -340,7 +340,7 @@ Create `crates/core/src/mls/key_package.rs`:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! MLS KeyPackage newtype.
 
@@ -383,7 +383,7 @@ Create `crates/core/src/storage/key_packages.rs`:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Repository for MLS KeyPackages (ours to publish + theirs to consume).
 
@@ -501,7 +501,7 @@ Replace the stub in `crates/core/src/storage/key_packages.rs` with:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Repository for MLS KeyPackages.
 //!
@@ -710,7 +710,7 @@ Replace the stub in `crates/core/src/mls/provider.rs` with the inline-test scaff
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Crypto + storage provider for OpenMLS.
 //!
@@ -910,7 +910,7 @@ Replace the stub in `crates/core/src/mls/key_package.rs` with the full implement
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! MLS KeyPackage newtype.
 //!
@@ -1217,7 +1217,7 @@ Replace the stub in `crates/core/src/mls/group.rs` with the full structure (meth
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Thin wrapper over `openmls::group::MlsGroup`.
 
@@ -2537,7 +2537,7 @@ Create `crates/tests/src/mls_pair.rs`:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Integration test: Alice ↔ Bob MLS 2-member group, exchange messages
 //! both ways, survive restart, resume exchange. Runs against in-memory

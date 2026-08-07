@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- **License header on every new `.rs` / `.svelte` / `.ts` file.** Rust/TS: `// SPDX-License-Identifier: GPL-3.0-or-later` then `// Copyright (C) 2026 Myggiz AB`. Svelte: `<!-- SPDX-License-Identifier: GPL-3.0-or-later -->` then `<!-- Copyright (C) 2026 Myggiz AB -->`.
+- **License header on every new `.rs` / `.svelte` / `.ts` file.** Rust/TS: `// SPDX-License-Identifier: GPL-3.0-or-later` then `// Copyright (C) 2026 Myggiz B.V.`. Svelte: `<!-- SPDX-License-Identifier: GPL-3.0-or-later -->` then `<!-- Copyright (C) 2026 Myggiz B.V. -->`.
 - **No `unwrap()` / `expect()` in shell command bodies.** Return `Result<T, String>`; map errors with `.map_err(|e| format!("…: {e}"))`. (`#[cfg(test)]` modules may use `unwrap` under the existing `#[allow(clippy::unwrap_used, …)]` attribute — mirror `main.rs:305-306`.)
 - **CSS uses house custom properties only:** `--bg`, `--bg-elevated`, `--text`, `--text-muted`, `--accent`, `--danger`, `--s-1`/`--s-2`/`--s-3` (spacing), `--t-ui`/`--t-display` (type). No hard-coded colors except the existing `rgba(255,255,255,0.7)` precedent.
 - **`manifest` is a runtime byte array.** `Kind::File.manifest` is Rust `Vec<u8>` (no `serde_bytes`); serde_json serializes it as a JSON **number array**, even though the generated TS type says `manifest: string` (a `#[ts(type="string")]` annotation that does not match runtime). The UI passes `record.kind.manifest` straight to the Rust decode command (param type `Vec<u8>`), casting through `unknown` in TS. **Never** base64-decode it in JS.
@@ -79,7 +79,7 @@ Create `crates/ui/src/attachments.rs`:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Phase 3.D attachment UI-shell commands: manifest decode, file stat,
 //! and open/reveal of received files. Presentation-only — no protocol.
@@ -532,7 +532,7 @@ git commit -m "build(3.D): add @tauri-apps/plugin-dialog + plugin-opener JS deps
 Create `crates/ui/src-svelte/src/lib/stores/attachments.test.ts`:
 ```ts
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 import { describe, expect, test, beforeEach } from "vitest";
 import { get } from "svelte/store";
 import {
@@ -603,7 +603,7 @@ Expected: FAIL — module `./attachments` not found.
 Create `crates/ui/src-svelte/src/lib/stores/attachments.ts`:
 ```ts
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 import { writable, get } from "svelte/store";
 
 export type AttachmentStatus =
@@ -736,7 +736,7 @@ git commit -m "feat(3.D): global attachments transfer store"
 Create `crates/ui/src-svelte/src/lib/attachments.test.ts`:
 ```ts
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 import { describe, expect, test, vi, beforeEach } from "vitest";
 
 // Mock the Tauri core module before importing the SUT.
@@ -816,7 +816,7 @@ Expected: FAIL — module `./attachments` not found.
 Create `crates/ui/src-svelte/src/lib/attachments.ts`:
 ```ts
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 import { invoke } from "@tauri-apps/api/core";
 import type { Kind } from "$lib/ipc/types";
 
@@ -966,7 +966,7 @@ git commit -m "feat(3.D): add paperclip/file/image icons"
 Create `crates/ui/src-svelte/src/lib/components/FileAttachmentBubble.test.ts`:
 ```ts
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 import { describe, expect, test, vi, beforeEach } from "vitest";
 import { render } from "@testing-library/svelte";
 import { tick } from "svelte";
@@ -1076,7 +1076,7 @@ Expected: FAIL — component not found.
 Create `crates/ui/src-svelte/src/lib/components/FileAttachmentBubble.svelte`:
 ```svelte
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
-<!-- Copyright (C) 2026 Myggiz AB -->
+<!-- Copyright (C) 2026 Myggiz B.V. -->
 <script lang="ts">
   import { invoke, convertFileSrc } from "@tauri-apps/api/core";
   import type { MessageRecord } from "$lib/ipc/types";
@@ -1674,7 +1674,7 @@ Expected: find the alias that maps `@tauri-apps/api/core` → `tauri-mock.ts` un
 Create `crates/ui/src-svelte/tests/e2e/attachments.spec.ts`:
 ```ts
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 import { test, expect } from "@playwright/test";
 
 test.describe("attachments", () => {

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Production `Transport` over Arti: publish via the existing `OnionListener`,
 //! dial via the Arti client. Wraps an already-bootstrapped `TorRuntime`.

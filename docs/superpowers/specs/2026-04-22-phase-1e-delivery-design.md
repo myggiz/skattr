@@ -140,7 +140,7 @@ File: `crates/core/src/storage/migrations/0004_outbox_message_id.sql`.
 
 ```sql
 -- SPDX-License-Identifier: GPL-3.0-or-later
--- Copyright (C) 2026 Myggiz AB
+-- Copyright (C) 2026 Myggiz B.V.
 --
 -- Skattr storage schema, version 4.
 -- Add per-message id to the outbox so the delivery layer can

@@ -12,7 +12,7 @@
 
 - Cargo is not on PATH — prefix every cargo command with `. "$HOME/.cargo/env" &&`.
 - Work ONLY on branch `fix/93-first-contact-pending-join`. Do not touch master.
-- Every `.rs` file carries the GPLv3 header: `// SPDX-License-Identifier: GPL-3.0-or-later` then `// Copyright (C) 2026 Myggiz AB`.
+- Every `.rs` file carries the GPLv3 header: `// SPDX-License-Identifier: GPL-3.0-or-later` then `// Copyright (C) 2026 Myggiz B.V.`.
 - No `unwrap()`/`expect()` in non-`#[cfg(test)]` library code — use `?` and typed `CoreError`/`StorageErrorKind`. Inside `#[cfg(test)]` and test-only helpers, `unwrap` is allowed (match existing style).
 - Redaction: never log pubkeys, onions, x25519 keys, `kp_ref`, or payload bytes at any level. Log static text + counts only. `CoreError` Display is onion/secret-free.
 - `rusqlite` stays pinned at 0.38 — do not bump.

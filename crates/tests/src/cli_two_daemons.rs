@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Two-daemon E2E: invite -> add -> send (blocked while pending), all over a
 //! mocked-transport harness.

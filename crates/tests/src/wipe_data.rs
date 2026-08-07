@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! WipeAllData integration test: verify the flush-ordered wipe teardown
 //! (T3-3) at the unit level without calling `process::exit`.

@@ -42,7 +42,7 @@ cargo test -p skattr-tests -- --test-threads=1
 ```rust
 // SPDX-License-Identifier: AGPL-3.0-or-later   (mailbox)
 // SPDX-License-Identifier: GPL-3.0-or-later    (core)
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 ```
 
 **Hard rules:** No `unwrap`/`expect` in non-test code (mailbox → `MailboxError`, core → `CoreError`); `todo!()` never `unimplemented!()`; no pubkeys/onions/ciphertext logged above `debug`; no new wire `MailboxFrame`/`ErrorCode`/`Command`/`Event` variants (ADR 0006 frozen). Every gate green before commit.
@@ -876,7 +876,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Phase 2.D exit criterion: the mailbox server bounds disk under an
 //! anonymous flood and a targeted victim-fill, rejects oversize Delete,

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! In-process `Transport` for tests: a shared registry maps fake onion
 //! addresses to an inbound-stream sender; `dial` makes a `duplex` pair and

@@ -4,7 +4,7 @@ Thanks for your interest in Skattr — a Rust, desktop-first, metadata-resistant
 P2P encrypted messenger (all traffic over Tor v3 onion services). This document
 covers how to propose changes and the bar a pull request has to clear.
 
-Skattr is owned by Myggiz AB (Sweden) and is pre-1.0 software. Please read the
+Skattr is owned by Myggiz B.V. (Netherlands) and is pre-1.0 software. Please read the
 [threat model](docs/skattr-design.md) and [`SECURITY.md`](SECURITY.md) before
 relying on it for anything sensitive.
 

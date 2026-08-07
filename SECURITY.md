@@ -16,7 +16,7 @@ In scope:
 - The `core`, `mailbox`, `cli`, and `ui` crates in this repository.
 - The wire protocol as described in [`docs/skattr-design.md`](docs/skattr-design.md) — frame framing, Noise_XK handshake, the MLS binding (`h_transport`, ADR 0009), the invite-link format (ADR 0008), and the frozen mailbox protocol (ADR 0006).
 - The local IPC surface between the CLI/UI and the daemon, and its peer authentication: **Unix** (`AF_UNIX` socket at `<data_dir>/ipc.sock`, `SO_PEERCRED` uid match) and **Windows** (Tokio Named Pipes with a per-daemon random pipe name `\\.\pipe\skattr-<24-hex>` discovered via `<data_dir>\ipc.endpoint`, an owner-SID DACL on the pipe, and a post-accept SID equality check). Both reject a non-matching local peer before dispatch.
-- Signed release binaries published by Myggiz AB (see *Release artifacts* below).
+- Signed release binaries published by Myggiz B.V. (see *Release artifacts* below).
 
 Out of scope (report to upstream):
 

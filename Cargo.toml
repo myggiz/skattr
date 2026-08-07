@@ -13,7 +13,7 @@ exclude = ["crates/core/fuzz", "crates/mailbox/fuzz"]
 version = "0.1.12"
 edition = "2021"
 rust-version = "1.75"
-authors = ["Myggiz AB <hello@myggiz.net>"]
+authors = ["Myggiz B.V. <hello@myggiz.net>"]
 repository = "https://github.com/myggiz/skattr"
 homepage = "https://skattr.org"
 

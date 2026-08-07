@@ -667,7 +667,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 - [ ] **Step 2: Write the guardrail test** in `crates/tests/src/at_rest_shutdown.rs`:
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Phase 2.B exit criterion: a cleanly shut-down daemon leaves no plaintext
 //! storage DB (or WAL/SHM/sentinel) on disk, only a decryptable .age.

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Phase 2.C guardrail: peer offline -> direct fails -> timeout -> fallback
 //! deposit to mailbox -> recipient polls -> receives & decrypts. Exercises the

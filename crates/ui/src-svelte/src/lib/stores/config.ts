@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 //
 // config store — fetches ConfigSnapshot from the daemon, exposes an
 // optimistic patchConfig helper that coalesces edits over 500 ms then

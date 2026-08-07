@@ -12,7 +12,7 @@
 
 - **Spec:** `docs/superpowers/specs/2026-06-23-phase-4d-t3-hardening-design.md`. The HS-key "salt" finding is **dropped** (premise false — `age` scrypt salts per-file); do not implement it.
 - **No `unwrap()`/`expect()` in library/command bodies** — return typed `Result`, map errors. `#[cfg(test)]` may use them under the file's existing `#[allow(...)]`.
-- **License header on every edited/new file** (GPLv3): Rust `// SPDX-License-Identifier: GPL-3.0-or-later` + `// Copyright (C) 2026 Myggiz AB`; Svelte/TS the same in `//` form. (All target files already have headers — do not duplicate.)
+- **License header on every edited/new file** (GPLv3): Rust `// SPDX-License-Identifier: GPL-3.0-or-later` + `// Copyright (C) 2026 Myggiz B.V.`; Svelte/TS the same in `//` form. (All target files already have headers — do not duplicate.)
 - **Cross-platform:** item 3 (0700) and item 5 (getuid) edits are `#[cfg(unix)]`; Windows behavior unchanged.
 - **Toolchain:** run Rust gates under pinned **1.95.0** (`rustup override set 1.95.0` in the repo; the default floats to 1.96 which SIGSEGVs the arti tree). CI uses its own stable.
 - **Local pre-push gates (all must pass):** `cargo fmt --all --check`, `cargo clippy -p skattr-core -p skattr-ui --all-targets --all-features -- -D warnings`, `cargo test -p skattr-core -p skattr-ui`, plus `pnpm test` + `pnpm check` for the two UI tasks. **`pnpm check` stays local (not added to CI here — that's 4.A).**

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Long-lived event subscription: opens a fresh IPC connection (the
 //! IpcClient in AppState handles request/response; this opens a

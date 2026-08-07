@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Phase 3.D attachment UI-shell commands: manifest decode, file stat,
 //! and open/reveal of received files. Presentation-only — no protocol.

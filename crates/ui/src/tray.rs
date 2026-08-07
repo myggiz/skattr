@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Tauri 2 built-in system-tray. Menu items: Show window / Tor status
 //! (disabled, status-only) / Unread count (disabled, status-only,
