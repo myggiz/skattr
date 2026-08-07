@@ -260,14 +260,17 @@ into 3.A → 3.B → 3.C → 3.D.
   (session-scoped store), configurable download folder, in-UI retry, sender-side
   download progress, concurrent attachments per peer.
 
-#### Phase 4 — Release integrity, docs, signing — 🔄 in progress (4.D, 4.B, 4.C, 4.A done — only the real signing keys remain)
+#### Phase 4 — Release integrity, docs, signing — ✅ complete (4.D, 4.B, 4.C, 4.A done; real signing keys landed in #20)
 
 Honest, accurate user-facing docs (close the audit's documentation-truthfulness
-gaps), a working download-verification chain, and **real signing keys**: the
-minisign keypair is a committed **placeholder** (`docs/install/minisign.pub`,
-"PLACEHOLDER — REPLACE BEFORE TAGGING v0.1.0"; maintainer procedure in
-`docs/install/README-MAINTAINER-MINISIGN.md`) and the `SECURITY.md` PGP key is
-also a placeholder — both must be real before Phase 4 ships.
+gaps), a working download-verification chain, and **real signing keys**. The
+signing story is now shipped: PR #20 ("release(signing): real minisign key; drop
+PGP for v0.1.0") generated the **real** minisign keypair (`docs/install/minisign.pub`,
+key ID `EEDBFDA4BF232D38`, secret held offline per
+`docs/install/README-MAINTAINER-MINISIGN.md`) replacing the earlier placeholder,
+and **dropped PGP for v0.1.0** (plaintext-email disclosure per `SECURITY.md`).
+Signed releases **v0.1.0** and **v0.1.1** were cut, so the `SHA256SUMS` +
+`SHA256SUMS.minisig` verification chain is live.
 
 The loose-end disposition for v1.0 is locked in
 `docs/superpowers/specs/2026-06-23-v1.0-pull-forward-vs-disclose-decisions.md`
