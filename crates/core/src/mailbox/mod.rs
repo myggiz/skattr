@@ -12,5 +12,3 @@ pub(crate) mod client;
 pub(crate) mod codec;
 pub(crate) mod poll;
 pub mod protocol;
-
-pub(crate) use client::{map_error, recipient_hash_from_pubkey, MailboxClient};

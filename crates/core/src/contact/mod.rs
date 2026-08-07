@@ -16,7 +16,6 @@ pub mod card;
 // module_inception lint doesn't like the layout but the prompt is explicit.
 #[allow(clippy::module_inception)]
 pub mod contact;
-pub mod rotation;
 pub(crate) mod self_card;
 
 pub use card::{ContactCard, ContactCardBody};

@@ -14,7 +14,6 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use skattr_core::daemon::Config;
 use skattr_core::identity::{IdentityKey, Mnemonic, Seed, Vault};
 
 /// `skattr` command-line interface.

@@ -15,8 +15,7 @@ use std::time::Duration;
 use crate::daemon::clock::now_unix_seconds;
 use crate::daemon::config::Config;
 use crate::storage::messages::MessageRepo;
-use crate::storage::Pool;
-use crate::storage::StorageErrorKind;
+use crate::storage::{Pool, StorageErrorKind};
 
 /// Spawn the retention sweep on the current Tokio runtime.
 ///
