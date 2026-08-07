@@ -84,7 +84,8 @@ pub enum FrameType {
     Chunk = 0x0C,
     /// Sender→receiver negative ack: cannot serve this index.
     ChunkNack = 0x0D,
-    /// Receiver→sender: all chunks received + reassembled.
+    /// Receiver→sender: all chunks received + verified against the manifest
+    /// (not reassembled — see `Frame::AttachmentComplete`).
     AttachmentComplete = 0x0E,
 }
 
