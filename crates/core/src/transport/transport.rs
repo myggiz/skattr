@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Transport abstraction: publish an onion + receive inbound connections,
 //! and dial outbound onions. Implemented by `ArtiTransport` (production) and

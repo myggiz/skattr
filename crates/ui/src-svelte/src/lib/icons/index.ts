@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 //
 // Inlines bundled Lucide icons (ISC) as raw SVG strings so they
 // can be dropped into Svelte components via {@html ...}. Vite's

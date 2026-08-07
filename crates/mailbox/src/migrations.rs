@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Forward-only schema-migration runner. Mirrors the `core::storage`
 //! pattern: `include_str!`'d SQL files keyed by a monotonic version.

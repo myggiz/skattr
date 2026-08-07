@@ -1,5 +1,5 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later
--- Copyright (C) 2026 Myggiz AB
+-- Copyright (C) 2026 Myggiz B.V.
 --
 -- Skattr storage schema, version 6.
 -- Phase 1.G: wire FTS5 over messages, persist mls_generation +

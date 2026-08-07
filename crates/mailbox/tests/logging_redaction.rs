@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Asserts the mailbox's `info`/`warn`/`error`-level log lines never
 //! contain a full 64-hex pubkey, full 32-byte hash, ciphertext, or

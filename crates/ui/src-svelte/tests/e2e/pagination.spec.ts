@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 // Playwright e2e spec — Scroll-back pagination.
 // Requires: TAURI_MOCK=1 pnpm test:e2e
 //

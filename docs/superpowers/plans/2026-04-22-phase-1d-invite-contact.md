@@ -91,7 +91,7 @@ Replace the entire contents of `crates/core/src/invite/link.rs` with:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Invite link parsing, generation, signing, and verification.
 //!
@@ -198,7 +198,7 @@ Replace the contents of `crates/core/src/invite/mod.rs` with:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Out-of-band contact exchange via signed invite links.
 //!
@@ -222,7 +222,7 @@ Replace the contents of `crates/core/src/invite/qr.rs` with:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! QR code rendering for invite links (feature-gated on `qr`).
 //!
@@ -247,7 +247,7 @@ Replace the entire contents of `crates/core/src/contact/card.rs` with:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! `ContactCard`: signed, versioned self-published routing record.
 //!
@@ -2170,7 +2170,7 @@ Create `crates/tests/src/invite_roundtrip.rs` with:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Integration test: Alice mints invite → Bob parses + verifies +
 //! records + marks consumed. No Tor, no Noise, no MLS — just the

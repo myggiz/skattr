@@ -1146,7 +1146,7 @@ Write `crates/core/tests/frame_proptest.rs`:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Property-based round-trip test for the frame codec.
 //!
@@ -1278,7 +1278,7 @@ Write `crates/core/fuzz/fuzz_targets/frame_decoder.rs`:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Fuzz target: `FrameCodec::decode` must never panic on arbitrary bytes.
 

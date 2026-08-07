@@ -180,7 +180,7 @@ export function pendingState(
 
 ```ts
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 import { readable, type Readable } from "svelte/store";
 
 /** Unix seconds, updated every 30 s — lets pending contacts re-evaluate their

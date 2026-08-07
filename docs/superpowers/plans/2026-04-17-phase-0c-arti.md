@@ -151,7 +151,7 @@ Create `crates/core/src/transport/hs_key.rs` with:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -815,7 +815,7 @@ Rewrite `crates/core/src/transport/listener.rs`:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Accepts onion-service connections, yields authenticated `DataStream`s
 //! via an mpsc channel.
@@ -1249,7 +1249,7 @@ Create `crates/tests/src/arti_echo.rs`:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Phase 0 exit-criterion test: two daemons echo bytes over real Tor.
 //!

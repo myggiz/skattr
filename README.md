@@ -99,4 +99,4 @@ Report vulnerabilities privately — see [SECURITY.md](SECURITY.md). Do **not** 
 - **`core`, `cli`, `tests`** — [GNU General Public License v3.0](LICENSE-GPL3).
 - **`mailbox`** — [GNU Affero General Public License v3.0](LICENSE-AGPL3). If you run a public mailbox, the AGPL's network-use clause applies.
 
-Copyright © Myggiz AB. See [`docs/adr/0001-license.md`](docs/adr/0001-license.md) for the rationale.
+Copyright © Myggiz B.V. See [`docs/adr/0001-license.md`](docs/adr/0001-license.md) for the rationale.

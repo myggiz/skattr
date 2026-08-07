@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Test-only: an `AsyncRead + AsyncWrite` wrapper that can be "killed"
 //! mid-stream by flipping a shared atomic. After the kill flag is set,

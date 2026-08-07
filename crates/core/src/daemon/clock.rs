@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Clock helpers for the daemon. Hoisted from a per-module copy in
 //! `daemon::inbound` + three integration-test copies. Saturates to 0 on

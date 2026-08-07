@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! In-process `Daemon::run` lifecycle. `start_in_process_cmd` is the
 //! Tauri command the wizard's final step calls after `vault_unlock`

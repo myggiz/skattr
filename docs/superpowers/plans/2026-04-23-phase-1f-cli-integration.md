@@ -109,7 +109,7 @@ Write `crates/core/src/storage/migrations/0005_contact_group_link.sql`:
 
 ```sql
 -- SPDX-License-Identifier: GPL-3.0-or-later
--- Copyright (C) 2026 Myggiz AB
+-- Copyright (C) 2026 Myggiz B.V.
 --
 -- Skattr storage schema, version 5.
 -- Bind every contact row to its 2-member MLS group so SendMessage /
@@ -499,7 +499,7 @@ Create `crates/core/src/daemon/hex.rs` with only the test module populated (the 
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Hex newtypes for wire-safe byte arrays.
 
@@ -571,7 +571,7 @@ Replace the contents of `crates/core/src/daemon/hex.rs` with:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Hex newtypes for wire-safe byte arrays.
 //!
@@ -861,7 +861,7 @@ Rewrite `crates/core/src/daemon/commands.rs`:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Commands submitted into the daemon from the UI / CLI.
 //!
@@ -1137,7 +1137,7 @@ Create `crates/core/src/daemon/error_kind.rs` with the test module but no types 
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Stable wire enum projecting rich `CoreError`s onto the IPC surface.
 
@@ -1198,7 +1198,7 @@ Replace `crates/core/src/daemon/error_kind.rs` with:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Stable wire enum projecting rich `CoreError`s onto the IPC surface.
 //!
@@ -1365,7 +1365,7 @@ Create `crates/core/src/daemon/ipc/wire.rs` with types stubbed out and tests pop
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! IPC wire types: `IpcRequest`, `IpcResponse`, `IpcError`,
 //! `EventFilter`. Every variant round-trips through CBOR.
@@ -1424,7 +1424,7 @@ Create `crates/core/src/daemon/ipc/mod.rs`:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! CLI ↔ daemon IPC transport.
 
@@ -1450,7 +1450,7 @@ Replace the contents of `crates/core/src/daemon/ipc/wire.rs` with:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! IPC wire types: `IpcRequest`, `IpcResponse`, `IpcError`,
 //! `EventFilter`. Every variant round-trips through CBOR.
@@ -1568,7 +1568,7 @@ Create `crates/core/src/daemon/ipc/codec.rs` with the tests populated but no imp
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Length-prefix + CBOR codec for IPC frames.
 //!
@@ -1661,7 +1661,7 @@ Replace the contents of `crates/core/src/daemon/ipc/codec.rs` with:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Length-prefix + CBOR codec for IPC frames.
 //!
@@ -1839,7 +1839,7 @@ Create `crates/core/src/daemon/ipc/server.rs` with helper function signatures + 
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! IPC server half. Binds a Unix socket with `0600` mode and a `0700`
 //! parent directory, peer-cred checks every accepted connection, and
@@ -1921,7 +1921,7 @@ Replace `crates/core/src/daemon/ipc/server.rs` with:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! IPC server half. Binds a Unix socket with `0600` mode and a `0700`
 //! parent directory, peer-cred checks every accepted connection, and
@@ -2458,7 +2458,7 @@ Create `crates/core/src/daemon/ipc/client.rs` with test-only contents:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! IPC client half. Used by the CLI to connect, send one `Command`,
 //! collect the result, and optionally stream `Event`s.
@@ -2536,7 +2536,7 @@ Replace the contents of `crates/core/src/daemon/ipc/client.rs` with:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! IPC client half. Used by the CLI to connect, send one `Command`,
 //! collect the result, and optionally stream `Event`s.
@@ -2722,7 +2722,7 @@ Create `crates/core/src/daemon/handle.rs`:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! `DaemonHandle` groups the subsystems every command handler needs.
 //!
@@ -2782,7 +2782,7 @@ Replace the contents of `crates/core/src/daemon/handle.rs` with:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! `DaemonHandle` groups the subsystems every command handler needs.
 
@@ -2899,7 +2899,7 @@ Create `crates/core/src/daemon/dispatch.rs`:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Command dispatch: one function per `Command` variant, consuming a
 //! `DaemonHandle` + the command and returning a typed result / error.
@@ -2972,7 +2972,7 @@ Replace `crates/core/src/daemon/dispatch.rs` with:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Command dispatch: one function per `Command` variant, consuming a
 //! `DaemonHandle` + the command and returning a typed result / error.
@@ -4055,7 +4055,7 @@ Create `crates/core/src/daemon/inbound.rs`:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! MLS-aware `InboundDispatch`: decrypt, persist, emit event.
 
@@ -4132,7 +4132,7 @@ Replace `crates/core/src/daemon/inbound.rs` with:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! MLS-aware `InboundDispatch`: decrypt, persist, emit event.
 //!
@@ -6200,7 +6200,7 @@ Create `crates/tests/src/cli_ipc_roundtrip.rs`:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! End-to-end IPC round-trip with a single daemon.
 //!
@@ -6347,7 +6347,7 @@ Create `crates/tests/src/cli_two_daemons.rs`. Base it on the existing `delivery_
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Two-daemon E2E: invite -> add -> send -> receive, all over the
 //! mocked-transport harness from Phase 1.E.
@@ -6570,7 +6570,7 @@ Create `crates/tests/src/cli_real_tor.rs`. Unlike Task 32, this one spins up two
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Two-daemon E2E over real Arti. Ignored by default — run with
 //! `cargo test -p skattr-tests --release -- --ignored cli_real_tor`.

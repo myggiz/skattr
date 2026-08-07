@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Shared helpers for the in-process `LoopbackTransport` guardrail tests
 //! (`daemon_run_direct`, `first_contact_direct`). Extracted to avoid the

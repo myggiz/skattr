@@ -559,7 +559,7 @@ Routing rules:
 
 ## What Skattr is
 
-A Rust, desktop-first, metadata-resistant P2P encrypted messenger. All traffic goes over Tor v3 onion services (via Arti). Message encryption is MLS (RFC 9420) via OpenMLS. Transport auth is Noise_XK via `snow`. Identity is an Ed25519 keypair backed by a BIP39 seed phrase. No central server; mailboxes exist only for offline delivery and are semi-trusted. Licensed GPLv3 (client) / AGPLv3 (mailbox server). Owned by Myggiz AB (Sweden).
+A Rust, desktop-first, metadata-resistant P2P encrypted messenger. All traffic goes over Tor v3 onion services (via Arti). Message encryption is MLS (RFC 9420) via OpenMLS. Transport auth is Noise_XK via `snow`. Identity is an Ed25519 keypair backed by a BIP39 seed phrase. No central server; mailboxes exist only for offline delivery and are semi-trusted. Licensed GPLv3 (client) / AGPLv3 (mailbox server). Owned by Myggiz B.V. (Netherlands).
 
 ## Locked technical decisions (do not casually revisit)
 

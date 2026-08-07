@@ -38,7 +38,7 @@ cargo test -p skattr-tests -- --test-threads=1
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 ```
 
 ---
@@ -874,7 +874,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Phase 2.C guardrail: peer offline -> direct fails -> timeout -> retarget ->
 //! sweeper deposits to mailbox -> recipient polls -> receives & decrypts.

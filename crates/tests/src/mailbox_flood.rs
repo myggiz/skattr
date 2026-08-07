@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Phase 2.D exit criterion: the mailbox server bounds disk under an
 //! anonymous flood and a targeted victim-fill, and a fresh legit deposit

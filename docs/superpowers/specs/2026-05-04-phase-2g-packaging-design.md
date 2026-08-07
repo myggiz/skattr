@@ -189,8 +189,8 @@ Add:
 ```json
 {
   "bundle": {
-    "publisher": "Myggiz AB",
-    "copyright": "© 2026 Myggiz AB",
+    "publisher": "Myggiz B.V.",
+    "copyright": "© 2026 Myggiz B.V.",
     "license": "GPL-3.0-or-later",
     "licenseFile": "../../COPYING",
     "icon": [

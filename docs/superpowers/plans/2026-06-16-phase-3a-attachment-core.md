@@ -63,7 +63,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
 - [ ] **Step 1: Scaffold the module.** Create `crates/core/src/attachment/mod.rs`:
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Attachment core (Phase 3.A): manifest format, chunker, reassembler,
 //! metadata stripping. Pure/local — no transport. The manifest rides inside
@@ -91,7 +91,7 @@ Add `pub(crate) mod attachment;` to `crates/core/src/lib.rs` (alongside `pub(cra
 - [ ] **Step 2: Add `AttachmentErrorKind`** in `attachment/error_kind.rs`:
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Typed attachment failures (payload of `CoreError::Attachment`).
 
@@ -175,7 +175,7 @@ fn sanitize_filename_strips_path_and_control() {
 - [ ] **Step 6: Implement `manifest.rs`:**
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Attachment manifest: the CBOR descriptor carried inside `Kind::File`.
 
@@ -366,7 +366,7 @@ fn chunker_rejects_oversize() {
 - [ ] **Step 3: Implement `chunker.rs`:**
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Pure chunker: plaintext → manifest + per-chunk ciphertext blobs.
 
@@ -511,7 +511,7 @@ fn flipped_tag_fails_aead() {
 - [ ] **Step 3: Implement `reassembler.rs`:**
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Pure reassembler: manifest + chunk source → verified plaintext file.
 
@@ -623,7 +623,7 @@ fn passes_through_non_image() {
 - [ ] **Step 4: Implement `strip.rs`** using `img-parts` to drop metadata segments without re-encoding pixels (JPEG: remove APP1/EXIF + other APPn metadata; PNG: remove ancillary text/`eXIf` chunks). Representative shape (confirm exact `img-parts` 0.3 API):
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Send-side metadata stripping for common image formats.
 
@@ -723,7 +723,7 @@ fn insert_and_get_and_mark_received_round_trip() {
 - [ ] **Step 5: Implement the on-disk chunk store** in `attachment/store.rs`:
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! On-disk ciphertext chunk store at `<data_dir>/attachments/<hex id>/<index>`.
 //! Blobs are AEAD ciphertext (keys live in the MLS-protected manifest), so this

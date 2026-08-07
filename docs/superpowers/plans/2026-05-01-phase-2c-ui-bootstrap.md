@@ -1503,7 +1503,7 @@ members = [
 
 ```toml
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Myggiz AB
+# Copyright (C) 2026 Myggiz B.V.
 
 [package]
 name = "skattr-ui"
@@ -1549,7 +1549,7 @@ If any of those workspace deps don't exist in `Cargo.toml`, add them or substitu
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 fn main() {
     tauri_build::build();
@@ -1617,7 +1617,7 @@ If your environment has neither `convert` nor a way to produce real PNGs, commit
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Skattr UI — Tauri 2 + SvelteKit shell.
 //!
@@ -1697,7 +1697,7 @@ Expected: errors about missing modules. We'll commit at the end of Task 18.
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Pre-daemon Tauri commands. These are the only Tauri commands that
 //! run before `Daemon::run` is spawned. Three commands total:
@@ -1847,7 +1847,7 @@ We'll defer commit until Task 18.
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! In-process `Daemon::run` lifecycle. `start_in_process_cmd` is the
 //! Tauri command the wizard's final step calls after `vault_unlock`
@@ -1975,7 +1975,7 @@ If `Config::defaults()` doesn't exist or has a different signature, adapt the co
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Post-daemon Tauri command: `ipc_request`. Single generic command
 //! that proxies any `IpcRequest` to the daemon over the in-process
@@ -2023,7 +2023,7 @@ grep -n "pub async fn execute" crates/core/src/daemon/ipc/client.rs
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Long-lived event subscription: opens a fresh IPC connection (the
 //! IpcClient in AppState handles request/response; this opens a
@@ -2318,7 +2318,7 @@ git commit -m "ui-svelte: scaffold SvelteKit project (configs + manifest)"
 
 ```css
 /* SPDX-License-Identifier: GPL-3.0-or-later */
-/* Copyright (C) 2026 Myggiz AB */
+/* Copyright (C) 2026 Myggiz B.V. */
 /* Phase 2.C design tokens — locked in 2026-05-01 spec; reused 2.D–2.F. */
 
 @font-face {
@@ -2412,7 +2412,7 @@ git commit -m "ui-svelte: tokens.css + bundled Inter (OFL 1.1)"
 
 ```typescript
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 // Transport-agnostic IPC client. Components consume this interface
 // only; the concrete `TauriTransport` lives in tauri.ts.
 
@@ -2465,7 +2465,7 @@ git commit -m "ui-svelte: IpcClient TS interface"
 
 ```typescript
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 // TauriTransport: realises the IpcClient interface over Tauri 2 IPC.
 
 import { invoke, Channel } from "@tauri-apps/api/core";
@@ -2520,7 +2520,7 @@ git commit -m "ui-svelte: TauriTransport realising IpcClient over Tauri 2"
 
 ```typescript
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 import { writable } from "svelte/store";
 import type { TorStatus } from "$lib/ipc/types";
 
@@ -2531,7 +2531,7 @@ export const torStatus = writable<TorStatus | null>(null);
 
 ```typescript
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 import { writable } from "svelte/store";
 import type { CommandResult } from "$lib/ipc/types";
 
@@ -2546,7 +2546,7 @@ export const daemonInfo = writable<
 
 ```typescript
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 import { writable } from "svelte/store";
 import type { ContactSummary } from "$lib/ipc/types";
 
@@ -2570,7 +2570,7 @@ export async function refreshContacts(): Promise<void> {
 
 ```typescript
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 import { writable, get } from "svelte/store";
 
 import { ipcClient } from "$lib/ipc/tauri";
@@ -2629,7 +2629,7 @@ git commit -m "ui-svelte: stores (tor_status, daemon_info, contacts, conversatio
 
 ```svelte
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
-<!-- Copyright (C) 2026 Myggiz AB -->
+<!-- Copyright (C) 2026 Myggiz B.V. -->
 <script lang="ts">
   import { torStatus } from "$lib/stores/tor_status";
 </script>
@@ -2686,7 +2686,7 @@ git commit -m "ui-svelte: TorPill component"
 
 ```svelte
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
-<!-- Copyright (C) 2026 Myggiz AB -->
+<!-- Copyright (C) 2026 Myggiz B.V. -->
 <script lang="ts">
   import type { ContactSummary } from "$lib/ipc/types";
 
@@ -2771,7 +2771,7 @@ git commit -m "ui-svelte: ContactRow component"
 
 ```svelte
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
-<!-- Copyright (C) 2026 Myggiz AB -->
+<!-- Copyright (C) 2026 Myggiz B.V. -->
 <script lang="ts">
   import type { MessageRecord } from "$lib/ipc/types";
 
@@ -2821,7 +2821,7 @@ git commit -m "ui-svelte: MessageBubble component"
 
 ```svelte
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
-<!-- Copyright (C) 2026 Myggiz AB -->
+<!-- Copyright (C) 2026 Myggiz B.V. -->
 <script lang="ts">
   import VirtualList from "svelte-virtual-list";
   import type { MessageRecord } from "$lib/ipc/types";
@@ -2861,7 +2861,7 @@ git commit -m "ui-svelte: VirtualMessageList component"
 
 ```svelte
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
-<!-- Copyright (C) 2026 Myggiz AB -->
+<!-- Copyright (C) 2026 Myggiz B.V. -->
 <script lang="ts">
   import "$lib/tokens.css";
   let { children } = $props();
@@ -2886,7 +2886,7 @@ git commit -m "ui-svelte: +layout.svelte loads tokens.css"
 
 ```svelte
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
-<!-- Copyright (C) 2026 Myggiz AB -->
+<!-- Copyright (C) 2026 Myggiz B.V. -->
 <script lang="ts">
   import { onMount } from "svelte";
   import { goto } from "$app/navigation";
@@ -2982,7 +2982,7 @@ git commit -m "ui-svelte: +page.svelte main shell"
 
 ```svelte
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
-<!-- Copyright (C) 2026 Myggiz AB -->
+<!-- Copyright (C) 2026 Myggiz B.V. -->
 <script lang="ts">
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
@@ -3038,7 +3038,7 @@ git commit -m "ui-svelte: first-run wizard wrapper"
 
 ```svelte
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
-<!-- Copyright (C) 2026 Myggiz AB -->
+<!-- Copyright (C) 2026 Myggiz B.V. -->
 <script lang="ts">
   let { onNext }: { onNext: () => void } = $props();
 </script>
@@ -3086,7 +3086,7 @@ git commit -m "ui-svelte: wizard step 1 (Welcome)"
 
 ```svelte
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
-<!-- Copyright (C) 2026 Myggiz AB -->
+<!-- Copyright (C) 2026 Myggiz B.V. -->
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { zxcvbnAsync, zxcvbnOptions } from "@zxcvbn-ts/core";
@@ -3195,7 +3195,7 @@ git commit -m "ui-svelte: wizard step 2 (Passphrase, with zxcvbn meter)"
 
 ```svelte
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
-<!-- Copyright (C) 2026 Myggiz AB -->
+<!-- Copyright (C) 2026 Myggiz B.V. -->
 <script lang="ts">
   let { mnemonic, onNext }: {
     mnemonic: string | null;
@@ -3318,7 +3318,7 @@ git commit -m "ui-svelte: wizard step 3 (SeedPhrase, type-back + skip modal)"
 
 ```svelte
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
-<!-- Copyright (C) 2026 Myggiz AB -->
+<!-- Copyright (C) 2026 Myggiz B.V. -->
 <script lang="ts">
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
@@ -3399,7 +3399,7 @@ git commit -m "ui-svelte: wizard step 4 (Bootstrap)"
 
 ```typescript
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 // Regression guard: tokens.css must not drift without an explicit
 // design-system change. Update this snapshot intentionally only.
 
@@ -3449,7 +3449,7 @@ git commit -m "ui-svelte: tokens.css regression snapshot"
 
 ```typescript
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 import { describe, expect, it, vi } from "vitest";
 import { unwrapOk } from "./client";
@@ -3692,7 +3692,7 @@ git commit -m "ui-svelte: Playwright unlock path"
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Phase 2.C: end-to-end first-run integration. Bootstraps a real
 //! Tor-backed daemon via `Daemon::run`, drives `Command::DaemonInfo`

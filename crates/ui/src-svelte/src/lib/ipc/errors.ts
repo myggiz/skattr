@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 // Human-readable error messages for structured IPC errors.
 
 import type { IpcError, DaemonErrorKind } from "./types";

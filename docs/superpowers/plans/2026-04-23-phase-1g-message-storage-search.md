@@ -143,7 +143,7 @@ Write `crates/core/src/storage/migrations/0006_history_search.sql`:
 
 ```sql
 -- SPDX-License-Identifier: GPL-3.0-or-later
--- Copyright (C) 2026 Myggiz AB
+-- Copyright (C) 2026 Myggiz B.V.
 --
 -- Skattr storage schema, version 6.
 -- Phase 1.G: wire FTS5 over messages, persist mls_generation +
@@ -256,7 +256,7 @@ Create `crates/core/src/storage/read_state.rs`:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -3411,7 +3411,7 @@ Create `crates/core/src/daemon/retention.rs`:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -4399,7 +4399,7 @@ Create `crates/tests/src/cli_search.rs`:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Phase 1.G integration test: full IPC round-trip for SearchMessages.
 //!
@@ -4560,7 +4560,7 @@ Create `crates/tests/src/history_sweep.rs`:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Phase 1.G integration test: hourly retention sweep with a 50 ms
 //! test-only tick interval.
@@ -4709,7 +4709,7 @@ Create `crates/tests/src/cli_tail_follow.rs`:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Phase 1.G integration test: Event::MessageReceived reaches a
 //! Subscribe(EventFilter::Messages) client end-to-end.
@@ -4805,7 +4805,7 @@ EOF
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Phase 1.G integration test: paginated ExportHistory yields a
 //! parseable JSON file with oldest-first ordering for 2500 rows.
@@ -4911,7 +4911,7 @@ Create `crates/core/tests/fts_search_p95.rs`:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Phase 1.G validation: FTS5 search over 100k rows, p95 < 50 ms.
 //!

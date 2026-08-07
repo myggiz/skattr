@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! On-demand outbound dialer for the per-peer delivery actor: resolve a
 //! contact's onion, dial via the injected `Transport`, run the Noise

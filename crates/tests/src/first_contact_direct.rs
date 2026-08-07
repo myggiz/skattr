@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Phase 1C exit-criterion guardrail: two real `run_with_transport` daemon
 //! assemblies complete the **full first-contact flow** over an in-process

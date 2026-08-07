@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 import { writable, type Writable } from "svelte/store";
 import { pubkeyEq } from "$lib/pubkey";
 import type { ContactSummary } from "$lib/ipc/types";

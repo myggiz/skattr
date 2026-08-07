@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 import { describe, it, expect } from "vitest";
 import { render } from "@testing-library/svelte";
 import ContactRow from "./ContactRow.svelte";

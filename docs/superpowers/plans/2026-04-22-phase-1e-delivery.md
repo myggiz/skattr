@@ -100,7 +100,7 @@ Create `crates/core/src/storage/migrations/0004_outbox_message_id.sql`:
 
 ```sql
 -- SPDX-License-Identifier: GPL-3.0-or-later
--- Copyright (C) 2026 Myggiz AB
+-- Copyright (C) 2026 Myggiz B.V.
 --
 -- Skattr storage schema, version 4.
 -- Add per-message id to the outbox so the delivery layer can
@@ -266,7 +266,7 @@ Overwrite everything above the `#[cfg(test)]` in `crates/core/src/storage/outbox
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -436,7 +436,7 @@ Create `crates/core/src/delivery/backoff.rs`:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Exponential backoff with ±25 % jitter, capped at 5 minutes.
 //!
@@ -531,7 +531,7 @@ Edit `crates/core/src/delivery/mod.rs` to add the new line (keep `outbox`, `rece
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Send/receive plumbing: outbox queue, retry, dedup, ACK handling.
 
@@ -592,7 +592,7 @@ Replace the whole contents of `crates/core/src/delivery/outbox.rs` with:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Persisted send queue with exponential-backoff retry.
 //!
@@ -802,7 +802,7 @@ Replace `crates/core/src/delivery/receiver.rs` in full with:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Receiver-side ingress: timestamp check, dedup, persist, ACK.
 //!
@@ -990,7 +990,7 @@ Create `crates/core/src/delivery/peer.rs`:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Per-peer connection actor.
 //!
@@ -1003,7 +1003,7 @@ Create `crates/core/src/delivery/hub.rs`:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Daemon-scoped delivery router.
 //!
@@ -1020,7 +1020,7 @@ Replace contents with:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Send/receive plumbing: outbox queue, retry, dedup, ACK handling.
 
@@ -1160,7 +1160,7 @@ Replace `crates/core/src/delivery/peer.rs` with:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Per-peer connection actor.
 
@@ -1830,7 +1830,7 @@ Replace `crates/core/src/delivery/hub.rs` skeleton with:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Daemon-scoped delivery router.
 //!
@@ -2072,7 +2072,7 @@ Create `crates/core/src/delivery/kill_stream.rs`:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Test-only: an `AsyncRead + AsyncWrite` wrapper that can be "killed"
 //! mid-stream by flipping a shared atomic. After the kill flag is set,
@@ -2168,7 +2168,7 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for KillableStream<S> {
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Send/receive plumbing: outbox queue, retry, dedup, ACK handling.
 
@@ -2303,7 +2303,7 @@ Create `crates/tests/src/delivery_kill_mid_message.rs`:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Integration test: two daemons share an MLS 2-member group, send one
 //! application message, kill the transport mid-flight, rebuild the
@@ -2721,7 +2721,7 @@ Create `crates/tests/src/delivery_real_tor.rs`:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Integration test over real Arti: two daemons publish onions,
 //! Alice dials Bob, runs the full handshake, and sends five

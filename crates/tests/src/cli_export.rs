@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Phase 1.G integration test: paginated `ExportHistory` yields 2500 rows
 //! oldest-first over three pages (1000 + 1000 + 500).

@@ -16,7 +16,7 @@
 - Tests live next to the code (unit tests in `mod tests` blocks); cross-binary integration tests in `crates/tests/src/`.
 - Cargo runs require `. "$HOME/.cargo/env" &&` prefix per CLAUDE.md.
 - `cargo test -p skattr-core` requires `--features test-harness` per memory; full-tree `cargo test` does not.
-- Every `.rs` file carries `// SPDX-License-Identifier: GPL-3.0-or-later` + `// Copyright (C) 2026 Myggiz AB` headers (AGPLv3 for `crates/mailbox/`, but 2.F doesn't touch that crate).
+- Every `.rs` file carries `// SPDX-License-Identifier: GPL-3.0-or-later` + `// Copyright (C) 2026 Myggiz B.V.` headers (AGPLv3 for `crates/mailbox/`, but 2.F doesn't touch that crate).
 - All commits include the `Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>` trailer.
 - Each task ends with **one** commit; commit messages follow the existing style (`feat(scope): subject` / `fix(scope): subject` / `docs(scope): subject` / `test(scope): subject`).
 - After every Rust task, run `cargo fmt --all` then `cargo clippy --all-targets -- -D warnings` then the relevant `cargo test` invocation. Don't stage failing-clippy code.
@@ -206,7 +206,7 @@ Create `crates/core/src/storage/migrations/0013_contacts_muted.sql`:
 
 ```sql
 -- SPDX-License-Identifier: GPL-3.0-or-later
--- Copyright (C) 2026 Myggiz AB
+-- Copyright (C) 2026 Myggiz B.V.
 --
 -- Skattr schema migration 0013: per-contact mute flag
 --
@@ -315,7 +315,7 @@ Create `crates/core/src/storage/migrations/0014_passphrase_audit.sql`:
 
 ```sql
 -- SPDX-License-Identifier: GPL-3.0-or-later
--- Copyright (C) 2026 Myggiz AB
+-- Copyright (C) 2026 Myggiz B.V.
 --
 -- Skattr schema migration 0014: passphrase change audit log
 --
@@ -1714,7 +1714,7 @@ Create `crates/core/src/storage/passphrase_audit.rs`:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Append-only audit log for `Command::ChangePassphrase` outcomes.
 
@@ -2067,7 +2067,7 @@ Create `crates/core/src/daemon/passphrase.rs`:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! ChangePassphrase: stage-then-rename atomic re-key spanning the
 //! identity vault and the storage age key. Recovery is deterministic
@@ -2895,7 +2895,7 @@ Create `crates/tests/src/passphrase_atomicity.rs`:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Six-kill-point coverage of `core::daemon::passphrase::rekey` +
 //! `recover_if_needed`. See spec § "ChangePassphrase — Test plan".
@@ -3066,7 +3066,7 @@ Create `crates/core/src/daemon/logs.rs`:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! In-memory ring-buffer log layer + redacted IPC stream.
 //!
@@ -3640,7 +3640,7 @@ Create `crates/tests/src/wipe_data.rs`:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 #![cfg(feature = "test-harness")]
 
@@ -3716,7 +3716,7 @@ Create `crates/ui/src/tray.rs`:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem},
@@ -3847,7 +3847,7 @@ notify-rust = { version = "4", default-features = false }
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 #[tauri::command]
 pub fn notify(title: String, body: String, conversation_id: Option<String>) -> Result<(), String> {
@@ -5648,7 +5648,7 @@ EOF
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 #![cfg(feature = "test-harness")]
 
@@ -5748,7 +5748,7 @@ EOF
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 #![cfg(feature = "test-harness")]
 

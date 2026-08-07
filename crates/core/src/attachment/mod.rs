@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Attachment core (Phase 3.A): manifest format, chunker, reassembler,
 //! metadata stripping. Pure/local — no transport. The manifest rides inside

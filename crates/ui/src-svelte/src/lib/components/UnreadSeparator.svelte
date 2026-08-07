@@ -1,5 +1,5 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
-<!-- Copyright (C) 2026 Myggiz AB -->
+<!-- Copyright (C) 2026 Myggiz B.V. -->
 <div class="separator" role="separator" aria-label="Unread messages below">
   <span class="line"></span>
   <span class="label">Unread</span>

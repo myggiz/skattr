@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 // TauriTransport: realises the IpcClient interface over Tauri 2 IPC.
 
 import { invoke, Channel } from "@tauri-apps/api/core";

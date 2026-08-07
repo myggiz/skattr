@@ -116,7 +116,7 @@ Full SQL of `crates/core/src/storage/migrations/0006_history_search.sql`:
 
 ```sql
 -- SPDX-License-Identifier: GPL-3.0-or-later
--- Copyright (C) 2026 Myggiz AB
+-- Copyright (C) 2026 Myggiz B.V.
 --
 -- Skattr storage schema, version 6.
 -- Phase 1.G: wire FTS5, persist mls_generation + ts_daemon_recv, add read_state.

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! #93 load-bearing guardrail: **first contact recovers after the responder's
 //! first Ack is dropped on the wire**, proven through the REAL

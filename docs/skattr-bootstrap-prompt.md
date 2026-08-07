@@ -1,6 +1,6 @@
 # Skattr — Project Bootstrap Prompt for Claude Code
 
-You are bootstrapping a new Rust project called **Skattr**, a desktop-first, metadata-resistant, serverless(ish) encrypted messaging application. The company behind it is Myggiz AB (Sweden). The product is licensed GPLv3 (client) and AGPLv3 (mailbox server).
+You are bootstrapping a new Rust project called **Skattr**, a desktop-first, metadata-resistant, serverless(ish) encrypted messaging application. The company behind it is Myggiz B.V. (Netherlands). The product is licensed GPLv3 (client) and AGPLv3 (mailbox server).
 
 ## What Skattr is
 

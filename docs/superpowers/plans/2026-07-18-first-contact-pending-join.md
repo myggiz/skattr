@@ -13,7 +13,7 @@
 - **Cargo not on PATH** — prefix every cargo command with `. "$HOME/.cargo/env" &&`.
 - **Local-first / on-demand CI** — the authoritative gate is local: `cargo fmt --all -- --check`, `cargo clippy --workspace --exclude skattr-ui --all-targets --features test-harness -- -D warnings`, `cargo test`, `cargo deny check`. CI does not auto-run.
 - **No `unwrap()`/`expect()` in non-test library code.** Errors are our types (`CoreError`/`thiserror`), never a vendor's. Use `?`.
-- **All `.rs` files carry the GPLv3 header** (`// SPDX-License-Identifier: GPL-3.0-or-later` / `// Copyright (C) 2026 Myggiz AB`).
+- **All `.rs` files carry the GPLv3 header** (`// SPDX-License-Identifier: GPL-3.0-or-later` / `// Copyright (C) 2026 Myggiz B.V.`).
 - **Redaction:** never log a peer pubkey, onion, or payload bytes. Peer identity may appear only as a short redacted `Debug` if at all; prefer counts/attempt numbers. Match the existing `#90` instrumentation style.
 - **rusqlite pinned at 0.38** — do not bump. Migrations are `include_str!`'d SQL keyed by `schema_version`.
 - **Protocol/auth-adjacent → second reviewer** (per CLAUDE.md). No wire-format change (the Welcome bytes and frames are unchanged; only local state lifecycle + a new local table).

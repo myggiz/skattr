@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Integration test: Alice ↔ Bob MLS 2-member group, exchange messages
 //! both ways, survive restart, resume exchange. Runs against in-memory

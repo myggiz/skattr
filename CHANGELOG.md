@@ -167,7 +167,7 @@ See `docs/THREAT_MODEL.md` for the full security model and disclosures.
 
 ### License
 
-Client GPLv3; mailbox server AGPLv3. © Myggiz AB.
+Client GPLv3; mailbox server AGPLv3. © Myggiz B.V.
 
 ## [Development history]
 

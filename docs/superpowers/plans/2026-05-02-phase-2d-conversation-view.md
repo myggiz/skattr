@@ -1332,7 +1332,7 @@ Top-of-file licence header (GPL-3.0-or-later — `crates/core` ships GPLv3):
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Snapshot test: enumerates every variant of `Command` and
 //! `CommandResult`, sorts them alphabetically, and compares the
@@ -1602,7 +1602,7 @@ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 ```typescript
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 //
 // Inlines bundled Lucide icons as raw SVG strings so they can be
 // dropped into Svelte components via {@html ...}. Vite's `?raw`
@@ -1666,7 +1666,7 @@ EOF
 
 ```typescript
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 import { describe, expect, test } from "vitest";
 import { render } from "@testing-library/svelte";
 import DeliveryIcon from "./DeliveryIcon.svelte";
@@ -1724,7 +1724,7 @@ cd /home/myggiz/development/skattr/crates/ui/src-svelte && pnpm vitest run Deliv
 
 ```svelte
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
-<!-- Copyright (C) 2026 Myggiz AB -->
+<!-- Copyright (C) 2026 Myggiz B.V. -->
 <script lang="ts">
   import { icons } from "$lib/icons";
 
@@ -1801,7 +1801,7 @@ EOF
 
 ```svelte
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
-<!-- Copyright (C) 2026 Myggiz AB -->
+<!-- Copyright (C) 2026 Myggiz B.V. -->
 <div class="separator" role="separator" aria-label="Unread messages below">
   <span class="line"></span>
   <span class="label">Unread</span>
@@ -1865,7 +1865,7 @@ EOF
 
 ```svelte
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
-<!-- Copyright (C) 2026 Myggiz AB -->
+<!-- Copyright (C) 2026 Myggiz B.V. -->
 <div class="skeleton" aria-hidden="true"></div>
 
 <style>
@@ -1920,7 +1920,7 @@ EOF
 
 ```typescript
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 import { describe, expect, test, beforeEach } from "vitest";
 import { get } from "svelte/store";
 import { delivery, recordDeliveryStatus, statusForMessageHex } from "./delivery";
@@ -1954,7 +1954,7 @@ describe("delivery store", () => {
 
 ```typescript
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 import { writable, get } from "svelte/store";
 import type { DeliveryStatus, Hex16 } from "$lib/ipc/types";
 
@@ -2060,7 +2060,7 @@ EOF
 
 ```typescript
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 import { describe, expect, test, beforeEach, vi } from "vitest";
 import { get } from "svelte/store";
 import { conversation, appendOptimistic, reconcile, markFailed } from "./conversation";
@@ -2138,7 +2138,7 @@ describe("optimistic send + reconcile", () => {
 
 ```typescript
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 import { writable, get } from "svelte/store";
 
 import { ipcClient } from "$lib/ipc/tauri";
@@ -2652,7 +2652,7 @@ EOF
 
 ```svelte
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
-<!-- Copyright (C) 2026 Myggiz AB -->
+<!-- Copyright (C) 2026 Myggiz B.V. -->
 <script lang="ts">
   import type { MessageRecord } from "$lib/ipc/types";
   import type { OptimisticMessage } from "$lib/stores/conversation";
@@ -2753,7 +2753,7 @@ This is the largest single-component change in the plan. The current file is 51 
 
 ```svelte
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
-<!-- Copyright (C) 2026 Myggiz AB -->
+<!-- Copyright (C) 2026 Myggiz B.V. -->
 <!--
   VirtualMessageList: virtualised list of MessageRecord items.
   Phase 2.D additions:
@@ -2981,7 +2981,7 @@ export async function send(contact: PublicKey, body: string): Promise<void> {
 
 ```typescript
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 import { describe, expect, test, beforeEach, vi } from "vitest";
 import { render, fireEvent } from "@testing-library/svelte";
 import Composer from "./Composer.svelte";
@@ -3071,7 +3071,7 @@ describe("Composer", () => {
 
 ```svelte
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
-<!-- Copyright (C) 2026 Myggiz AB -->
+<!-- Copyright (C) 2026 Myggiz B.V. -->
 <script lang="ts">
   import { send } from "$lib/stores/conversation";
   import type { PublicKey } from "$lib/ipc/types";
@@ -3293,7 +3293,7 @@ EOF
 
 ```typescript
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 import { test, expect } from "@playwright/test";
 
 test.describe("composer happy path", () => {
@@ -3375,7 +3375,7 @@ EOF
 
 ```typescript
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 import { test, expect } from "@playwright/test";
 
 test.describe("conversation pagination", () => {
@@ -3500,7 +3500,7 @@ This test is `#[ignore]`-gated alongside `cli_real_tor` / `delivery_real_tor`. I
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 #![cfg(feature = "test-harness")]
 

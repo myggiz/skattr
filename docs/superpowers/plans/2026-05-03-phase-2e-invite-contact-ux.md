@@ -16,7 +16,7 @@
 - Tests live next to the code: `crates/core/src/storage/<module>.rs::tests` for storage, `daemon/dispatch.rs::tests` for dispatch, `daemon/inbound.rs::tests` for inbound, `crates/tests/src/` for cross-daemon integration.
 - Cargo runs require `. "$HOME/.cargo/env" &&` prefix per CLAUDE.md.
 - `cargo test -p skattr-core` requires `--features test-harness` per memory; full-tree `cargo test` does not.
-- Every `.rs` file carries `// SPDX-License-Identifier: GPL-3.0-or-later` + `// Copyright (C) 2026 Myggiz AB` headers.
+- Every `.rs` file carries `// SPDX-License-Identifier: GPL-3.0-or-later` + `// Copyright (C) 2026 Myggiz B.V.` headers.
 - All commits include the `Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>` trailer.
 - Each task ends with **one** commit; commit messages follow the existing style (`feat(scope): subject` / `fix(scope): subject` / `docs(scope): subject`).
 
@@ -128,7 +128,7 @@ Create `crates/core/src/storage/migrations/0010_outstanding_invites.sql`:
 
 ```sql
 -- SPDX-License-Identifier: GPL-3.0-or-later
--- Copyright (C) 2026 Myggiz AB
+-- Copyright (C) 2026 Myggiz B.V.
 --
 -- Skattr schema migration 0010: outstanding invites
 --
@@ -167,7 +167,7 @@ Create `crates/core/src/storage/outstanding_invites.rs`:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -542,7 +542,7 @@ Create `crates/core/src/storage/migrations/0011_contacts_hidden.sql`:
 
 ```sql
 -- SPDX-License-Identifier: GPL-3.0-or-later
--- Copyright (C) 2026 Myggiz AB
+-- Copyright (C) 2026 Myggiz B.V.
 --
 -- Skattr schema migration 0011: soft-delete column on contacts
 --
@@ -3075,7 +3075,7 @@ Create `crates/ui/src-svelte/src/lib/components/Toast.test.ts`:
 
 ```ts
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { render } from "@testing-library/svelte";
@@ -3123,7 +3123,7 @@ Create `crates/ui/src-svelte/src/lib/stores/toast.ts`:
 
 ```ts
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 import { writable, type Readable } from "svelte/store";
 
@@ -3165,7 +3165,7 @@ Create `crates/ui/src-svelte/src/lib/components/Toast.svelte`:
 
 ```svelte
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
-<!-- Copyright (C) 2026 Myggiz AB -->
+<!-- Copyright (C) 2026 Myggiz B.V. -->
 <script lang="ts">
   import { currentToast } from "$lib/stores/toast";
 </script>
@@ -3232,7 +3232,7 @@ Create `crates/ui/src-svelte/src/lib/components/ConfirmDialog.test.ts`:
 
 ```ts
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 import { describe, it, expect, vi } from "vitest";
 import { render, fireEvent } from "@testing-library/svelte";
@@ -3312,7 +3312,7 @@ Create `crates/ui/src-svelte/src/lib/components/ConfirmDialog.svelte`:
 
 ```svelte
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
-<!-- Copyright (C) 2026 Myggiz AB -->
+<!-- Copyright (C) 2026 Myggiz B.V. -->
 <script lang="ts">
   interface Props {
     title: string;
@@ -3423,7 +3423,7 @@ Create `crates/ui/src-svelte/src/lib/stores/qr.test.ts`:
 
 ```ts
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
@@ -3471,7 +3471,7 @@ Create `crates/ui/src-svelte/src/lib/stores/qr.ts`:
 
 ```ts
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 import { invoke } from "@tauri-apps/api/core";
 
@@ -3524,7 +3524,7 @@ Create `crates/ui/src-svelte/src/lib/components/InviteGenerateDialog.test.ts`:
 
 ```ts
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 import { describe, it, expect, vi } from "vitest";
 import { render, fireEvent } from "@testing-library/svelte";
@@ -3588,7 +3588,7 @@ Create `crates/ui/src-svelte/src/lib/components/InviteGenerateDialog.svelte`:
 
 ```svelte
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
-<!-- Copyright (C) 2026 Myggiz AB -->
+<!-- Copyright (C) 2026 Myggiz B.V. -->
 <script lang="ts">
   import { ipcClient } from "$lib/ipc/tauri";
   import { renderInviteQr } from "$lib/stores/qr";
@@ -3755,7 +3755,7 @@ Create `crates/ui/src-svelte/src/lib/components/AddContactDialog.test.ts`:
 
 ```ts
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, fireEvent } from "@testing-library/svelte";
@@ -3809,7 +3809,7 @@ Create `crates/ui/src-svelte/src/lib/components/AddContactDialog.svelte`:
 
 ```svelte
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
-<!-- Copyright (C) 2026 Myggiz AB -->
+<!-- Copyright (C) 2026 Myggiz B.V. -->
 <script lang="ts">
   import { ipcClient } from "$lib/ipc/tauri";
   import { refreshContacts } from "$lib/stores/contacts";
@@ -4141,7 +4141,7 @@ Edit `crates/ui/src-svelte/src/lib/stores/contacts.test.ts` (create if absent):
 
 ```ts
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
@@ -4293,7 +4293,7 @@ Create `crates/ui/src-svelte/src/lib/components/ContactDetailsPanel.test.ts`:
 
 ```ts
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, fireEvent } from "@testing-library/svelte";
@@ -4420,7 +4420,7 @@ Create `crates/ui/src-svelte/src/lib/components/ContactDetailsPanel.svelte`:
 
 ```svelte
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
-<!-- Copyright (C) 2026 Myggiz AB -->
+<!-- Copyright (C) 2026 Myggiz B.V. -->
 <script lang="ts">
   import type { ContactSummary } from "$lib/ipc/types";
   import { rename, archive } from "$lib/stores/contacts";
@@ -4821,7 +4821,7 @@ Create `crates/ui/src-svelte/tests/e2e/invite-generate.spec.ts`:
 
 ```ts
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 import { test, expect } from "@playwright/test";
 
@@ -4845,7 +4845,7 @@ Create `crates/ui/src-svelte/tests/e2e/add-contact-paste.spec.ts`:
 
 ```ts
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 import { test, expect } from "@playwright/test";
 
@@ -4866,7 +4866,7 @@ Create `crates/ui/src-svelte/tests/e2e/contact-details-panel.spec.ts`:
 
 ```ts
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 import { test, expect } from "@playwright/test";
 
@@ -4935,7 +4935,7 @@ Create `crates/tests/src/welcome_propagation.rs`. The exact wiring follows the p
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Phase 2.E end-to-end: paired daemons over real Tor exchange an
 //! invite, add the contact, propagate the Welcome, and round-trip a

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Typed invite-layer error kinds. Replaces free-form String payloads
 //! so CoreError::kind() can project via a structural match.

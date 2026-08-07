@@ -175,7 +175,7 @@ Replace the entire contents of `crates/core/src/transport/noise.rs` with:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Noise_XK handshake and transport cipher via `snow`.
 //!
@@ -638,7 +638,7 @@ Replace the entire contents of `crates/core/src/transport/connection.rs` with:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! A handshake-complete bidirectional connection to an authenticated peer.
 //!
@@ -1902,7 +1902,7 @@ Create `crates/core/tests/noise_handshake.rs` with:
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Integration test: Noise_XK handshake + post-handshake round-trip
 //! over a `tokio::io::duplex`. Runs both halves concurrently via

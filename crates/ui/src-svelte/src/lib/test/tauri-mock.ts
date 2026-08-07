@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 // Deterministic Tauri 2 mock for Playwright e2e tests (TAURI_MOCK=1).
 // Replaces @tauri-apps/api/core via Vite alias.
 // No network calls, no CDN deps.

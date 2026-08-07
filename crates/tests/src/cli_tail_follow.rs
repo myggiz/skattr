@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Phase 1.G integration test: `Event::MessageReceived` reaches a
 //! `Subscribe(EventFilter::Messages { contact })` client, and

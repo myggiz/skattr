@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Myggiz AB
+// Copyright (C) 2026 Myggiz B.V.
 
 //! Public re-exports for backup export / import. The implementations
 //! live in `storage::backup` (crate-private); this module surfaces the
