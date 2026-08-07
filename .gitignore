@@ -19,6 +19,9 @@ Cargo.lock.bak
 *.key
 *.pem
 identity.vault
+*.age
+*.onion
+hostname
 
 # proptest auto-generated regression seeds (we don't check these in)
 proptest-regressions/
