@@ -1,63 +1,139 @@
 # Contributing to Skattr
 
-Thanks for your interest. Skattr is a security-sensitive project, so the bar for changes is high. This document covers how to build, test, and get a change merged.
+Thanks for your interest in Skattr — a Rust, desktop-first, metadata-resistant
+P2P encrypted messenger (all traffic over Tor v3 onion services). This document
+covers how to propose changes and the bar a pull request has to clear.
 
-## Before you start
+Skattr is owned by Myggiz AB (Sweden) and is pre-1.0 software. Please read the
+[threat model](docs/skattr-design.md) and [`SECURITY.md`](SECURITY.md) before
+relying on it for anything sensitive.
 
-- Read [`docs/skattr-design.md`](docs/skattr-design.md) end-to-end.
-- Skim [`docs/skattr-implementation-plan.md`](docs/skattr-implementation-plan.md) to locate what phase you'd be contributing to.
-- For crypto-, protocol-, or auth-related changes: open an issue or draft an ADR (`docs/adr/`) *before* writing code. These changes always need a second reviewer.
+## Reporting security issues
 
-## Development setup
+**Do not open a public issue for a security problem.** Follow
+[`SECURITY.md`](SECURITY.md): email `security@myggiz.net`. See that file for
+scope and what to expect.
 
-Install Rust stable (the toolchain is pinned via `rust-toolchain.toml`). On Linux you also need a C toolchain, `pkg-config`, and OpenSSL headers.
+## Reporting bugs and proposing features
+
+The backlog lives in **GitHub issues**. Before opening a new one, search existing
+issues (including closed) and the known-limitation list in `SECURITY.md` — several
+absences (no multi-member groups, no metadata padding, direct-only first-contact
+Welcome, advisory onion rotation) are documented, deliberate v1.0 limitations, not
+bugs.
+
+A good issue carries: what you observed vs. expected, `file:line` if you have it,
+repro steps, and your OS/version.
+
+## Sign your commits — Developer Certificate of Origin (DCO)
+
+Skattr uses the [Developer Certificate of Origin](DCO) instead of a CLA. Every
+commit must be signed off, certifying you wrote the change (or have the right to
+submit it) under the project's license. Add the trailer with `-s`:
 
 ```bash
-cargo build --workspace
-cargo test  --workspace
-cargo clippy --all-targets -- -D warnings
-cargo fmt --all --check
-cargo deny check       # licenses, advisories, bans, sources
+git commit -s -m "your message"
 ```
 
-Run the CLI locally:
+This appends a line to the commit message:
+
+```
+Signed-off-by: Your Name <your.email@example.com>
+```
+
+Use your real name and a reachable email. PRs whose commits lack a valid
+`Signed-off-by` will not be merged. To fix an existing branch, amend
+(`git commit --amend -s`) or rebase with `git rebase --signoff`.
+
+## Licensing of contributions
+
+Inbound = outbound. By contributing you agree your work is licensed under the
+same terms as the code you touch:
+
+- `core`, `cli`, `tests` — **GPL-3.0-or-later**
+- `mailbox` — **AGPL-3.0-or-later**
+
+Every source file must carry its SPDX license header, matching the crate
+(`// SPDX-License-Identifier: GPL-3.0-or-later` or `AGPL-3.0-or-later`). See
+[`LICENSE-GPL3`](LICENSE-GPL3), [`LICENSE-AGPL3`](LICENSE-AGPL3), and
+`docs/adr/0001-license.md` for the rationale.
+
+## Development workflow
+
+- **Never commit to `master` directly.** Branch, then open a pull request.
+- One logical change per PR. Keep the diff focused — bias to the smallest change
+  that works; don't refactor or rename code you weren't asked about in the same PR.
+- Reference the issue you resolve (`Closes #NN`).
+
+Cargo isn't assumed on `PATH`; source your rustup env first if needed
+(`. "$HOME/.cargo/env"`).
+
+### The done-gate (a PR must pass all of these)
 
 ```bash
-cargo run -p skattr-cli -- init
-cargo run -p skattr-cli -- daemon
+cargo fmt --all -- --check
+cargo clippy --workspace --exclude skattr-ui --all-targets --features test-harness -- -D warnings
+cargo test
+cargo clippy -p skattr-ui --all-targets -- -D warnings
+cargo deny check
 ```
+
+For the UI crate (`crates/ui/src-svelte`):
+
+```bash
+pnpm check          # svelte-check, 0 errors / 0 warnings
+pnpm exec vitest run
+```
+
+CI runs on GitHub Actions; the same commands above are the authoritative local
+gate. `clippy -D warnings` being clean is the bar — warnings are failures.
 
 ## Coding standards
 
-- **Rust edition:** 2021, stable toolchain.
-- **No `unsafe` in this workspace** — the `forbid(unsafe_code)` lint is workspace-wide.
-- **No `unwrap()` / `expect()` in library code.** Use `?` and typed errors (`CoreError`). Binaries may use `anyhow` at the top level.
-- **No panics on adversary-controlled input.** Parsers must return errors, never panic.
-- **Secrets zeroize.** Any type holding key material, seed bytes, or passphrase-derived keys must implement or derive `ZeroizeOnDrop`, or wrap its fields in `Zeroizing`.
-- **No custom crypto.** No hand-rolled AEADs, no "slightly modified" Noise patterns, no MLS tweaks. Use the crates called out in the design doc.
-- **Every `.rs` file has a license header.** GPLv3 for `core`/`cli`/`tests`, AGPLv3 for `mailbox`. See existing files for the exact header.
-- **Public items have doc comments.** `missing_docs` is `warn` at workspace level.
-- **Logging hygiene.** Never log pubkeys, onion addresses, or message contents at `info` or higher. Gate verbose output behind `debug!`/`trace!`.
+**Rust**
 
-## Commits
+- Newtypes over primitives; model states as enums, not bool flags.
+- **No `unwrap()` / `expect()` in library code** — use `?` and typed errors
+  (`thiserror` in libs, `anyhow` in binaries). Errors are our types, not a
+  vendor's.
+- Test-first: the test must fail before the fix.
+- All secret material zeroizes (`Zeroizing` / `ZeroizeOnDrop`) — no bare
+  `[u8; 32]` secrets left on the stack.
+- **No custom crypto.** Use the libraries and patterns the design doc specifies;
+  no hand-rolled AEAD, Noise tweaks, or MLS changes.
+- Functional core / imperative shell: keep I/O, clock, randomness, and env reads
+  out of logic — take them as parameters, wire concretes up in `main`.
 
-- Small, focused commits. Squashing happens at merge.
-- Commit subject: imperative mood, ≤72 chars (e.g. `transport: reject handshake frames over 64 KiB`).
-- Sign your commits (`git commit -S`). Unsigned commits on protected branches will be rejected post-Phase-0.
+**TypeScript**
 
-## Pull requests
+- `strict`; no `any`, no `!`, no `ts-ignore`. Branded types for IDs; parse at the
+  boundary. Discriminated unions over optional-field soup. `tsc --noEmit` +
+  eslint are the done-gate.
 
-1. Open against `main` from a feature branch.
-2. Link the related issue or ADR.
-3. Explain *why* in the description, not just *what* — reviewers need the rationale.
-4. If you added a dependency, justify it in the PR description (deny.toml enforces source/license/ban rules).
-5. CI must be green: `fmt`, `clippy -D warnings`, `test`, `cargo-deny`, `cargo-audit`.
-6. Crypto/protocol/auth PRs require review from **two** maintainers.
+**Everything**
 
-## Reporting bugs
+- Leave no dead code or TODO stubs. Fail loudly rather than adding defensive
+  handling for cases that can't happen. If a rule makes the code worse here, say
+  so in the PR and write the simpler version.
 
-Public issue tracker for non-security bugs. Security vulnerabilities → [`SECURITY.md`](SECURITY.md).
+## Changes that need extra review
 
-## License of contributions
+- **Protocol / crypto / auth changes** (frame types, invite fields, handshake
+  binding, MLS ciphersuite, IPC auth) require:
+  - an **ADR** under `docs/adr/` with rationale, filed *before* the code, and
+  - a **second reviewer**.
+- **New dependencies** need justification in the PR and must pass `cargo-deny`
+  (license allowlist, no git deps, no banned crates).
 
-By contributing you agree your code is released under the same license as the crate it lands in (GPLv3 for most crates, AGPLv3 for `mailbox`).
+## Locked decisions
+
+Some technical choices (edition/toolchain, async runtime, Tor via Arti, the Noise
+pattern, MLS ciphersuite, crypto libraries, wire serialization, storage, the
+transport↔MLS binding) are deliberately locked. See "Locked technical decisions"
+in the design doc before proposing a change to any of them — reversing one has
+cascading consequences and needs an ADR.
+
+## Questions
+
+Open a GitHub Discussion or a non-security issue. For anything touching a
+vulnerability, use `SECURITY.md`.
