@@ -1,7 +1,10 @@
 # ADR 0008 — Invite link embeds the inviter's signed ContactCard
 
-**Status:** Proposed
-**Date:** 2026-06-12
+**Status:** Accepted — **shipped.** Implemented in Phase 1C (merge `5c0b827`);
+the invite body carries the inviter's signed `ContactCard` (`invite/link.rs`,
+`InviteLinkBody { card, key_package, psk, expires_at }`), so the consumer learns
+the inviter's onion from the link itself.
+**Date:** 2026-06-12 (accepted 2026-08-07 after verifying the shipped code)
 **Context:** Phase 1C (first contact over direct transport).
 **Relates:** ADR 0007 (Welcome carve-out + transport↔MLS binding); Phase 1B
 direct-transport assembly. Wire-format change to the `skattr://invite/v1#…`

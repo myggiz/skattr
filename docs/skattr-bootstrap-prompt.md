@@ -388,11 +388,10 @@ Standard Rust CI: check formatting, run clippy with `-D warnings`, run tests, ac
 
 **CONTRIBUTING.md** — How to build, how to run tests, commit message format, PR process.
 
-**docs/adr/0001-license.md** — GPLv3 for clients, AGPLv3 for mailbox, rationale.
-
-**docs/adr/0002-crypto-libraries.md** — RustCrypto ecosystem, ed25519-dalek, rationale.
-
-**docs/adr/0003-storage-approach.md** — rusqlite + app-level encryption, rationale.
+**docs/adr/** — Architecture Decision Records. The scaffold starts with 0001
+(license), 0002 (crypto libraries), and 0003 (storage approach); see
+[`docs/adr/README.md`](adr/README.md) for the current index of all ADRs and
+their statuses. Add a row there whenever you add an ADR.
 
 ## Important constraints
 

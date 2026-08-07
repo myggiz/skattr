@@ -25,7 +25,7 @@ We adopt the **RustCrypto** ecosystem plus **OpenMLS** and **snow**.
 | Argon2id | `argon2` | RustCrypto; parameters `m=64 MiB, t=3, p=4`. |
 | BIP39 | `bip39` v2 | Standard, English wordlist only. |
 | MLS | `openmls` | The mainline Rust MLS implementation. |
-| Noise | `snow` | Pattern: `Noise_XK_25519_ChaChaPoly_BLAKE2s`. |
+| Noise | `snow` | Pattern: `Noise_XK_25519_ChaChaPoly_BLAKE2s` — the only pattern used in production (`psk = None` at every call site). A `Noise_XKpsk3_25519_ChaChaPoly_BLAKE2s` constant also exists in `transport/noise.rs` for an invite-PSK handshake, but **no production path selects it**; the invite PSK is applied at the MLS layer instead (ADR 0009). |
 
 All are pure Rust. No system OpenSSL dependency. No custom
 cryptographic primitives.

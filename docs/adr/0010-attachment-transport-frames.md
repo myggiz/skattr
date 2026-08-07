@@ -72,9 +72,15 @@ Properties:
    receiver fail fast rather than time out.
 
 4. **`AttachmentComplete`** is the receiver's signal that all chunks are received
-   and reassembled, so a pure-pull sender can mark its `out` row `complete`, GC
-   its staged blobs, and emit send-side completion. Without it the sender has no
-   way to learn the transfer finished.
+   and **sha256-verified against the manifest**, so a pure-pull sender can mark
+   its `out` row `complete`, GC its staged blobs, and emit send-side completion.
+   Without it the sender has no way to learn the transfer finished.
+
+   It does **not** mean the file was reassembled to disk. The receiver keeps the
+   chunks encrypted in the `ChunkStore` (encrypted-at-rest); plaintext is
+   produced only on an explicit `SaveAttachment` / `OpenAttachment`
+   (`delivery/peer.rs`). An empty download dir after a completed receive is
+   expected, not a failure.
 
 5. **Flow control / fairness** is a property of the engine, not the wire: the
    receiver keeps ≤ 8 `ChunkRequest`s outstanding and only refills on idle

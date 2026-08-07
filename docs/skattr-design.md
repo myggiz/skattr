@@ -76,7 +76,7 @@ skattr://invite/v1#
 ```
 
 - `kp` is a pre-published MLS KeyPackage, consumed exactly once
-- `psk` is mixed into the Noise handshake and the first MLS epoch as a pre-shared key. This defends against active MITM during first contact: an attacker substituting their own onion/identity would fail to know the PSK.
+- `psk` is a one-time secret injected as an **external MLS PSK into the genesis Commit** (alongside the `h_transport` binding PSK — see §1.5 and ADR 0009). **As shipped it is *not* mixed into the Noise handshake:** production runs plain `Noise_XK` with no PSK on both the dial and accept paths. A `Noise_XKpsk3` pattern constant exists in the code but is unused. First-contact MITM resistance therefore rests on Noise_XK's pre-known responder static key (learned from the Ed25519-signed invite, which embeds the inviter's ContactCard — ADR 0008) plus the MLS-layer PSK; the Noise-layer PSK described in earlier revisions of this document was never wired.
 - `sig` is Ed25519 over the canonical serialization of the other fields, signed with `identity_pubkey`. Prevents tampering with the link contents (e.g. swapping the onion address while keeping the signed identity).
 - `exp` limits the window an intercepted link is usable
 
@@ -132,7 +132,7 @@ Alice                                          Tor network                      
   |                                                                                                  |
   |                                                  <-- 4. NOISE_RESP (-e, ee, s, es) --           |
   |                                                                                                  |
-  |-- 5. NOISE_FINAL (-s, se, psk=invite_psk) ----------------------------------------------------->|
+  |-- 5. NOISE_FINAL (-s, se)  [plain XK — no PSK; invite psk is used at the MLS layer] ----------->|
   |                                                                                                  |
   |      Both sides now have: authenticated channel, shared h_transport                              |
   |                                                                                                  |
@@ -149,7 +149,7 @@ Notes on what each step buys you:
 
 - **Step 1** prevents a tampered link (attacker swaps onion address).
 - **Step 2** — Tor rendezvous: neither guard node nor Bob learns Alice's IP; Alice never learns Bob's IP; no DNS involved; no TLS cert authority.
-- **Steps 3–5** — Noise_XK with PSK: mutual identity-key authentication, forward secrecy, MITM resistance.
+- **Steps 3–5** — plain Noise_XK (no PSK): mutual identity-key authentication, forward secrecy, MITM resistance. MITM resistance comes from XK's *pre-known responder static key* — Alice learns Bob's identity key from the signed invite in step 1 — not from a Noise-level PSK. The invite PSK is applied one layer up, in the MLS genesis Commit (steps 6–7).
 - **Steps 6–7** — MLS session established; future messages have FS and PCS.
 - **Step 8 onward** — steady-state application traffic.
 
