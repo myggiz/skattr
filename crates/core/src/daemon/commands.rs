@@ -168,8 +168,10 @@ pub enum Command {
         #[serde(default)]
         paged: bool,
     },
-    /// Start a new MLS group with the given initial members. Reserved
-    /// for Phase 2; 1.F server answers `IpcError::UnknownCommand`.
+    /// Start a new MLS group with the given initial members.
+    ///
+    /// Not implemented: multi-member (>2) groups are deferred to v1.1, so the
+    /// daemon answers `IpcError::UnknownCommand`.
     CreateGroup {
         /// Initial group members.
         members: Vec<PublicKey>,

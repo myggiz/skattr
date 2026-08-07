@@ -3,10 +3,10 @@
 
 //! Repository for MLS KeyPackages.
 //!
-//! For 1.C every row is `direction = 'ours'` (we generated the KP for a
-//! peer to consume). `direction = 'theirs'` lands in Phase 2 when we
-//! cache received KPs for out-of-order use. `consumed` is flipped by
-//! 1.D's invite flow on successful single-use join; 1.C only persists.
+//! `direction = 'ours'` rows are KeyPackages we generated for a peer to
+//! consume; `direction = 'theirs'` rows are received KPs we cache (written by
+//! the invite-consume path in `invite::link`). `consumed` is flipped by the
+//! invite flow on a successful single-use join.
 
 use super::StorageErrorKind;
 use crate::error::{CoreError, Result};

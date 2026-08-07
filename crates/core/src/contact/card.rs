@@ -23,7 +23,9 @@ pub struct ContactCardBody {
     pub identity: PublicKey,
     /// Current onion service, v3 format (56-char base32).
     pub onion: String,
-    /// Mailboxes this user is registered with. Empty in 1.D.
+    /// Mailboxes this user is registered with. Populated by `AddMailbox` and
+    /// republished via `build_next_self_card`; drives the peer's
+    /// direct→mailbox delivery fallback.
     pub mailboxes: Vec<String>,
     /// Monotonic version. Higher is newer.
     pub version: u64,

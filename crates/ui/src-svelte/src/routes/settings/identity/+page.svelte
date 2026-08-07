@@ -93,7 +93,7 @@
 {#if confirmRotate}
   <ConfirmDialog
     title="Rotate onion?"
-    body="In Phase 2.F this only bumps the self-card version (real HS-key rotation lands in a follow-up)."
+    body="This does not yet change your .onion address — it only republishes your contact card with a new version number. Your contacts will see the update but will keep reaching you at the same address. Real address rotation is planned for a future release."
     confirmLabel="Rotate"
     onConfirm={rotateOnion}
     onCancel={() => (confirmRotate = false)}

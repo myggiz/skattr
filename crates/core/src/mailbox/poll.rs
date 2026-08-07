@@ -428,7 +428,9 @@ struct ActorEntry {
 /// 1. Look up the row's `onion` from `MailboxRepo`.
 /// 2. Loop: sleep `next_interval(active, unreachable, &mut rng)`,
 ///    open a fresh `MailboxClient` via `connect_factory`, run
-///    `run_one_poll_tick`, update status / consecutive-failure counter
+///    `poll_dispatch_once` (fetch → dispatch → delete only what was
+///    dispatched; `run_one_poll_tick` is a test-only seam that does NOT
+///    decrypt or persist), update status / consecutive-failure counter
 ///    / Active-hold timer, hand each fetched deposit to the inbound
 ///    MLS dispatcher.
 /// 3. Status events fire **only on transition**, not every tick.

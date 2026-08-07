@@ -3,8 +3,17 @@
 
 //! Envelope kinds.
 //!
-//! `Kind` is open for extension: clients ignore unknown variants rather
-//! than error, to allow forward-compatible rollout of new message types.
+//! **`Kind` is NOT forward-compatible as encoded.** It is a plain
+//! `#[serde(tag = "kind")]` enum with no `#[serde(other)]` fallback, so an
+//! unknown variant makes `Envelope::decode` fail with `CborDecode` — a peer
+//! does *not* silently ignore kinds it does not know. Adding a variant is
+//! therefore a breaking wire change for older clients, and needs a version
+//! negotiation or a catch-all variant first (an earlier revision of this doc
+//! claimed the opposite).
+//!
+//! Several variants below are **inert in v1.0**: `Reaction`, `Edit`, `Delete`,
+//! and `Typing` are accepted and stored but never produced, and nothing acts on
+//! them. They are placeholders for v1.1.
 
 use serde::{Deserialize, Serialize};
 
@@ -32,14 +41,16 @@ pub enum Kind {
         #[ts(type = "string")]
         manifest: Vec<u8>,
     },
-    /// Emoji reaction to an earlier message.
+    /// Emoji reaction to an earlier message. **Inert in v1.0** — accepted and
+    /// stored, never produced or acted on.
     Reaction {
         /// Target message id.
         target: MessageId,
         /// The emoji, as a short UTF-8 string.
         emoji: String,
     },
-    /// Edit of an earlier message.
+    /// Edit of an earlier message. **Inert in v1.0** — accepted and stored,
+    /// never produced or acted on.
     Edit {
         /// Target message id.
         target: MessageId,
@@ -47,15 +58,17 @@ pub enum Kind {
         body: String,
     },
     /// Delete-for-everyone tombstone (advisory — recipients cooperate).
+    /// **Inert in v1.0** — accepted and stored, never produced or acted on.
     Delete {
         /// Target message id.
         target: MessageId,
     },
-    /// Typing indicator (ephemeral, not persisted).
+    /// Typing indicator (ephemeral, not persisted). **Inert in v1.0** — never
+    /// produced or acted on.
     Typing,
     /// Self-published `ContactCard` (rotation, mailbox-list change).
-    /// 2.B carries these inside MLS app messages so rotation reuses the
-    /// direct→mailbox fallback path with no new transport frame.
+    /// Carried inside MLS app messages so rotation reuses the direct→mailbox
+    /// fallback path with no new transport frame.
     ContactCardUpdate {
         /// Signed card carrying the new onion + mailbox list. Verified
         /// against the sender's identity by the receiver's inbound

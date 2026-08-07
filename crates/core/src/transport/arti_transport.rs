@@ -14,8 +14,6 @@ use tokio::sync::Mutex;
 
 const INBOUND_CAP: usize = 64;
 
-// used by Daemon::run in Task 7
-#[allow(dead_code)]
 pub(crate) struct ArtiTransport {
     /// Guards the one-time publish (needs `&mut TorRuntime`) and shutdown
     /// (consumes `TorRuntime`, hence the `Option` so it can be `take`n).
@@ -24,8 +22,6 @@ pub(crate) struct ArtiTransport {
     client: arti_client::TorClient<tor_rtcompat::tokio::TokioRustlsRuntime>,
 }
 
-// used by Daemon::run in Task 7
-#[allow(dead_code)]
 impl ArtiTransport {
     pub(crate) fn new(runtime: TorRuntime) -> Self {
         let client = runtime.client().clone();

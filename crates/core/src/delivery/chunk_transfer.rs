@@ -18,7 +18,7 @@ use crate::attachment::manifest::AttachmentManifest;
 use crate::attachment::store::ChunkStore;
 use crate::transport::frame::Frame;
 
-/// Max chunk requests in flight at once (≈2 MiB at the 256 KiB chunk size).
+/// Max chunk requests in flight at once (≈384 KiB at the 48 KiB `CHUNK_SIZE`).
 pub(crate) const CHUNK_WINDOW: usize = 8;
 /// Per-index retry budget before the transfer fails.
 pub(crate) const CHUNK_RETRY_BUDGET: u8 = 3;

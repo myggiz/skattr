@@ -159,10 +159,12 @@ impl IdentityKey {
         use sha2::{Digest, Sha512};
         use zeroize::Zeroize as _;
 
-        // `Sha512::digest` returns a `GenericArray<u8, U64>` which is
-        // auto-zeroized via the `hash` crate's ZeroizeOnDrop impl for
-        // `Output`. We still force a scrub on the intermediate copy
-        // below in case of future API drift.
+        // The explicit `full.zeroize()` below is the ONLY guarantee that this
+        // intermediate is scrubbed: `sha2`'s `Output` does not implement
+        // `ZeroizeOnDrop`, and `.into()` copies the digest into a plain
+        // `[u8; 64]` that would otherwise be left on the stack. Keep the
+        // manual scrub. (An earlier revision of this comment credited a
+        // nonexistent `hash` crate with auto-zeroizing here.)
         let mut full: [u8; 64] = Sha512::digest(self.secret).into();
         let mut out = zeroize::Zeroizing::new([0u8; 32]);
         out.copy_from_slice(&full[..32]);
