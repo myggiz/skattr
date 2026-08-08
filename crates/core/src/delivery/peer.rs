@@ -1002,15 +1002,39 @@ where
                             "attachment: delivery acked by peer"
                         );
                         // Sender side: receiver confirmed receipt → finalize the out row + GC.
+                        // These three writes are best-effort — the peer already has
+                        // the file, so nothing is retried on failure — but a silent
+                        // failure leaves the row stuck non-`complete`, the staged
+                        // chunks on disk, or the offline deposits queued to re-send
+                        // an attachment that already arrived. Log each one.
                         let repo = crate::storage::attachments::AttachmentRepo::new(&pool);
-                        let _ = repo.set_status(&attachment_id, "complete");
+                        if let Err(e) = repo.set_status(&attachment_id, "complete") {
+                            tracing::warn!(
+                                aid = %hex::encode(attachment_id), err = %e,
+                                "attachment: set_status(complete) failed after peer ack"
+                            );
+                        }
                         if let Some(store) = chunk_store.as_ref() {
-                            let _ = store.remove(&attachment_id);
+                            if let Err(e) = store.remove(&attachment_id) {
+                                tracing::warn!(
+                                    aid = %hex::encode(attachment_id), err = %e,
+                                    "attachment: staged chunk GC failed after peer ack"
+                                );
+                            }
                         }
                         served.forget(&attachment_id);
                         // 3.C: a direct completion cancels the offline lane.
-                        let _ = crate::storage::attachments::AttachmentDepositRepo::new(&pool)
-                            .delete_for_attachment(&attachment_id);
+                        if let Err(e) = crate::storage::attachments::AttachmentDepositRepo::new(
+                            &pool,
+                        )
+                        .delete_for_attachment(&attachment_id)
+                        {
+                            tracing::warn!(
+                                aid = %hex::encode(attachment_id), err = %e,
+                                "attachment: offline deposit prune failed after peer ack; \
+                                 chunks may be re-deposited to a mailbox"
+                            );
+                        }
                         if let Some(d) = inbound.as_ref() {
                             if let Ok(Some(row)) = repo.get(&attachment_id) {
                                 let t = row.total_chunks as u32;

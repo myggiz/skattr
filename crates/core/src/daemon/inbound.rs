@@ -243,8 +243,17 @@ impl DaemonInbound {
                         tracing::warn!(err = %e, "inbound: attachment manifest insert failed");
                     } else {
                         // Record the sender so the offline path (finalize_offline)
-                        // can populate Event::AttachmentReceived.contact (Phase 3.C).
-                        let _ = repo.set_peer(&m.attachment_id, &from.0);
+                        // can populate Event::AttachmentReceived.contact. If this
+                        // write is lost, finalize_offline falls back to an all-zero
+                        // PublicKey and the UI shows the attachment against the
+                        // wrong contact — so it must not fail silently.
+                        if let Err(e) = repo.set_peer(&m.attachment_id, &from.0) {
+                            tracing::warn!(
+                                err = %e,
+                                "inbound: attachment set_peer failed; offline completion \
+                                 will report an unknown sender"
+                            );
+                        }
                         let begin = crate::delivery::chunk_transfer::AttachmentBegin {
                             attachment_id: m.attachment_id,
                             manifest: m,
