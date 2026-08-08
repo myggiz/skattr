@@ -5,7 +5,7 @@
   import { save, ask } from "@tauri-apps/plugin-dialog";
   import type { MessageRecord } from "$lib/ipc/types";
   import type { OptimisticMessage } from "$lib/stores/conversation";
-  import { attachments, applyManifest, markAvailable } from "$lib/stores/attachments";
+  import { attachments, applyManifest, markAvailable, markRetrying } from "$lib/stores/attachments";
   import { delivery, deliveryToIconStatus, hex16ToString } from "$lib/stores/delivery";
   import { decodeManifestMemo, mimeIconName, formatBytes } from "$lib/attachments";
   import type { ManifestSummary } from "$lib/attachments";
@@ -79,6 +79,7 @@
   let receiving = $derived(!isOutgoing && xferState?.status === "receiving");
   let complete = $derived(!isOutgoing && (xferState?.status === "complete" || xferState?.available === true));
   let failed = $derived(!isOutgoing && xferState?.status === "failed");
+  let retrying = $derived(!isOutgoing && xferState?.retrying === true);
 
   // Sender side: chunk-transfer state supersedes the manifest-ack delivery
   // icon. The manifest is MLS-acked before any chunk moves, so the icon alone
@@ -172,6 +173,26 @@
     }
   }
 
+  // #144: ask the daemon to re-arm a failed transfer. Best-effort by nature —
+  // the sender drops its staged chunks once a deposit sweep or a peer ack
+  // completes, so this can still come back as a fresh AttachmentFailed. Say
+  // "asked", not "downloading", and let the events tell the real story.
+  async function doRetry() {
+    // Bind to a const so the guard narrows it to string for the typed request
+    // below — `aidHex` is a reactive `let`, which TS will not narrow across the
+    // await.
+    const aid = aidHex;
+    if (!aid) return;
+    try {
+      const resp = await ipcClient.request({ cmd: "retry_attachment", attachment_id: aid });
+      if (resp.resp !== "ok") throw new Error("retry rejected");
+      markRetrying(aid);
+      toast.show("Retrying — this only works while the sender still has the file.");
+    } catch {
+      toast.show("Couldn't retry this transfer.");
+    }
+  }
+
   let iconGlyph = $derived(icons[mimeIconName(mime)]);
 </script>
 
@@ -199,6 +220,11 @@
       {/if}
       {#if failed}
         <span class="failed">⚠️ {xferState?.reason ?? "Transfer failed"}</span>
+        <div class="actions">
+          <button type="button" onclick={doRetry} aria-label="Retry transfer">Retry</button>
+        </div>
+      {:else if retrying}
+        <span class="waiting">Retrying — waiting for the sender…</span>
       {/if}
     </div>
     {#if receiving}
@@ -252,6 +278,7 @@
   .progress .bar { height: 100%; background: var(--accent); transition: width 0.2s; }
   .progress .label { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font: var(--t-ui); color: var(--text); }
   .failed { color: var(--danger); font: var(--t-ui); }
+  .waiting { color: var(--text-muted); font: var(--t-ui); }
   .delivered { color: var(--text-muted); font: var(--t-ui); }
   .file-bubble.outgoing .delivered { color: rgba(255, 255, 255, 0.7); }
 </style>

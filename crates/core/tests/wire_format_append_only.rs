@@ -52,6 +52,7 @@ fn command_variant_tag(c: &Command) -> &'static str {
         Command::OpenAttachment { .. } => "open_attachment",
         Command::SaveAttachment { .. } => "save_attachment",
         Command::AttachmentAvailable { .. } => "attachment_available",
+        Command::RetryAttachment { .. } => "retry_attachment",
     }
 }
 
@@ -112,6 +113,7 @@ fn expected_command_variant_set() -> Vec<&'static str> {
         "remove_contact",
         "remove_mailbox",
         "rename_contact",
+        "retry_attachment",
         "rotate_onion",
         "save_attachment",
         "search_messages",

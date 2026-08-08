@@ -349,6 +349,13 @@ pub enum Command {
         /// 16-byte attachment id.
         attachment_id: crate::daemon::hex::Hex16,
     },
+    /// Re-arm a failed inbound attachment for another fetch attempt (#144).
+    /// Best-effort: it can only succeed while the sender still has the file
+    /// staged, or its mailbox deposits are still unexpired.
+    RetryAttachment {
+        /// 16-byte attachment id.
+        attachment_id: crate::daemon::hex::Hex16,
+    },
 }
 
 /// Outcome of a `SendMessage` command after the inline-delivery wait.

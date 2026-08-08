@@ -190,6 +190,39 @@ impl<'p> AttachmentRepo<'p> {
         })
     }
 
+    /// Re-arm a **failed inbound** attachment for another fetch attempt (#144).
+    /// Returns `true` iff this call performed the `'failed' → 'pending'`
+    /// transition.
+    ///
+    /// This is the only sanctioned way back into `'pending'`, and it is kept as
+    /// a separate statement rather than widening [`Self::claim_terminal`] on
+    /// purpose: the terminal claim must keep `'pending'` as its sole source
+    /// state, or the cross-lane exactly-once guarantee from #38 dissolves. It is
+    /// scoped to `direction='in'` (an outbound row's status is driven by the
+    /// peer's ack, not by us) and refuses `'complete'` (reviving a finished
+    /// transfer would re-open the double-emit).
+    ///
+    /// Re-arming is cheap because nothing else was thrown away: the manifest and
+    /// the per-chunk received bitmap are still on the row, so both lanes resume
+    /// rather than restart — the offline lane because `list_pending_in` starts
+    /// matching again, the direct lane once the caller re-queues its begin.
+    pub fn rearm_failed_in(&self, attachment_id: &[u8; 16]) -> Result<bool> {
+        self.pool.with_mut(|c| {
+            let n = c
+                .execute(
+                    "UPDATE attachments SET status = 'pending' \
+                     WHERE attachment_id = ?1 AND direction = 'in' AND status = 'failed'",
+                    rusqlite::params![&attachment_id[..]],
+                )
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!(
+                        "attachments rearm_failed_in: {e}"
+                    )))
+                })?;
+            Ok(n == 1)
+        })
+    }
+
     /// Set the transfer status.
     pub fn set_status(&self, attachment_id: &[u8; 16], status: &str) -> Result<()> {
         self.pool.with_mut(|c| {
@@ -542,6 +575,47 @@ mod tests {
         assert!(!repo
             .claim_terminal(&[0x99; 16], TerminalStatus::Complete)
             .unwrap());
+    }
+
+    /// #144 — re-arming is the one sanctioned way back into `'pending'`, and it
+    /// is deliberately narrow: only a `'failed'` inbound row. It must not
+    /// resurrect a completed transfer (that would re-open the #38 double-emit)
+    /// and must not touch outbound rows.
+    #[test]
+    fn rearm_failed_in_only_revives_a_failed_inbound_row() {
+        let pool = Pool::in_memory();
+        let repo = AttachmentRepo::new(&pool);
+
+        // Failed inbound → re-armed once; a second call finds nothing to do.
+        repo.insert(&[0x11; 16], "in", b"m", 1, 0).unwrap();
+        repo.claim_terminal(&[0x11; 16], TerminalStatus::Failed)
+            .unwrap();
+        assert!(
+            repo.rearm_failed_in(&[0x11; 16]).unwrap(),
+            "failed → pending"
+        );
+        assert_eq!(repo.get(&[0x11; 16]).unwrap().unwrap().status, "pending");
+        assert!(
+            !repo.rearm_failed_in(&[0x11; 16]).unwrap(),
+            "already pending → nothing to re-arm"
+        );
+
+        // A completed transfer must never be revived.
+        repo.insert(&[0x22; 16], "in", b"m", 1, 0).unwrap();
+        repo.claim_terminal(&[0x22; 16], TerminalStatus::Complete)
+            .unwrap();
+        assert!(!repo.rearm_failed_in(&[0x22; 16]).unwrap());
+        assert_eq!(repo.get(&[0x22; 16]).unwrap().unwrap().status, "complete");
+
+        // Outbound rows are not this command's business.
+        repo.insert(&[0x33; 16], "out", b"m", 1, 0).unwrap();
+        repo.claim_terminal(&[0x33; 16], TerminalStatus::Failed)
+            .unwrap();
+        assert!(!repo.rearm_failed_in(&[0x33; 16]).unwrap());
+        assert_eq!(repo.get(&[0x33; 16]).unwrap().unwrap().status, "failed");
+
+        // Unknown id.
+        assert!(!repo.rearm_failed_in(&[0x99; 16]).unwrap());
     }
 
     #[test]

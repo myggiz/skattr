@@ -102,6 +102,9 @@ where
         Command::AttachmentAvailable { attachment_id } => {
             attachment_available_cmd(handle, attachment_id.0).await
         }
+        Command::RetryAttachment { attachment_id } => {
+            retry_attachment_cmd(handle, attachment_id.0).await
+        }
     }
 }
 
@@ -2025,6 +2028,73 @@ where
         Some(row) if row.direction == "in" && row.status == "complete"
     );
     Ok(CommandResult::AttachmentAvailability { available })
+}
+
+/// Re-arm a failed inbound attachment (#144).
+///
+/// Two lanes have to be re-armed and they re-arm differently. The offline lane
+/// self-arms the moment the row is back to `'pending'`, because `list_pending_in`
+/// starts matching deposits again. The direct lane needs its begin re-queued for
+/// the peer that sent the manifest; the per-peer actor picks it up on its next
+/// retry tick, once it has a live connection.
+///
+/// Best-effort by nature: the sender drops its staged chunks after a completed
+/// deposit sweep or a peer ack, so a retry can still come back as a nack. That
+/// is reported through the normal `AttachmentFailed` event, not from here — this
+/// command only reports whether the re-arm itself took.
+async fn retry_attachment_cmd<S>(
+    handle: Arc<DaemonHandle<S>>,
+    attachment_id: [u8; 16],
+) -> std::result::Result<CommandResult, IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    use crate::daemon::error_kind::DaemonErrorKind;
+    use crate::identity::PublicKey;
+    let repo = crate::storage::attachments::AttachmentRepo::new(&handle.pool);
+    let row = repo.get(&attachment_id).map_err(map_err)?.ok_or_else(|| {
+        IpcError::Daemon(DaemonErrorKind::InvalidArgument {
+            message: "attachment not found".into(),
+        })
+    })?;
+    if row.direction != "in" || row.status != "failed" {
+        return Err(IpcError::Daemon(DaemonErrorKind::InvalidArgument {
+            message: "only a failed inbound attachment can be retried".into(),
+        }));
+    }
+    // The sender is needed to know who to re-request from. It is written when
+    // the manifest is ingested; a row without it cannot be retried.
+    let peer = repo
+        .peer_for(&attachment_id)
+        .map_err(map_err)?
+        .map(PublicKey)
+        .ok_or_else(|| {
+            IpcError::Daemon(DaemonErrorKind::InvalidArgument {
+                message: "attachment has no recorded sender".into(),
+            })
+        })?;
+    let manifest = crate::attachment::manifest::AttachmentManifest::from_cbor(&row.manifest)
+        .map_err(map_err)?;
+
+    // Re-arm storage first: this is what re-opens the offline lane, and it is
+    // the transition that can lose a race (a concurrent lane may have already
+    // moved the row). Only queue the direct-lane begin if we won it.
+    if !repo.rearm_failed_in(&attachment_id).map_err(map_err)? {
+        return Err(IpcError::Daemon(DaemonErrorKind::InvalidArgument {
+            message: "attachment is no longer in a retryable state".into(),
+        }));
+    }
+    if let Some(inbound) = handle.inbound.as_ref() {
+        inbound.requeue_attachment(
+            peer,
+            crate::delivery::chunk_transfer::AttachmentBegin {
+                attachment_id,
+                manifest,
+            },
+        );
+    }
+    tracing::info!(aid = %hex::encode(attachment_id), "attachment: retry re-armed");
+    Ok(CommandResult::Ok)
 }
 
 // ---------------------------------------------------------------------------
@@ -6037,6 +6107,143 @@ mod tests {
                 CommandResult::AttachmentAvailability { available: false }
             ),
             "AttachmentAvailable for unknown id must be false, got {result:?}"
+        );
+    }
+
+    /// #144 — `RetryAttachment` re-arms a failed inbound transfer: the row goes
+    /// back to `'pending'` (which is what re-opens the offline lane, since
+    /// `list_pending_in` starts matching again) and the direct lane's begin is
+    /// re-queued for the recorded sender. Everything else is refused: an
+    /// already-pending row, a completed transfer, and an unknown id.
+    #[tokio::test]
+    async fn retry_attachment_rearms_failed_inbound_and_requeues_the_fetch() {
+        use crate::daemon::inbound::DaemonInbound;
+        use crate::delivery::peer::InboundDispatch;
+        use crate::storage::attachments::{AttachmentRepo, TerminalStatus};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().to_path_buf();
+        let seed = Seed::generate().unwrap();
+        let pool = Arc::new(Pool::open(&data_dir, &seed).unwrap());
+        let identity = IdentityKey::from_seed(&seed).unwrap();
+        let hub: Arc<DeliveryHub<tokio::io::DuplexStream>> =
+            Arc::new(DeliveryHub::new(pool.clone()));
+        let (events_tx, _) = broadcast::channel::<Event>(16);
+        let mut cfg = crate::daemon::config::Config::fallback_for_tests();
+        cfg.data_dir = data_dir.clone();
+        let dispatcher = Arc::new(DaemonInbound::new(pool.clone(), events_tx.clone()));
+        let mut h = DaemonHandle::new_with_config(
+            pool.clone(),
+            hub,
+            identity,
+            events_tx,
+            cfg,
+            data_dir.join("config.toml"),
+        );
+        h.inbound = Some(dispatcher.clone());
+        let handle: Arc<DaemonHandle<tokio::io::DuplexStream>> = Arc::new(h);
+
+        // A failed inbound attachment from a known sender, one chunk already in.
+        let (manifest, chunks) = crate::attachment::chunker::chunk_plaintext(
+            b"payload",
+            "f.bin",
+            "application/octet-stream",
+        )
+        .unwrap();
+        let aid = manifest.attachment_id;
+        let sender = crate::identity::PublicKey([0x42; 32]);
+        let repo = AttachmentRepo::new(&pool);
+        repo.insert(
+            &aid,
+            "in",
+            &manifest.to_cbor().unwrap(),
+            chunks.len() as i64,
+            0,
+        )
+        .unwrap();
+        repo.set_peer(&aid, &sender.0).unwrap();
+        repo.mark_received(&aid, 0).unwrap();
+        repo.claim_terminal(&aid, TerminalStatus::Failed).unwrap();
+
+        let hex_id = crate::daemon::hex::Hex16::from(aid);
+        let result = execute_command(
+            handle.clone(),
+            Command::RetryAttachment {
+                attachment_id: hex_id,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(result, CommandResult::Ok), "got {result:?}");
+        assert_eq!(
+            repo.get(&aid).unwrap().unwrap().status,
+            "pending",
+            "re-arm must return the row to pending so the offline lane matches again"
+        );
+        // The received bitmap survives — a retry resumes, it does not restart.
+        assert_eq!(repo.received_indices(&aid).unwrap(), vec![0]);
+
+        let begin = dispatcher
+            .take_begin_attachment(sender)
+            .expect("direct-lane begin must be queued for the recorded sender");
+        assert_eq!(begin.attachment_id, aid);
+
+        // Now pending → no longer retryable.
+        let err = execute_command(
+            handle.clone(),
+            Command::RetryAttachment {
+                attachment_id: hex_id,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                IpcError::Daemon(
+                    crate::daemon::error_kind::DaemonErrorKind::InvalidArgument { .. }
+                )
+            ),
+            "a pending row must not be retryable, got {err:?}"
+        );
+
+        // A completed transfer must never be revived.
+        repo.set_status(&aid, "complete").unwrap();
+        let err = execute_command(
+            handle.clone(),
+            Command::RetryAttachment {
+                attachment_id: hex_id,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                IpcError::Daemon(
+                    crate::daemon::error_kind::DaemonErrorKind::InvalidArgument { .. }
+                )
+            ),
+            "a complete row must not be retryable, got {err:?}"
+        );
+
+        // Unknown id.
+        let err = execute_command(
+            handle.clone(),
+            Command::RetryAttachment {
+                attachment_id: crate::daemon::hex::Hex16::from([0xFFu8; 16]),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                IpcError::Daemon(
+                    crate::daemon::error_kind::DaemonErrorKind::InvalidArgument { .. }
+                )
+            ),
+            "unknown id must be rejected, got {err:?}"
         );
     }
 

@@ -848,6 +848,19 @@ impl InboundDispatch for DaemonInbound {
         self.begins.lock().ok()?.get_mut(&peer)?.pop_front()
     }
 
+    fn requeue_attachment(
+        &self,
+        peer: PublicKey,
+        begin: crate::delivery::chunk_transfer::AttachmentBegin,
+    ) {
+        match self.begins.lock() {
+            Ok(mut g) => g.entry(peer).or_default().push_back(begin),
+            // A poisoned queue costs the user their retry, and the command
+            // already reported success — say so rather than dropping it.
+            Err(e) => tracing::warn!(err = %e, "inbound: begins queue poisoned; retry not queued"),
+        }
+    }
+
     fn attachment_received(
         &self,
         contact: PublicKey,
