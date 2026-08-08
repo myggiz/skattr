@@ -81,15 +81,23 @@ jobs:
 
       # The esrap patch exists for a reason — a regeneration that silently
       # dropped it would look green and be wrong.
+      # esrap is a transitive dep (via svelte), so it is NOT symlinked at the top
+      # level — the real copy lives under node_modules/.pnpm/. Assert on the
+      # patched source itself, not on the directory layout.
       - name: Verify the esrap patch is still applied
         working-directory: crates/ui/src-svelte
         run: |
           grep -q "patchedDependencies" pnpm-lock.yaml \
             || { echo "patchedDependencies vanished from the lockfile"; exit 1; }
-          test -d node_modules/esrap \
-            || { echo "esrap not installed"; exit 1; }
-          echo "--- patch we expect to be applied ---"
-          cat patches/esrap@1.4.9.patch
+          echo "--- installed esrap copies ---"
+          ls -d node_modules/.pnpm/esrap@* || true
+          # The patch adds an `EmptyStatement` arm to handle_type_annotation.
+          if grep -rq "case 'EmptyStatement':" node_modules/.pnpm/esrap@*/node_modules/esrap/; then
+            echo "esrap patch IS applied"
+          else
+            echo "esrap patch is NOT applied — regeneration dropped it"
+            exit 1
+          fi
 
       # Everything the real `ui` job gates on, so the artifact is not just
       # syntactically valid but actually works.
