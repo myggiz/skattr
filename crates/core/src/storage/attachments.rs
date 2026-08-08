@@ -22,6 +22,23 @@ pub struct AttachmentRow {
     pub created_at: i64,
 }
 
+/// The terminal states an inbound attachment can be claimed into by
+/// [`AttachmentRepo::claim_terminal`]. A row leaves `'pending'` exactly once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalStatus {
+    Complete,
+    Failed,
+}
+
+impl TerminalStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            TerminalStatus::Complete => "complete",
+            TerminalStatus::Failed => "failed",
+        }
+    }
+}
+
 /// Persistence for attachment transfer state.
 pub struct AttachmentRepo<'p> {
     pool: &'p Pool,
@@ -145,22 +162,28 @@ impl<'p> AttachmentRepo<'p> {
         })
     }
 
-    /// Compare-and-set: flip `status` from `'pending'` to `'complete'`
+    /// Compare-and-set: flip `status` from `'pending'` to a terminal state
     /// atomically. Returns `true` iff this call performed the transition
-    /// (`rows_affected == 1`). The single fire-gate for `AttachmentReceived`,
-    /// so the direct (3.B) and offline (3.C) lanes cannot both emit on a
-    /// simultaneous completion.
-    pub fn set_status_if_pending(&self, attachment_id: &[u8; 16]) -> Result<bool> {
+    /// (`rows_affected == 1`).
+    ///
+    /// `'pending'` is a single-use claim token. The direct (3.B) and offline
+    /// (3.C) lanes both race to terminalize the same inbound attachment, so
+    /// whichever lane claims it first decides the outcome and owns the terminal
+    /// event; every later claim — completion *or* failure — loses and must stay
+    /// silent. That is what keeps `AttachmentReceived` from double-firing, and
+    /// what keeps a late direct-lane timeout from marking an attachment the
+    /// offline lane already completed as `'failed'` (#38).
+    pub fn claim_terminal(&self, attachment_id: &[u8; 16], status: TerminalStatus) -> Result<bool> {
         self.pool.with_mut(|c| {
             let n = c
                 .execute(
-                    "UPDATE attachments SET status = 'complete' \
+                    "UPDATE attachments SET status = ?2 \
                      WHERE attachment_id = ?1 AND status = 'pending'",
-                    rusqlite::params![&attachment_id[..]],
+                    rusqlite::params![&attachment_id[..], status.as_str()],
                 )
                 .map_err(|e| {
                     CoreError::Storage(StorageErrorKind::Other(format!(
-                        "attachments set_status_if_pending: {e}"
+                        "attachments claim_terminal: {e}"
                     )))
                 })?;
             Ok(n == 1)
@@ -465,28 +488,60 @@ impl<'p> AttachmentDepositRepo<'p> {
 mod tests {
     use super::*;
 
+    /// `pending` is a single-use claim token: whichever lane claims it first
+    /// decides the terminal state, and no later claim can overwrite it. This is
+    /// the gate that stops the direct (3.B) and offline (3.C) lanes both
+    /// emitting a terminal event, and stops a late direct-lane timeout marking
+    /// an already-completed attachment `failed` (#38).
     #[test]
-    fn set_status_if_pending_fires_exactly_once() {
+    fn claim_terminal_is_single_shot_per_attachment() {
         let pool = Pool::in_memory();
-        let aid = [0x11u8; 16];
-        // Insert a pending 'in' attachment row directly (schema from 0015).
-        pool.with_mut(|c| {
-            c.execute(
-                "INSERT INTO attachments \
-                 (attachment_id, direction, manifest, total_chunks, status, created_at) \
-                 VALUES (?1, 'in', x'00', 1, 'pending', 0)",
-                rusqlite::params![&aid[..]],
-            )
-            .unwrap();
-            Ok(())
-        })
-        .unwrap();
         let repo = AttachmentRepo::new(&pool);
-        assert!(repo.set_status_if_pending(&aid).unwrap(), "first call wins");
+
+        // Completion claimed first → every later claim is refused.
+        repo.insert(&[0x11; 16], "in", b"m", 1, 0).unwrap();
         assert!(
-            !repo.set_status_if_pending(&aid).unwrap(),
-            "second call loses"
+            repo.claim_terminal(&[0x11; 16], TerminalStatus::Complete)
+                .unwrap(),
+            "first claim wins"
         );
+        assert!(
+            !repo
+                .claim_terminal(&[0x11; 16], TerminalStatus::Complete)
+                .unwrap(),
+            "second completion claim loses"
+        );
+        assert!(
+            !repo
+                .claim_terminal(&[0x11; 16], TerminalStatus::Failed)
+                .unwrap(),
+            "a later failure claim must not win"
+        );
+        assert_eq!(
+            repo.get(&[0x11; 16]).unwrap().unwrap().status,
+            "complete",
+            "a lost failure claim must not overwrite 'complete'"
+        );
+
+        // Failure claimed first → a later completion claim is refused.
+        repo.insert(&[0x22; 16], "in", b"m", 1, 0).unwrap();
+        assert!(
+            repo.claim_terminal(&[0x22; 16], TerminalStatus::Failed)
+                .unwrap(),
+            "first claim wins"
+        );
+        assert!(
+            !repo
+                .claim_terminal(&[0x22; 16], TerminalStatus::Complete)
+                .unwrap(),
+            "a later completion claim must not win"
+        );
+        assert_eq!(repo.get(&[0x22; 16]).unwrap().unwrap().status, "failed");
+
+        // An unknown attachment claims nothing.
+        assert!(!repo
+            .claim_terminal(&[0x99; 16], TerminalStatus::Complete)
+            .unwrap());
     }
 
     #[test]

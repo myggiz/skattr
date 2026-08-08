@@ -12,6 +12,7 @@ use tokio::task::JoinHandle;
 use crate::envelope::MessageId;
 use crate::error::{CoreError, Result};
 use crate::identity::PublicKey;
+use crate::storage::attachments::TerminalStatus;
 use crate::transport::connection::AuthenticatedConnection;
 use crate::transport::frame::Frame;
 use crate::transport::TransportErrorKind;
@@ -167,7 +168,7 @@ async fn finalize_rx<S>(
     // Fire-gate: only the lane that flips pending→complete emits, so the
     // direct/offline lanes can't race and produce duplicate events. On a real
     // storage failure, don't ack (so the sender retries) and leave the row pending.
-    let won = match repo.set_status_if_pending(&aid) {
+    let won = match repo.claim_terminal(&aid, TerminalStatus::Complete) {
         Ok(won) => won,
         Err(e) => {
             tracing::warn!(err = %e, "inbound: attachment completion CAS failed");
@@ -199,6 +200,14 @@ async fn finalize_rx<S>(
 }
 
 /// Mark an inbound transfer failed and emit `Event::AttachmentFailed`.
+///
+/// Gated on the same terminal claim as `finalize_rx` (#38): this lane's
+/// `ChunkRx` bitmap is in-memory only, so when the offline (3.C) lane fills the
+/// last chunks the direct lane keeps waiting and eventually times out. Failing
+/// unconditionally there would overwrite `status='complete'` and emit
+/// `AttachmentFailed` for a fully-received file — which `open_attachment_cmd`
+/// and `attachment_available_cmd` (both require `status == "complete"`) would
+/// then refuse to hand back. Only the lane that claims the pending row reports.
 async fn fail_rx(
     pool: &std::sync::Arc<crate::storage::Pool>,
     inbound: &Option<std::sync::Arc<dyn InboundDispatch>>,
@@ -207,9 +216,29 @@ async fn fail_rx(
 ) {
     let aid = rx.attachment_id();
     let repo = crate::storage::attachments::AttachmentRepo::new(pool);
-    let _ = repo.set_status(&aid, "failed");
-    if let Some(d) = inbound.as_ref() {
-        d.attachment_failed(aid, reason);
+    match repo.claim_terminal(&aid, TerminalStatus::Failed) {
+        Ok(true) => {
+            if let Some(d) = inbound.as_ref() {
+                d.attachment_failed(aid, reason);
+            }
+        }
+        Ok(false) => {
+            // Another lane already terminalized this attachment (typically the
+            // offline lane completing it). Nothing to report.
+            tracing::debug!(
+                aid = %hex::encode(aid),
+                reason,
+                "attachment: failure not claimed; another lane already finished it"
+            );
+        }
+        Err(e) => {
+            // Ownership unknown — stay silent rather than risk a spurious
+            // failure event, and leave the row pending.
+            tracing::warn!(
+                aid = %hex::encode(aid), err = %e,
+                "attachment: failure claim failed"
+            );
+        }
     }
 }
 
@@ -1946,5 +1975,130 @@ mod tests {
         }
 
         handle.abort();
+    }
+
+    /// Build a real single-chunk attachment and return `(manifest, complete rx)`.
+    fn one_chunk_rx() -> (
+        crate::attachment::manifest::AttachmentManifest,
+        crate::delivery::chunk_transfer::ChunkRx,
+    ) {
+        let (manifest, _cts) = crate::attachment::chunker::chunk_plaintext(
+            b"hello",
+            "f.bin",
+            "application/octet-stream",
+        )
+        .unwrap();
+        assert_eq!(manifest.chunks.len(), 1, "expected a 1-chunk attachment");
+        let rx = crate::delivery::chunk_transfer::ChunkRx::new(manifest.clone(), &[0]);
+        assert!(rx.is_complete(), "rx must be complete for a finalize test");
+        (manifest, rx)
+    }
+
+    /// #38 — a late direct-lane failure must NOT clobber an attachment the
+    /// offline (3.C) lane already completed. Both lanes race whenever the
+    /// sender goes offline mid-transfer: the mailbox lane fills the last chunks
+    /// and wins the terminal claim, then the direct lane's in-memory `ChunkRx`
+    /// (which never learns the gaps were filled) hits its 30 s request timeout.
+    /// Before the terminal-claim gate, that timeout overwrote `status='complete'`
+    /// with `'failed'` and emitted `AttachmentFailed`, leaving a fully-received
+    /// file permanently unopenable — `open_attachment_cmd` and
+    /// `attachment_available_cmd` both require `status == "complete"`.
+    #[tokio::test]
+    async fn fail_rx_does_not_clobber_an_already_completed_attachment() {
+        use crate::storage::attachments::{AttachmentRepo, TerminalStatus};
+        use std::sync::Arc;
+        use std::sync::Mutex as StdMutex;
+
+        struct Stub(Arc<StdMutex<Option<String>>>);
+        impl InboundDispatch for Stub {
+            fn dispatch(&self, _peer: PublicKey, _ct: &[u8]) -> Option<MessageId> {
+                None
+            }
+            fn attachment_failed(&self, _aid: [u8; 16], reason: &str) {
+                *self.0.lock().unwrap() = Some(reason.to_string());
+            }
+        }
+
+        let (manifest, rx) = one_chunk_rx();
+        let aid = manifest.attachment_id;
+        let pool = Arc::new(Pool::in_memory());
+        let repo = AttachmentRepo::new(&pool);
+        repo.insert(&aid, "in", &manifest.to_cbor().unwrap(), 1, 0)
+            .unwrap();
+        // The offline lane got there first.
+        assert!(repo.claim_terminal(&aid, TerminalStatus::Complete).unwrap());
+
+        let failed: Arc<StdMutex<Option<String>>> = Arc::new(StdMutex::new(None));
+        let inbound: Option<Arc<dyn InboundDispatch>> = Some(Arc::new(Stub(failed.clone())));
+        fail_rx(&pool, &inbound, &rx, "request timeout").await;
+
+        assert_eq!(
+            repo.get(&aid).unwrap().unwrap().status,
+            "complete",
+            "a late failure must not overwrite the completed status"
+        );
+        assert!(
+            failed.lock().unwrap().is_none(),
+            "a late failure must not emit AttachmentFailed for a completed attachment"
+        );
+    }
+
+    /// #38 acceptance — simultaneous direct + offline completion emits exactly
+    /// one `Event::AttachmentReceived`, in either arrival order. Both lanes are
+    /// driven for real (`finalize_rx` and `DaemonInbound::finalize_offline`)
+    /// against one shared pool and one event channel; the terminal claim is the
+    /// only thing stopping a double emit.
+    #[tokio::test]
+    async fn direct_and_offline_completion_emit_one_attachment_received() {
+        use crate::daemon::events::Event;
+        use crate::daemon::inbound::DaemonInbound;
+        use crate::storage::attachments::AttachmentRepo;
+        use std::sync::Arc;
+        use tokio::io::DuplexStream;
+        use tokio::sync::broadcast;
+
+        // `direct_first == true` runs finalize_rx then finalize_offline.
+        async fn run_both_lanes(direct_first: bool) -> Vec<Event> {
+            let (manifest, rx) = one_chunk_rx();
+            let aid = manifest.attachment_id;
+            let pool = Arc::new(Pool::in_memory());
+            AttachmentRepo::new(&pool)
+                .insert(&aid, "in", &manifest.to_cbor().unwrap(), 1, 0)
+                .unwrap();
+
+            let (events_tx, mut events_rx) = broadcast::channel(16);
+            let dispatch = Arc::new(DaemonInbound::new(pool.clone(), events_tx));
+            let inbound: Option<Arc<dyn InboundDispatch>> = Some(dispatch.clone());
+            let peer = PublicKey([0x07; 32]);
+            // No conn: the AttachmentComplete ack is not what is under test.
+            let mut conn: Option<AuthenticatedConnection<DuplexStream>> = None;
+
+            if direct_first {
+                finalize_rx(&mut conn, &pool, &inbound, peer, &rx).await;
+                dispatch.finalize_offline(&aid, &manifest);
+            } else {
+                dispatch.finalize_offline(&aid, &manifest);
+                finalize_rx(&mut conn, &pool, &inbound, peer, &rx).await;
+            }
+
+            let mut seen = Vec::new();
+            while let Ok(ev) = events_rx.try_recv() {
+                seen.push(ev);
+            }
+            seen
+        }
+
+        for direct_first in [true, false] {
+            let received: Vec<_> = run_both_lanes(direct_first)
+                .await
+                .into_iter()
+                .filter(|e| matches!(e, Event::AttachmentReceived { .. }))
+                .collect();
+            assert_eq!(
+                received.len(),
+                1,
+                "exactly one AttachmentReceived expected (direct_first={direct_first}), got {received:?}"
+            );
+        }
     }
 }
