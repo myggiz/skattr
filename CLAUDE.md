@@ -423,9 +423,12 @@ client-side mitigation goes in **4.C**.
 - **3.C offline transfer is best-effort** — a deposited-but-never-fetched
   attachment is lost after the mailbox TTL (~7 days; the sender gets no fetch
   feedback so it never re-deposits), and a stalled inbound stays `pending`
-  forever (no auto-fail/partial-GC janitor — shared deferral with 3.B). Large
-  files (>10 MiB) cannot transfer while a peer is offline. All disclosed in the
-  v1.0 limitations.
+  forever (no auto-fail/partial-GC janitor — shared deferral with 3.B). A
+  *failed* inbound is likewise terminal — `'failed'` is absorbing, so neither
+  lane can heal it and its stored chunks are orphaned; now promoted to active
+  work as **#144** (retry + partial-GC), so treat that issue, not this bullet,
+  as the live record. Large files (>10 MiB) cannot transfer while a peer is
+  offline. All disclosed in the v1.0 limitations.
 - **Flatpak full build-validation is deferred (manifest does not build today)** —
   ❌ deferred (v1.1). The in-repo manifest (`packaging/flatpak/net.myggiz.skattr.yml`)
   pins the `org.freedesktop.*//23.08` runtime, past freedesktop's support window
@@ -508,7 +511,9 @@ Use the `superpowers` skills by default for every development task — they are 
 
 The `using-superpowers` skill itself enforces "invoke relevant skills BEFORE any response or action" — treat that as binding, not advisory.
 
-**When a phase or task is complete: push the branch and open a PR.** The PR is the unit of review and the record of what shipped; keep opening them even though CI is on-demand. **There is currently no automated PR reviewer** — CodeRabbit was removed (2026-08-07) and a replacement (Greptile or similar) is being evaluated. Until one is in place, the second pair of eyes is the `superpowers` whole-branch review on the most capable model, run before the PR is opened — do not skip it, and do not treat a green local gate as a substitute for it. When a new reviewer is adopted, restore the babysit rule here: verify findings before applying, reject false positives with evidence, and resolve all threads before merging.
+**When a phase or task is complete: push the branch and open a PR.** The PR is the unit of review and the record of what shipped; keep opening them even though CI is on-demand. **Greptile is the automated PR reviewer** — adopted 2026-08-08, replacing CodeRabbit (removed 2026-08-07). It runs on PR open as a `Greptile Review` check and **is** the second pair of eyes: the `superpowers` whole-branch review that stood in during the no-reviewer gap is no longer required before opening a PR.
+
+Babysit Greptile — verify each finding against the code before applying it, reject false positives with evidence, and resolve all threads before merging. Read the **check conclusion**, not the review state: a clean run lands as a green `Greptile Review` check with no comments and no formal GitHub approval, so `reviewDecision` stays empty and `reviews` is `[]` even on a branch Greptile has passed.
 
 ### Issue tracking (GitHub issues are the backlog)
 
