@@ -9,9 +9,15 @@
 //! The HS signing key is Ed25519 (v3 onion services use `HsIdKey`, the
 //! identity master key). It is generated fresh on first `skattr daemon`,
 //! persisted encrypted under a `HKDF("skattr-hs-storage-v1")` derivation
-//! of the identity seed, and reloaded each subsequent run. A new HS key
-//! means a new `.onion` address — that's deliberate rotation (documented
-//! in design §1.1 and the Phase 2 rotation workstream).
+//! of the identity seed, and reloaded each subsequent run.
+//!
+//! The key is random (`OsRng`), NOT derived from the identity seed — only the
+//! at-rest encryption key is seed-derived. So restoring from a seed phrase
+//! alone yields a *new* `.onion`; keeping an address requires the backup
+//! archive that carries this file. Losing/replacing this file changes the
+//! address, but that is a consequence of key loss, not a rotation feature:
+//! real onion rotation is not implemented (`RotateOnion` republishes the same
+//! address) and is deferred to v1.1.
 
 use std::path::Path;
 

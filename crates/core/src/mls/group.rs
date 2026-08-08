@@ -48,8 +48,13 @@ impl Group {
     /// invite KeyPackageRef (which derives the per-invite-unique PSK id) and the
     /// 32-byte PSK secret. Both are registered (no proposal — solo) so the
     /// subsequent `add_member` genesis Commit can reference them. `h_transport`
-    /// is the transport↔MLS binding PSK (ADR 0009); callers pass `None` until
-    /// the binding is activated.
+    /// is the transport↔MLS binding PSK (ADR 0009).
+    ///
+    /// **The binding is active and mandatory.** Production always passes
+    /// `Some(..)` here (`daemon::dispatch`), and the responder registers the
+    /// identical transcript value before `join_from_welcome`. The parameter is
+    /// `Option` only so tests can construct a group without a live Noise
+    /// session — do not read it as "the binding is optional".
     pub fn create_solo(
         identity: &IdentityKey,
         invite_psk: Option<(&[u8; 32], &[u8; 32])>,

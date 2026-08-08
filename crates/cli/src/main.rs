@@ -3,9 +3,10 @@
 
 //! `skattr` — the command-line client.
 //!
-//! All subcommands are thin wrappers over `skattr_core::Daemon`. In
-//! Phase 0 each subcommand acknowledges the request and prints a
-//! placeholder message; implementations land in Phase 1.
+//! Every subcommand is fully implemented. `daemon` runs the daemon in-process
+//! via `skattr_core::Daemon::run`; all other subcommands connect to a running
+//! daemon over local IPC (Unix socket / Windows named pipe) and issue a single
+//! `Command`, rendering the `CommandResult` as text or, where supported, JSON.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -642,7 +643,9 @@ async fn daemon(
     use skattr_core::daemon::{Config, Daemon};
 
     if detach {
-        anyhow::bail!("--detach is not yet supported in Phase 1.F");
+        anyhow::bail!(
+            "--detach is not implemented; run the daemon in the foreground \n             (or under your service manager) instead"
+        );
     }
 
     let mut config = Config::defaults()?;

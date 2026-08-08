@@ -50,8 +50,9 @@
   // contact, accumulate formatted lines, then copy to clipboard.
   // Note: ExportHistory requires a specific contact (PublicKey) — there is
   // no all-conversations variant in the current wire format. We iterate
-  // contacts client-side. A Tauri save-dialog plugin is not bundled in
-  // this release; clipboard copy is the pragmatic 2.F fallback.
+  // contacts client-side. This export path copies to the clipboard rather than
+  // writing a file; the save-dialog flow used elsewhere (backup export,
+  // attachment save) has not been wired up here yet.
   async function downloadAll() {
     exportInflight = true;
     try {

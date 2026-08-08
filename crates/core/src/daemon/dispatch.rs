@@ -6,9 +6,9 @@
 //! Command dispatch: one function per `Command` variant, consuming a
 //! `DaemonHandle` + the command and returning a typed result / error.
 //!
-//! Per-variant handlers are private to this module. Task 14+ fill them
-//! in; today all variants except `Shutdown` / `RotateOnion` return
-//! `IpcError::UnknownCommand`.
+//! Per-variant handlers are private to this module. Every variant is
+//! implemented except `CreateGroup`, which returns `IpcError::UnknownCommand`
+//! because multi-member (>2) groups are deferred to v1.1.
 
 use std::sync::Arc;
 
@@ -46,6 +46,9 @@ where
             before_id,
             paged,
         } => recent_messages(&handle, contact, limit, before_id, paged).await,
+        // Multi-member (>2) groups are deferred to v1.1; the MLS layer gates
+        // group size at 2 (`mls/group.rs`). Answered as UnknownCommand so a
+        // client can feature-detect rather than get a partial group.
         Command::CreateGroup { .. } => Err(IpcError::UnknownCommand),
         Command::RenameContact { contact, nickname } => {
             rename_contact(&handle, contact, nickname).await

@@ -616,7 +616,10 @@ where
                 first_failure_at = None;
             }
             _ = retry_tick.tick() => {
-                // dial-on-demand happens on the next job send; timer-driven redial is Phase-2 fallback work.
+                // One tick drives three jobs: (1) retry due direct-outbox rows,
+                // (2) fire the sustained-failure → mailbox fallback below, and
+                // (3) time out stale chunk requests. Dial-on-demand still happens
+                // on the next job send; this tick never dials on its own.
                 let ob = Outbox::new(&pool);
                 let now = now_ms();
                 let due = match ob.due(now, 32) { Ok(v) => v, Err(_) => continue };

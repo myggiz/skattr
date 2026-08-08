@@ -41,8 +41,13 @@ pub struct Envelope {
     /// Sender's wall-clock time, millis since Unix epoch.
     ///
     /// Display-only. Ordering comes from MLS generation numbers, not from
-    /// this field. Receivers reject envelopes whose `ts` is more than
-    /// one hour away from local clock (replay resistance).
+    /// this field.
+    ///
+    /// The ±1 h replay window is enforced on the **direct** path only. Mailbox
+    /// deposits are deliberately exempt (a legitimately delayed deposit must
+    /// still surface); replay resistance there comes from `(sender,
+    /// envelope_id)` dedup plus the MLS generation counter and server-side
+    /// delete.
     pub ts: i64,
     /// Optional reply target.
     #[serde(skip_serializing_if = "Option::is_none")]

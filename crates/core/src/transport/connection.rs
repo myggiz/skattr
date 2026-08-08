@@ -86,10 +86,13 @@ where
         codec.encode(frame, &mut inner)?;
 
         // Noise payload cap (65535) minus ChaChaPoly tag (16) = 65519.
-        // FrameCodec enforces 16 MiB so the inner could in principle be
-        // larger; for 1.B's scope — Ping/Pong/Bye/small MlsApp — inner
-        // stays well under 65 KiB. Larger payloads land in 1.E with a
-        // chunked send path.
+        // FrameCodec enforces 16 MiB, so the inner frame could in principle be
+        // larger than one Noise message. Nothing chunks here: instead every
+        // producer is sized to fit. The binding constraint is attachment
+        // chunks — `CHUNK_SIZE` is 48 KiB precisely so one chunk plus framing
+        // fits under this cap, locked by the regression guard
+        // `chunk_frame_worst_case_fits_noise_max_outer` in `frame.rs`. If you
+        // raise CHUNK_SIZE, that test is what will stop you.
         const NOISE_MAX_OUTER: usize = 65519;
         if inner.len() > NOISE_MAX_OUTER {
             return Err(CoreError::Transport(TransportErrorKind::Other(format!(

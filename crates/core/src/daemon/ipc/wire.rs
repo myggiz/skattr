@@ -55,7 +55,7 @@ pub enum IpcRequest {
     /// Long-lived subscription; expect one `Ok(Subscribed)` then a
     /// stream of `Event(..)` frames until the client hangs up.
     Subscribe(EventFilter),
-    /// Graceful daemon shutdown. Expect `Ok(ShuttingDown)` then `Bye`.
+    /// Graceful daemon shutdown. Expect `Ok(CommandResult::Ok)` then `Bye`.
     Shutdown,
 }
 
@@ -92,7 +92,8 @@ pub enum IpcError {
         /// Maximum accepted body length.
         max: u32,
     },
-    /// Variant is reserved for a future phase (e.g. `CreateGroup` in 1.F).
+    /// Command the daemon does not implement. Currently only `CreateGroup`
+    /// (multi-member groups, deferred to v1.1).
     UnknownCommand,
     /// Daemon is still booting; retry.
     VaultNotReady,

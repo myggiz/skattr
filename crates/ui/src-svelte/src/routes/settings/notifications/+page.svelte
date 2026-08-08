@@ -63,7 +63,7 @@
     Other conversations always notify.
   </label>
   <p class="muted">
-    This behaviour is locked in Phase 2.F to keep the notification UX predictable.
+    This behaviour is fixed, to keep notifications predictable.
   </p>
 </fieldset>
 

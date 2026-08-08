@@ -5,9 +5,13 @@
 
 //! Message history repository.
 //!
-//! Phase 0.D covers insert + recent-by-group. FTS5 full-text search
-//! lands in Phase 1 when the daemon actually holds enough messages for
-//! search to matter.
+//! Covers insert, recent-by-group, and FTS5 full-text search (`search`,
+//! `fts5_tokenize_and_and`; the index is created by migration 0006).
+//!
+//! Ordering differs by query, and never uses `Envelope.ts` (which is
+//! display-only): conversation reads order by `mls_generation DESC, id DESC`,
+//! while `search` orders by `messages.id DESC` (newest-first) or
+//! `bm25(messages_fts) ASC, messages.id DESC` (by relevance).
 
 use crate::envelope::Envelope;
 use crate::error::{CoreError, Result};
