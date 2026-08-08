@@ -13,8 +13,13 @@ name: regen-lockfile-probe
 # So: regenerate on the Linux runner, prove the whole `ui` gate passes with the
 # result, and upload the lockfile as an artifact for review before it lands.
 
+# Scoped to this throwaway branch only. It is NOT workflow_dispatch because
+# GitHub only dispatches workflows that already exist on the default branch,
+# and this one must never land there.
 on:
-  workflow_dispatch:
+  push:
+    branches:
+      - ci/147-regen-lockfile-probe
 
 env:
   CARGO_TERM_COLOR: always
