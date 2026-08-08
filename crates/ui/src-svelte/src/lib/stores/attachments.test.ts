@@ -63,9 +63,9 @@ describe("attachments store", () => {
     applyProgress("gg", 3, 8);
     applyFailed("gg", "request timeout");
     markRetrying("gg");
-    const s = attachmentFor("gg")!;
+    const s = attachmentFor("gg");
     expect(s).toMatchObject({ status: "queued", retrying: true, received: 3, total: 8 });
-    expect(s.reason).toBeUndefined();
+    expect(s?.reason).toBeUndefined();
   });
 
   test("a retry that then makes progress drops the retrying flag (#144)", () => {

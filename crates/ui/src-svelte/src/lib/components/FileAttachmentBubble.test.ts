@@ -329,9 +329,9 @@ describe("FileAttachmentBubble", () => {
     );
     // Re-armed: the error is gone, the waiting state is shown, and the chunks
     // already received are kept (a retry resumes, it does not restart).
-    const state = attachmentFor(AID)!;
+    const state = attachmentFor(AID);
     expect(state).toMatchObject({ status: "queued", retrying: true, received: 2 });
-    expect(state.reason).toBeUndefined();
+    expect(state?.reason).toBeUndefined();
     await findByText("Retrying — waiting for the sender…");
     expect(container.querySelector(".failed")).toBeNull();
   });

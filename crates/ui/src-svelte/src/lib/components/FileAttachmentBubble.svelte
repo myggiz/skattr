@@ -178,14 +178,15 @@
   // completes, so this can still come back as a fresh AttachmentFailed. Say
   // "asked", not "downloading", and let the events tell the real story.
   async function doRetry() {
-    if (!aidHex) return;
+    // Bind to a const so the guard narrows it to string for the typed request
+    // below — `aidHex` is a reactive `let`, which TS will not narrow across the
+    // await.
+    const aid = aidHex;
+    if (!aid) return;
     try {
-      const resp = await ipcClient.request({
-        cmd: "retry_attachment",
-        attachment_id: aidHex,
-      } as any);
+      const resp = await ipcClient.request({ cmd: "retry_attachment", attachment_id: aid });
       if (resp.resp !== "ok") throw new Error("retry rejected");
-      markRetrying(aidHex);
+      markRetrying(aid);
       toast.show("Retrying — this only works while the sender still has the file.");
     } catch {
       toast.show("Couldn't retry this transfer.");
