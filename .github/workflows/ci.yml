@@ -1,13 +1,28 @@
 name: CI
 
-# On-demand only — to conserve GitHub Actions minutes during the sub-version
-# fix cycle. Verification is done locally (maintainer runs the Rust + UI gates
-# on Linux; Windows builds are produced/tested locally on a separate box).
-# Trigger a full CI run manually (Actions tab → CI → "Run workflow") before a
-# real release, or when a change specifically warrants cross-checking.
-# See CLAUDE.md.
+# Runs on every PR into master, plus manual dispatch.
+#
+# This was `workflow_dispatch`-only while the repo was private, to conserve
+# GitHub Actions minutes (#82). The repo is public now and every job below
+# uses a standard GitHub-hosted runner, which is free and unmetered for public
+# repositories — so the reason for the on-demand cadence is gone and CI is a
+# real gate again. The local gate stays useful for fast iteration before
+# pushing; it is no longer the *only* verification.
+#
+# Deliberately NOT on every branch push: a PR run (plus a re-run on each push
+# to that PR) is the useful signal. `workflow_dispatch` is kept for running a
+# check against a branch before opening a PR, or before a release.
 on:
+  pull_request:
+    branches: [master]
   workflow_dispatch:
+
+# A new push to a PR cancels the previous run for that PR — the older result
+# is worthless once the branch moves, and this avoids piling up concurrent
+# jobs on a branch that is being iterated on.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
