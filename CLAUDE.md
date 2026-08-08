@@ -423,12 +423,28 @@ client-side mitigation goes in **4.C**.
 - **3.C offline transfer is best-effort** — a deposited-but-never-fetched
   attachment is lost after the mailbox TTL (~7 days; the sender gets no fetch
   feedback so it never re-deposits), and a stalled inbound stays `pending`
-  forever (no auto-fail/partial-GC janitor — shared deferral with 3.B). A
-  *failed* inbound is likewise terminal — `'failed'` is absorbing, so neither
-  lane can heal it and its stored chunks are orphaned; now promoted to active
-  work as **#144** (retry + partial-GC), so treat that issue, not this bullet,
-  as the live record. Large files (>10 MiB) cannot transfer while a peer is
-  offline. All disclosed in the v1.0 limitations.
+  forever (no auto-fail janitor — shared deferral with 3.B). Large files
+  (>10 MiB) cannot transfer while a peer is offline. All disclosed in the v1.0
+  limitations.
+- **A failed inbound attachment is retryable** — ✅ done (#144, PR #146).
+  `'failed'` is still absorbing (that is #38's exactly-once gate), but it is no
+  longer a dead end: `AttachmentRepo::rearm_failed_in` is the one sanctioned
+  transition back to `'pending'`, driven by `Command::RetryAttachment` and a
+  Retry action on the failed bubble. Both lanes re-arm — the offline lane
+  because `list_pending_in` matches again, the direct lane via
+  `InboundDispatch::requeue_attachment` drained on the peer actor's retry tick.
+  Nothing is discarded on failure, so a retry **resumes** from the chunks
+  already held. Best-effort by nature: the sender drops its staged chunks after
+  a peer ack or a completed deposit sweep, so a retry can still come back as a
+  nack.
+- **Orphaned chunks are never reclaimed** — ❌ deferred (v1.1), tracked as
+  **#149** (the partial-GC half of #144, split out). Chunks for inbound
+  transfers that never complete — `'failed'` and never retried, stalled
+  `'pending'`, or true orphans with no row — accumulate under
+  `<data_dir>/attachments/` forever. No corruption; unbounded invisible disk
+  growth. Note for whoever takes it: a **completed** inbound attachment's chunks
+  *are* the user's file (encrypted-at-rest; plaintext only on demand), so
+  `status='complete'` must stay strictly out of any janitor's scope.
 - **Flatpak full build-validation is deferred (manifest does not build today)** —
   ❌ deferred (v1.1). The in-repo manifest (`packaging/flatpak/net.myggiz.skattr.yml`)
   pins the `org.freedesktop.*//23.08` runtime, past freedesktop's support window
