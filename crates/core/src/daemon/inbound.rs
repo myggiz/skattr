@@ -613,7 +613,7 @@ impl DaemonInbound {
     /// The sender's pubkey is looked up from the `peer` column written when the
     /// manifest was ingested; falls back to `PublicKey([0u8; 32])` if unavailable
     /// (should not happen for well-formed 'in' rows).
-    fn finalize_offline(
+    pub(crate) fn finalize_offline(
         &self,
         attachment_id: &[u8; 16],
         manifest: &crate::attachment::manifest::AttachmentManifest,
@@ -627,9 +627,12 @@ impl DaemonInbound {
             .flatten()
             .map(PublicKey)
             .unwrap_or(PublicKey([0u8; 32]));
-        // Fire-gate: only the lane that flips pending→complete emits, so the
+        // Fire-gate: only the lane that claims the pending row emits, so the
         // direct/offline lanes can't race and produce duplicate events.
-        match repo.set_status_if_pending(attachment_id) {
+        match repo.claim_terminal(
+            attachment_id,
+            crate::storage::attachments::TerminalStatus::Complete,
+        ) {
             Ok(true) => {
                 // Encrypted-at-rest: retain chunks, do not reassemble. Emit availability.
                 let _ = self.events_tx.send(Event::AttachmentReceived {

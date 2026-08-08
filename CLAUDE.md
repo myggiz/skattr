@@ -288,7 +288,8 @@ client-side mitigation goes in **4.C**.
   rounds: **Item 4** schema-downgrade guard (`migrations::apply` refuses a DB
   whose `schema_version` exceeds the highest known migration, and propagates a
   read error rather than masking it as fresh); **P2** attachment-completion CAS
-  fire-gate (`AttachmentRepo::set_status_if_pending`; both finalize lanes now
+  fire-gate (`AttachmentRepo::set_status_if_pending`, since generalized to
+  `claim_terminal` by #38; both finalize lanes now
   run the CAS *first* and only the winner allocates a `unique_download_path` +
   reassembles, so a losing/erroring lane writes no orphan and the direct/offline
   lanes can't race on the same output path — this also closes the old "3.C
@@ -406,17 +407,19 @@ client-side mitigation goes in **4.C**.
   original connection's `h_transport` (ADR 0009) and cannot bind on a new
   connection; the invitee stays "Connecting…" and keeps retrying (capped
   backoff). Tracked with #90 Mode A; full recovery is v1.1.
-- **3.C completion is not atomic across lanes** — ❌ deferred (v1.1). The
-  attachment-complete check (`received_indices().len() >= total` → reassemble +
-  emit `AttachmentReceived` → `set_status('complete')`) is not atomic with the
-  status flip, and the direct (3.B `finalize_rx`) and offline (3.C
-  `finalize_offline`) lanes run in separate tasks. Under *simultaneous*
-  direct+offline completion a duplicate `AttachmentReceived` event can fire —
-  event-level only (no corruption; `unique_download_path` writes distinct files;
-  UI keys on `attachment_id`). Fix: a compare-and-set status gate
-  (`UPDATE … WHERE status='pending'`, rows-affected as the fire gate). Also v1.1:
-  add `warn!` on the `chunk_sweep` prune writes + `finalize_offline`
-  post-reassemble status writes (currently swallowed with `let _ =`).
+- **3.C cross-lane completion atomicity** — ✅ done (#38). `'pending'` is now a
+  single-use claim token: `AttachmentRepo::claim_terminal(aid, TerminalStatus)`
+  (`UPDATE … SET status=?2 WHERE status='pending'`, rows-affected as the gate)
+  is the sole route out of `pending`, so the direct (3.B `finalize_rx`) and
+  offline (3.C `finalize_offline`) lanes emit **exactly one terminal event**
+  between them. 4.D had gated the two completion emits; #38 extended the same
+  gate to `fail_rx`, which previously overwrote `status='complete'` with
+  `'failed'` and emitted `AttachmentFailed` when the direct lane's 30 s request
+  timeout fired after the offline lane had already completed the attachment —
+  leaving a fully-received file permanently unopenable (`open_attachment_cmd`
+  and `attachment_available_cmd` both require `status == "complete"`). The
+  `warn!`-on-swallowed-write half of #38 had already landed via #142 and the
+  existing `chunk_sweep` logging.
 - **3.C offline transfer is best-effort** — a deposited-but-never-fetched
   attachment is lost after the mailbox TTL (~7 days; the sender gets no fetch
   feedback so it never re-deposits), and a stalled inbound stays `pending`
