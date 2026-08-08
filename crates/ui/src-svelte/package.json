@@ -26,11 +26,6 @@
     "vite": "5.4.0",
     "vitest": "2.1.0"
   },
-  "pnpm": {
-    "patchedDependencies": {
-      "esrap@1.4.9": "patches/esrap@1.4.9.patch"
-    }
-  },
   "dependencies": {
     "@tanstack/svelte-virtual": "3.10.9",
     "@tauri-apps/api": "~2.11.1",
