@@ -18,6 +18,7 @@ export interface AttachmentState {
   size?: number; // bytes (≤100 MiB → JS number is exact)
   available?: boolean; // true once the encrypted-at-rest file can be opened (receiver)
   reason?: string; // when failed
+  retrying?: boolean; // re-armed by RetryAttachment, no chunk has moved yet (#144)
 }
 
 /**
@@ -70,6 +71,7 @@ export function applyProgress(aidHex: string, received: number, total: number): 
     status: prev.status === "complete" ? "complete" : "receiving",
     received,
     total,
+    retrying: false,
   }));
 }
 
@@ -85,6 +87,7 @@ export function markAvailable(
     mime: info.mime,
     size: info.size,
     available: true,
+    retrying: false,
   }));
 }
 
@@ -96,7 +99,28 @@ export function applyReceived(
 }
 
 export function applyFailed(aidHex: string, reason: string): void {
-  patch(aidHex, (prev) => ({ ...prev, status: "failed", reason }));
+  patch(aidHex, (prev) => ({ ...prev, status: "failed", reason, retrying: false }));
+}
+
+/**
+ * Move a failed transfer back to waiting after the daemon accepted a retry
+ * (#144). The received count is kept: a retry resumes from the chunks already
+ * held rather than restarting, so zeroing it would misreport progress. The
+ * failure reason is cleared so the bubble stops showing the old error.
+ *
+ * "queued" rather than "receiving" on purpose — the daemon only re-arms here.
+ * The fetch itself starts when the peer is reachable again, which may not be
+ * now, and claiming "downloading" before a single chunk has moved would be a
+ * lie the user can see. The distinct `retrying` flag is what the bubble reads,
+ * so this does not disturb the plain "queued" seed state of a fresh transfer.
+ */
+export function markRetrying(aidHex: string): void {
+  patch(aidHex, (prev) => ({
+    ...prev,
+    status: "queued",
+    reason: undefined,
+    retrying: true,
+  }));
 }
 
 export function attachmentFor(aidHex: string): AttachmentState | undefined {

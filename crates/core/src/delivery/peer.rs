@@ -331,6 +331,17 @@ pub trait InboundDispatch: Send + Sync + 'static {
         None
     }
 
+    /// Queue an inbound-attachment begin for `peer` from outside the MLS
+    /// dispatch path — the #144 retry, where the manifest was received long ago
+    /// and only the fetch needs restarting. Default no-op.
+    #[allow(private_interfaces)]
+    fn requeue_attachment(
+        &self,
+        _peer: PublicKey,
+        _begin: crate::delivery::chunk_transfer::AttachmentBegin,
+    ) {
+    }
+
     /// Emit `Event::AttachmentReceived`. Default no-op.
     fn attachment_received(
         &self,
@@ -729,6 +740,32 @@ where
                                 .await;
                             }
                             _ => {}
+                        }
+                    }
+                    // #144: pick up a retry-requeued begin. The MlsApp arm is
+                    // the only other drain point, so without this a retry would
+                    // sit idle until the peer happened to send a message.
+                    //
+                    // Gated on a live conn: `maybe_start_next_rx` marks its
+                    // window in-flight as soon as it dequeues, and those
+                    // requests can only be sent over a conn — starting one
+                    // without a conn would just re-fail on the 30 s timeout.
+                    // The begin stays queued in the dispatcher until then.
+                    if conn.is_some() {
+                        if let Some(d) = inbound.as_ref() {
+                            while let Some(begin) = d.take_begin_attachment(peer) {
+                                rx_queue.push_back(begin);
+                            }
+                            if active_rx.is_none() {
+                                active_rx = maybe_start_next_rx(
+                                    &mut conn,
+                                    &pool,
+                                    &inbound,
+                                    peer,
+                                    &mut rx_queue,
+                                )
+                                .await;
+                            }
                         }
                     }
                 }
@@ -1975,6 +2012,109 @@ mod tests {
         }
 
         handle.abort();
+    }
+
+    /// #144 — a retry-requeued begin must start fetching on its own. The only
+    /// other drain point is the `Frame::MlsApp` arm, so without the retry-tick
+    /// drain a retry would sit idle until the peer happened to send a message —
+    /// which, for a peer that just failed a transfer, may be never. Drives the
+    /// real seam: `DaemonInbound::requeue_attachment` → actor tick →
+    /// `ChunkRequest` on the wire. No MlsApp is ever sent here.
+    #[tokio::test(start_paused = true)]
+    async fn retry_requeued_begin_starts_fetching_on_the_next_tick() {
+        use crate::attachment::store::ChunkStore;
+        use crate::daemon::inbound::DaemonInbound;
+        use std::sync::Arc;
+        use tokio::io::DuplexStream;
+        use tokio::sync::broadcast;
+
+        let (manifest, _cts) = crate::attachment::chunker::chunk_plaintext(
+            b"retry me",
+            "f.bin",
+            "application/octet-stream",
+        )
+        .unwrap();
+        let aid = manifest.attachment_id;
+
+        let pool = Arc::new(Pool::in_memory());
+        crate::storage::attachments::AttachmentRepo::new(&pool)
+            .insert(&aid, "in", &manifest.to_cbor().unwrap(), 1, 0)
+            .unwrap();
+
+        let (client_stream, server_stream) = tokio::io::duplex(64 * 1024);
+        let actor_id = IdentityKey::generate().unwrap();
+        let responder_id = IdentityKey::generate().unwrap();
+        let responder_static = responder_id.noise_static_public();
+        let peer = PublicKey(responder_id.public().0);
+        let responder_task = tokio::spawn(async move {
+            handshake_responder(server_stream, &responder_id, None)
+                .await
+                .unwrap()
+        });
+        let (conn, _) = handshake_initiator(client_stream, &actor_id, &responder_static, None)
+            .await
+            .unwrap();
+        let (mut peer_conn, _) = responder_task.await.unwrap();
+
+        let (events_tx, _events_rx) = broadcast::channel(16);
+        let dispatcher = Arc::new(DaemonInbound::new(pool.clone(), events_tx));
+        let tmp = tempfile::tempdir().unwrap();
+        let chunk_store = Arc::new(ChunkStore::new(tmp.path()));
+        let download_dir = tmp.path().join("downloads");
+
+        let (_jobs_tx, jobs_rx) = mpsc::channel::<DeliveryJob>(4);
+        let (_welcome_tx, welcome_rx) = mpsc::channel::<WelcomeJob>(4);
+        let (_ctrl_tx, ctrl_rx) = mpsc::channel::<PeerCtrl<DuplexStream>>(4);
+        let run_inbound: Arc<dyn InboundDispatch> = dispatcher.clone();
+        let run_pool = pool.clone();
+        let actor = tokio::spawn(async move {
+            let _ = super::full_run::<DuplexStream>(
+                peer,
+                Some(conn),
+                jobs_rx,
+                welcome_rx,
+                ctrl_rx,
+                run_pool,
+                Some(run_inbound),
+                None,
+                std::time::Duration::from_secs(0),
+                None,
+                Some(chunk_store),
+                Some(download_dir),
+            )
+            .await;
+        });
+
+        // The retry: re-queue the begin after the actor is already running, with
+        // no MLS traffic to piggyback on.
+        dispatcher.requeue_attachment(
+            peer,
+            crate::delivery::chunk_transfer::AttachmentBegin {
+                attachment_id: aid,
+                manifest,
+            },
+        );
+
+        // Advance past one retry tick (1 s).
+        tokio::time::advance(std::time::Duration::from_millis(1_100)).await;
+
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(5), peer_conn.recv())
+            .await
+            .expect("a ChunkRequest must be issued within 5 s of the retry")
+            .expect("conn readable")
+            .expect("frame present");
+        match frame {
+            Frame::ChunkRequest {
+                attachment_id,
+                index,
+            } => {
+                assert_eq!(attachment_id, aid);
+                assert_eq!(index, 0, "resumes from the first missing chunk");
+            }
+            other => panic!("expected ChunkRequest, got {other:?}"),
+        }
+
+        actor.abort();
     }
 
     /// Build a real single-chunk attachment and return `(manifest, complete rx)`.

@@ -10,6 +10,7 @@ import {
   applyReceived,
   markAvailable,
   applyFailed,
+  markRetrying,
   attachmentFor,
 } from "./attachments";
 
@@ -56,6 +57,22 @@ describe("attachments store", () => {
     applyProgress("ee", 1, 4);
     applyFailed("ee", "timeout");
     expect(attachmentFor("ee")).toMatchObject({ status: "failed", reason: "timeout" });
+  });
+
+  test("markRetrying clears the failure but keeps received chunks (#144)", () => {
+    applyProgress("gg", 3, 8);
+    applyFailed("gg", "request timeout");
+    markRetrying("gg");
+    const s = attachmentFor("gg")!;
+    expect(s).toMatchObject({ status: "queued", retrying: true, received: 3, total: 8 });
+    expect(s.reason).toBeUndefined();
+  });
+
+  test("a retry that then makes progress drops the retrying flag (#144)", () => {
+    applyFailed("hh", "timeout");
+    markRetrying("hh");
+    applyProgress("hh", 1, 4);
+    expect(attachmentFor("hh")).toMatchObject({ status: "receiving", retrying: false });
   });
 
   test("updates are immutable (new Map each time)", () => {

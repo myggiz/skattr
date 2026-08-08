@@ -41,7 +41,13 @@ vi.mock("$lib/attachments", async (importOriginal) => {
 });
 
 import FileAttachmentBubble from "./FileAttachmentBubble.svelte";
-import { attachments, applyProgress, markAvailable } from "$lib/stores/attachments";
+import {
+  attachments,
+  applyFailed,
+  applyProgress,
+  attachmentFor,
+  markAvailable,
+} from "$lib/stores/attachments";
 import { delivery, recordDeliveryStatus } from "$lib/stores/delivery";
 import type { MessageRecord } from "$lib/ipc/types";
 
@@ -301,5 +307,49 @@ describe("FileAttachmentBubble", () => {
     expect(container.querySelector(".icon")).not.toBeNull();
     expect(container.querySelector(".icon.delivered")).toBeNull();
     expect(container.querySelector(".icon.sent")).not.toBeNull();
+  });
+
+  test("a failed transfer offers Retry, which re-arms it (#144)", async () => {
+    const { container, findByText, getByLabelText } = render(FileAttachmentBubble, {
+      props: { record: fileRecord("incoming") },
+    });
+    await findByText("photo.jpg");
+    applyProgress(AID, 2, 8);
+    applyFailed(AID, "request timeout");
+    await tick();
+    await findByText("⚠️ request timeout");
+
+    ipcRequestMock.mockResolvedValueOnce({ resp: "ok", data: { result: "ok" } });
+    getByLabelText("Retry transfer").click();
+    await tick();
+    await tick();
+
+    expect(ipcRequestMock).toHaveBeenCalledWith(
+      expect.objectContaining({ cmd: "retry_attachment", attachment_id: AID }),
+    );
+    // Re-armed: the error is gone, the waiting state is shown, and the chunks
+    // already received are kept (a retry resumes, it does not restart).
+    const state = attachmentFor(AID)!;
+    expect(state).toMatchObject({ status: "queued", retrying: true, received: 2 });
+    expect(state.reason).toBeUndefined();
+    await findByText("Retrying — waiting for the sender…");
+    expect(container.querySelector(".failed")).toBeNull();
+  });
+
+  test("a rejected retry leaves the failed state alone (#144)", async () => {
+    const { findByText, getByLabelText } = render(FileAttachmentBubble, {
+      props: { record: fileRecord("incoming") },
+    });
+    await findByText("photo.jpg");
+    applyFailed(AID, "sender nack reason 1");
+    await tick();
+
+    ipcRequestMock.mockResolvedValueOnce({ resp: "err", error: { kind: "invalid_argument" } });
+    getByLabelText("Retry transfer").click();
+    await tick();
+    await tick();
+
+    expect(attachmentFor(AID)).toMatchObject({ status: "failed", reason: "sender nack reason 1" });
+    await findByText("⚠️ sender nack reason 1");
   });
 });
