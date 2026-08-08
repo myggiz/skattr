@@ -33,37 +33,13 @@ pub struct Ready {
     pub ipc_socket: std::path::PathBuf,
 }
 
-/// The running daemon.
-pub struct Daemon {
-    events_tx: broadcast::Sender<Event>,
-}
-
-impl Daemon {
-    /// Start the daemon: unlock vault, bootstrap Tor, open storage,
-    /// publish onion, spawn sender/receiver/poller tasks.
-    pub async fn start(_config: Config, _passphrase: &str) -> Result<Self> {
-        let (events_tx, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
-        // TODO(phase-0): open Vault, TorRuntime::bootstrap, Pool::open,
-        //                spawn OnionListener + Sender + MailboxScheduler.
-        Ok(Self { events_tx })
-    }
-
-    /// Execute a command.
-    pub async fn execute(&self, _cmd: Command) -> Result<CommandResult> {
-        todo!("match command, dispatch to subsystem, return CommandResult")
-    }
-
-    /// Subscribe to the daemon's event stream.
-    #[must_use]
-    pub fn events(&self) -> broadcast::Receiver<Event> {
-        self.events_tx.subscribe()
-    }
-
-    /// Graceful shutdown: cancel tasks, flush outbox, stop Tor.
-    pub async fn shutdown(self) -> Result<()> {
-        todo!("cancel tokens, await tasks, flush storage, stop Arti")
-    }
-}
+/// Entry points for the daemon lifecycle.
+///
+/// `Daemon` is a namespace, not a handle: it holds no state. Everything the
+/// running daemon owns (pool, Tor runtime, delivery hub, IPC server) lives in
+/// the task graph that [`Daemon::run`] assembles and tears down, and callers
+/// interact with a live daemon over IPC rather than through this type.
+pub struct Daemon;
 
 impl Daemon {
     /// Run the full daemon lifecycle:
@@ -262,30 +238,6 @@ impl Daemon {
             shutdown,
         )
         .await
-    }
-
-    /// Encrypt an envelope for `peer` via the existing MLS group, persist
-    /// it to the outbox, and hand it off to the delivery hub for
-    /// transmission. `pub(crate)` until 1.F wires the CLI path; tests
-    /// reach this via `test_exports::send`.
-    #[allow(dead_code)]
-    pub(crate) async fn send(
-        &self,
-        _peer: crate::identity::PublicKey,
-        _envelope: crate::envelope::Envelope,
-    ) -> crate::error::Result<tokio::sync::oneshot::Receiver<std::result::Result<(), ()>>> {
-        // 1.E is scaffold-complete but Daemon::run does not yet
-        // construct the hub (that wiring lands with 1.F when
-        // Daemon::execute grows Command::Send). Returning an error
-        // here keeps the signature stable for tests; the integration
-        // test in crates/tests/src/delivery_kill_mid_message.rs
-        // bypasses Daemon and drives DeliveryHub directly through
-        // test_exports.
-        Err(crate::error::CoreError::Delivery(
-            crate::delivery::DeliveryErrorKind::Other(
-                "Daemon::send requires 1.F CLI integration".into(),
-            ),
-        ))
     }
 }
 

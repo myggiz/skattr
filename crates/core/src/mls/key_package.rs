@@ -10,7 +10,6 @@
 
 use openmls::prelude::*;
 use openmls_basic_credential::SignatureKeyPair;
-use openmls_traits::OpenMlsProvider as _;
 use sha2::{Digest, Sha256};
 use tls_codec::{Deserialize as _, Serialize as _};
 

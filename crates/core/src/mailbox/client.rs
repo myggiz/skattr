@@ -15,7 +15,7 @@ use tokio_util::codec::Framed;
 
 use crate::error::{CoreError, MailboxClientErrorKind, Result};
 use crate::mailbox::codec::{MailboxFrame, MailboxFrameCodec};
-use crate::mailbox::protocol::{Challenge, ChallengeNonce, ErrorBody, ErrorCode, PROTOCOL_VERSION};
+use crate::mailbox::protocol::{Challenge, ErrorBody, ErrorCode, PROTOCOL_VERSION};
 
 /// Single-mailbox client over a long-lived framed stream.
 pub(crate) struct MailboxClient<S>

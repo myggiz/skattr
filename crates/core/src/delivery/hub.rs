@@ -25,7 +25,7 @@ use crate::mailbox::client::recipient_hash_from_pubkey;
 use crate::mailbox::poll::MailboxConnectFactory;
 use crate::storage::outbox::OutboxRepo;
 use crate::storage::seen_messages::SeenMessagesRepo;
-use crate::storage::{ContactRepo, MailboxRepo, Pool};
+use crate::storage::{MailboxRepo, Pool};
 use crate::transport::connection::AuthenticatedConnection;
 
 const JOB_CHAN_CAP: usize = 64;

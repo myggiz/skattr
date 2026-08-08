@@ -13,7 +13,7 @@ pub(crate) mod store;
 pub(crate) mod strip;
 
 pub(crate) use error_kind::AttachmentErrorKind;
-pub(crate) use manifest::{AttachmentManifest, ChunkRef};
+pub(crate) use manifest::AttachmentManifest;
 
 /// Plaintext bytes per chunk (48 KiB). Must stay under the Noise single-message
 /// cap: `NOISE_MAX_OUTER = 65_519` bytes (65_535 − 16-byte ChaChaPoly tag).

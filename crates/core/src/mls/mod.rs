@@ -29,9 +29,8 @@ pub(crate) use key_package::KeyPackage;
 pub(crate) use state_machine::GroupState;
 
 #[cfg(feature = "test-harness")]
-pub use ciphersuite::CIPHERSUITE;
 #[cfg(feature = "test-harness")]
-pub use group::{CommitBytes, Group, GroupId, WelcomeBytes};
+pub use group::{Group, GroupId};
 #[cfg(feature = "test-harness")]
 pub use key_package::KeyPackage;
 #[cfg(feature = "test-harness")]

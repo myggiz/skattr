@@ -64,7 +64,7 @@ pub(crate) use read_state::ReadStateRepo;
 pub(crate) use seen_messages::SeenMessagesRepo;
 
 #[cfg(feature = "test-harness")]
-pub use attachments::{AttachmentRepo, AttachmentRow};
+pub use attachments::AttachmentRepo;
 #[cfg(feature = "test-harness")]
 pub use contacts::ContactRepo;
 #[cfg(feature = "test-harness")]
@@ -80,7 +80,7 @@ pub use outstanding_invites::OutstandingInviteRepo;
 #[cfg(feature = "test-harness")]
 pub use passphrase_audit::{AuditOutcome, PassphraseAuditRepo};
 #[cfg(feature = "test-harness")]
-pub use pending_welcomes::{PendingWelcomeDue, PendingWelcomeRepo};
+pub use pending_welcomes::PendingWelcomeRepo;
 #[cfg(feature = "test-harness")]
 pub use pool::Pool;
 #[cfg(feature = "test-harness")]
