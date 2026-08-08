@@ -5,7 +5,9 @@ settings:
   excludeLinksFromLockfile: false
 
 patchedDependencies:
-  esrap@1.4.9: eabcd92379774f8d9933cf21294ef6232e78176853746821c28e1d7fecf18560
+  esrap@1.4.9:
+    hash: eabcd92379774f8d9933cf21294ef6232e78176853746821c28e1d7fecf18560
+    path: patches/esrap@1.4.9.patch
 
 importers:
 
