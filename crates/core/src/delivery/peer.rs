@@ -1028,7 +1028,8 @@ where
                         {
                             tracing::warn!(
                                 aid = %hex::encode(attachment_id), err = %e,
-                                "attachment: offline deposit prune failed after peer ack;                                  chunks may be re-deposited to a mailbox"
+                                "attachment: offline deposit prune failed after peer ack; \
+                                 chunks may be re-deposited to a mailbox"
                             );
                         }
                         if let Some(d) = inbound.as_ref() {

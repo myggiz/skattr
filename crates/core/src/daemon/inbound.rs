@@ -250,7 +250,8 @@ impl DaemonInbound {
                         if let Err(e) = repo.set_peer(&m.attachment_id, &from.0) {
                             tracing::warn!(
                                 err = %e,
-                                "inbound: attachment set_peer failed; offline completion                                  will report an unknown sender"
+                                "inbound: attachment set_peer failed; offline completion \
+                                 will report an unknown sender"
                             );
                         }
                         let begin = crate::delivery::chunk_transfer::AttachmentBegin {
