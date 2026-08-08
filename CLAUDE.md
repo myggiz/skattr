@@ -511,7 +511,7 @@ Use the `superpowers` skills by default for every development task — they are 
 
 The `using-superpowers` skill itself enforces "invoke relevant skills BEFORE any response or action" — treat that as binding, not advisory.
 
-**When a phase or task is complete: push the branch and open a PR.** The PR is the unit of review and the record of what shipped; keep opening them even though CI is on-demand. **Greptile is the automated PR reviewer** — adopted 2026-08-08, replacing CodeRabbit (removed 2026-08-07). It runs on PR open as a `Greptile Review` check and **is** the second pair of eyes: the `superpowers` whole-branch review that stood in during the no-reviewer gap is no longer required before opening a PR.
+**When a phase or task is complete: push the branch and open a PR.** The PR is the unit of review and the record of what shipped — and now also what triggers CI (see the cadence section). **Greptile is the automated PR reviewer** — adopted 2026-08-08, replacing CodeRabbit (removed 2026-08-07). It runs on PR open as a `Greptile Review` check and **is** the second pair of eyes: the `superpowers` whole-branch review that stood in during the no-reviewer gap is no longer required before opening a PR.
 
 Babysit Greptile — verify each finding against the code before applying it, reject false positives with evidence, and resolve all threads before merging. Read the **check conclusion**, not the review state: a clean run lands as a green `Greptile Review` check with no comments and no formal GitHub approval, so `reviewDecision` stays empty and `reviews` is `[]` even on a branch Greptile has passed.
 
