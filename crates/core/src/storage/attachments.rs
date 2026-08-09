@@ -265,6 +265,31 @@ impl<'p> AttachmentRepo<'p> {
         })
     }
 
+    /// Every `attachment_id` in the table — any direction, any status.
+    ///
+    /// Used by the janitor to distinguish a chunk directory that belongs to a
+    /// known attachment from a true orphan. It deliberately does not filter:
+    /// a directory whose row exists in *any* state must be spared.
+    pub fn all_ids(&self) -> Result<Vec<[u8; 16]>> {
+        self.pool.with(|c| {
+            let mut stmt = c.prepare("SELECT attachment_id FROM attachments")?;
+            let rows = stmt.query_map([], |r| {
+                let aid: Vec<u8> = r.get(0)?;
+                Ok(aid)
+            })?;
+            let mut out = Vec::new();
+            for row in rows {
+                let aid = row?;
+                if aid.len() == 16 {
+                    let mut id = [0u8; 16];
+                    id.copy_from_slice(&aid);
+                    out.push(id);
+                }
+            }
+            Ok(out)
+        })
+    }
+
     /// Store the sender's pubkey (`peer`) alongside the manifest row so
     /// `finalize_offline` can populate `Event::AttachmentReceived.contact`.
     /// Silently ignored if the row does not exist.
@@ -687,5 +712,32 @@ mod tests {
         repo.delete_for_attachment(&aid).unwrap();
         assert!(repo.due(10_000, 10).unwrap().is_empty());
         assert!(repo.all_deposited(&aid).unwrap()); // vacuously true: no pending rows
+    }
+
+    #[test]
+    fn all_ids_returns_every_row_regardless_of_direction_or_status() {
+        let pool = Pool::in_memory();
+        let repo = AttachmentRepo::new(&pool);
+
+        let a = [0xA1u8; 16]; // in / pending
+        let b = [0xB2u8; 16]; // in / complete
+        let c = [0xC3u8; 16]; // out / failed
+        repo.insert(&a, "in", b"m", 1, 0).unwrap();
+        repo.insert(&b, "in", b"m", 1, 0).unwrap();
+        repo.insert(&c, "out", b"m", 1, 0).unwrap();
+        repo.claim_terminal(&b, TerminalStatus::Complete).unwrap();
+        repo.claim_terminal(&c, TerminalStatus::Failed).unwrap();
+
+        let mut got = repo.all_ids().unwrap();
+        got.sort();
+        let mut want = vec![a, b, c];
+        want.sort();
+        assert_eq!(got, want, "all_ids must not filter by direction or status");
+    }
+
+    #[test]
+    fn all_ids_is_empty_on_a_fresh_db() {
+        let pool = Pool::in_memory();
+        assert!(AttachmentRepo::new(&pool).all_ids().unwrap().is_empty());
     }
 }
