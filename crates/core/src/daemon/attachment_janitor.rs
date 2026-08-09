@@ -36,6 +36,15 @@ use crate::storage::Pool;
 /// never failed while its deposits could still arrive.
 pub(crate) const STALL_GRACE: Duration = Duration::from_secs(14 * 24 * 60 * 60);
 
+/// How old a chunk directory with no `attachments` row must be before it is
+/// treated as an orphan.
+///
+/// `ChunkStore::put` calls `create_dir_all` before the row is guaranteed
+/// visible to another connection; this grace closes that window rather than
+/// relying on write ordering. Orphans are never urgent, so the bound is
+/// generous.
+pub(crate) const ORPHAN_GRACE: Duration = Duration::from_secs(60 * 60);
+
 /// What one janitor pass reclaimed.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct JanitorStats {
@@ -110,10 +119,71 @@ pub(crate) fn run_once(
         }
     }
 
-    if stats.stalled > 0 {
+    // --- Mechanism B: remove chunk directories with no row ------------------
+    //
+    // `all_ids` is unfiltered on purpose: a directory whose row exists in ANY
+    // status must be spared, including 'complete', whose chunks are the file.
+    let known: std::collections::HashSet<[u8; 16]> = match repo.all_ids() {
+        Ok(v) => v.into_iter().collect(),
+        Err(e) => {
+            tracing::warn!(err = %e, "janitor: listing attachment ids failed; skipping orphan sweep");
+            // Without the id set we cannot tell an orphan from a live
+            // attachment. Deleting on a guess is unacceptable here, so skip.
+            return finish(stats);
+        }
+    };
+
+    match std::fs::read_dir(&root) {
+        Ok(entries) => {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let Some(name) = name.to_str() else { continue };
+                // Only touch names that parse as an attachment id. Anything
+                // else is not ours.
+                let Ok(raw) = hex::decode(name) else { continue };
+                let Ok(aid) = <[u8; 16]>::try_from(raw.as_slice()) else {
+                    continue;
+                };
+                if known.contains(&aid) {
+                    continue;
+                }
+                let Ok(meta) = entry.metadata() else { continue };
+                if !meta.is_dir() {
+                    continue;
+                }
+                let Ok(mtime) = meta.modified() else { continue };
+                let Ok(age) = now.duration_since(mtime) else {
+                    continue;
+                };
+                if age <= ORPHAN_GRACE {
+                    continue;
+                }
+                match std::fs::remove_dir_all(entry.path()) {
+                    Ok(()) => stats.orphans += 1,
+                    Err(e) => tracing::warn!(
+                        aid = %hex::encode(aid),
+                        err = %e,
+                        "janitor: removing orphan chunk dir failed"
+                    ),
+                }
+            }
+        }
+        // A fresh data dir has no attachments/ yet. Not an error.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => tracing::warn!(err = %e, "janitor: reading attachment root failed"),
+    }
+
+    finish(stats)
+}
+
+/// Log what the pass reclaimed and hand back the stats. Quiet when idle — this
+/// runs hourly.
+fn finish(stats: JanitorStats) -> JanitorStats {
+    if stats.stalled > 0 || stats.orphans > 0 {
         tracing::info!(
             stalled = stats.stalled,
-            "janitor: auto-failed stalled transfers"
+            orphans = stats.orphans,
+            "janitor: reclaimed attachment state"
         );
     }
     stats
@@ -273,5 +343,90 @@ mod tests {
             }
             other => panic!("expected AttachmentFailed, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn orphan_directory_with_no_row_is_removed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = Pool::in_memory();
+        let aid = [0x0Fu8; 16];
+        make_chunks(tmp.path(), &aid); // directory, but no row inserted
+
+        let stats = run_once(&pool, tmp.path(), &events(), way_later());
+
+        assert_eq!(stats.orphans, 1);
+        assert!(!chunk_dir(tmp.path(), &aid).exists());
+    }
+
+    #[tokio::test]
+    async fn directory_with_a_row_is_spared_in_every_status() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = Pool::in_memory();
+        let repo = AttachmentRepo::new(&pool);
+
+        let p = [0x11u8; 16]; // pending
+        let f = [0x22u8; 16]; // failed
+        let c = [0x33u8; 16]; // complete
+        for (aid, dir) in [(p, "in"), (f, "in"), (c, "in")] {
+            repo.insert(&aid, dir, b"m", 1, 0).unwrap();
+            make_chunks(tmp.path(), &aid);
+        }
+        repo.claim_terminal(&f, TerminalStatus::Failed).unwrap();
+        repo.claim_terminal(&c, TerminalStatus::Complete).unwrap();
+
+        let stats = run_once(&pool, tmp.path(), &events(), way_later());
+
+        assert_eq!(
+            stats.orphans, 0,
+            "a directory with a row is never an orphan"
+        );
+        for aid in [p, f, c] {
+            assert!(chunk_dir(tmp.path(), &aid).exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn fresh_orphan_inside_the_grace_window_is_spared() {
+        // Guards the window between create_dir_all and the row insert.
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = Pool::in_memory();
+        let aid = [0x44u8; 16];
+        make_chunks(tmp.path(), &aid);
+
+        let stats = run_once(&pool, tmp.path(), &events(), SystemTime::now());
+
+        assert_eq!(stats.orphans, 0);
+        assert!(chunk_dir(tmp.path(), &aid).exists());
+    }
+
+    #[tokio::test]
+    async fn non_hex_directory_name_is_left_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = Pool::in_memory();
+        let d = tmp.path().join("attachments").join("not-an-attachment-id");
+        std::fs::create_dir_all(&d).unwrap();
+
+        let stats = run_once(&pool, tmp.path(), &events(), way_later());
+
+        assert_eq!(stats.orphans, 0);
+        assert!(
+            d.exists(),
+            "the janitor only removes what it positively recognises"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_attachments_root_is_not_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = Pool::in_memory();
+        // no attachments/ directory at all — a fresh data dir
+        let stats = run_once(&pool, tmp.path(), &events(), way_later());
+        assert_eq!(
+            stats,
+            JanitorStats {
+                stalled: 0,
+                orphans: 0
+            }
+        );
     }
 }
