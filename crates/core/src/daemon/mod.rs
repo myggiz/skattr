@@ -10,6 +10,7 @@
 //! [`Event`]s — intentionally the same narrow interface for both.
 
 pub(crate) mod accept;
+pub(crate) mod attachment_janitor;
 pub mod backup;
 pub(crate) mod clock;
 pub mod commands;
