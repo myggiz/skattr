@@ -1050,7 +1050,7 @@ async fn tail(
     if json {
         println!("{}", serde_json::to_string(&rows)?);
     } else {
-        print!("{}", render_messages_human(&rows));
+        print!("{}", render_messages_human(&rows, &AvailMap::new()));
     }
     Ok(())
 }
@@ -1085,7 +1085,70 @@ async fn resolve_optional_contact(
     }
 }
 
-fn render_message_record_human(row: &skattr_core::daemon::commands::MessageRecord) -> String {
+/// Availability of inbound attachments, keyed by `attachment_id`.
+///
+/// Built by the caller (which does the IPC) and passed into rendering, so the
+/// render functions stay pure and unit-testable.
+type AvailMap = std::collections::HashMap<[u8; 16], bool>;
+
+/// Human-readable byte size: `0 B`, `512 B`, `2.0 KiB`, `2.4 MiB`.
+fn format_size(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = 1024.0 * 1024.0;
+    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+    let b = bytes as f64;
+    if b >= GIB {
+        format!("{:.1} GiB", b / GIB)
+    } else if b >= MIB {
+        format!("{:.1} MiB", b / MIB)
+    } else if b >= KIB {
+        format!("{:.1} KiB", b / KIB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+/// Render a `Kind::File` body: filename, size, short id, and (when known)
+/// availability.
+///
+/// `Kind::File` carries only the CBOR manifest — there is no filename field on
+/// the record — so decoding is the only way to say anything useful about it.
+/// A manifest that will not decode renders as a marker rather than aborting the
+/// listing: one bad row must not blind the whole tail (#118).
+fn render_file_kind(manifest: &[u8], availability: Option<bool>) -> String {
+    let Ok(m) = skattr_core::AttachmentManifest::from_cbor(manifest) else {
+        return "📎 (unreadable manifest)".to_string();
+    };
+    let id: String = m
+        .attachment_id
+        .iter()
+        .take(8)
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let state = match availability {
+        Some(true) => "  available",
+        Some(false) => "  incomplete",
+        None => "",
+    };
+    format!(
+        "📎 {name}  {size}  id={id}{state}",
+        name = m.filename,
+        size = format_size(m.total_size),
+    )
+}
+
+/// Look up availability for a file row, keyed by the manifest's attachment id.
+/// `None` when the manifest will not decode or the id was never probed
+/// (outgoing rows, or a probe that failed).
+fn availability_for(manifest: &[u8], avail: &AvailMap) -> Option<bool> {
+    let m = skattr_core::AttachmentManifest::from_cbor(manifest).ok()?;
+    avail.get(&m.attachment_id).copied()
+}
+
+fn render_message_record_human(
+    row: &skattr_core::daemon::commands::MessageRecord,
+    avail: &AvailMap,
+) -> String {
     use skattr_core::daemon::commands::Direction;
     use skattr_core::envelope::Kind;
 
@@ -1095,6 +1158,7 @@ fn render_message_record_human(row: &skattr_core::daemon::commands::MessageRecor
     };
     let body = match &row.kind {
         Kind::Text { body } => body.clone(),
+        Kind::File { manifest } => render_file_kind(manifest, availability_for(manifest, avail)),
         other => format!("({other:?})"),
     };
     let contact_short: String = row
@@ -1110,7 +1174,10 @@ fn render_message_record_human(row: &skattr_core::daemon::commands::MessageRecor
     )
 }
 
-fn render_messages_human(rows: &[skattr_core::daemon::commands::MessageRecord]) -> String {
+fn render_messages_human(
+    rows: &[skattr_core::daemon::commands::MessageRecord],
+    avail: &AvailMap,
+) -> String {
     use std::fmt::Write;
 
     if rows.is_empty() {
@@ -1120,7 +1187,7 @@ fn render_messages_human(rows: &[skattr_core::daemon::commands::MessageRecord]) 
     let mut out = String::new();
     // Render oldest-first on stdout (`recent` returns newest-first).
     for row in rows.iter().rev() {
-        let _ = writeln!(out, "{}", render_message_record_human(row));
+        let _ = writeln!(out, "{}", render_message_record_human(row, avail));
     }
     out
 }
@@ -1151,7 +1218,7 @@ async fn tail_follow(
         Err(e) => exit_on_ipc_error(e),
     };
     if let CommandResult::Messages(rows) = recent {
-        print!("{}", render_messages_human(&rows));
+        print!("{}", render_messages_human(&rows, &AvailMap::new()));
     }
 
     // 2. Subscribe. Reconnect first: RecentMessages above closed the one-shot
@@ -1174,7 +1241,7 @@ async fn tail_follow(
         };
         match ev {
             Event::MessageReceived { contact: _, record } => {
-                println!("{}", render_message_record_human(&record));
+                println!("{}", render_message_record_human(&record, &AvailMap::new()));
             }
             Event::DeliveryStatusChanged { message, status } => {
                 let id_hex: String = message.0.iter().map(|b| format!("{b:02x}")).collect();
@@ -1417,10 +1484,16 @@ fn chrono_or_naive_iso(ts: u64) -> String {
         .unwrap_or_else(|| format!("{ts}"))
 }
 
-fn render_export_text_line(rec: &skattr_core::daemon::commands::MessageRecord) -> String {
+fn render_export_text_line(
+    rec: &skattr_core::daemon::commands::MessageRecord,
+    avail: &AvailMap,
+) -> String {
     use skattr_core::daemon::commands::Direction;
     let body = match &rec.kind {
         skattr_core::envelope::Kind::Text { body } => body.clone(),
+        skattr_core::envelope::Kind::File { manifest } => {
+            render_file_kind(manifest, availability_for(manifest, avail))
+        }
         other => format!("<{other:?}>"),
     };
     let from = match rec.direction {
@@ -1520,7 +1593,7 @@ async fn export(
                 first_record = false;
                 serde_json::to_writer(&mut file, r)?;
             } else {
-                file.write_all(render_export_text_line(r).as_bytes())?;
+                file.write_all(render_export_text_line(r, &AvailMap::new()).as_bytes())?;
             }
         }
         if next.is_none() {
@@ -1852,7 +1925,7 @@ mod tests {
 
     #[test]
     fn render_messages_human_empty() {
-        let out = render_messages_human(&[]);
+        let out = render_messages_human(&[], &AvailMap::new());
         assert_eq!(out.trim(), "No messages.");
     }
 
@@ -1874,9 +1947,99 @@ mod tests {
             ts_daemon_recv: 1_700_000_000,
             ts_envelope: 1_699_999_999,
         }];
-        let out = render_messages_human(&rows);
+        let out = render_messages_human(&rows, &AvailMap::new());
         assert!(out.contains("hello"));
         assert!(out.contains("<-")); // incoming arrow
+    }
+
+    fn test_manifest_bytes(name: &str, size: u64, id: [u8; 16]) -> Vec<u8> {
+        use skattr_core::AttachmentManifest;
+        let m = AttachmentManifest {
+            manifest_version: 1,
+            attachment_id: id,
+            filename: name.to_string(),
+            mime: "application/octet-stream".into(),
+            total_size: size,
+            chunk_size: 49152,
+            file_key: [0u8; 32],
+            chunks: vec![],
+        };
+        let mut buf = Vec::new();
+        ciborium::into_writer(&m, &mut buf).unwrap();
+        buf
+    }
+
+    #[test]
+    fn format_size_renders_human_units() {
+        assert_eq!(format_size(0), "0 B");
+        assert_eq!(format_size(512), "512 B");
+        assert_eq!(format_size(2048), "2.0 KiB");
+        assert_eq!(format_size(2_516_582), "2.4 MiB");
+    }
+
+    #[test]
+    fn render_file_kind_shows_name_size_and_id() {
+        let bytes = test_manifest_bytes("logs.tar.gz", 2_516_582, [0x78; 16]);
+        let out = render_file_kind(&bytes, Some(true));
+        assert!(out.contains("logs.tar.gz"), "got {out}");
+        assert!(out.contains("2.4 MiB"), "got {out}");
+        assert!(out.contains("id=78787878"), "got {out}");
+        assert!(out.contains("available"), "got {out}");
+    }
+
+    #[test]
+    fn render_file_kind_marks_incomplete_when_unavailable() {
+        let bytes = test_manifest_bytes("huge.bin", 40, [0x4f; 16]);
+        let out = render_file_kind(&bytes, Some(false));
+        assert!(out.contains("incomplete"), "got {out}");
+        assert!(
+            !out.contains("available"),
+            "must not claim available: {out}"
+        );
+    }
+
+    #[test]
+    fn render_file_kind_omits_state_when_availability_unknown() {
+        // Outgoing rows and failed probes pass None — the row still renders,
+        // just without an availability field.
+        let bytes = test_manifest_bytes("sent.bin", 10, [0x11; 16]);
+        let out = render_file_kind(&bytes, None);
+        assert!(out.contains("sent.bin"), "got {out}");
+        assert!(!out.contains("available"), "got {out}");
+        assert!(!out.contains("incomplete"), "got {out}");
+    }
+
+    #[test]
+    fn render_file_kind_survives_an_undecodable_manifest() {
+        // A corrupt or future-version manifest must not abort a tail.
+        let out = render_file_kind(&[0xff, 0x00, 0x13], None);
+        assert!(out.contains("unreadable manifest"), "got {out}");
+    }
+
+    #[test]
+    fn render_messages_human_decodes_a_file_row() {
+        use skattr_core::daemon::commands::{Direction, MessageRecord};
+        use skattr_core::daemon::hex::Hex16;
+        use skattr_core::envelope::Kind;
+        use skattr_core::identity::PublicKey;
+        let bytes = test_manifest_bytes("photo.jpg", 318_000, [0xAB; 16]);
+        let rows = vec![MessageRecord {
+            row_id: 0,
+            message_id: Hex16::from([2; 16]),
+            contact: PublicKey([7; 32]),
+            direction: Direction::Incoming,
+            kind: Kind::File { manifest: bytes },
+            mls_generation: 0,
+            ts_daemon_recv: 1_700_000_000,
+            ts_envelope: 1_699_999_999,
+        }];
+        let mut avail = AvailMap::new();
+        avail.insert([0xAB; 16], true);
+        let out = render_messages_human(&rows, &avail);
+        assert!(out.contains("photo.jpg"), "got {out}");
+        assert!(out.contains("available"), "got {out}");
+        // The old Debug dump must be gone.
+        assert!(!out.contains("File {"), "still Debug-dumping: {out}");
     }
 
     #[test]
@@ -1915,7 +2078,7 @@ mod tests {
             ts_daemon_recv: 1_700_000_000,
             ts_envelope: 1_700_000_000,
         };
-        let line = render_export_text_line(&rec);
+        let line = render_export_text_line(&rec, &AvailMap::new());
         assert!(line.starts_with('['));
         assert!(line.contains("peer"));
         assert!(line.contains("hi"));
@@ -1991,8 +2154,8 @@ mod tests {
             ts_envelope: 1_700_000_900,
         };
         // Per-row formatter must match exactly what a one-shot dump of a single row produces.
-        let line = render_message_record_human(&rec);
-        let one_shot = render_messages_human(std::slice::from_ref(&rec));
+        let line = render_message_record_human(&rec, &AvailMap::new());
+        let one_shot = render_messages_human(std::slice::from_ref(&rec), &AvailMap::new());
         assert_eq!(one_shot.trim_end(), line.trim_end());
         assert!(line.contains("live update"));
     }

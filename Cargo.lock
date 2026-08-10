@@ -6479,6 +6479,7 @@ name = "skattr-cli"
 version = "0.1.13"
 dependencies = [
  "anyhow",
+ "ciborium",
  "clap",
  "directories 5.0.1",
  "futures",
