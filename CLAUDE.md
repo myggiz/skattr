@@ -422,10 +422,15 @@ client-side mitigation goes in **4.C**.
   existing `chunk_sweep` logging.
 - **3.C offline transfer is best-effort** — a deposited-but-never-fetched
   attachment is lost after the mailbox TTL (~7 days; the sender gets no fetch
-  feedback so it never re-deposits). A stalled inbound is **no longer stuck
-  forever**: the hourly janitor (#149) auto-fails an inbound transfer whose
-  chunk directory has gone untouched for 14 days, which surfaces it in the UI
-  as failed-and-retryable (#146) rather than silently pending. Large files
+  feedback so it never re-deposits). A stalled inbound that has received **at
+  least one chunk** is **no longer stuck forever**: the hourly janitor (#149)
+  auto-fails an inbound transfer whose chunk directory has gone untouched for
+  14 days, which surfaces it in the UI as failed-and-retryable (#146) rather
+  than silently pending. This does not cover every stall: `ChunkStore::put`
+  only creates `<data_dir>/attachments/<id>/` on the *first* chunk write, so
+  an inbound row whose manifest arrived but which never received a single
+  chunk (e.g. the sender vanished right after announcing it) has no directory
+  for the janitor to age-check and stays `'pending'` forever. Large files
   (>10 MiB) cannot transfer while a peer is offline. All disclosed in the v1.0
   limitations.
 - **A failed inbound attachment is retryable** — ✅ done (#144, PR #146).
