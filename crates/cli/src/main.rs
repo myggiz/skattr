@@ -1390,14 +1390,33 @@ fn display_sanitize_filename(name: &str) -> String {
         .collect()
 }
 
-/// Unicode bidi/format controls that `char::is_control` (C0/C1 only) misses
-/// but which enable filename-display spoofing (e.g. U+202E RTL override).
-/// Mirrors the same check in `delivery::chunk_transfer::is_bidi_or_format_control`.
+/// Unicode format/invisible characters that `char::is_control` (C0/C1 only)
+/// misses but which enable filename-display spoofing — bidi overrides that
+/// reverse apparent text (U+202E), directional marks that nudge it (U+061C),
+/// and zero-width characters that hide or fabricate content (U+200B, U+FEFF).
+///
+/// The filename is authored by the sending peer, so this is attacker-controlled
+/// input printed to a terminal. The list covers the Unicode `Cf` (format)
+/// category; matching on ranges rather than a category lookup keeps this
+/// dependency-free.
+///
+/// A narrower version of this check lives in
+/// `delivery::chunk_transfer::is_bidi_or_format_control`, which is `pub(crate)`
+/// and cannot be reused here (CLAUDE.md forbids exposing `delivery/`
+/// internals). That one still misses the characters below and is used for
+/// *on-disk* filenames — tracked separately.
 fn is_bidi_or_format_control(c: char) -> bool {
     matches!(c,
-        '\u{200E}' | '\u{200F}'
-        | '\u{202A}'..='\u{202E}'
-        | '\u{2066}'..='\u{2069}'
+        '\u{00AD}'                  // soft hyphen
+        | '\u{061C}'                // arabic letter mark
+        | '\u{180E}'                // mongolian vowel separator
+        | '\u{200B}'..='\u{200F}'   // zero-width chars, LRM, RLM
+        | '\u{202A}'..='\u{202E}'   // embeddings + overrides
+        | '\u{2060}'..='\u{2064}'   // word joiner, invisible operators
+        | '\u{2066}'..='\u{206F}'   // isolates + deprecated format chars
+        | '\u{FEFF}'                // zero-width no-break space / BOM
+        | '\u{FFF9}'..='\u{FFFB}'   // interlinear annotation
+        | '\u{E0000}'..='\u{E007F}' // language tags
     )
 }
 
@@ -2354,6 +2373,32 @@ mod tests {
         assert_eq!(display_sanitize_filename("a\x1b[31mb"), "a[31mb");
         assert_eq!(display_sanitize_filename("a\u{202E}b"), "ab");
         assert_eq!(display_sanitize_filename("plain.txt"), "plain.txt");
+    }
+
+    #[test]
+    fn display_sanitize_filename_strips_the_wider_format_category() {
+        // #155: the first version covered only U+200E/200F, U+202A-202E and
+        // U+2066-2069, leaving other Cf characters to reach the terminal.
+        // Each of these can spoof or hide part of a displayed filename.
+        for (input, want, what) in [
+            ("a\u{061C}b", "ab", "U+061C arabic letter mark"),
+            ("a\u{00AD}b", "ab", "U+00AD soft hyphen"),
+            ("a\u{200B}b", "ab", "U+200B zero-width space"),
+            ("a\u{200D}b", "ab", "U+200D zero-width joiner"),
+            ("a\u{2060}b", "ab", "U+2060 word joiner"),
+            ("a\u{FEFF}b", "ab", "U+FEFF zero-width no-break space"),
+            ("a\u{E0041}b", "ab", "U+E0041 language tag"),
+        ] {
+            assert_eq!(
+                display_sanitize_filename(input),
+                want,
+                "failed to strip {what}"
+            );
+        }
+        // Ordinary non-ASCII text must survive — this is a spoofing filter,
+        // not an ASCII filter.
+        assert_eq!(display_sanitize_filename("réçu-café.pdf"), "réçu-café.pdf");
+        assert_eq!(display_sanitize_filename("写真.jpg"), "写真.jpg");
     }
 
     #[test]
