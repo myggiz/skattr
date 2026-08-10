@@ -1099,9 +1099,19 @@ async fn save_attachment(
 ) -> Result<()> {
     use skattr_core::daemon::{Command as CoreCommand, CommandResult};
 
-    // 1. List contacts.
+    // 1. List contacts, INCLUDING archived ones. Archiving a connected contact
+    //    (#109) is a soft-delete: the row keeps its `hidden` bit set and its
+    //    messages — and therefore its attachments — are preserved. Plain
+    //    `ListContacts` filters those out, so using it here would make a
+    //    completed attachment unresolvable purely because its sender was
+    //    archived, even though the daemon can still save it by id.
     let mut client = connect_or_exit(sock_flag).await?;
-    let contacts = match client.execute(CoreCommand::ListContacts).await {
+    let contacts = match client
+        .execute(CoreCommand::ListContactsWithFilter {
+            include_hidden: true,
+        })
+        .await
+    {
         Ok(CommandResult::Contacts(rows)) => rows,
         Ok(other) => anyhow::bail!("unexpected reply: {other:?}"),
         Err(e) => exit_on_ipc_error(e),
