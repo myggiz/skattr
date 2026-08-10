@@ -97,11 +97,23 @@ async fn wait_for_attachment(
 /// `Command::SaveAttachment` must equal the original file exactly, and their
 /// sha256 digests must match (the manifest's integrity guarantee).
 ///
-/// A second case in the same test: saving an attachment that is still
-/// `pending` (Alice has queued it but Bob has not yet received all chunks)
-/// must return an error, and must not create the destination file.
+/// A second case in the same test: saving an attachment id that was never
+/// sent or queued (no row exists on Bob's side) must return an error, and
+/// must not create the destination file. This deliberately does NOT race a
+/// real in-flight transfer to catch it mid-`pending` — `LoopbackNet` is an
+/// in-process transport with no network latency, so a multi-chunk transfer
+/// can complete in low single-digit milliseconds while the negative-case
+/// `IpcClient::connect` + `execute()` still has to open a socket and get
+/// scheduled; there is no ordering guarantee, especially under CI
+/// contention. The `status='pending', row exists` branch of this same
+/// `InvalidArgument` gate is already covered deterministically (by
+/// constructing the row directly, no race) in
+/// `open_attachment_on_pending_row_returns_invalid_argument`
+/// (`crates/core/src/daemon/dispatch.rs:6253`). Do not "restore" a race here
+/// thinking coverage is being added back — it isn't; it would only add
+/// flake risk for no new proof.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn save_attachment_is_byte_identical_and_rejects_pending() {
+async fn save_attachment_unknown_id_errors_and_writes_nothing() {
     let tmp_a = tempfile::tempdir().unwrap();
     let tmp_b = tempfile::tempdir().unwrap();
     init_vault(tmp_a.path());
@@ -236,43 +248,26 @@ async fn save_attachment_is_byte_identical_and_rejects_pending() {
         "sha256 of the saved attachment must match the source"
     );
 
-    // --- Negative case: saving a still-pending attachment errors, no partial file ---
-    // Queue a second, larger file on Alice's side but do NOT wait for Bob to
-    // receive it — race SaveAttachment against the transfer so the row is
-    // still 'pending' (direction='in', status != 'complete') at save time.
-    let pending_payload = deterministic_payload(5 * 1024 * 1024);
-    let pending_src = tmp_a.path().join("pending.bin");
-    std::fs::write(&pending_src, &pending_payload).unwrap();
-
-    let mut send_a2 = IpcClient::connect(&ready_a.ipc_socket).await.unwrap();
-    let pending_attachment_id = match send_a2
-        .execute(Command::SendFile {
-            contact: bob_pubkey,
-            path: pending_src.to_string_lossy().to_string(),
-        })
-        .await
-        .unwrap()
-    {
-        CommandResult::FileQueued { attachment_id, .. } => attachment_id.to_string(),
-        other => panic!("expected FileQueued, got {other:?}"),
-    };
-
-    let pending_out = tmp_b.path().join("pending-out.bin");
-    let pending_aid: skattr_core::daemon::hex::Hex16 = pending_attachment_id.parse().unwrap();
-    let mut bob_save_pending = IpcClient::connect(&ready_b.ipc_socket).await.unwrap();
-    let result = bob_save_pending
+    // --- Negative case: saving an unknown attachment id errors, no partial file ---
+    // No `SendFile` in this test ever produces this id (all-0xAA, distinct from
+    // the completed transfer's real id), so Bob has no row for it at all —
+    // deterministic, no race against an in-flight transfer required.
+    let unknown_out = tmp_b.path().join("unknown-out.bin");
+    let unknown_aid = skattr_core::daemon::hex::Hex16::from([0xAAu8; 16]);
+    let mut bob_save_unknown = IpcClient::connect(&ready_b.ipc_socket).await.unwrap();
+    let result = bob_save_unknown
         .execute(Command::SaveAttachment {
-            attachment_id: pending_aid,
-            dest_path: pending_out.to_string_lossy().to_string(),
+            attachment_id: unknown_aid,
+            dest_path: unknown_out.to_string_lossy().to_string(),
         })
         .await;
     assert!(
-        result.is_err() || !matches!(result, Ok(CommandResult::Ok)),
-        "SaveAttachment on a pending attachment must not report Ok, got {result:?}"
+        !matches!(result, Ok(CommandResult::Ok)),
+        "SaveAttachment on an unknown attachment id must not report Ok, got {result:?}"
     );
     assert!(
-        !pending_out.exists(),
-        "SaveAttachment must not create a partial file for a pending attachment"
+        !unknown_out.exists(),
+        "SaveAttachment must not create a partial file for an unknown attachment id"
     );
 
     // --- Graceful shutdown ---
