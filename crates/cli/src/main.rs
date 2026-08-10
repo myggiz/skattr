@@ -1056,6 +1056,19 @@ fn resolve_attachment_id(
     }
 }
 
+/// Resolve `dest` to an absolute path against `cwd`, without touching the
+/// filesystem or the environment — `cwd` is a parameter so this stays a pure,
+/// unit-testable function (the daemon's working directory is not ours, so a
+/// relative `dest` would otherwise resolve somewhere the user did not mean).
+fn absolutize(dest: &str, cwd: &std::path::Path) -> std::path::PathBuf {
+    let dest_path = std::path::Path::new(dest);
+    if dest_path.is_absolute() {
+        dest_path.to_path_buf()
+    } else {
+        cwd.join(dest_path)
+    }
+}
+
 /// Save a received attachment to `dest`.
 ///
 /// Resolve-then-act: one connection to list recent messages (to resolve the id
@@ -1086,22 +1099,35 @@ async fn save_attachment(
     };
     let (attachment_id, manifest) = resolve_attachment_id(&rows, id_prefix)?;
 
-    // 2. Absolutize the destination. The daemon's working directory is not
-    //    ours, so a relative path would otherwise resolve somewhere the user
-    //    did not mean. Validation is #54's job, not this command's.
-    let dest_path = std::path::Path::new(dest);
-    let abs = if dest_path.is_absolute() {
-        dest_path.to_path_buf()
-    } else {
-        std::env::current_dir()?.join(dest_path)
-    };
+    // 2. Reject an empty dest or one that is (or resolves to) a directory,
+    //    before it ever reaches the daemon: `reassemble` writes the full
+    //    decrypted file to `<dest>.part` and only removes it on validation
+    //    errors, so a directory target (e.g. `~/Downloads`, which users will
+    //    naturally try, expecting the filename to be appended) would fail the
+    //    final rename with EISDIR and leave complete plaintext at
+    //    `~/Downloads.part` outside any cleanup. This is a shape check only —
+    //    path traversal / scope validation is #54's job, not this command's.
+    if dest.is_empty() {
+        anyhow::bail!("dest is empty — give a full file path including the filename");
+    }
 
-    // 3. Save on a fresh connection.
+    // 3. Absolutize the destination. The daemon's working directory is not
+    //    ours, so a relative path would otherwise resolve somewhere the user
+    //    did not mean.
+    let abs = absolutize(dest, &std::env::current_dir()?);
+    if abs.is_dir() {
+        anyhow::bail!("dest is a directory — give a full file path including the filename");
+    }
+    let dest_str = abs
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("destination path is not valid UTF-8"))?;
+
+    // 4. Save on a fresh connection.
     let mut client = connect_or_exit(sock_flag).await?;
     match client
         .execute(CoreCommand::SaveAttachment {
             attachment_id: skattr_core::daemon::hex::Hex16::from(attachment_id),
-            dest_path: abs.to_string_lossy().into_owned(),
+            dest_path: dest_str.to_string(),
         })
         .await
     {
@@ -1128,11 +1154,12 @@ async fn save_attachment(
         Ok(other) => anyhow::bail!("unexpected reply: {other:?}"),
         // Verified: `decrypt_attachment_to` (dispatch.rs) returns
         // `IpcError::Daemon(DaemonErrorKind::InvalidArgument{..})` when the row
-        // is missing OR when `direction != "in" || status != "complete"`.
-        // Since the id came from a real file row we just listed, the live cause
-        // is effectively always "not complete yet". Report it as a clean
-        // diagnostic with a non-zero exit so a script can branch on it, rather
-        // than an error dump (#118 acceptance).
+        // is missing OR when `direction != "in" || status != "complete"`. Since
+        // the id came from a real file row we just listed, the live cause is
+        // either "not a received attachment" (an outgoing file's id, now shown
+        // in `tail`) or "not complete yet". Report a clean diagnostic covering
+        // both with a non-zero exit so a script can branch on it, rather than
+        // an error dump (#118 acceptance).
         Err(skattr_core::daemon::IpcClientError::Server(
             skattr_core::daemon::ipc::wire::IpcError::Daemon(
                 skattr_core::daemon::error_kind::DaemonErrorKind::InvalidArgument { .. },
@@ -1144,7 +1171,7 @@ async fn save_attachment(
                     serde_json::json!({ "saved": false, "reason": "unavailable" })
                 );
             } else {
-                eprintln!("not available yet (transfer incomplete)");
+                eprintln!("not available (not a received attachment, or transfer incomplete)");
             }
             std::process::exit(1);
         }
@@ -2450,5 +2477,54 @@ mod tests {
             ts_envelope: 1_699_999_999,
         }];
         assert!(resolve_attachment_id(&rows, "abab").is_err());
+    }
+
+    #[test]
+    fn resolve_attachment_id_dedupes_rows_sharing_an_id() {
+        // Two rows referencing the same attachment_id (e.g. the manifest was
+        // re-announced) must resolve, not report "ambiguous".
+        let rows = vec![file_row([0xAB; 16], "a.bin"), file_row([0xAB; 16], "a.bin")];
+        let (id, m) = resolve_attachment_id(&rows, "abab").unwrap();
+        assert_eq!(id, [0xAB; 16]);
+        assert_eq!(m.filename, "a.bin");
+    }
+
+    #[test]
+    fn absolutize_empty_dest_resolves_to_cwd() {
+        let cwd = std::path::Path::new("/cwd");
+        assert_eq!(absolutize("", cwd), std::path::PathBuf::from("/cwd"));
+    }
+
+    #[test]
+    fn absolutize_dot_resolves_under_cwd() {
+        let cwd = std::path::Path::new("/cwd");
+        assert_eq!(absolutize(".", cwd), std::path::PathBuf::from("/cwd/."));
+    }
+
+    #[test]
+    fn absolutize_relative_joins_cwd() {
+        let cwd = std::path::Path::new("/cwd");
+        assert_eq!(
+            absolutize("rel/x", cwd),
+            std::path::PathBuf::from("/cwd/rel/x")
+        );
+    }
+
+    #[test]
+    fn absolutize_absolute_dest_is_unchanged() {
+        let cwd = std::path::Path::new("/cwd");
+        assert_eq!(
+            absolutize("/abs/x", cwd),
+            std::path::PathBuf::from("/abs/x")
+        );
+    }
+
+    #[test]
+    fn absolutize_parent_relative_joins_cwd_without_normalizing() {
+        let cwd = std::path::Path::new("/cwd");
+        assert_eq!(
+            absolutize("../x", cwd),
+            std::path::PathBuf::from("/cwd/../x")
+        );
     }
 }

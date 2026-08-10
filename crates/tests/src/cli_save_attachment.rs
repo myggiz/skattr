@@ -95,25 +95,16 @@ async fn wait_for_attachment(
 
 /// Byte-identical round-trip: a completed inbound attachment saved via
 /// `Command::SaveAttachment` must equal the original file exactly, and their
-/// sha256 digests must match (the manifest's integrity guarantee).
+/// sha256 digests must match (the manifest's integrity guarantee). This is
+/// the branch's headline acceptance assertion (#118).
 ///
-/// A second case in the same test: saving an attachment id that was never
-/// sent or queued (no row exists on Bob's side) must return an error, and
-/// must not create the destination file. This deliberately does NOT race a
-/// real in-flight transfer to catch it mid-`pending` — `LoopbackNet` is an
-/// in-process transport with no network latency, so a multi-chunk transfer
-/// can complete in low single-digit milliseconds while the negative-case
-/// `IpcClient::connect` + `execute()` still has to open a socket and get
-/// scheduled; there is no ordering guarantee, especially under CI
-/// contention. The `status='pending', row exists` branch of this same
-/// `InvalidArgument` gate is already covered deterministically (by
-/// constructing the row directly, no race) in
-/// `open_attachment_on_pending_row_returns_invalid_argument`
-/// (`crates/core/src/daemon/dispatch.rs:6253`). Do not "restore" a race here
-/// thinking coverage is being added back — it isn't; it would only add
-/// flake risk for no new proof.
+/// The unknown-id negative case (must error, must write nothing) is a
+/// separate test, `save_attachment_unknown_id_errors_and_writes_nothing`
+/// below — split out so each test name greps to exactly the behavior it
+/// proves, since this one previously carried both and grepping for the
+/// round-trip missed it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn save_attachment_unknown_id_errors_and_writes_nothing() {
+async fn save_attachment_round_trip_is_byte_identical() {
     let tmp_a = tempfile::tempdir().unwrap();
     let tmp_b = tempfile::tempdir().unwrap();
     init_vault(tmp_a.path());
@@ -248,13 +239,45 @@ async fn save_attachment_unknown_id_errors_and_writes_nothing() {
         "sha256 of the saved attachment must match the source"
     );
 
-    // --- Negative case: saving an unknown attachment id errors, no partial file ---
-    // No `SendFile` in this test ever produces this id (all-0xAA, distinct from
-    // the completed transfer's real id), so Bob has no row for it at all —
+    // --- Graceful shutdown ---
+    let _ = shutdown_a_tx.send(());
+    let _ = shutdown_b_tx.send(());
+    let _ = tokio::time::timeout(Duration::from_secs(30), task_a).await;
+    let _ = tokio::time::timeout(Duration::from_secs(30), task_b).await;
+}
+
+/// Saving an attachment id that was never sent or queued (no row exists at
+/// all) must return an error, and must not create the destination file.
+///
+/// Split out from `save_attachment_round_trip_is_byte_identical` (#118
+/// review F5) so each test name greps to exactly the behavior it proves; this
+/// case also needs none of that test's first-contact/file-transfer setup, so
+/// it runs against a single standalone daemon.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn save_attachment_unknown_id_errors_and_writes_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_vault(tmp.path());
+
+    let net = LoopbackNet::new();
+    let pw = Zeroizing::new(PASSPHRASE.to_string());
+
+    let (ready_rx, shutdown_tx, task) = spawn_daemon(
+        tmp.path(),
+        "bob.onion",
+        net,
+        pw,
+        tmp.path().join("downloads"),
+    );
+    let ready: Ready = tokio::time::timeout(Duration::from_secs(60), ready_rx)
+        .await
+        .expect("Bob ready within 60 s")
+        .expect("Bob ready_tx open");
+
+    // No `SendFile` ever produces this id, so Bob has no row for it at all —
     // deterministic, no race against an in-flight transfer required.
-    let unknown_out = tmp_b.path().join("unknown-out.bin");
+    let unknown_out = tmp.path().join("unknown-out.bin");
     let unknown_aid = skattr_core::daemon::hex::Hex16::from([0xAAu8; 16]);
-    let mut bob_save_unknown = IpcClient::connect(&ready_b.ipc_socket).await.unwrap();
+    let mut bob_save_unknown = IpcClient::connect(&ready.ipc_socket).await.unwrap();
     let result = bob_save_unknown
         .execute(Command::SaveAttachment {
             attachment_id: unknown_aid,
@@ -270,9 +293,6 @@ async fn save_attachment_unknown_id_errors_and_writes_nothing() {
         "SaveAttachment must not create a partial file for an unknown attachment id"
     );
 
-    // --- Graceful shutdown ---
-    let _ = shutdown_a_tx.send(());
-    let _ = shutdown_b_tx.send(());
-    let _ = tokio::time::timeout(Duration::from_secs(30), task_a).await;
-    let _ = tokio::time::timeout(Duration::from_secs(30), task_b).await;
+    let _ = shutdown_tx.send(());
+    let _ = tokio::time::timeout(Duration::from_secs(30), task).await;
 }
