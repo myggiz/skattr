@@ -1396,9 +1396,17 @@ fn display_sanitize_filename(name: &str) -> String {
 /// and zero-width characters that hide or fabricate content (U+200B, U+FEFF).
 ///
 /// The filename is authored by the sending peer, so this is attacker-controlled
-/// input printed to a terminal. The list covers the Unicode `Cf` (format)
-/// category; matching on ranges rather than a category lookup keeps this
-/// dependency-free.
+/// input printed to a terminal.
+///
+/// This is deliberately **not** the whole Unicode `Cf` category. `Cf` also
+/// contains characters that are ordinary parts of real text — `U+0600` ARABIC
+/// NUMBER SIGN, `U+070F` SYRIAC ABBREVIATION MARK, `U+110BD` KAITHI NUMBER
+/// SIGN — and stripping those would corrupt legitimate Arabic, Syriac and
+/// Kaithi filenames while preventing nothing: they neither reverse text
+/// direction nor render content invisible. What is listed here is the subset
+/// that enables display spoofing: bidi controls, and zero-width/invisible
+/// characters. Matching on ranges rather than a category lookup also keeps
+/// this dependency-free.
 ///
 /// A narrower version of this check lives in
 /// `delivery::chunk_transfer::is_bidi_or_format_control`, which is `pub(crate)`
