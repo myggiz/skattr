@@ -1050,7 +1050,8 @@ async fn tail(
     if json {
         println!("{}", serde_json::to_string(&rows)?);
     } else {
-        print!("{}", render_messages_human(&rows, &AvailMap::new()));
+        let avail = probe_availability(&rows, sock_flag).await;
+        print!("{}", render_messages_human(&rows, &avail));
     }
     Ok(())
 }
@@ -1090,6 +1091,60 @@ async fn resolve_optional_contact(
 /// Built by the caller (which does the IPC) and passed into rendering, so the
 /// render functions stay pure and unit-testable.
 type AvailMap = std::collections::HashMap<[u8; 16], bool>;
+
+/// Probe availability for every **inbound** file row in `rows`.
+///
+/// Inbound only: `attachment_available_cmd` answers true iff the row is
+/// `direction='in', status='complete'`, so probing an outgoing row would print
+/// `incomplete` beside a file the user sent themselves.
+///
+/// One probe per connection — the daemon's IPC connection is single-request
+/// (#116), and in `--follow` the caller's connection is already subscribed, so
+/// a probe there *must* be separate or it would hang.
+///
+/// Best-effort: a probe that fails is simply omitted from the map, and the row
+/// renders without an availability field. Visibility must not be all-or-nothing.
+async fn probe_availability(
+    rows: &[skattr_core::daemon::commands::MessageRecord],
+    sock_flag: Option<&std::path::Path>,
+) -> AvailMap {
+    use skattr_core::daemon::commands::Direction;
+    use skattr_core::daemon::{Command as CoreCommand, CommandResult};
+    use skattr_core::envelope::Kind;
+
+    let mut out = AvailMap::new();
+    for row in rows {
+        if row.direction != Direction::Incoming {
+            continue;
+        }
+        let Kind::File { manifest } = &row.kind else {
+            continue;
+        };
+        let Ok(m) = skattr_core::AttachmentManifest::from_cbor(manifest) else {
+            continue;
+        };
+        if out.contains_key(&m.attachment_id) {
+            continue; // same attachment referenced twice in one listing
+        }
+        // Deliberately NOT `connect_or_exit`: it prints and exits the process
+        // when the daemon is down, which is wrong for a best-effort probe.
+        let Ok(path) = resolve_socket_path(sock_flag) else {
+            continue;
+        };
+        let Ok(mut client) = skattr_core::daemon::IpcClient::connect(&path).await else {
+            continue;
+        };
+        let res = client
+            .execute(CoreCommand::AttachmentAvailable {
+                attachment_id: skattr_core::daemon::hex::Hex16::from(m.attachment_id),
+            })
+            .await;
+        if let Ok(CommandResult::AttachmentAvailability { available }) = res {
+            out.insert(m.attachment_id, available);
+        }
+    }
+    out
+}
 
 /// Human-readable byte size: `0 B`, `512 B`, `2.0 KiB`, `2.4 MiB`.
 fn format_size(bytes: u64) -> String {
@@ -1218,7 +1273,8 @@ async fn tail_follow(
         Err(e) => exit_on_ipc_error(e),
     };
     if let CommandResult::Messages(rows) = recent {
-        print!("{}", render_messages_human(&rows, &AvailMap::new()));
+        let avail = probe_availability(&rows, sock_flag).await;
+        print!("{}", render_messages_human(&rows, &avail));
     }
 
     // 2. Subscribe. Reconnect first: RecentMessages above closed the one-shot
@@ -1241,7 +1297,8 @@ async fn tail_follow(
         };
         match ev {
             Event::MessageReceived { contact: _, record } => {
-                println!("{}", render_message_record_human(&record, &AvailMap::new()));
+                let avail = probe_availability(std::slice::from_ref(&record), sock_flag).await;
+                println!("{}", render_message_record_human(&record, &avail));
             }
             Event::DeliveryStatusChanged { message, status } => {
                 let id_hex: String = message.0.iter().map(|b| format!("{b:02x}")).collect();
@@ -1585,6 +1642,11 @@ async fn export(
             } => (records, next_after_id),
             other => anyhow::bail!("unexpected response: {other:?}"),
         };
+        let avail = if format == "json" {
+            AvailMap::new()
+        } else {
+            probe_availability(&records, sock_flag).await
+        };
         for r in &records {
             if format == "json" {
                 if !first_record {
@@ -1593,7 +1655,7 @@ async fn export(
                 first_record = false;
                 serde_json::to_writer(&mut file, r)?;
             } else {
-                file.write_all(render_export_text_line(r, &AvailMap::new()).as_bytes())?;
+                file.write_all(render_export_text_line(r, &avail).as_bytes())?;
             }
         }
         if next.is_none() {
