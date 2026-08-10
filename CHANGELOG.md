@@ -11,6 +11,14 @@ accumulate here and are stamped with a date when a build is cut._
 
 ### Fixed
 
+- **Received files were invisible from the CLI — now you can see and save
+  them** (#118): `skattr tail`/`export` showed a file message as an unreadable
+  dump of numbers instead of a filename, so there was no way to tell what
+  arrived, how big it was, or whether it had fully downloaded — and no way to
+  get the file out of the app at all from the CLI. `tail`/`export` now show
+  the filename, size, and whether it has fully arrived, and a new `skattr
+  save-attachment <id> <path>` command saves a received file to a path you
+  choose.
 - **A file transfer that stalls no longer hangs around invisibly forever**
   (#149): if the sender vanished part-way through sending you a file, the
   transfer sat silently unfinished — it never appeared as failed, so there was
