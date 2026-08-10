@@ -165,6 +165,14 @@ enum Command {
         /// Path to the local file to send.
         path: String,
     },
+    /// Save a received attachment to a file.
+    SaveAttachment {
+        /// Attachment id, or any unique prefix of it (see `tail`).
+        id: String,
+        /// Destination path. Relative paths resolve against the current
+        /// directory.
+        dest: String,
+    },
     /// Remove a contact. A pending/unconnected contact is wiped completely
     /// (so a fresh invite can be added); a connected contact is archived.
     Remove {
@@ -380,6 +388,9 @@ async fn main() -> Result<()> {
             before,
             keep_last,
         } => prune(contact.as_deref(), before, keep_last, socket.as_deref()).await,
+        Command::SaveAttachment { id, dest } => {
+            save_attachment(&id, &dest, socket.as_deref(), json).await
+        }
         Command::Remove { contact } => remove(&contact, socket.as_deref(), json).await,
     }
 }
@@ -1010,6 +1021,135 @@ fn resolve_contact(
         1 => Ok(matches.remove(0).pubkey),
         0 => anyhow::bail!("no contact matches {prefix:?}"),
         n => anyhow::bail!("ambiguous: {n} contacts match {prefix:?}"),
+    }
+}
+
+/// Resolve a unique attachment-id prefix against the file rows in `rows`.
+///
+/// Mirrors `resolve_contact`: lowercased `starts_with` matching, and an error
+/// naming the count when a prefix is ambiguous. Returns the full id and the
+/// decoded manifest, so the caller can report the filename and size without
+/// decoding twice.
+fn resolve_attachment_id(
+    rows: &[skattr_core::daemon::commands::MessageRecord],
+    prefix: &str,
+) -> Result<([u8; 16], skattr_core::AttachmentManifest)> {
+    use skattr_core::envelope::Kind;
+    let lower = prefix.to_ascii_lowercase();
+    let mut matches: Vec<([u8; 16], skattr_core::AttachmentManifest)> = Vec::new();
+    for row in rows {
+        let Kind::File { manifest } = &row.kind else {
+            continue;
+        };
+        let Ok(m) = skattr_core::AttachmentManifest::from_cbor(manifest) else {
+            continue;
+        };
+        let hex: String = m.attachment_id.iter().map(|b| format!("{b:02x}")).collect();
+        if hex.starts_with(&lower) && !matches.iter().any(|(id, _)| *id == m.attachment_id) {
+            matches.push((m.attachment_id, m));
+        }
+    }
+    match matches.len() {
+        1 => Ok(matches.remove(0)),
+        0 => anyhow::bail!("no attachment matches {prefix:?}"),
+        n => anyhow::bail!("ambiguous: {n} attachments match {prefix:?}"),
+    }
+}
+
+/// Save a received attachment to `dest`.
+///
+/// Resolve-then-act: one connection to list recent messages (to resolve the id
+/// prefix), a second to save. The IPC connection is single-request (#116), so
+/// reusing the first would broken-pipe.
+async fn save_attachment(
+    id_prefix: &str,
+    dest: &str,
+    sock_flag: Option<&std::path::Path>,
+    json: bool,
+) -> Result<()> {
+    use skattr_core::daemon::{Command as CoreCommand, CommandResult};
+
+    // 1. Resolve the prefix against recent messages.
+    let mut client = connect_or_exit(sock_flag).await?;
+    let rows = match client
+        .execute(CoreCommand::RecentMessages {
+            contact: None,
+            limit: 500,
+            before_id: None,
+            paged: false,
+        })
+        .await
+    {
+        Ok(CommandResult::Messages(rows)) => rows,
+        Ok(other) => anyhow::bail!("unexpected reply: {other:?}"),
+        Err(e) => exit_on_ipc_error(e),
+    };
+    let (attachment_id, manifest) = resolve_attachment_id(&rows, id_prefix)?;
+
+    // 2. Absolutize the destination. The daemon's working directory is not
+    //    ours, so a relative path would otherwise resolve somewhere the user
+    //    did not mean. Validation is #54's job, not this command's.
+    let dest_path = std::path::Path::new(dest);
+    let abs = if dest_path.is_absolute() {
+        dest_path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(dest_path)
+    };
+
+    // 3. Save on a fresh connection.
+    let mut client = connect_or_exit(sock_flag).await?;
+    match client
+        .execute(CoreCommand::SaveAttachment {
+            attachment_id: skattr_core::daemon::hex::Hex16::from(attachment_id),
+            dest_path: abs.to_string_lossy().into_owned(),
+        })
+        .await
+    {
+        Ok(CommandResult::Ok) => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "saved": true,
+                        "path": abs.to_string_lossy(),
+                        "filename": manifest.filename,
+                        "size": manifest.total_size,
+                    })
+                );
+            } else {
+                println!(
+                    "saved {} -> {}",
+                    format_size(manifest.total_size),
+                    abs.display()
+                );
+            }
+            Ok(())
+        }
+        Ok(other) => anyhow::bail!("unexpected reply: {other:?}"),
+        // Verified: `decrypt_attachment_to` (dispatch.rs) returns
+        // `IpcError::Daemon(DaemonErrorKind::InvalidArgument{..})` when the row
+        // is missing OR when `direction != "in" || status != "complete"`.
+        // Since the id came from a real file row we just listed, the live cause
+        // is effectively always "not complete yet". Report it as a clean
+        // diagnostic with a non-zero exit so a script can branch on it, rather
+        // than an error dump (#118 acceptance).
+        Err(skattr_core::daemon::IpcClientError::Server(
+            skattr_core::daemon::ipc::wire::IpcError::Daemon(
+                skattr_core::daemon::error_kind::DaemonErrorKind::InvalidArgument { .. },
+            ),
+        )) => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({ "saved": false, "reason": "unavailable" })
+                );
+            } else {
+                eprintln!("not available yet (transfer incomplete)");
+            }
+            std::process::exit(1);
+        }
+        // Anything else is a genuine transport/daemon failure.
+        Err(e) => exit_on_ipc_error(e),
     }
 }
 
@@ -2233,5 +2373,82 @@ mod tests {
         let one_shot = render_messages_human(std::slice::from_ref(&rec), &AvailMap::new());
         assert_eq!(one_shot.trim_end(), line.trim_end());
         assert!(line.contains("live update"));
+    }
+
+    fn file_row(id: [u8; 16], name: &str) -> skattr_core::daemon::commands::MessageRecord {
+        use skattr_core::daemon::commands::{Direction, MessageRecord};
+        use skattr_core::daemon::hex::Hex16;
+        use skattr_core::envelope::Kind;
+        use skattr_core::identity::PublicKey;
+        MessageRecord {
+            row_id: 0,
+            message_id: Hex16::from([2; 16]),
+            contact: PublicKey([7; 32]),
+            direction: Direction::Incoming,
+            kind: Kind::File {
+                manifest: test_manifest_bytes(name, 10, id),
+            },
+            mls_generation: 0,
+            ts_daemon_recv: 1_700_000_000,
+            ts_envelope: 1_699_999_999,
+        }
+    }
+
+    #[test]
+    fn resolve_attachment_id_matches_a_unique_prefix() {
+        let rows = vec![file_row([0xAB; 16], "a.bin"), file_row([0xCD; 16], "b.bin")];
+        let (id, m) = resolve_attachment_id(&rows, "abab").unwrap();
+        assert_eq!(id, [0xAB; 16]);
+        assert_eq!(m.filename, "a.bin");
+    }
+
+    #[test]
+    fn resolve_attachment_id_is_case_insensitive() {
+        let rows = vec![file_row([0xAB; 16], "a.bin")];
+        assert!(resolve_attachment_id(&rows, "ABAB").is_ok());
+    }
+
+    #[test]
+    fn resolve_attachment_id_ambiguous_reports_the_count() {
+        // Two ids sharing the queried prefix.
+        let mut a = [0u8; 16];
+        a[0] = 0xAB;
+        let mut b = [0u8; 16];
+        b[0] = 0xAB;
+        b[15] = 0x01;
+        let rows = vec![file_row(a, "a.bin"), file_row(b, "b.bin")];
+        let err = resolve_attachment_id(&rows, "ab").unwrap_err().to_string();
+        assert!(err.contains('2'), "should report the count: {err}");
+        assert!(err.to_lowercase().contains("ambiguous"), "got {err}");
+    }
+
+    #[test]
+    fn resolve_attachment_id_no_match_errors() {
+        let rows = vec![file_row([0xAB; 16], "a.bin")];
+        let err = resolve_attachment_id(&rows, "ffff")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("ffff"), "should quote the prefix: {err}");
+    }
+
+    #[test]
+    fn resolve_attachment_id_ignores_text_rows() {
+        use skattr_core::daemon::commands::{Direction, MessageRecord};
+        use skattr_core::daemon::hex::Hex16;
+        use skattr_core::envelope::Kind;
+        use skattr_core::identity::PublicKey;
+        let rows = vec![MessageRecord {
+            row_id: 0,
+            message_id: Hex16::from([2; 16]),
+            contact: PublicKey([7; 32]),
+            direction: Direction::Incoming,
+            kind: Kind::Text {
+                body: "abab".into(),
+            },
+            mls_generation: 0,
+            ts_daemon_recv: 1_700_000_000,
+            ts_envelope: 1_699_999_999,
+        }];
+        assert!(resolve_attachment_id(&rows, "abab").is_err());
     }
 }
