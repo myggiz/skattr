@@ -367,7 +367,7 @@ mod tests {
         let p = [0x11u8; 16]; // pending
         let f = [0x22u8; 16]; // failed
         let c = [0x33u8; 16]; // complete
-        for (aid, dir) in [(p, "in"), (f, "in"), (c, "in")] {
+        for (aid, dir) in [(p, "in"), (f, "in"), (c, "out")] {
             repo.insert(&aid, dir, b"m", 1, 0).unwrap();
             make_chunks(tmp.path(), &aid);
         }

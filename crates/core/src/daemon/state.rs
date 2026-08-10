@@ -177,7 +177,13 @@ impl Daemon {
         // (#149).
         let (events_tx, _) = broadcast::channel::<Event>(EVENT_CHANNEL_CAPACITY);
 
-        // Phase 1.G: hourly retention sweep.
+        // Phase 1.G: hourly retention sweep. The janitor (#149) walks
+        // <data_dir>/attachments and must agree with the root `ChunkStore`
+        // was opened against a few lines above — pass the function's own
+        // `data_dir` argument directly rather than `config.data_dir` (even
+        // though `:128` forces them equal here) so this site matches the
+        // test-harness entrypoints, which have no such forcing and would
+        // otherwise risk the janitor walking the wrong directory.
         let (sweep_shutdown_tx, sweep_shutdown_rx) = tokio::sync::watch::channel(false);
         let sweep_handle = crate::daemon::retention::spawn_sweep(
             pool.clone(),
@@ -185,7 +191,7 @@ impl Daemon {
             std::time::Duration::from_secs(3600),
             sweep_shutdown_rx,
             events_tx.clone(),
-            config.data_dir.clone(),
+            data_dir.to_path_buf(),
         );
 
         // Step 4: Tor bootstrap. Build the mailbox factory from a cloned
@@ -656,7 +662,7 @@ pub async fn run_loopback(
         std::time::Duration::from_secs(3600),
         sweep_shutdown_rx,
         events_tx.clone(),
-        config.data_dir.clone(),
+        data_dir.to_path_buf(),
     );
 
     // Step 3: loopback transport + no-op mailbox factory (in place of Tor).
@@ -762,7 +768,7 @@ pub async fn run_loopback_with_mailbox(
         std::time::Duration::from_secs(3600),
         sweep_shutdown_rx,
         events_tx.clone(),
-        config.data_dir.clone(),
+        data_dir.to_path_buf(),
     );
 
     let transport = Arc::new(crate::transport::LoopbackTransport::new(net, my_onion));
@@ -857,7 +863,7 @@ where
         std::time::Duration::from_secs(3600),
         sweep_shutdown_rx,
         events_tx.clone(),
-        config.data_dir.clone(),
+        data_dir.to_path_buf(),
     );
 
     let mailbox_factory: Arc<dyn crate::mailbox::poll::MailboxConnectFactory> =

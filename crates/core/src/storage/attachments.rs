@@ -284,6 +284,13 @@ impl<'p> AttachmentRepo<'p> {
                     let mut id = [0u8; 16];
                     id.copy_from_slice(&aid);
                     out.push(id);
+                } else {
+                    // This id is the janitor's sole gate on deletion — a
+                    // silently dropped row reads to it as an orphan and its
+                    // chunks get deleted. Not reachable through the typed
+                    // write path (`insert` takes `&[u8; 16]`), so a hit here
+                    // means a corrupted or hand-edited row; make it visible.
+                    tracing::warn!(len = aid.len(), "all_ids: skipping malformed attachment_id");
                 }
             }
             Ok(out)
