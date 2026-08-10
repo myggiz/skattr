@@ -4,13 +4,24 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — targeting v0.1.12
+## [Unreleased] — targeting v0.1.13
 
 _In-progress patch line. The version is bumped per build for tracking; entries
 accumulate here and are stamped with a date when a build is cut._
 
 ### Fixed
 
+- **A file transfer that stalls no longer hangs around invisibly forever**
+  (#149): if the sender vanished part-way through sending you a file, the
+  transfer sat silently unfinished — it never appeared as failed, so there was
+  nothing to retry, and the partial data stayed on disk unnoticed. After two
+  weeks without progress it is now marked failed, which is what makes the
+  **Retry** button appear; retrying picks up from the pieces already received
+  rather than starting over. Leftover pieces from transfers the app no longer
+  has any record of are cleaned up automatically. Two deliberate limits: a
+  received file's data is never touched (it *is* your file — kept encrypted
+  until you open or save it), and the pieces from a failed transfer are kept
+  too, because they are what makes a retry cheap.
 - **The app could refuse to start on a slower or busy machine, unable to open
   its own encrypted data** (#121): the identity key, message database, and
   backups are encrypted at rest with `age`, which was left to auto-pick how much

@@ -6476,7 +6476,7 @@ checksum = "b2aa850e253778c88a04c3d7323b043aeda9d3e30d5971937c1855769763678e"
 
 [[package]]
 name = "skattr-cli"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "anyhow",
  "clap",
@@ -6498,7 +6498,7 @@ dependencies = [
 
 [[package]]
 name = "skattr-core"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "age",
  "arbitrary",
@@ -6563,7 +6563,7 @@ dependencies = [
 
 [[package]]
 name = "skattr-mailbox"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "anyhow",
  "arti-client",
@@ -6599,7 +6599,7 @@ dependencies = [
 
 [[package]]
 name = "skattr-tests"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "anyhow",
  "arti-client",
@@ -6620,7 +6620,7 @@ dependencies = [
 
 [[package]]
 name = "skattr-ui"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "anyhow",
  "notify-rust",
