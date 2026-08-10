@@ -172,6 +172,11 @@ impl Daemon {
         // sweep re-reads.
         let config_arc = std::sync::Arc::new(tokio::sync::RwLock::new(config.clone()));
 
+        // Step 3: event broadcast channel — created before the sweep, which
+        // now emits Event::AttachmentFailed from the attachment janitor
+        // (#149).
+        let (events_tx, _) = broadcast::channel::<Event>(EVENT_CHANNEL_CAPACITY);
+
         // Phase 1.G: hourly retention sweep.
         let (sweep_shutdown_tx, sweep_shutdown_rx) = tokio::sync::watch::channel(false);
         let sweep_handle = crate::daemon::retention::spawn_sweep(
@@ -179,10 +184,9 @@ impl Daemon {
             config_arc.clone(),
             std::time::Duration::from_secs(3600),
             sweep_shutdown_rx,
+            events_tx.clone(),
+            config.data_dir.clone(),
         );
-
-        // Step 3: event broadcast channel.
-        let (events_tx, _) = broadcast::channel::<Event>(EVENT_CHANNEL_CAPACITY);
 
         // Step 4: Tor bootstrap. Build the mailbox factory from a cloned
         // TorClient BEFORE the runtime is moved into the ArtiTransport
@@ -643,15 +647,17 @@ pub async fn run_loopback(
 
     let config_arc = std::sync::Arc::new(tokio::sync::RwLock::new(config.clone()));
 
+    let (events_tx, _) = broadcast::channel::<Event>(EVENT_CHANNEL_CAPACITY);
+
     let (sweep_shutdown_tx, sweep_shutdown_rx) = tokio::sync::watch::channel(false);
     let sweep_handle = crate::daemon::retention::spawn_sweep(
         pool.clone(),
         config_arc.clone(),
         std::time::Duration::from_secs(3600),
         sweep_shutdown_rx,
+        events_tx.clone(),
+        config.data_dir.clone(),
     );
-
-    let (events_tx, _) = broadcast::channel::<Event>(EVENT_CHANNEL_CAPACITY);
 
     // Step 3: loopback transport + no-op mailbox factory (in place of Tor).
     let transport = Arc::new(crate::transport::LoopbackTransport::new(net, my_onion));
@@ -747,15 +753,17 @@ pub async fn run_loopback_with_mailbox(
 
     let config_arc = std::sync::Arc::new(tokio::sync::RwLock::new(config.clone()));
 
+    let (events_tx, _) = broadcast::channel::<Event>(EVENT_CHANNEL_CAPACITY);
+
     let (sweep_shutdown_tx, sweep_shutdown_rx) = tokio::sync::watch::channel(false);
     let sweep_handle = crate::daemon::retention::spawn_sweep(
         pool.clone(),
         config_arc.clone(),
         std::time::Duration::from_secs(3600),
         sweep_shutdown_rx,
+        events_tx.clone(),
+        config.data_dir.clone(),
     );
-
-    let (events_tx, _) = broadcast::channel::<Event>(EVENT_CHANNEL_CAPACITY);
 
     let transport = Arc::new(crate::transport::LoopbackTransport::new(net, my_onion));
     let transport_identity = Arc::new(identity_for_transport);
@@ -840,15 +848,17 @@ where
 
     let config_arc = std::sync::Arc::new(tokio::sync::RwLock::new(config.clone()));
 
+    let (events_tx, _) = broadcast::channel::<Event>(EVENT_CHANNEL_CAPACITY);
+
     let (sweep_shutdown_tx, sweep_shutdown_rx) = tokio::sync::watch::channel(false);
     let sweep_handle = crate::daemon::retention::spawn_sweep(
         pool.clone(),
         config_arc.clone(),
         std::time::Duration::from_secs(3600),
         sweep_shutdown_rx,
+        events_tx.clone(),
+        config.data_dir.clone(),
     );
-
-    let (events_tx, _) = broadcast::channel::<Event>(EVENT_CHANNEL_CAPACITY);
 
     let mailbox_factory: Arc<dyn crate::mailbox::poll::MailboxConnectFactory> =
         Arc::new(NoopMailboxFactory);

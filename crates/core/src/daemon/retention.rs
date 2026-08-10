@@ -30,6 +30,8 @@ pub fn spawn_sweep(
     config: Arc<tokio::sync::RwLock<Config>>,
     tick: Duration,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
+    events_tx: tokio::sync::broadcast::Sender<crate::daemon::events::Event>,
+    data_dir: std::path::PathBuf,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
@@ -69,6 +71,15 @@ pub fn spawn_sweep(
                             "retention: outstanding invite purge failed"
                         ),
                     }
+
+                    // Attachment janitor (#149): auto-fail stalled inbound
+                    // transfers and remove orphaned chunk directories.
+                    let _ = crate::daemon::attachment_janitor::run_once(
+                        &pool,
+                        &data_dir,
+                        &events_tx,
+                        std::time::SystemTime::now(),
+                    );
                 }
                 _ = shutdown.changed() => break,
             }
@@ -113,11 +124,15 @@ mod tests {
             .unwrap();
 
         let (tx, rx) = tokio::sync::watch::channel(false);
+        let tmp = tempfile::tempdir().unwrap();
+        let (ev_tx, _ev_rx) = tokio::sync::broadcast::channel(16);
         let h = spawn_sweep(
             pool.clone(),
             config_with_retention(0),
             Duration::from_millis(20),
             rx,
+            ev_tx,
+            tmp.path().to_path_buf(),
         );
         tokio::time::sleep(Duration::from_millis(80)).await;
         let _ = tx.send(true);
@@ -154,11 +169,15 @@ mod tests {
         }
 
         let (tx, rx) = tokio::sync::watch::channel(false);
+        let tmp = tempfile::tempdir().unwrap();
+        let (ev_tx, _ev_rx) = tokio::sync::broadcast::channel(16);
         let h = spawn_sweep(
             pool.clone(),
             config_with_retention(1), /* 1 day */
             Duration::from_millis(20),
             rx,
+            ev_tx,
+            tmp.path().to_path_buf(),
         );
         tokio::time::sleep(Duration::from_millis(80)).await;
         let _ = tx.send(true);
@@ -205,11 +224,15 @@ mod tests {
         .unwrap();
 
         let (tx, rx) = tokio::sync::watch::channel(false);
+        let tmp = tempfile::tempdir().unwrap();
+        let (ev_tx, _ev_rx) = tokio::sync::broadcast::channel(16);
         let h = spawn_sweep(
             pool.clone(),
             config_with_retention(0),
             Duration::from_millis(20),
             rx,
+            ev_tx,
+            tmp.path().to_path_buf(),
         );
         tokio::time::sleep(Duration::from_millis(80)).await;
         let _ = tx.send(true);

@@ -59,7 +59,16 @@ async fn sweep_deletes_only_rows_older_than_cutoff_and_cascades_fts() {
     let mut cfg = Config::defaults().expect("defaults");
     cfg.history.retention_days = 1; /* day */
     let config_arc = Arc::new(tokio::sync::RwLock::new(cfg));
-    let h = spawn_sweep(pool.clone(), config_arc, Duration::from_millis(50), rx);
+    let tmp = tempfile::tempdir().unwrap();
+    let (ev_tx, _ev_rx) = tokio::sync::broadcast::channel(16);
+    let h = spawn_sweep(
+        pool.clone(),
+        config_arc,
+        Duration::from_millis(50),
+        rx,
+        ev_tx,
+        tmp.path().to_path_buf(),
+    );
 
     // Wait long enough for at least one tick (~2-4 ticks at 50 ms).
     tokio::time::sleep(Duration::from_millis(200)).await;
