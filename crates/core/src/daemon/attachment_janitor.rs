@@ -102,6 +102,18 @@ pub(crate) fn run_once(
         // Transition via claim_terminal only: it is the #38 exactly-once gate.
         // A false return means another lane already terminalised this row, and
         // that lane owns the event — stay silent.
+        //
+        // Known, accepted race: a chunk that lands between the `metadata` read
+        // above and this claim marks a transfer that just resumed as failed.
+        // The window is the few instructions in between, and it takes a
+        // transfer silent for STALL_GRACE to hit it. It is not closable
+        // cheaply — atomicity would have to span the filesystem and the DB —
+        // and the outcome is recoverable rather than lossy: nothing here
+        // deletes chunks, so the row surfaces as failed-and-retryable and
+        // #146's `rearm_failed_in` resumes from the chunks already held. The
+        // deposits are not server-side deleted either, so a retry can still
+        // match them. Raised by review on PR #153; documented rather than
+        // coded around, deliberately.
         match repo.claim_terminal(&aid, TerminalStatus::Failed) {
             Ok(true) => {
                 stats.stalled += 1;
