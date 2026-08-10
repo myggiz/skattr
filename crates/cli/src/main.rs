@@ -1952,6 +1952,11 @@ mod tests {
         assert!(out.contains("<-")); // incoming arrow
     }
 
+    const DISTINCT_ID: [u8; 16] = [
+        0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+        0x00,
+    ];
+
     fn test_manifest_bytes(name: &str, size: u64, id: [u8; 16]) -> Vec<u8> {
         use skattr_core::AttachmentManifest;
         let m = AttachmentManifest {
@@ -1964,9 +1969,7 @@ mod tests {
             file_key: [0u8; 32],
             chunks: vec![],
         };
-        let mut buf = Vec::new();
-        ciborium::into_writer(&m, &mut buf).unwrap();
-        buf
+        m.to_cbor().unwrap()
     }
 
     #[test]
@@ -1979,11 +1982,21 @@ mod tests {
 
     #[test]
     fn render_file_kind_shows_name_size_and_id() {
-        let bytes = test_manifest_bytes("logs.tar.gz", 2_516_582, [0x78; 16]);
+        let bytes = test_manifest_bytes("logs.tar.gz", 2_516_582, DISTINCT_ID);
         let out = render_file_kind(&bytes, Some(true));
         assert!(out.contains("logs.tar.gz"), "got {out}");
         assert!(out.contains("2.4 MiB"), "got {out}");
-        assert!(out.contains("id=78787878"), "got {out}");
+        assert!(out.contains("id=1122334455667788"), "got {out}");
+        // Must stop at 8 bytes: the 9th byte must not follow the id.
+        assert!(
+            !out.contains("112233445566778899"),
+            "id not truncated: {out}"
+        );
+        // And certainly not the whole 32-char id.
+        assert!(
+            !out.contains("112233445566778899aabbccddeeff00"),
+            "id not truncated: {out}"
+        );
         assert!(out.contains("available"), "got {out}");
     }
 
