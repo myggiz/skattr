@@ -296,3 +296,196 @@ async fn save_attachment_unknown_id_errors_and_writes_nothing() {
     let _ = shutdown_tx.send(());
     let _ = tokio::time::timeout(Duration::from_secs(30), task).await;
 }
+
+/// #155 F1 regression guard: the CLI's `save_attachment` originally sent
+/// `RecentMessages { contact: None, .. }`. `dispatch.rs::recent_messages`
+/// rejects that unconditionally (`Phase 1.F requires a contact filter` —
+/// Phase 1.G global recent never landed), so *every* `save-attachment`
+/// invocation failed with `ContactNotFound` before the id was ever examined.
+/// Nothing in the test suite executed the CLI's `save_attachment` function
+/// itself (it lives in the `skattr-cli` binary crate, which has no lib
+/// target `skattr-tests` can call into — a full CLI-binary invocation from
+/// here would need to locate and depend on a pre-built `skattr` binary,
+/// which is impractical to guarantee for `cargo test -p skattr-tests`), so
+/// this is the guard against the assumption silently returning: it proves
+/// (a) `contact: None` still errors — the fix must not route through it —
+/// and (b) the fix's actual strategy, one `RecentMessages { contact:
+/// Some(pubkey), .. }` per contact from `ListContacts`, does find the
+/// attachment `contact: None` could never reach.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn recent_messages_contact_none_errors_but_per_contact_finds_the_attachment() {
+    use skattr_core::daemon::error_kind::DaemonErrorKind;
+    use skattr_core::daemon::ipc::wire::IpcError;
+    use skattr_core::daemon::IpcClientError;
+    use skattr_core::envelope::Kind;
+
+    let tmp_a = tempfile::tempdir().unwrap();
+    let tmp_b = tempfile::tempdir().unwrap();
+    init_vault(tmp_a.path());
+    init_vault(tmp_b.path());
+
+    let net = LoopbackNet::new();
+    let pw = Zeroizing::new(PASSPHRASE.to_string());
+
+    let (ready_a_rx, shutdown_a_tx, task_a) = spawn_daemon(
+        tmp_a.path(),
+        "alice.onion",
+        net.clone(),
+        pw.clone(),
+        tmp_a.path().join("downloads"),
+    );
+    let (ready_b_rx, shutdown_b_tx, task_b) = spawn_daemon(
+        tmp_b.path(),
+        "bob.onion",
+        net.clone(),
+        pw.clone(),
+        tmp_b.path().join("downloads"),
+    );
+
+    let ready_a: Ready = tokio::time::timeout(Duration::from_secs(60), ready_a_rx)
+        .await
+        .expect("Alice ready within 60 s")
+        .expect("Alice ready_tx open");
+    let ready_b: Ready = tokio::time::timeout(Duration::from_secs(60), ready_b_rx)
+        .await
+        .expect("Bob ready within 60 s")
+        .expect("Bob ready_tx open");
+
+    // --- First contact ---
+    let mut client_a = IpcClient::connect(&ready_a.ipc_socket).await.unwrap();
+    let invite_url = match client_a
+        .execute(Command::CreateInvite {
+            nickname: None,
+            ttl_secs: Some(600),
+        })
+        .await
+        .unwrap()
+    {
+        CommandResult::InviteCreated { url, .. } => url,
+        other => panic!("expected InviteCreated, got {other:?}"),
+    };
+
+    let mut client_b = IpcClient::connect(&ready_b.ipc_socket).await.unwrap();
+    let alice_pubkey = match client_b
+        .execute(Command::AddContact {
+            invite_url: invite_url.clone(),
+        })
+        .await
+        .unwrap()
+    {
+        CommandResult::ContactAdded(s) => s.pubkey,
+        other => panic!("expected ContactAdded, got {other:?}"),
+    };
+
+    let mut client_b_info = IpcClient::connect(&ready_b.ipc_socket).await.unwrap();
+    let bob_pubkey = match client_b_info.execute(Command::DaemonInfo).await.unwrap() {
+        CommandResult::DaemonInfo { local_pubkey, .. } => local_pubkey,
+        other => panic!("expected DaemonInfo, got {other:?}"),
+    };
+
+    wait_for_group_active(&ready_a.ipc_socket, bob_pubkey, Duration::from_secs(30)).await;
+
+    let mut bob_sub = IpcClient::connect(&ready_b.ipc_socket).await.unwrap();
+    bob_sub.subscribe(EventFilter::All).await.unwrap();
+
+    // === Send a small single-chunk file and let it complete ===
+    let payload = deterministic_payload(1024);
+    let src = tmp_a.path().join("payload.bin");
+    std::fs::write(&src, &payload).unwrap();
+
+    let mut send_a = IpcClient::connect(&ready_a.ipc_socket).await.unwrap();
+    let attachment_id = match send_a
+        .execute(Command::SendFile {
+            contact: bob_pubkey,
+            path: src.to_string_lossy().to_string(),
+        })
+        .await
+        .unwrap()
+    {
+        CommandResult::FileQueued { attachment_id, .. } => attachment_id.to_string(),
+        other => panic!("expected FileQueued, got {other:?}"),
+    };
+
+    wait_for_attachment(
+        &mut bob_sub,
+        alice_pubkey,
+        &attachment_id,
+        Duration::from_secs(60),
+    )
+    .await;
+
+    // (a) `contact: None` — the shape `save_attachment` originally sent —
+    // must still error. If this assertion ever starts passing, Phase 1.G
+    // (global recent) has landed and this whole regression guard is stale.
+    let mut bob_none = IpcClient::connect(&ready_b.ipc_socket).await.unwrap();
+    let none_result = bob_none
+        .execute(Command::RecentMessages {
+            contact: None,
+            limit: 500,
+            before_id: None,
+            paged: false,
+        })
+        .await;
+    assert!(
+        matches!(
+            none_result,
+            Err(IpcClientError::Server(IpcError::Daemon(
+                DaemonErrorKind::ContactNotFound
+            )))
+        ),
+        "RecentMessages{{contact: None}} must still error — got {none_result:?}"
+    );
+
+    // (b) The fix's actual strategy: ListContacts, then RecentMessages per
+    // contact, must find the attachment `contact: None` could never reach.
+    let mut bob_contacts = IpcClient::connect(&ready_b.ipc_socket).await.unwrap();
+    let contacts = match bob_contacts.execute(Command::ListContacts).await.unwrap() {
+        CommandResult::Contacts(rows) => rows,
+        other => panic!("expected Contacts, got {other:?}"),
+    };
+    assert_eq!(
+        contacts.len(),
+        1,
+        "Bob should have exactly Alice as a contact"
+    );
+
+    let mut found = false;
+    for c in &contacts {
+        let mut client = IpcClient::connect(&ready_b.ipc_socket).await.unwrap();
+        let rows = match client
+            .execute(Command::RecentMessages {
+                contact: Some(c.pubkey),
+                limit: 500,
+                before_id: None,
+                paged: false,
+            })
+            .await
+            .unwrap()
+        {
+            CommandResult::Messages(rows) => rows,
+            other => panic!("expected Messages, got {other:?}"),
+        };
+        for row in &rows {
+            if let Kind::File { manifest } = &row.kind {
+                let m = skattr_core::AttachmentManifest::from_cbor(manifest).unwrap();
+                if m.attachment_id
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()
+                    == attachment_id
+                {
+                    found = true;
+                }
+            }
+        }
+    }
+    assert!(
+        found,
+        "per-contact RecentMessages must find the attachment id {attachment_id}"
+    );
+
+    let _ = shutdown_a_tx.send(());
+    let _ = shutdown_b_tx.send(());
+    let _ = tokio::time::timeout(Duration::from_secs(30), task_a).await;
+    let _ = tokio::time::timeout(Duration::from_secs(30), task_b).await;
+}

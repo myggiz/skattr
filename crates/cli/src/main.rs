@@ -1030,9 +1030,15 @@ fn resolve_contact(
 /// naming the count when a prefix is ambiguous. Returns the full id and the
 /// decoded manifest, so the caller can report the filename and size without
 /// decoding twice.
+/// `RecentMessages` per-contact page size used to build the candidate set for
+/// `resolve_attachment_id` in `save_attachment`. Not exhaustive — see the
+/// honest-bound wording on the no-match error below (#155 F2).
+const ATTACHMENT_SEARCH_LIMIT: u32 = 500;
+
 fn resolve_attachment_id(
     rows: &[skattr_core::daemon::commands::MessageRecord],
     prefix: &str,
+    searched_limit_per_contact: u32,
 ) -> Result<([u8; 16], skattr_core::AttachmentManifest)> {
     use skattr_core::envelope::Kind;
     let lower = prefix.to_ascii_lowercase();
@@ -1051,7 +1057,13 @@ fn resolve_attachment_id(
     }
     match matches.len() {
         1 => Ok(matches.remove(0)),
-        0 => anyhow::bail!("no attachment matches {prefix:?}"),
+        // Honest bound (#155 F2): `rows` is at most `searched_limit_per_contact`
+        // messages per contact, not full history — say so instead of implying
+        // an exhaustive search.
+        0 => anyhow::bail!(
+            "no attachment matches {prefix:?} in the most recent \
+             {searched_limit_per_contact} messages per contact"
+        ),
         n => anyhow::bail!("ambiguous: {n} attachments match {prefix:?}"),
     }
 }
@@ -1071,9 +1083,14 @@ fn absolutize(dest: &str, cwd: &std::path::Path) -> std::path::PathBuf {
 
 /// Save a received attachment to `dest`.
 ///
-/// Resolve-then-act: one connection to list recent messages (to resolve the id
-/// prefix), a second to save. The IPC connection is single-request (#116), so
-/// reusing the first would broken-pipe.
+/// Resolve-then-act. `RecentMessages` requires a contact filter (Phase 1.G —
+/// global recent — never landed; the daemon rejects `contact: None` with
+/// `ContactNotFound`, see `dispatch.rs::recent_messages`), so resolution
+/// iterates contacts CLI-side: one `ListContacts` plus one `RecentMessages`
+/// per contact, concatenating rows before `resolve_attachment_id` (#155 F1).
+/// The IPC connection is single-request (#116/#117), so every `execute` here
+/// — including each per-contact page — gets its own connection, matching the
+/// pattern `probe_availability` already uses for per-item connections.
 async fn save_attachment(
     id_prefix: &str,
     dest: &str,
@@ -1082,22 +1099,37 @@ async fn save_attachment(
 ) -> Result<()> {
     use skattr_core::daemon::{Command as CoreCommand, CommandResult};
 
-    // 1. Resolve the prefix against recent messages.
+    // 1. List contacts.
     let mut client = connect_or_exit(sock_flag).await?;
-    let rows = match client
-        .execute(CoreCommand::RecentMessages {
-            contact: None,
-            limit: 500,
-            before_id: None,
-            paged: false,
-        })
-        .await
-    {
-        Ok(CommandResult::Messages(rows)) => rows,
+    let contacts = match client.execute(CoreCommand::ListContacts).await {
+        Ok(CommandResult::Contacts(rows)) => rows,
         Ok(other) => anyhow::bail!("unexpected reply: {other:?}"),
         Err(e) => exit_on_ipc_error(e),
     };
-    let (attachment_id, manifest) = resolve_attachment_id(&rows, id_prefix)?;
+
+    // 2. Pull the most recent messages per contact and concatenate. Bounded
+    //    at `ATTACHMENT_SEARCH_LIMIT` per contact, not exhaustive — see the
+    //    honest-bound wording in `resolve_attachment_id`'s no-match error.
+    let mut rows: Vec<skattr_core::daemon::commands::MessageRecord> = Vec::new();
+    for c in &contacts {
+        let mut client = connect_or_exit(sock_flag).await?;
+        let page = match client
+            .execute(CoreCommand::RecentMessages {
+                contact: Some(c.pubkey),
+                limit: ATTACHMENT_SEARCH_LIMIT,
+                before_id: None,
+                paged: false,
+            })
+            .await
+        {
+            Ok(CommandResult::Messages(rows)) => rows,
+            Ok(other) => anyhow::bail!("unexpected reply: {other:?}"),
+            Err(e) => exit_on_ipc_error(e),
+        };
+        rows.extend(page);
+    }
+    let (attachment_id, manifest) =
+        resolve_attachment_id(&rows, id_prefix, ATTACHMENT_SEARCH_LIMIT)?;
 
     // 2. Reject an empty dest or one that is (or resolves to) a directory,
     //    before it ever reaches the daemon: `reassemble` writes the full
@@ -1337,6 +1369,38 @@ fn format_size(bytes: u64) -> String {
 /// the record — so decoding is the only way to say anything useful about it.
 /// A manifest that will not decode renders as a marker rather than aborting the
 /// listing: one bad row must not blind the whole tail (#118).
+/// Strip control characters and Unicode bidi/format controls from a
+/// peer-authored filename before it reaches the terminal.
+///
+/// Mirrors `delivery::chunk_transfer::sanitize_filename` in `core` — that
+/// function does the same character-class filtering, but it is `pub(crate)`
+/// inside `delivery/` and `CLAUDE.md`'s module-visibility rule says such
+/// items must not be exposed directly (wrap in an approved public module
+/// instead of widening visibility). This is a display-only concern local to
+/// the CLI's rendering, not worth a new public API surface for, so it is
+/// duplicated in miniature here rather than shared. Unlike the core
+/// function, this does not strip path separators or cap length or fall back
+/// to a default name — it only neutralizes terminal-control characters
+/// (#155 F3: a hostile peer's manifest filename can otherwise carry
+/// newlines, forging line-oriented `export --format text` records, or ANSI
+/// escapes, manipulating the user's terminal).
+fn display_sanitize_filename(name: &str) -> String {
+    name.chars()
+        .filter(|c| !c.is_control() && !is_bidi_or_format_control(*c))
+        .collect()
+}
+
+/// Unicode bidi/format controls that `char::is_control` (C0/C1 only) misses
+/// but which enable filename-display spoofing (e.g. U+202E RTL override).
+/// Mirrors the same check in `delivery::chunk_transfer::is_bidi_or_format_control`.
+fn is_bidi_or_format_control(c: char) -> bool {
+    matches!(c,
+        '\u{200E}' | '\u{200F}'
+        | '\u{202A}'..='\u{202E}'
+        | '\u{2066}'..='\u{2069}'
+    )
+}
+
 fn render_file_kind(manifest: &[u8], availability: Option<bool>) -> String {
     let Ok(m) = skattr_core::AttachmentManifest::from_cbor(manifest) else {
         return "📎 (unreadable manifest)".to_string();
@@ -1354,7 +1418,7 @@ fn render_file_kind(manifest: &[u8], availability: Option<bool>) -> String {
     };
     format!(
         "📎 {name}  {size}  id={id}{state}",
-        name = m.filename,
+        name = display_sanitize_filename(&m.filename),
         size = format_size(m.total_size),
     )
 }
@@ -2259,6 +2323,40 @@ mod tests {
     }
 
     #[test]
+    fn render_file_kind_strips_control_chars_from_a_hostile_filename() {
+        // #155 F3: the manifest is peer-authored (`from_cbor` does not
+        // re-sanitize; the honest chunker's `sanitize_filename` is a
+        // sender-side guard a hostile peer can simply not run). A newline
+        // could forge line-oriented `export --format text` records; an ANSI
+        // escape could manipulate the user's terminal. Built directly via
+        // `test_manifest_bytes` (bypassing the chunker) to model exactly
+        // that: a manifest the sender constructed by hand.
+        let hostile = "evil\nnewline\x1b[31minjected.txt";
+        let bytes = test_manifest_bytes(hostile, 10, [0x22; 16]);
+        let out = render_file_kind(&bytes, None);
+        assert!(
+            !out.contains('\n'),
+            "newline must not reach the render: {out:?}"
+        );
+        assert!(
+            !out.contains('\x1b'),
+            "ANSI escape must not reach the render: {out:?}"
+        );
+        // The rest of the (non-control) text still renders — only the ESC
+        // byte itself is stripped, `[31m` is plain text to us.
+        assert!(out.contains("evil"), "got {out:?}");
+        assert!(out.contains("newline[31minjected.txt"), "got {out:?}");
+    }
+
+    #[test]
+    fn display_sanitize_filename_strips_control_and_bidi() {
+        assert_eq!(display_sanitize_filename("a\nb"), "ab");
+        assert_eq!(display_sanitize_filename("a\x1b[31mb"), "a[31mb");
+        assert_eq!(display_sanitize_filename("a\u{202E}b"), "ab");
+        assert_eq!(display_sanitize_filename("plain.txt"), "plain.txt");
+    }
+
+    #[test]
     fn render_messages_human_decodes_a_file_row() {
         use skattr_core::daemon::commands::{Direction, MessageRecord};
         use skattr_core::daemon::hex::Hex16;
@@ -2424,7 +2522,7 @@ mod tests {
     #[test]
     fn resolve_attachment_id_matches_a_unique_prefix() {
         let rows = vec![file_row([0xAB; 16], "a.bin"), file_row([0xCD; 16], "b.bin")];
-        let (id, m) = resolve_attachment_id(&rows, "abab").unwrap();
+        let (id, m) = resolve_attachment_id(&rows, "abab", 500).unwrap();
         assert_eq!(id, [0xAB; 16]);
         assert_eq!(m.filename, "a.bin");
     }
@@ -2432,7 +2530,7 @@ mod tests {
     #[test]
     fn resolve_attachment_id_is_case_insensitive() {
         let rows = vec![file_row([0xAB; 16], "a.bin")];
-        assert!(resolve_attachment_id(&rows, "ABAB").is_ok());
+        assert!(resolve_attachment_id(&rows, "ABAB", 500).is_ok());
     }
 
     #[test]
@@ -2444,7 +2542,9 @@ mod tests {
         b[0] = 0xAB;
         b[15] = 0x01;
         let rows = vec![file_row(a, "a.bin"), file_row(b, "b.bin")];
-        let err = resolve_attachment_id(&rows, "ab").unwrap_err().to_string();
+        let err = resolve_attachment_id(&rows, "ab", 500)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains('2'), "should report the count: {err}");
         assert!(err.to_lowercase().contains("ambiguous"), "got {err}");
     }
@@ -2452,10 +2552,17 @@ mod tests {
     #[test]
     fn resolve_attachment_id_no_match_errors() {
         let rows = vec![file_row([0xAB; 16], "a.bin")];
-        let err = resolve_attachment_id(&rows, "ffff")
+        let err = resolve_attachment_id(&rows, "ffff", 500)
             .unwrap_err()
             .to_string();
         assert!(err.contains("ffff"), "should quote the prefix: {err}");
+        // #155 F2: state the search bound honestly rather than implying an
+        // exhaustive search.
+        assert!(err.contains("500"), "should state the bound: {err}");
+        assert!(
+            err.contains("per contact"),
+            "should say the bound is per contact: {err}"
+        );
     }
 
     #[test]
@@ -2476,7 +2583,7 @@ mod tests {
             ts_daemon_recv: 1_700_000_000,
             ts_envelope: 1_699_999_999,
         }];
-        assert!(resolve_attachment_id(&rows, "abab").is_err());
+        assert!(resolve_attachment_id(&rows, "abab", 500).is_err());
     }
 
     #[test]
@@ -2484,7 +2591,7 @@ mod tests {
         // Two rows referencing the same attachment_id (e.g. the manifest was
         // re-announced) must resolve, not report "ambiguous".
         let rows = vec![file_row([0xAB; 16], "a.bin"), file_row([0xAB; 16], "a.bin")];
-        let (id, m) = resolve_attachment_id(&rows, "abab").unwrap();
+        let (id, m) = resolve_attachment_id(&rows, "abab", 500).unwrap();
         assert_eq!(id, [0xAB; 16]);
         assert_eq!(m.filename, "a.bin");
     }
