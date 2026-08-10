@@ -422,8 +422,10 @@ client-side mitigation goes in **4.C**.
   existing `chunk_sweep` logging.
 - **3.C offline transfer is best-effort** — a deposited-but-never-fetched
   attachment is lost after the mailbox TTL (~7 days; the sender gets no fetch
-  feedback so it never re-deposits), and a stalled inbound stays `pending`
-  forever (no auto-fail janitor — shared deferral with 3.B). Large files
+  feedback so it never re-deposits). A stalled inbound is **no longer stuck
+  forever**: the hourly janitor (#149) auto-fails an inbound transfer whose
+  chunk directory has gone untouched for 14 days, which surfaces it in the UI
+  as failed-and-retryable (#146) rather than silently pending. Large files
   (>10 MiB) cannot transfer while a peer is offline. All disclosed in the v1.0
   limitations.
 - **A failed inbound attachment is retryable** — ✅ done (#144, PR #146).
@@ -437,14 +439,15 @@ client-side mitigation goes in **4.C**.
   already held. Best-effort by nature: the sender drops its staged chunks after
   a peer ack or a completed deposit sweep, so a retry can still come back as a
   nack.
-- **Orphaned chunks are never reclaimed** — ❌ deferred (v1.1), tracked as
-  **#149** (the partial-GC half of #144, split out). Chunks for inbound
-  transfers that never complete — `'failed'` and never retried, stalled
-  `'pending'`, or true orphans with no row — accumulate under
-  `<data_dir>/attachments/` forever. No corruption; unbounded invisible disk
-  growth. Note for whoever takes it: a **completed** inbound attachment's chunks
-  *are* the user's file (encrypted-at-rest; plaintext only on demand), so
-  `status='complete'` must stay strictly out of any janitor's scope.
+- **Chunks for failed/stalled transfers are still retained** — ⚠️ partial
+  (#149). True orphans (a chunk directory with no `attachments` row) are now
+  reclaimed by the hourly janitor, and a stalled transfer is auto-failed so the
+  user can see and retry it. What is **not** reclaimed is the chunk data of a
+  `'failed'` row: those chunks are the resume state that makes retry cheap, so
+  deleting them needs an age policy and a durable failed-at signal that the
+  schema does not carry (`created_at` is not touched by `rearm_failed_in`).
+  #149 stays open for that half. A user who never retries keeps the partial
+  file until they remove the attachment.
 - **Flatpak full build-validation is deferred (manifest does not build today)** —
   ❌ deferred (v1.1). The in-repo manifest (`packaging/flatpak/net.myggiz.skattr.yml`)
   pins the `org.freedesktop.*//23.08` runtime, past freedesktop's support window
