@@ -11,6 +11,13 @@ accumulate here and are stamped with a date when a build is cut._
 
 ### Fixed
 
+- **A failed file save could leave a readable copy behind** (#156, #52):
+  attachments are normally kept encrypted at rest and only decrypted on
+  demand, but if writing the decrypted file out failed part-way through — a
+  full disk, for example — the partial, readable copy could be left sitting
+  next to where you asked it to go, instead of being cleaned up. Decrypted
+  copies left over from an interrupted save are now always removed, whatever
+  went wrong.
 - **Received files were invisible from the CLI — now you can see and save
   them** (#118): `skattr tail`/`export` showed a file message as an unreadable
   dump of numbers instead of a filename, so there was no way to tell what
