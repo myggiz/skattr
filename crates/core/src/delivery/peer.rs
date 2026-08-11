@@ -2014,6 +2014,167 @@ mod tests {
         handle.abort();
     }
 
+    /// #76: an inbound attachment fetch must be able to establish its own
+    /// connection.
+    ///
+    /// Outbound *messages* dial on demand (`ensure_conn`, called from the
+    /// DeliveryJob and WelcomeJob arms). The chunk-pull path does not — it only
+    /// ever sends over whatever connection happens to already exist, and the
+    /// retry tick that drives it states outright that it "never dials on its
+    /// own". So when the peer connection is gone, a pending fetch has no way to
+    /// reach the sender.
+    ///
+    /// This is the field signature from the v0.1.9 two-machine runs: the
+    /// receiver reports `request timeout` while the sender logs *zero*
+    /// `ChunkRequest`s, because the requests were never transmitted at all. A
+    /// loopback test cannot catch it by accident — loopback connections do not
+    /// die — so the connection is simply absent from the start here.
+    #[tokio::test(start_paused = true)]
+    async fn inbound_fetch_dials_when_there_is_no_connection() {
+        use crate::attachment::store::ChunkStore;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::sync::Mutex as StdMutex;
+        use std::time::Duration;
+        use tokio::io::DuplexStream;
+
+        let (manifest, _cts) =
+            crate::attachment::chunker::chunk_plaintext(b"pull me", "f.bin", "text/plain").unwrap();
+        let aid = manifest.attachment_id;
+
+        let pool = Arc::new(Pool::in_memory());
+        crate::storage::attachments::AttachmentRepo::new(&pool)
+            .insert(&aid, "in", &manifest.to_cbor().unwrap(), 1, 0)
+            .unwrap();
+
+        // Yields exactly one pending inbound attachment, as a delivered
+        // `Kind::File` manifest would have.
+        struct Stub {
+            begin: StdMutex<Option<crate::delivery::chunk_transfer::AttachmentBegin>>,
+        }
+        impl InboundDispatch for Stub {
+            fn dispatch(&self, _peer: PublicKey, _ct: &[u8]) -> Option<MessageId> {
+                None
+            }
+            #[allow(private_interfaces)]
+            fn take_begin_attachment(
+                &self,
+                _peer: PublicKey,
+            ) -> Option<crate::delivery::chunk_transfer::AttachmentBegin> {
+                self.begin.lock().unwrap().take()
+            }
+        }
+
+        // Pre-build the connection the dialer hands over, so the dial itself is
+        // instant and the test asserts routing, not handshake mechanics.
+        let actor_id = IdentityKey::generate().unwrap();
+        let responder_id = IdentityKey::generate().unwrap();
+        let responder_static = responder_id.noise_static_public();
+        let peer = PublicKey(responder_id.public().0);
+        let (client_stream, server_stream) = tokio::io::duplex(64 * 1024);
+        let responder_task = tokio::spawn(async move {
+            handshake_responder(server_stream, &responder_id, None)
+                .await
+                .unwrap()
+        });
+        let (dialed_conn, _) =
+            handshake_initiator(client_stream, &actor_id, &responder_static, None)
+                .await
+                .unwrap();
+        let (mut peer_conn, _) = responder_task.await.unwrap();
+
+        struct MockDial {
+            conn: StdMutex<Option<AuthenticatedConnection<DuplexStream>>>,
+            calls: Arc<AtomicUsize>,
+        }
+        #[async_trait::async_trait]
+        impl crate::delivery::dial::OutboundDial<DuplexStream> for MockDial {
+            async fn dial(
+                &self,
+                _peer: PublicKey,
+            ) -> Result<(
+                AuthenticatedConnection<DuplexStream>,
+                zeroize::Zeroizing<[u8; 32]>,
+            )> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                match self.conn.lock().unwrap().take() {
+                    Some(c) => Ok((c, zeroize::Zeroizing::new([0u8; 32]))),
+                    None => Err(crate::delivery::DeliveryErrorKind::Timeout.into()),
+                }
+            }
+            async fn dial_at(
+                &self,
+                peer: PublicKey,
+                _onion: &str,
+            ) -> Result<(
+                AuthenticatedConnection<DuplexStream>,
+                zeroize::Zeroizing<[u8; 32]>,
+            )> {
+                self.dial(peer).await
+            }
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let dialer = Arc::new(MockDial {
+            conn: StdMutex::new(Some(dialed_conn)),
+            calls: calls.clone(),
+        });
+
+        let tmp = tempfile::tempdir().unwrap();
+        let (_jobs_tx, jobs_rx) = mpsc::channel::<DeliveryJob>(4);
+        let (_welcome_tx, welcome_rx) = mpsc::channel::<WelcomeJob>(4);
+        let (_ctrl_tx, ctrl_rx) = mpsc::channel::<PeerCtrl<DuplexStream>>(4);
+        let stub: std::sync::Arc<dyn InboundDispatch> = Arc::new(Stub {
+            begin: StdMutex::new(Some(crate::delivery::chunk_transfer::AttachmentBegin {
+                attachment_id: aid,
+                manifest: manifest.clone(),
+            })),
+        });
+        let run_pool = pool.clone();
+        let run_dir = tmp.path().join("downloads");
+        let run_store = Arc::new(ChunkStore::new(tmp.path()));
+        let _actor = tokio::spawn(async move {
+            // NOTE the `None` conn: this is the whole point of the test.
+            let _ = super::full_run::<DuplexStream>(
+                peer,
+                None,
+                jobs_rx,
+                welcome_rx,
+                ctrl_rx,
+                run_pool,
+                Some(stub),
+                Some(dialer),
+                Duration::ZERO,
+                None,
+                Some(run_store),
+                Some(run_dir),
+            )
+            .await;
+        });
+
+        // A correct actor dials on the first retry tick (1s) and requests the
+        // one missing chunk. 60s of (paused, auto-advanced) time is far past the
+        // 3 x 30s retry budget, so this cannot pass by luck.
+        let frame = tokio::time::timeout(Duration::from_secs(60), peer_conn.recv()).await;
+
+        assert!(
+            calls.load(Ordering::SeqCst) > 0,
+            "#76: the actor must dial to fetch a pending attachment when it has \
+             no connection — it never dialed, so the ChunkRequest was never \
+             transmitted and the transfer can only time out"
+        );
+        match frame {
+            Ok(Ok(Some(Frame::ChunkRequest {
+                attachment_id,
+                index,
+            }))) => {
+                assert_eq!(attachment_id, aid);
+                assert_eq!(index, 0);
+            }
+            other => panic!("expected a ChunkRequest over the dialed conn, got {other:?}"),
+        }
+    }
+
     /// #144 — a retry-requeued begin must start fetching on its own. The only
     /// other drain point is the `Frame::MlsApp` arm, so without the retry-tick
     /// drain a retry would sit idle until the peer happened to send a message —
