@@ -906,8 +906,9 @@ where
 
 /// Best-effort wipe of the managed attachment open-cache
 /// (`<data_dir>/cache/open`). Decrypted plaintext lives here only while an
-/// attachment is open; clearing it at boot + clean shutdown keeps plaintext
-/// ephemeral. Failures are warned, never fatal.
+/// attachment is open; clearing it at boot, at clean shutdown, and via the
+/// drop guard armed around `run_with_transport` keeps plaintext ephemeral.
+/// Failures are warned, never fatal.
 pub(crate) fn wipe_open_cache(data_dir: &std::path::Path) {
     let dir = data_dir.join("cache").join("open");
     match std::fs::remove_dir_all(&dir) {

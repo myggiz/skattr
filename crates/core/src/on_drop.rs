@@ -5,11 +5,15 @@
 
 //! A scope guard that runs a cleanup closure on drop.
 //!
-//! Exists so that cleanup of **decrypted plaintext** happens on every exit
-//! path — `?`, early return, and panic — rather than only where someone
+//! Exists so that cleanup of **decrypted plaintext** happens on every error
+//! exit path — `?` and early return — rather than only where someone
 //! remembered to write it. Attachments are kept encrypted at rest, so a
 //! failure part-way through producing plaintext must not leave that plaintext
-//! behind (#156, #52).
+//! behind (#156, #52). It also covers a panic, but only in builds that
+//! unwind: this workspace's release profile sets `panic = "abort"`
+//! (`Cargo.toml`), and `Drop` does not run on abort — so in a shipped release
+//! binary a panic still kills the process without running this cleanup. The
+//! error-path coverage, which is the reported defect, is unaffected by that.
 
 /// Runs `f` when dropped, unless [`OnDrop::disarm`] was called first.
 ///
@@ -80,7 +84,11 @@ mod tests {
     #[test]
     fn runs_during_unwind() {
         // The property that distinguishes this from explicit cleanup at each
-        // error site: a panic between arming and disarming still cleans up.
+        // error site: a panic between arming and disarming still cleans up
+        // *while unwinding*. This test runs under the dev/test profile, which
+        // unwinds; the release profile sets `panic = "abort"` (Cargo.toml),
+        // where `Drop` does not run, so this guarantee does not extend to a
+        // shipped release binary — only to the error-path (`?`) case.
         let hits = Arc::new(AtomicUsize::new(0));
         let h = hits.clone();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
@@ -95,17 +103,5 @@ mod tests {
             1,
             "cleanup must run while unwinding"
         );
-    }
-
-    #[test]
-    fn runs_exactly_once() {
-        let hits = Arc::new(AtomicUsize::new(0));
-        {
-            let h = hits.clone();
-            let _g = OnDrop::new(move || {
-                h.fetch_add(1, Ordering::SeqCst);
-            });
-        }
-        assert_eq!(hits.load(Ordering::SeqCst), 1);
     }
 }

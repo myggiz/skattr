@@ -36,11 +36,13 @@ pub(crate) fn reassemble<S: ChunkSource>(
     tmp_os.push(".part");
     let tmp = std::path::PathBuf::from(tmp_os);
     // The temp file holds DECRYPTED plaintext of an attachment that is
-    // otherwise kept encrypted at rest, so no failure may leave it behind —
-    // not a validation error, not a disk error, not a panic (#156). An
-    // earlier version cleaned up only the validation paths on the grounds
-    // that a stray `.part` is never mistaken for real output; true, but it
-    // answers a correctness question rather than the security one.
+    // otherwise kept encrypted at rest, so no error path may leave it behind
+    // — not a validation error, not a disk error (#156). It also covers a
+    // panic, but only in unwinding builds: release builds set `panic =
+    // "abort"` (Cargo.toml), and `Drop` does not run on abort. An earlier
+    // version cleaned up only the validation paths on the grounds that a
+    // stray `.part` is never mistaken for real output; true, but it answers
+    // a correctness question rather than the security one.
     let cleanup = crate::on_drop::OnDrop::new({
         let tmp = tmp.clone();
         move || {
@@ -192,6 +194,28 @@ mod tests {
         assert!(
             !part_path(&out).exists(),
             "decrypted .part must be removed on unwind"
+        );
+    }
+
+    #[test]
+    fn rename_failure_after_full_write_leaves_no_plaintext_behind() {
+        // #156's literal scenario: everything up to and including `sync_all`
+        // succeeds — the full plaintext is written to `.part` — and only the
+        // final `rename` fails (disk-full / read-only-mount territory).
+        // Forced here by making `output_path` an existing directory: the
+        // write completes normally, then `std::fs::rename` fails because you
+        // cannot rename a file onto a directory.
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("out.bin");
+        std::fs::create_dir(&out).unwrap();
+        let (manifest, chunks, _plaintext) = fixture_multi_chunk();
+
+        let res = reassemble(&manifest, &mem_source(chunks), &out);
+
+        assert!(res.is_err(), "expected the rename failure to propagate");
+        assert!(
+            !part_path(&out).exists(),
+            "decrypted .part must be removed after a post-write rename failure"
         );
     }
 

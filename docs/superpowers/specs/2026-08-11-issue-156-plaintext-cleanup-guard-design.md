@@ -68,7 +68,11 @@ The closure must not panic: a panic inside `Drop` during unwinding aborts the pr
 Consequences:
 - The three existing explicit `let _ = std::fs::remove_file(&tmp);` calls on the validation paths become redundant and are **removed** — the guard covers them. Leaving both would be two mechanisms for one job.
 - Every `?` on `create` / `write_all` / `sync_all` / `rename` now cleans up.
-- A panic anywhere in the loop cleans up.
+- A panic anywhere in the loop cleans up **in unwinding builds**. This
+  workspace's release profile sets `panic = "abort"` (`Cargo.toml`), and
+  `Drop` does not run on abort, so a release binary's panic coverage is a
+  bonus of the dev/test profile, not something a shipped build gets. The
+  error-path coverage above — the reported defect — is unaffected.
 
 **Behaviour that must not change:** the function still produces no partial output — `rename` still happens only on full success, and the error variants returned are unchanged. This is a cleanup change, not a semantics change.
 
