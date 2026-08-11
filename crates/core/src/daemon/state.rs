@@ -328,10 +328,12 @@ where
     // (covers abnormal exits where the shutdown wipe never ran).
     wipe_open_cache(data_dir);
     // Backstop for every exit path this function has, including an early
-    // return or a panic during teardown — the clean-shutdown wipe below only
-    // runs when we reach it (#52). Never disarmed: the cache should be empty
-    // however we leave. `wipe_open_cache` warns on its own errors and is
-    // idempotent, so running twice on the clean path is harmless.
+    // return or, in unwinding builds, a panic during teardown — release builds
+    // set `panic = "abort"` (Cargo.toml) and `Drop` does not run on abort. The
+    // clean-shutdown wipe below only runs when we reach it (#52). Never
+    // disarmed: the cache should be empty however we leave. `wipe_open_cache`
+    // warns on its own errors and is idempotent, so running twice on the clean
+    // path is harmless.
     let _open_cache_guard = crate::on_drop::OnDrop::new({
         let data_dir = data_dir.to_path_buf();
         move || crate::daemon::state::wipe_open_cache(&data_dir)

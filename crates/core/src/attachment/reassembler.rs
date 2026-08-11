@@ -43,10 +43,18 @@ pub(crate) fn reassemble<S: ChunkSource>(
     // version cleaned up only the validation paths on the grounds that a
     // stray `.part` is never mistaken for real output; true, but it answers
     // a correctness question rather than the security one.
+    // A failed removal (read-only mount, changed directory permissions) cannot
+    // be propagated out of `Drop`, and the caller sees only the original
+    // error — so warn, or the surviving plaintext leaves no trace at all.
+    // Logged without the path: it carries the attachment's filename.
     let cleanup = crate::on_drop::OnDrop::new({
         let tmp = tmp.clone();
-        move || {
-            let _ = std::fs::remove_file(&tmp);
+        move || match std::fs::remove_file(&tmp) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "reassembly temp cleanup failed; decrypted plaintext may remain")
+            }
         }
     });
     let mut out = std::fs::File::create(&tmp)?;
