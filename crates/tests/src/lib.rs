@@ -28,6 +28,8 @@ mod cli_ipc_roundtrip;
 #[cfg(test)]
 mod cli_real_tor;
 #[cfg(test)]
+mod cli_save_attachment;
+#[cfg(test)]
 mod cli_search;
 #[cfg(test)]
 mod cli_tail_follow;
