@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — targeting v0.1.14
+## [Unreleased] — targeting v0.1.15
 
 _In-progress patch line. The version is bumped per build for tracking; entries
 accumulate here and are stamped with a date when a build is cut._
@@ -16,7 +16,9 @@ accumulate here and are stamped with a date when a build is cut._
   demand, but if writing the decrypted file out failed part-way through — a
   full disk, for example — the partial, readable copy could be left sitting
   next to where you asked it to go, instead of being cleaned up. If saving
-  fails, the partial decrypted copy is now always removed.
+  fails, the partial decrypted copy is now always removed. Opening or saving
+  the same file twice at once (a double-click, say) no longer makes the two
+  attempts interfere with each other.
 - **Received files were invisible from the CLI — now you can see and save
   them** (#118): `skattr tail`/`export` showed a file message as an unreadable
   dump of numbers instead of a filename, so there was no way to tell what
