@@ -49,6 +49,7 @@ pub(crate) mod delivery;
 pub use attachment::manifest::AttachmentManifest;
 pub mod mailbox;
 pub(crate) mod mls;
+pub(crate) mod on_drop;
 pub(crate) mod storage;
 pub(crate) mod transport;
 

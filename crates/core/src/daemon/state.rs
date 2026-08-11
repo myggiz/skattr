@@ -327,6 +327,17 @@ where
     // Clear any decrypted plaintext left in the open-cache from a previous run
     // (covers abnormal exits where the shutdown wipe never ran).
     wipe_open_cache(data_dir);
+    // Backstop for every exit path this function has, including an early
+    // return or, in unwinding builds, a panic during teardown — release builds
+    // set `panic = "abort"` (Cargo.toml) and `Drop` does not run on abort. The
+    // clean-shutdown wipe below only runs when we reach it (#52). Never
+    // disarmed: the cache should be empty however we leave. `wipe_open_cache`
+    // warns on its own errors and is idempotent, so running twice on the clean
+    // path is harmless.
+    let _open_cache_guard = crate::on_drop::OnDrop::new({
+        let data_dir = data_dir.to_path_buf();
+        move || crate::daemon::state::wipe_open_cache(&data_dir)
+    });
     inbound_impl.set_chunk_store(chunk_store.clone());
     inbound_impl.set_download_dir(config.resolved_download_dir());
     let inbound = Arc::new(inbound_impl) as Arc<dyn InboundDispatch>;
@@ -897,8 +908,9 @@ where
 
 /// Best-effort wipe of the managed attachment open-cache
 /// (`<data_dir>/cache/open`). Decrypted plaintext lives here only while an
-/// attachment is open; clearing it at boot + clean shutdown keeps plaintext
-/// ephemeral. Failures are warned, never fatal.
+/// attachment is open; clearing it at boot, at clean shutdown, and via the
+/// drop guard armed around `run_with_transport` keeps plaintext ephemeral.
+/// Failures are warned, never fatal.
 pub(crate) fn wipe_open_cache(data_dir: &std::path::Path) {
     let dir = data_dir.join("cache").join("open");
     match std::fs::remove_dir_all(&dir) {
@@ -998,6 +1010,28 @@ mod tests {
         assert!(!tmp.path().join("cache").join("open").exists());
         // Idempotent: a second wipe on an absent dir is a no-op (no panic, no error).
         super::wipe_open_cache(tmp.path());
+    }
+
+    #[test]
+    fn open_cache_guard_wipes_on_early_return() {
+        // #52: the wipe must happen even when the clean-shutdown call is never
+        // reached. Exercises the guard directly rather than standing up a whole
+        // daemon: the property under test is "dropping the guard wipes", and
+        // `run_with_transport` arms exactly this guard.
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path().join("cache").join("open");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join("decrypted.bin"), b"plaintext").unwrap();
+        assert!(cache.join("decrypted.bin").exists());
+
+        {
+            let data_dir = tmp.path().to_path_buf();
+            let _guard = crate::on_drop::OnDrop::new(move || super::wipe_open_cache(&data_dir));
+            // Simulate an early return: the guard goes out of scope without any
+            // explicit wipe having run.
+        }
+
+        assert!(!cache.exists(), "open cache must be wiped on early return");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
