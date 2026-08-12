@@ -676,12 +676,72 @@ Inside the retry tick, as the **first** thing in the `if chunk_enabled {` block 
 
 The existing `if conn.is_some()` drain further down (~line 754) then picks up the begin and starts the fetch on the same tick. Leave that gate as it is.
 
-- [ ] **Step 6: Run the tests to verify they pass**
+- [ ] **Step 6: Re-issue a rolled-back window**
+
+Immediately after the dial block from Step 5, still inside `if chunk_enabled`:
+
+```rust
+                    // A window rolled back by `unsent` (Task 2) left `inflight`
+                    // empty, and nothing else re-issues it: `timed_out` iterates
+                    // `inflight`, `reissue` returns `inflight` keys, and the
+                    // `maybe_start_next_rx` drain below only runs when
+                    // `active_rx` is None. Without this, a fetch that failed to
+                    // transmit would hold a live connection and never ask again.
+                    if conn.is_some() {
+                        if let Some(rx) = active_rx.as_mut() {
+                            let reqs = rx.next_requests();
+                            if !reqs.is_empty() {
+                                let aid = rx.attachment_id();
+                                if !send_chunk_requests(&mut conn, aid, &reqs).await {
+                                    rx.unsent(&reqs);
+                                }
+                            }
+                        }
+                    }
+```
+
+`next_requests` returns empty once the in-flight window is full (`CHUNK_WINDOW`), so this is a no-op on every tick of a healthy transfer.
+
+- [ ] **Step 7: Add the recovery test**
+
+This is the end-to-end proof that the three parts compose — the previous tests each cover one part in isolation. Add to `mod tests` in `crates/core/src/delivery/peer.rs`:
+
+```rust
+    /// #76 end-to-end: a fetch whose connection dies must re-dial and finish.
+    /// This is the exact field scenario — manifest arrives, connection drops
+    /// mid-pull, and the transfer has to recover on its own.
+    #[tokio::test(start_paused = true)]
+    async fn a_fetch_recovers_after_its_connection_dies() {
+        // Build with the same harness shape as
+        // `resume_reissues_chunk_requests_and_completes_after_replace_conn`:
+        // a real chunked attachment, a Stub InboundDispatch yielding one begin
+        // and recording `attachment_received`, and a dialer whose FIRST dial
+        // fails (peer still unreachable) and whose SECOND hands back a live
+        // pre-built connection.
+        //
+        // Sequence:
+        //   1. spawn the actor with conn1; send the manifest MlsApp;
+        //      collect the first ChunkRequest window over conn1
+        //   2. drop the conn1 peer side -> the actor sees EOF, conn = None
+        //   3. advance time past the first backoff step (15s) twice, so the
+        //      failing dial is followed by a succeeding one
+        //   4. serve every requested chunk over conn2
+        //   5. assert `attachment_received` fired with the right id, and that
+        //      `attachment_failed` never did
+        //
+        // Assert on both: completing while also emitting a failure would still
+        // be wrong.
+    }
+```
+
+Write the body following the cited existing test's structure (`dial` helper, `collect_requests` helper, chunk-serving loop). Keep the two assertions stated above.
+
+- [ ] **Step 8: Run the tests to verify they pass**
 
 Run: `cargo test -p skattr-core --lib delivery::peer`
-Expected: PASS — including `inbound_fetch_dials_when_there_is_no_connection` (the original red test), `pending_fetch_dials_are_paced_by_backoff`, `a_dead_connection_does_not_produce_a_false_request_timeout`, and every pre-existing test (`resume_reissues_chunk_requests_and_completes_after_replace_conn`, `retry_requeued_begin_starts_fetching_on_the_next_tick`, the CAS/completion tests).
+Expected: PASS — including `inbound_fetch_dials_when_there_is_no_connection` (the original red test), `pending_fetch_dials_are_paced_by_backoff`, `a_fetch_recovers_after_its_connection_dies`, `a_dead_connection_does_not_produce_a_false_request_timeout`, and every pre-existing test (`resume_reissues_chunk_requests_and_completes_after_replace_conn`, `retry_requeued_begin_starts_fetching_on_the_next_tick`, the CAS/completion tests).
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
 git add crates/core/src/delivery/peer.rs
@@ -742,3 +802,4 @@ Maps to the spec's acceptance table (§8):
 - [ ] A never-started begin is detected without consuming it — `has_pending_begin_reports_without_consuming`
 - [ ] Existing behaviour over a live connection is unchanged — the pre-existing `delivery::peer` chunk tests
 - [ ] `unsent` cannot deadlock a transfer — `unsent_does_not_deadlock_the_transfer`
+- [ ] A rolled-back window is re-issued rather than stalling — `a_fetch_recovers_after_its_connection_dies` (Task 4 Step 6)
