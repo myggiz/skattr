@@ -333,6 +333,17 @@ pub trait InboundDispatch: Send + Sync + 'static {
         None
     }
 
+    /// Whether `peer` has an inbound attachment waiting to start, *without*
+    /// consuming it.
+    ///
+    /// The actor needs to know a fetch is pending in order to dial for it
+    /// (#76), but must not drain the begin to find out: draining moves it from
+    /// the dispatcher's durable queue into actor-local memory, where an actor
+    /// crash would lose it.
+    fn has_pending_begin(&self, _peer: PublicKey) -> bool {
+        false
+    }
+
     /// Queue an inbound-attachment begin for `peer` from outside the MLS
     /// dispatch path — the #144 retry, where the manifest was received long ago
     /// and only the fetch needs restarting. Default no-op.
