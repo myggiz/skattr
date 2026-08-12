@@ -144,7 +144,9 @@ where
             total,
             "attachment: fetching from peer"
         );
-        let _ = send_chunk_requests(conn, aid, &reqs).await;
+        if !send_chunk_requests(conn, aid, &reqs).await {
+            rx.unsent(&reqs);
+        }
         return Some(rx);
     }
 }
@@ -722,9 +724,12 @@ where
                     if let Some((aid, action)) = timeout {
                         match action {
                             crate::delivery::chunk_transfer::ChunkAction::Request(idxs)
-                                if !idxs.is_empty() =>
+                                if !idxs.is_empty()
+                                    && !send_chunk_requests(&mut conn, aid, &idxs).await =>
                             {
-                                let _ = send_chunk_requests(&mut conn, aid, &idxs).await;
+                                if let Some(rx) = active_rx.as_mut() {
+                                    rx.unsent(&idxs);
+                                }
                             }
                             crate::delivery::chunk_transfer::ChunkAction::Fail => {
                                 if let Some(rx) = active_rx.take() {
@@ -808,10 +813,12 @@ where
                         first_failure_at = None;
                         // 3.B: resume an in-flight inbound transfer on reconnect by
                         // re-issuing its outstanding requests over the fresh conn.
-                        if let Some(rx) = active_rx.as_ref() {
+                        if let Some(rx) = active_rx.as_mut() {
                             let aid = rx.attachment_id();
                             let reqs = rx.reissue();
-                            let _ = send_chunk_requests(&mut conn, aid, &reqs).await;
+                            if !send_chunk_requests(&mut conn, aid, &reqs).await {
+                                rx.unsent(&reqs);
+                            }
                         }
                     }
                     Some(PeerCtrl::Shutdown) | None => break,
@@ -1006,8 +1013,9 @@ where
                                     } else {
                                         let reqs = rx.next_requests();
                                         let aid = rx.attachment_id();
-                                        let _ =
-                                            send_chunk_requests(&mut conn, aid, &reqs).await;
+                                        if !send_chunk_requests(&mut conn, aid, &reqs).await {
+                                            rx.unsent(&reqs);
+                                        }
                                         active_rx = Some(rx);
                                     }
                                 } else {
@@ -1017,8 +1025,9 @@ where
                                             idxs,
                                         ) => {
                                             let aid = rx.attachment_id();
-                                            let _ = send_chunk_requests(&mut conn, aid, &idxs)
-                                                .await;
+                                            if !send_chunk_requests(&mut conn, aid, &idxs).await {
+                                                rx.unsent(&idxs);
+                                            }
                                             active_rx = Some(rx);
                                         }
                                         crate::delivery::chunk_transfer::ChunkAction::Fail => {
@@ -2173,6 +2182,134 @@ mod tests {
             }
             other => panic!("expected a ChunkRequest over the dialed conn, got {other:?}"),
         }
+    }
+
+    /// #76: `"request timeout"` must mean the peer stayed silent — never that
+    /// we failed to transmit. A fetch whose connection dies must not burn its
+    /// 3 x 30s budget on requests that never left the machine and then report
+    /// a timeout the sender has no record of.
+    #[tokio::test(start_paused = true)]
+    async fn a_dead_connection_does_not_produce_a_false_request_timeout() {
+        use crate::attachment::store::ChunkStore;
+        use std::sync::Arc;
+        use std::sync::Mutex as StdMutex;
+        use std::time::Duration;
+        use tokio::io::DuplexStream;
+
+        let payload = vec![3u8; crate::attachment::CHUNK_SIZE + 10];
+        let (manifest, _cts) =
+            crate::attachment::chunker::chunk_plaintext(&payload, "f.bin", "text/plain").unwrap();
+        let aid = manifest.attachment_id;
+
+        let pool = Arc::new(Pool::in_memory());
+        crate::storage::attachments::AttachmentRepo::new(&pool)
+            .insert(
+                &aid,
+                "in",
+                &manifest.to_cbor().unwrap(),
+                manifest.chunks.len() as i64,
+                0,
+            )
+            .unwrap();
+
+        struct Stub {
+            begin: StdMutex<Option<crate::delivery::chunk_transfer::AttachmentBegin>>,
+            failed: Arc<StdMutex<Option<String>>>,
+        }
+        impl InboundDispatch for Stub {
+            fn dispatch(&self, _peer: PublicKey, _ct: &[u8]) -> Option<MessageId> {
+                Some(MessageId::generate())
+            }
+            #[allow(private_interfaces)]
+            fn take_begin_attachment(
+                &self,
+                _peer: PublicKey,
+            ) -> Option<crate::delivery::chunk_transfer::AttachmentBegin> {
+                self.begin.lock().unwrap().take()
+            }
+            fn attachment_failed(&self, _aid: [u8; 16], reason: &str) {
+                *self.failed.lock().unwrap() = Some(reason.to_string());
+            }
+        }
+
+        let failed: Arc<StdMutex<Option<String>>> = Arc::new(StdMutex::new(None));
+        let stub: std::sync::Arc<dyn InboundDispatch> = Arc::new(Stub {
+            begin: StdMutex::new(Some(crate::delivery::chunk_transfer::AttachmentBegin {
+                attachment_id: aid,
+                manifest: manifest.clone(),
+            })),
+            failed: failed.clone(),
+        });
+
+        let actor_id = IdentityKey::generate().unwrap();
+        let responder_id = IdentityKey::generate().unwrap();
+        let responder_static = responder_id.noise_static_public();
+        let peer = PublicKey(responder_id.public().0);
+        let (client_stream, server_stream) = tokio::io::duplex(64 * 1024);
+        let responder_task = tokio::spawn(async move {
+            handshake_responder(server_stream, &responder_id, None)
+                .await
+                .unwrap()
+        });
+        let (conn, _) = handshake_initiator(client_stream, &actor_id, &responder_static, None)
+            .await
+            .unwrap();
+        let (mut peer_conn, _) = responder_task.await.unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let (_jobs_tx, jobs_rx) = mpsc::channel::<DeliveryJob>(4);
+        let (_welcome_tx, welcome_rx) = mpsc::channel::<WelcomeJob>(4);
+        let (_ctrl_tx, ctrl_rx) = mpsc::channel::<PeerCtrl<DuplexStream>>(4);
+        let run_pool = pool.clone();
+        let run_dir = tmp.path().join("downloads");
+        let run_store = Arc::new(ChunkStore::new(tmp.path()));
+        let _actor = tokio::spawn(async move {
+            // No dialer: the fetch cannot recover, which is precisely the
+            // condition under which it must NOT invent a timeout.
+            let _ = super::full_run::<DuplexStream>(
+                peer,
+                Some(conn),
+                jobs_rx,
+                welcome_rx,
+                ctrl_rx,
+                run_pool,
+                Some(stub),
+                None,
+                Duration::ZERO,
+                None,
+                Some(run_store),
+                Some(run_dir),
+            )
+            .await;
+        });
+
+        // Start the fetch over the live conn, then kill the connection.
+        peer_conn
+            .send(Frame::MlsApp(b"manifest".to_vec()))
+            .await
+            .unwrap();
+        // Drain until the first ChunkRequest proves the fetch began.
+        loop {
+            let f = tokio::time::timeout(Duration::from_secs(5), peer_conn.recv())
+                .await
+                .expect("actor must respond")
+                .unwrap()
+                .expect("conn must not EOF yet");
+            if matches!(f, Frame::ChunkRequest { .. }) {
+                break;
+            }
+        }
+        drop(peer_conn); // actor sees EOF -> conn = None
+
+        // Well past 3 x CHUNK_REQUEST_TIMEOUT.
+        tokio::time::sleep(Duration::from_secs(150)).await;
+
+        assert!(
+            failed.lock().unwrap().is_none(),
+            "#76: a fetch that could not transmit must not report a timeout \
+             the peer never saw (got {:?})",
+            failed.lock().unwrap()
+        );
     }
 
     /// #144 — a retry-requeued begin must start fetching on its own. The only
