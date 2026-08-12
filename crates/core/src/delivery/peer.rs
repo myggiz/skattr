@@ -912,6 +912,15 @@ where
                         // do not let stale failures from the old conn fire the
                         // fallback. (Re-armed on the next failure if it recurs.)
                         first_failure_at = None;
+                        // Same reasoning for the #76 dial pacing: the peer has
+                        // just proven reachable, so a backoff accumulated while
+                        // it was unreachable is stale evidence. Without this, a
+                        // conn that arrives during a 15-minute backoff and then
+                        // drops leaves the fetch idle until that stale deadline
+                        // expires, even though we know the peer was up moments
+                        // ago. Re-armed from the first step if dialing fails again.
+                        next_chunk_dial_at = None;
+                        chunk_dial_step = 0;
                         // 3.B: resume an in-flight inbound transfer on reconnect by
                         // re-issuing its outstanding requests over the fresh conn.
                         if let Some(rx) = active_rx.as_mut() {
@@ -2589,6 +2598,157 @@ mod tests {
         assert!(
             failed.lock().unwrap().is_none(),
             "a late failure must not emit AttachmentFailed for a completed attachment"
+        );
+    }
+
+    /// #76 review: a connection arriving via `ReplaceConn` (the peer dialed
+    /// US) proves the peer is reachable, so a backoff accumulated while it was
+    /// unreachable is stale evidence. If that connection then drops, the fetch
+    /// must retry promptly rather than waiting out the old deadline — which, at
+    /// the last backoff step, is 15 minutes of idleness after a peer we know
+    /// was up moments ago.
+    #[tokio::test(start_paused = true)]
+    async fn replace_conn_resets_the_dial_backoff() {
+        use crate::attachment::store::ChunkStore;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::sync::Mutex as StdMutex;
+        use std::time::Duration;
+        use tokio::io::DuplexStream;
+
+        let (manifest, _cts) =
+            crate::attachment::chunker::chunk_plaintext(b"reset me", "f.bin", "text/plain")
+                .unwrap();
+        let aid = manifest.attachment_id;
+
+        let pool = Arc::new(Pool::in_memory());
+        crate::storage::attachments::AttachmentRepo::new(&pool)
+            .insert(&aid, "in", &manifest.to_cbor().unwrap(), 1, 0)
+            .unwrap();
+
+        struct Stub {
+            begin: StdMutex<Option<crate::delivery::chunk_transfer::AttachmentBegin>>,
+        }
+        impl InboundDispatch for Stub {
+            fn dispatch(&self, _peer: PublicKey, _ct: &[u8]) -> Option<MessageId> {
+                None
+            }
+            #[allow(private_interfaces)]
+            fn take_begin_attachment(
+                &self,
+                _peer: PublicKey,
+            ) -> Option<crate::delivery::chunk_transfer::AttachmentBegin> {
+                self.begin.lock().unwrap().take()
+            }
+            fn has_pending_begin(&self, _peer: PublicKey) -> bool {
+                self.begin.lock().map(|g| g.is_some()).unwrap_or(false)
+            }
+        }
+
+        struct FailingDial {
+            calls: Arc<AtomicUsize>,
+        }
+        #[async_trait::async_trait]
+        impl crate::delivery::dial::OutboundDial<DuplexStream> for FailingDial {
+            async fn dial(
+                &self,
+                _peer: PublicKey,
+            ) -> Result<(
+                AuthenticatedConnection<DuplexStream>,
+                zeroize::Zeroizing<[u8; 32]>,
+            )> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Err(crate::delivery::DeliveryErrorKind::Timeout.into())
+            }
+            async fn dial_at(
+                &self,
+                peer: PublicKey,
+                _onion: &str,
+            ) -> Result<(
+                AuthenticatedConnection<DuplexStream>,
+                zeroize::Zeroizing<[u8; 32]>,
+            )> {
+                self.dial(peer).await
+            }
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let dialer = Arc::new(FailingDial {
+            calls: calls.clone(),
+        });
+
+        // The connection the peer will hand us via ReplaceConn.
+        let actor_id = IdentityKey::generate().unwrap();
+        let responder_id = IdentityKey::generate().unwrap();
+        let responder_static = responder_id.noise_static_public();
+        let peer = PublicKey(responder_id.public().0);
+        let (client_stream, server_stream) = tokio::io::duplex(64 * 1024);
+        let responder_task = tokio::spawn(async move {
+            handshake_responder(server_stream, &responder_id, None)
+                .await
+                .unwrap()
+        });
+        let (incoming, _) = handshake_initiator(client_stream, &actor_id, &responder_static, None)
+            .await
+            .unwrap();
+        let (peer_conn, _) = responder_task.await.unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let (_jobs_tx, jobs_rx) = mpsc::channel::<DeliveryJob>(4);
+        let (_welcome_tx, welcome_rx) = mpsc::channel::<WelcomeJob>(4);
+        let (ctrl_tx, ctrl_rx) = mpsc::channel::<PeerCtrl<DuplexStream>>(4);
+        let stub: std::sync::Arc<dyn InboundDispatch> = Arc::new(Stub {
+            begin: StdMutex::new(Some(crate::delivery::chunk_transfer::AttachmentBegin {
+                attachment_id: aid,
+                manifest: manifest.clone(),
+            })),
+        });
+        let run_pool = pool.clone();
+        let run_dir = tmp.path().join("downloads");
+        let run_store = Arc::new(ChunkStore::new(tmp.path()));
+        let _actor = tokio::spawn(async move {
+            let _ = super::full_run::<DuplexStream>(
+                peer,
+                None,
+                jobs_rx,
+                welcome_rx,
+                ctrl_rx,
+                run_pool,
+                Some(stub),
+                Some(dialer),
+                Duration::ZERO,
+                None,
+                Some(run_store),
+                Some(run_dir),
+            )
+            .await;
+        });
+
+        // Let the backoff climb to its last step (15s + 60s + 300s elapsed).
+        tokio::time::sleep(Duration::from_secs(400)).await;
+        let before = calls.load(Ordering::SeqCst);
+        assert!(
+            before >= 3,
+            "backoff should have reached a late step (got {before} dials)"
+        );
+
+        // The peer dials US, then that connection dies.
+        ctrl_tx
+            .send(PeerCtrl::ReplaceConn(Box::new(incoming)))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        drop(peer_conn); // actor sees EOF -> conn = None
+        tokio::time::sleep(Duration::from_secs(60)).await;
+
+        // 60s is far below the retained 900s deadline, so a dial here can only
+        // happen if ReplaceConn reset the schedule.
+        assert!(
+            calls.load(Ordering::SeqCst) > before,
+            "after a ReplaceConn'd connection drops, the fetch must retry \
+             promptly — the peer was reachable moments ago, so the old backoff \
+             is stale evidence (dials before={before}, after={})",
+            calls.load(Ordering::SeqCst)
         );
     }
 
