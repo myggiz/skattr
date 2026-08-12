@@ -720,7 +720,12 @@ where
                     // mutable borrow, then release it before any `active_rx.take()`.
                     let timeout = active_rx
                         .as_mut()
-                        .map(|rx| (rx.attachment_id(), rx.timed_out(std::time::Instant::now())));
+                        .map(|rx| {
+                            (
+                                rx.attachment_id(),
+                                rx.timed_out(tokio::time::Instant::now().into_std()),
+                            )
+                        });
                     if let Some((aid, action)) = timeout {
                         match action {
                             crate::delivery::chunk_transfer::ChunkAction::Request(idxs)
