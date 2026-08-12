@@ -681,13 +681,19 @@ where
                 first_failure_at = None;
             }
             _ = retry_tick.tick() => {
-                // One tick drives three jobs: (1) retry due direct-outbox rows,
-                // (2) fire the sustained-failure → mailbox fallback below, and
-                // (3) time out stale chunk requests. Dial-on-demand still happens
-                // on the next job send; this tick never dials on its own.
+                // One tick drives four jobs: (1) retry due direct-outbox rows,
+                // (2) fire the sustained-failure → mailbox fallback below, (3)
+                // time out stale chunk requests, and (4) dial on behalf of a
+                // pending inbound attachment fetch (#76) — the deliberate
+                // exception to "dial-on-demand happens on the next job send":
+                // that fetch is background work with no local user action
+                // behind it, so nothing else will ever give it a connection.
                 let ob = Outbox::new(&pool);
                 let now = now_ms();
-                let due = match ob.due(now, 32) { Ok(v) => v, Err(_) => continue };
+                // A transient outbox read error must not also skip the #76
+                // dial block below, so fall back to an empty batch here
+                // rather than `continue`-ing the whole tick.
+                let due = ob.due(now, 32).unwrap_or_default();
                 for entry in due {
                     if pending.contains_key(&entry.message_id) { continue; }
                     if entry.target != peer { continue; }
@@ -2931,6 +2937,178 @@ mod tests {
         assert!(
             failed.lock().unwrap().is_none(),
             "attachment_failed must never fire"
+        );
+    }
+
+    /// #76 — a window rolled back to `needed` by `unsent` must be re-sent as
+    /// soon as a live connection is available, not only when
+    /// `CHUNK_REQUEST_TIMEOUT` (30s) finally elapses. `reissue()` (driven by
+    /// `PeerCtrl::ReplaceConn`) only re-sends what is still `inflight`; a fully
+    /// rolled-back window has nothing `inflight`, so without the dedicated
+    /// refill block in the retry tick, `ReplaceConn` alone leaves the window
+    /// stuck holding a live connection and asking for nothing — a silent,
+    /// permanent hang (since `timed_out` iterates `inflight` too and can never
+    /// reach `ChunkAction::Fail` on an empty one).
+    ///
+    /// Deleting the refill block must turn this test red — that is the whole
+    /// point: the pre-existing `timed_out`-driven re-send only fires at 30s,
+    /// so this test's sub-30s deadline is what distinguishes "refill block
+    /// worked" from "the timeout eventually would have caught it anyway".
+    #[tokio::test(start_paused = true)]
+    async fn chunk_dial_refill_resends_a_fully_rolled_back_window_before_timeout() {
+        use crate::attachment::store::ChunkStore;
+        use std::sync::Arc;
+        use std::sync::Mutex as StdMutex;
+        use std::time::Duration;
+        use tokio::io::DuplexStream;
+
+        let (manifest, _cts) =
+            crate::attachment::chunker::chunk_plaintext(b"refill me", "f.bin", "text/plain")
+                .unwrap();
+        let aid = manifest.attachment_id;
+
+        struct Stub {
+            begin: StdMutex<Option<crate::delivery::chunk_transfer::AttachmentBegin>>,
+        }
+        impl InboundDispatch for Stub {
+            fn dispatch(&self, _peer: PublicKey, _ct: &[u8]) -> Option<MessageId> {
+                Some(MessageId::generate())
+            }
+            #[allow(private_interfaces)]
+            fn take_begin_attachment(
+                &self,
+                _peer: PublicKey,
+            ) -> Option<crate::delivery::chunk_transfer::AttachmentBegin> {
+                self.begin.lock().unwrap().take()
+            }
+            fn has_pending_begin(&self, _peer: PublicKey) -> bool {
+                self.begin.lock().map(|g| g.is_some()).unwrap_or(false)
+            }
+        }
+
+        let pool = Arc::new(Pool::in_memory());
+        crate::storage::attachments::AttachmentRepo::new(&pool)
+            .insert(&aid, "in", &manifest.to_cbor().unwrap(), 1, 0)
+            .unwrap();
+        let stub: std::sync::Arc<dyn InboundDispatch> = Arc::new(Stub {
+            begin: StdMutex::new(Some(crate::delivery::chunk_transfer::AttachmentBegin {
+                attachment_id: aid,
+                manifest: manifest.clone(),
+            })),
+        });
+
+        async fn dial(
+            actor_id: &IdentityKey,
+            responder_id: IdentityKey,
+            responder_static: [u8; 32],
+        ) -> (
+            AuthenticatedConnection<DuplexStream>,
+            AuthenticatedConnection<DuplexStream>,
+        ) {
+            let (client_stream, server_stream) = tokio::io::duplex(64 * 1024);
+            let responder_task = tokio::spawn(async move {
+                handshake_responder(server_stream, &responder_id, None)
+                    .await
+                    .unwrap()
+            });
+            let (actor_conn, _) =
+                handshake_initiator(client_stream, actor_id, &responder_static, None)
+                    .await
+                    .unwrap();
+            let (peer_conn, _) = responder_task.await.unwrap();
+            (actor_conn, peer_conn)
+        }
+
+        let actor_id = IdentityKey::generate().unwrap();
+        let responder_id1 = IdentityKey::generate().unwrap();
+        let responder_static1 = responder_id1.noise_static_public();
+        let peer = PublicKey(responder_id1.public().0);
+        let (conn1, peer_conn1) = dial(&actor_id, responder_id1, responder_static1).await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let (_jobs_tx, jobs_rx) = mpsc::channel::<DeliveryJob>(4);
+        let (_welcome_tx, welcome_rx) = mpsc::channel::<WelcomeJob>(4);
+        let (ctrl_tx, ctrl_rx) = mpsc::channel::<PeerCtrl<DuplexStream>>(4);
+        let run_pool = pool.clone();
+        let run_dir = tmp.path().join("downloads");
+        let run_store = Arc::new(ChunkStore::new(tmp.path()));
+        let _actor = tokio::spawn(async move {
+            let _ = super::full_run::<DuplexStream>(
+                peer,
+                Some(conn1),
+                jobs_rx,
+                welcome_rx,
+                ctrl_rx,
+                run_pool,
+                Some(stub),
+                None, // no dialer: recovery here is via ReplaceConn, not redial
+                Duration::ZERO,
+                None,
+                Some(run_store),
+                Some(run_dir),
+            )
+            .await;
+        });
+
+        // Deliver the manifest, then immediately sever conn1's peer side. The
+        // manifest bytes are already buffered on conn1's read side (a
+        // duplex-pipe write that already completed survives the peer being
+        // dropped), but every WRITE the actor attempts on conn1 from here on
+        // fails with a broken pipe — including the very first `ChunkRequest`
+        // that `maybe_start_next_rx` sends as soon as it drains the begin.
+        // That immediate transmit failure (not a 30s timeout) is what rolls
+        // the one-chunk window all the way back to `needed` via `unsent`,
+        // while `conn` is still (uselessly) `Some`.
+        let mut peer_conn1 = peer_conn1;
+        peer_conn1
+            .send(Frame::MlsApp(b"manifest".to_vec()))
+            .await
+            .unwrap();
+        drop(peer_conn1);
+
+        // Let the actor's task actually process the buffered manifest and hit
+        // the failed transmit before we hand it a working connection.
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+
+        // Hand over a fresh, WORKING connection the same way a real reconnect
+        // would (`hub`'s redial path issues `PeerCtrl::ReplaceConn`). Its own
+        // built-in resume (`reissue()`) only re-sends what is `inflight` —
+        // empty here — so it is a no-op; only the refill block can recover
+        // this state.
+        let responder_id2 = IdentityKey::generate().unwrap();
+        let responder_static2 = responder_id2.noise_static_public();
+        let (conn2, mut peer_conn2) = dial(&actor_id, responder_id2, responder_static2).await;
+        let t0 = tokio::time::Instant::now();
+        ctrl_tx
+            .send(PeerCtrl::ReplaceConn(Box::new(conn2)))
+            .await
+            .unwrap();
+
+        let frame = tokio::time::timeout(Duration::from_secs(10), peer_conn2.recv())
+            .await
+            .expect("the refill block must re-send within 10s of simulated time")
+            .unwrap()
+            .expect("conn2 must not EOF");
+        let elapsed = t0.elapsed();
+
+        match frame {
+            Frame::ChunkRequest {
+                attachment_id,
+                index,
+            } => {
+                assert_eq!(attachment_id, aid);
+                assert_eq!(index, 0);
+            }
+            other => panic!("expected a re-sent ChunkRequest, got {other:?}"),
+        }
+        assert!(
+            elapsed < crate::delivery::chunk_transfer::CHUNK_REQUEST_TIMEOUT,
+            "the rolled-back window must be re-sent by the refill block well \
+             before CHUNK_REQUEST_TIMEOUT (30s) — a resend that only shows up \
+             at/after the timeout means the refill block did no work and the \
+             pre-existing timed_out path did (got {elapsed:?})"
         );
     }
 
