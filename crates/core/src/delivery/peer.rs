@@ -761,6 +761,17 @@ where
                             if ensure_conn::<S>(peer, &mut conn, &dialer).await {
                                 next_chunk_dial_at = None;
                                 chunk_dial_step = 0;
+                                // Mirror the ReplaceConn arm: this is also
+                                // "install a fresh connection", so idle/pong
+                                // state left over from before the outage must
+                                // not survive it. Without this, the first
+                                // keepalive tick after a long outage sees a
+                                // stale `last_traffic` (>= IDLE_CLOSE) or a
+                                // stale `awaiting_pong_since` (>= PONG_DEADLINE)
+                                // and immediately tears down the brand-new
+                                // connection.
+                                last_traffic = tokio::time::Instant::now();
+                                awaiting_pong_since = None;
                             } else {
                                 let idx = chunk_dial_step.min(CHUNK_DIAL_BACKOFF_MS.len() - 1);
                                 // Deadline measured from now: the dial itself
@@ -805,6 +816,14 @@ where
                         });
                     if let Some((aid, action)) = timeout {
                         match action {
+                            // The guard's `!send_chunk_requests(...).await` is
+                            // deliberately side-effecting, not a pure
+                            // predicate: it's the actual (re-)transmit
+                            // attempt, and the guard's boolean result is
+                            // whether that attempt failed. Written as a match
+                            // guard (rather than a nested `if` inside the
+                            // arm) because clippy's `collapsible_match`
+                            // rejects the nested form.
                             crate::delivery::chunk_transfer::ChunkAction::Request(idxs)
                                 if !idxs.is_empty()
                                     && !send_chunk_requests(&mut conn, aid, &idxs).await =>
@@ -1205,10 +1224,17 @@ where
                     Ok(None) => {
                         conn = None;
                         drain_pending(&mut pending);
+                        // Stale pong-wait state must not outlive the
+                        // connection it belonged to (#76 keepalive fix): a
+                        // Ping issued just before this EOF would otherwise
+                        // leave `awaiting_pong_since` armed for whatever
+                        // connection eventually replaces this one.
+                        awaiting_pong_since = None;
                     }
                     Err(_) => {
                         conn = None;
                         drain_pending(&mut pending);
+                        awaiting_pong_since = None;
                     }
                 }
             }
@@ -3109,6 +3135,196 @@ mod tests {
              before CHUNK_REQUEST_TIMEOUT (30s) — a resend that only shows up \
              at/after the timeout means the refill block did no work and the \
              pre-existing timed_out path did (got {elapsed:?})"
+        );
+    }
+
+    /// #76 — a connection freshly established by the chunk-pull dial block
+    /// must not inherit stale `last_traffic`/`awaiting_pong_since` state from
+    /// before the outage. `last_traffic` is set once at actor start and is
+    /// otherwise only bumped by real traffic; if a peer stays unreachable long
+    /// enough for the dial backoff (15s/60s/300s/900s) to push the successful
+    /// redial past `IDLE_CLOSE` (180s) of elapsed time since that stale
+    /// timestamp, the very next keepalive tick sees
+    /// `last_traffic.elapsed() >= IDLE_CLOSE` and closes the brand-new
+    /// connection outright — exactly the shape the `ReplaceConn` arm already
+    /// guards against, but the dial-success branch didn't.
+    #[tokio::test(start_paused = true)]
+    async fn dial_success_after_long_outage_survives_the_next_keepalive_tick() {
+        use crate::attachment::store::ChunkStore;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::sync::Mutex as StdMutex;
+        use std::time::Duration;
+        use tokio::io::DuplexStream;
+
+        let (manifest, _cts) = crate::attachment::chunker::chunk_plaintext(
+            b"survive the outage",
+            "f.bin",
+            "text/plain",
+        )
+        .unwrap();
+        let aid = manifest.attachment_id;
+
+        struct Stub {
+            begin: StdMutex<Option<crate::delivery::chunk_transfer::AttachmentBegin>>,
+        }
+        impl InboundDispatch for Stub {
+            fn dispatch(&self, _peer: PublicKey, _ct: &[u8]) -> Option<MessageId> {
+                None
+            }
+            #[allow(private_interfaces)]
+            fn take_begin_attachment(
+                &self,
+                _peer: PublicKey,
+            ) -> Option<crate::delivery::chunk_transfer::AttachmentBegin> {
+                self.begin.lock().unwrap().take()
+            }
+            fn has_pending_begin(&self, _peer: PublicKey) -> bool {
+                self.begin.lock().map(|g| g.is_some()).unwrap_or(false)
+            }
+        }
+
+        let pool = Arc::new(Pool::in_memory());
+        crate::storage::attachments::AttachmentRepo::new(&pool)
+            .insert(&aid, "in", &manifest.to_cbor().unwrap(), 1, 0)
+            .unwrap();
+        let stub: std::sync::Arc<dyn InboundDispatch> = Arc::new(Stub {
+            begin: StdMutex::new(Some(crate::delivery::chunk_transfer::AttachmentBegin {
+                attachment_id: aid,
+                manifest: manifest.clone(),
+            })),
+        });
+
+        // Pre-build the connection the dialer eventually hands over, so the
+        // successful dial itself is instant.
+        let actor_id = IdentityKey::generate().unwrap();
+        let responder_id = IdentityKey::generate().unwrap();
+        let responder_static = responder_id.noise_static_public();
+        let peer = PublicKey(responder_id.public().0);
+        let (client_stream, server_stream) = tokio::io::duplex(64 * 1024);
+        let responder_task = tokio::spawn(async move {
+            handshake_responder(server_stream, &responder_id, None)
+                .await
+                .unwrap()
+        });
+        let (dialed_conn, _) =
+            handshake_initiator(client_stream, &actor_id, &responder_static, None)
+                .await
+                .unwrap();
+        let (mut peer_conn, _) = responder_task.await.unwrap();
+
+        // Fails its first 3 calls (peer stays unreachable through the 15s and
+        // 60s backoff steps), then succeeds on the 4th — due only after the
+        // 300s step, so ~1s + 15s + 60s + 300s ≈ 376s has elapsed since actor
+        // start with zero traffic. That is comfortably past IDLE_CLOSE (180s).
+        struct FlakyDial {
+            conn: StdMutex<Option<AuthenticatedConnection<DuplexStream>>>,
+            calls: Arc<AtomicUsize>,
+        }
+        #[async_trait::async_trait]
+        impl crate::delivery::dial::OutboundDial<DuplexStream> for FlakyDial {
+            async fn dial(
+                &self,
+                _peer: PublicKey,
+            ) -> Result<(
+                AuthenticatedConnection<DuplexStream>,
+                zeroize::Zeroizing<[u8; 32]>,
+            )> {
+                let call = self.calls.fetch_add(1, Ordering::SeqCst);
+                if call < 3 {
+                    return Err(crate::delivery::DeliveryErrorKind::Timeout.into());
+                }
+                match self.conn.lock().unwrap().take() {
+                    Some(c) => Ok((c, zeroize::Zeroizing::new([0u8; 32]))),
+                    None => Err(crate::delivery::DeliveryErrorKind::Timeout.into()),
+                }
+            }
+            async fn dial_at(
+                &self,
+                peer: PublicKey,
+                _onion: &str,
+            ) -> Result<(
+                AuthenticatedConnection<DuplexStream>,
+                zeroize::Zeroizing<[u8; 32]>,
+            )> {
+                self.dial(peer).await
+            }
+        }
+
+        let dialer = Arc::new(FlakyDial {
+            conn: StdMutex::new(Some(dialed_conn)),
+            calls: Arc::new(AtomicUsize::new(0)),
+        });
+
+        let tmp = tempfile::tempdir().unwrap();
+        let (_jobs_tx, jobs_rx) = mpsc::channel::<DeliveryJob>(4);
+        let (_welcome_tx, welcome_rx) = mpsc::channel::<WelcomeJob>(4);
+        let (_ctrl_tx, ctrl_rx) = mpsc::channel::<PeerCtrl<DuplexStream>>(4);
+        let run_pool = pool.clone();
+        let run_dir = tmp.path().join("downloads");
+        let run_store = Arc::new(ChunkStore::new(tmp.path()));
+        let _actor = tokio::spawn(async move {
+            let _ = super::full_run::<DuplexStream>(
+                peer,
+                None, // no initial connection: the outage starts at t=0
+                jobs_rx,
+                welcome_rx,
+                ctrl_rx,
+                run_pool,
+                Some(stub),
+                Some(dialer),
+                Duration::ZERO,
+                None,
+                Some(run_store),
+                Some(run_dir),
+            )
+            .await;
+        });
+
+        // Drain frames on `peer_conn` until the redial succeeds and the
+        // actor's #144 drain starts the fetch — the first ChunkRequest is the
+        // signal that a fresh (post-outage) connection is up and in use.
+        // Timeout budget covers the full 4-attempt backoff schedule.
+        loop {
+            let frame = tokio::time::timeout(Duration::from_secs(500), peer_conn.recv())
+                .await
+                .expect("dial must eventually succeed within the backoff schedule")
+                .expect("conn must not error")
+                .expect("conn must not EOF");
+            if matches!(frame, Frame::ChunkRequest { .. }) {
+                break;
+            }
+        }
+
+        // Cross at least one keepalive tick (60s period) since the redial.
+        // We deliberately do NOT respond to the ChunkRequest — the point is
+        // to observe the keepalive check on an otherwise-idle connection.
+        // The retry tick's `timed_out` machinery may re-send the same
+        // ChunkRequest a bounded number of times (CHUNK_RETRY_BUDGET) while
+        // we wait; that's expected and orthogonal to what's under test here.
+        let mut saw_ping = false;
+        for _ in 0..10 {
+            match tokio::time::timeout(Duration::from_secs(70), peer_conn.recv()).await {
+                Ok(Ok(Some(Frame::Ping))) => {
+                    saw_ping = true;
+                    break;
+                }
+                Ok(Ok(Some(Frame::ChunkRequest { .. }))) => continue,
+                Ok(Ok(Some(Frame::Bye))) | Ok(Ok(None)) => panic!(
+                    "#76: the freshly redialed connection was torn down by the \
+                     next keepalive tick (Bye/EOF) — it inherited stale \
+                     last_traffic/awaiting_pong_since from before the outage"
+                ),
+                Ok(Ok(Some(other))) => panic!("unexpected frame while waiting: {other:?}"),
+                Ok(Err(e)) => panic!("conn errored while waiting: {e}"),
+                Err(_) => break,
+            }
+        }
+        assert!(
+            saw_ping,
+            "#76: expected the keepalive tick to Ping a surviving connection, \
+             but no Ping arrived — either it was torn down silently or the \
+             wait budget was insufficient"
         );
     }
 

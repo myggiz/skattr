@@ -172,6 +172,15 @@ impl ChunkRx {
     /// `next_requests` *moves* indices out of `needed` into `inflight`, so
     /// dropping them from `inflight` alone would leave them in neither
     /// collection and the transfer could never complete.
+    ///
+    /// Callers pass the *whole* attempted window on any transmit failure, even
+    /// when the underlying send only failed partway through (index `k` of
+    /// `0..k` already reached the wire). That means `0..k` can end up
+    /// requested — and served — twice. This is intentionally not special-cased:
+    /// `on_received`'s already-resolved guard makes a duplicate serve harmless
+    /// (wasted bandwidth only, not a correctness or budget issue), and
+    /// distinguishing "sent" from "unsent" indices at the call site would add
+    /// real complexity for no behavioral gain.
     pub(crate) fn unsent(&mut self, indices: &[u32]) {
         // Reverse + `push_front` preserves the original relative order: pushing
         // [0,1,2] onto the front in forward order would leave [2,1,0].
