@@ -848,6 +848,17 @@ impl InboundDispatch for DaemonInbound {
         self.begins.lock().ok()?.get_mut(&peer)?.pop_front()
     }
 
+    fn has_pending_begin(&self, peer: PublicKey) -> bool {
+        // A poisoned lock reports "nothing pending" rather than panicking:
+        // this only gates an optimistic dial, and `take_begin_attachment`
+        // already degrades the same way.
+        self.begins
+            .lock()
+            .ok()
+            .and_then(|g| g.get(&peer).map(|q| !q.is_empty()))
+            .unwrap_or(false)
+    }
+
     fn requeue_attachment(
         &self,
         peer: PublicKey,
@@ -2235,5 +2246,45 @@ mod tests {
         );
         // A non-chunk blob: not recognized.
         assert!(!inbound.dispatch_attachment_chunk(b"not a chunk"));
+    }
+
+    #[test]
+    fn has_pending_begin_reports_without_consuming() {
+        use crate::delivery::peer::InboundDispatch;
+        let pool = std::sync::Arc::new(crate::storage::Pool::in_memory());
+        let (events_tx, _rx) = tokio::sync::broadcast::channel(4);
+        let inbound = DaemonInbound::new(pool, events_tx);
+        let peer = PublicKey([9u8; 32]);
+
+        assert!(
+            !inbound.has_pending_begin(peer),
+            "empty queue reports false"
+        );
+
+        let (manifest, _cts) = crate::attachment::chunker::chunk_plaintext(b"x", "f", "m").unwrap();
+        inbound.requeue_attachment(
+            peer,
+            crate::delivery::chunk_transfer::AttachmentBegin {
+                attachment_id: manifest.attachment_id,
+                manifest,
+            },
+        );
+
+        assert!(
+            inbound.has_pending_begin(peer),
+            "queued begin must be visible"
+        );
+        assert!(
+            inbound.has_pending_begin(peer),
+            "the probe must not consume — a second call still reports true"
+        );
+        assert!(
+            inbound.take_begin_attachment(peer).is_some(),
+            "the begin must still be there to drain"
+        );
+        assert!(
+            !inbound.has_pending_begin(peer),
+            "drained queue reports false"
+        );
     }
 }

@@ -162,6 +162,38 @@ impl ChunkRx {
         self.inflight.keys().copied().collect()
     }
 
+    /// Roll back bookkeeping for requests that were never transmitted.
+    ///
+    /// Returns each index to `needed` so it is requested again, and charges no
+    /// attempt: a send that failed locally is not evidence about the peer, so
+    /// it must not consume the retry budget that exists to detect peer silence.
+    ///
+    /// Returning them to `needed` is load-bearing, not tidiness —
+    /// `next_requests` *moves* indices out of `needed` into `inflight`, so
+    /// dropping them from `inflight` alone would leave them in neither
+    /// collection and the transfer could never complete.
+    ///
+    /// Callers pass the *whole* attempted window on any transmit failure, even
+    /// when the underlying send only failed partway through (index `k` of
+    /// `0..k` already reached the wire). That means `0..k` can end up
+    /// requested — and served — twice. This is intentionally not special-cased:
+    /// `on_received`'s already-resolved guard makes a duplicate serve harmless
+    /// (wasted bandwidth only, not a correctness or budget issue), and
+    /// distinguishing "sent" from "unsent" indices at the call site would add
+    /// real complexity for no behavioral gain.
+    pub(crate) fn unsent(&mut self, indices: &[u32]) {
+        // Reverse + `push_front` preserves the original relative order: pushing
+        // [0,1,2] onto the front in forward order would leave [2,1,0].
+        for &index in indices.iter().rev() {
+            // `is_some()`: an index that already resolved (a Chunk arrived
+            // between the failed send and this rollback) is no longer in
+            // flight and must not be re-queued.
+            if self.inflight.remove(&index).is_some() {
+                self.needed.push_front(index);
+            }
+        }
+    }
+
     pub(crate) fn is_complete(&self) -> bool {
         self.received >= self.total
     }
@@ -466,5 +498,71 @@ mod tests {
         t.forget(&AID_A);
         assert!(t.is_new(&AID_A));
         assert_eq!(t.record(&AID_A, 7), 1);
+    }
+
+    #[test]
+    fn unsent_returns_indices_for_rerequest() {
+        // A request window that never reached the wire must be re-requestable,
+        // and must not consume any of the retry budget. Multi-chunk on purpose:
+        // a single-chunk fixture would pass even if `unsent` reordered the
+        // queue, which is exactly the bug worth catching here.
+        let payload = vec![7u8; crate::attachment::CHUNK_SIZE * 2 + 5];
+        let (manifest, _cts) =
+            crate::attachment::chunker::chunk_plaintext(&payload, "f", "m").unwrap();
+        assert!(manifest.chunks.len() >= 3, "fixture must be multi-chunk");
+        let mut rx = ChunkRx::new(manifest, &[]);
+
+        let first = rx.next_requests();
+        assert!(!first.is_empty(), "fixture must produce requests");
+
+        rx.unsent(&first);
+
+        let again = rx.next_requests();
+        assert_eq!(
+            again, first,
+            "indices whose send failed must be offered again, in the same order"
+        );
+    }
+
+    #[test]
+    fn unsent_does_not_deadlock_the_transfer() {
+        // The failure mode this guards: if `unsent` only dropped the indices
+        // from `inflight`, they would be absent from `needed` too — so nothing
+        // would ever be requested again and `is_complete` could never be true.
+        let (manifest, _cts) =
+            crate::attachment::chunker::chunk_plaintext(&[7u8; 10], "f", "m").unwrap();
+        let total = manifest.chunks.len() as u32;
+        let mut rx = ChunkRx::new(manifest, &[]);
+
+        let reqs = rx.next_requests();
+        rx.unsent(&reqs);
+
+        let reissued = rx.next_requests();
+        for idx in &reissued {
+            assert!(rx.on_received(*idx), "re-requested index must be in flight");
+        }
+        assert_eq!(rx.progress(), (total, total));
+        assert!(rx.is_complete(), "transfer must still be completable");
+    }
+
+    #[test]
+    fn unsent_ignores_an_index_that_already_resolved() {
+        // A Chunk can arrive between the failed send and the rollback. That
+        // index is no longer in flight and must not be pushed back into
+        // `needed`, or it would be fetched a second time.
+        let (manifest, _cts) =
+            crate::attachment::chunker::chunk_plaintext(&[7u8; 10], "f", "m").unwrap();
+        let mut rx = ChunkRx::new(manifest, &[]);
+
+        let reqs = rx.next_requests();
+        let first = reqs[0];
+        assert!(rx.on_received(first), "chunk arrives before the rollback");
+
+        rx.unsent(&reqs);
+
+        assert!(
+            !rx.next_requests().contains(&first),
+            "an already-received index must not be re-queued"
+        );
     }
 }

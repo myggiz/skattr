@@ -139,6 +139,15 @@ accumulate here and are stamped with a date when a build is cut._
   Previously-silent attachment-serve failure paths (missing chunk store, store
   read errors, failed replies) now log, so a stalled chunk transfer is
   diagnosable.
+- **Received files could get stuck, or wrongly report a timeout** (#76): if the
+  connection to the sender dropped while a file was arriving — common over Tor —
+  the download had no way to reconnect. It would sit unfinished, or give up with
+  a "request timeout" that the sender had no record of, because the requests
+  never actually left your machine. While the app stays running, downloads now
+  reconnect on their own, with a back-off so an offline peer isn't hammered, and
+  a transfer only reports a timeout when the sender genuinely didn't answer. A
+  transfer interrupted by restarting the app may still need a nudge — send that
+  contact a message, or hit Retry once you're both back online.
 
 ## [v0.1.1] — 2026-06-30
 
