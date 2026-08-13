@@ -4,13 +4,18 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — targeting v0.1.16
+## [Unreleased] — targeting v0.1.17
 
 _In-progress patch line. The version is bumped per build for tracking; entries
 accumulate here and are stamped with a date when a build is cut._
 
 ### Fixed
 
+- **`skattr-ui --version` opened the app instead of printing a version**
+  (#161): there was no way to tell which build a copy of the desktop app
+  was, short of launching it and digging through settings — and a script
+  checking the version would hang on a window rather than answer. It now
+  prints the version and exits, like the command-line tool already did.
 - **A failed file save could leave a readable copy behind** (#156, #52):
   attachments are normally kept encrypted at rest and only decrypted on
   demand, but if writing the decrypted file out failed part-way through — a
