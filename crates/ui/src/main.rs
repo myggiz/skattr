@@ -33,6 +33,17 @@ fn detect_smoke_test_flag(argv: &[String]) -> bool {
     argv.iter().any(|a| a == "--smoke-test")
 }
 
+/// Returns true if a version flag appears anywhere in argv (#161).
+fn detect_version_flag(argv: &[String]) -> bool {
+    argv.iter().any(|a| a == "--version" || a == "-V")
+}
+
+/// The line printed for `--version`. Read from `CARGO_PKG_VERSION`, which the
+/// per-build version bump already edits, so this cannot drift from the build.
+fn version_line() -> String {
+    format!("skattr-ui {}", env!("CARGO_PKG_VERSION"))
+}
+
 /// Parse `--smoke-test`-mode argv. Required: `--data-dir <PATH>`.
 /// Optional: `--timeout-secs <N>` (default 240).
 fn parse_smoke_argv(argv: &[String]) -> Result<SmokeArgs, String> {
@@ -133,6 +144,15 @@ fn set_close_to_tray(state: tauri::State<'_, CloseToTraySentinel>, enabled: bool
 
 fn main() {
     let argv: Vec<String> = std::env::args().collect();
+    // #161: answer before anything else — no data dir, no migration, no Tauri
+    // builder, and crucially before `tauri_plugin_single_instance`, which would
+    // otherwise forward this invocation to an already-running window instead of
+    // printing. Without this the flag is ignored and a GUI window opens, so a
+    // tester holding only the binary cannot tell which build it is.
+    if detect_version_flag(&argv) {
+        println!("{}", version_line());
+        std::process::exit(0);
+    }
     if detect_smoke_test_flag(&argv) {
         run_smoke_and_exit(argv);
     }
@@ -442,5 +462,35 @@ mod smoke_argv_tests {
         let argv = vec!["skattr-ui".to_string(), "--smoke-test".to_string()];
         let result = detect_smoke_test_flag(&argv);
         assert!(result, "flag present => true");
+    }
+
+    #[test]
+    fn version_flag_detected_in_both_spellings() {
+        // #161: without this, `skattr-ui --version` ignores the argument and
+        // opens a GUI window, so a tester holding only the binary cannot tell
+        // which build they have.
+        for spelling in ["--version", "-V"] {
+            let argv = vec!["skattr-ui".to_string(), spelling.to_string()];
+            assert!(detect_version_flag(&argv), "{spelling} must be recognised");
+        }
+    }
+
+    #[test]
+    fn version_flag_absent_by_default() {
+        let argv = vec!["skattr-ui".to_string()];
+        assert!(
+            !detect_version_flag(&argv),
+            "a normal launch must not be treated as a version query"
+        );
+    }
+
+    #[test]
+    fn version_string_is_the_crate_version() {
+        // Pins the source: the per-build bump edits Cargo.toml, so reading
+        // CARGO_PKG_VERSION keeps the reported version honest for free.
+        assert_eq!(
+            version_line(),
+            format!("skattr-ui {}", env!("CARGO_PKG_VERSION"))
+        );
     }
 }
