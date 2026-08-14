@@ -155,8 +155,12 @@ pub async fn start_in_process_cmd(state: tauri::State<'_, AppState>) -> Result<R
 /// boot-time wipe and `Pool::open` crash-residue re-encryption clean up then.
 pub const QUIT_TEARDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
-/// Graceful shutdown — drains the daemon over the shutdown oneshot,
-/// joins the task with a timeout. Called from the close-window hook.
+/// Graceful shutdown — drains the daemon over the shutdown oneshot, joins the
+/// task with a timeout. Called from the `RunEvent::ExitRequested` choke point
+/// in `main.rs` (#179/#180), itself already bounded by `QUIT_TEARDOWN_TIMEOUT`
+/// — so this inner join, nested inside that outer bound, can never be the one
+/// to trip in practice. Left in place as a direct-caller safety net, not as a
+/// second independent bound.
 pub async fn shutdown(app: &tauri::AppHandle) {
     let state = tauri::Manager::state::<AppState>(app);
     let tx = state.shutdown_tx.lock().await.take();

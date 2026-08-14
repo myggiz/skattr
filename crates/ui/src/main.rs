@@ -15,7 +15,7 @@ mod notifications;
 pub mod tray;
 
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU8, Ordering},
     Arc,
 };
 
@@ -38,18 +38,60 @@ fn detect_version_flag(argv: &[String]) -> bool {
     argv.iter().any(|a| a == "--version" || a == "-V")
 }
 
-/// Set once the quit teardown has run, so the `app.exit()` we issue after
-/// tearing down does not re-enter the handler (#179).
-static TORN_DOWN: AtomicBool = AtomicBool::new(false);
-
-/// Claim the one-shot right to run the quit teardown.
+/// States for the one-shot quit teardown (#179/#180).
 ///
-/// Returns `true` exactly once per process: the caller that gets `true` owns
-/// the teardown, every later caller must let the exit proceed. Extracted from
-/// the `RunEvent::ExitRequested` handler so the decision is testable without
-/// a Tauri run loop.
-fn claim_teardown(flag: &AtomicBool) -> bool {
-    !flag.swap(true, Ordering::SeqCst)
+/// A plain bool flipped at *claim* time can only mean "teardown started", not
+/// "teardown finished" — a second `ExitRequested` arriving while teardown is
+/// still running would then pass through and let the process exit mid-encrypt.
+/// The third state closes that gap: a request during `TearingDown` must be
+/// held, not passed through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum TeardownState {
+    Idle = 0,
+    TearingDown = 1,
+    Done = 2,
+}
+
+/// What an `ExitRequested` handler should do, decided by `claim_teardown`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TeardownAction {
+    /// First request: this caller owns teardown. Must call `prevent_exit()`,
+    /// run the teardown, mark it `Done`, then exit for real.
+    Start,
+    /// A request arrived while teardown is still running. Must call
+    /// `prevent_exit()` and return — letting this one through would kill the
+    /// process mid-teardown.
+    Hold,
+    /// Teardown already finished. Let this exit proceed.
+    PassThrough,
+}
+
+static TEARDOWN_STATE: AtomicU8 = AtomicU8::new(TeardownState::Idle as u8);
+
+/// Decide what an `ExitRequested` handler should do, atomically claiming
+/// `Idle -> TearingDown` if this is the caller that owns teardown.
+///
+/// Extracted from the `RunEvent::ExitRequested` handler so the decision is
+/// testable without a Tauri run loop. Race-free under concurrent requests via
+/// `compare_exchange`.
+fn claim_teardown(state: &AtomicU8) -> TeardownAction {
+    match state.compare_exchange(
+        TeardownState::Idle as u8,
+        TeardownState::TearingDown as u8,
+        Ordering::SeqCst,
+        Ordering::SeqCst,
+    ) {
+        Ok(_) => TeardownAction::Start,
+        Err(current) if current == TeardownState::TearingDown as u8 => TeardownAction::Hold,
+        Err(_) => TeardownAction::PassThrough,
+    }
+}
+
+/// Mark teardown finished. Only the `Start` claimant calls this, after
+/// teardown has actually completed (or timed out).
+fn mark_teardown_done(state: &AtomicU8) {
+    state.store(TeardownState::Done as u8, Ordering::SeqCst);
 }
 
 /// The line printed for `--version`. Read from `CARGO_PKG_VERSION`, which the
@@ -429,27 +471,36 @@ fn main() {
     // plaintext and decrypted attachments still on disk.
     app.run(|app_handle, event| {
         if let tauri::RunEvent::ExitRequested { api, .. } = event {
-            if !claim_teardown(&TORN_DOWN) {
-                // Already torn down — this is the exit we asked for. Let it go.
-                return;
-            }
-            api.prevent_exit();
-            let app_handle = app_handle.clone();
-            tauri::async_runtime::spawn(async move {
-                if tokio::time::timeout(
-                    daemon::QUIT_TEARDOWN_TIMEOUT,
-                    daemon::shutdown(&app_handle),
-                )
-                .await
-                .is_err()
-                {
-                    tracing::warn!(
-                        "quit teardown exceeded its timeout; exiting anyway \
-                         (boot-time wipe will clean up)"
-                    );
+            match claim_teardown(&TEARDOWN_STATE) {
+                TeardownAction::PassThrough => {
+                    // Torn down already — this is the exit we asked for. Let it go.
                 }
-                app_handle.exit(0);
-            });
+                TeardownAction::Hold => {
+                    // Teardown is still running (up to QUIT_TEARDOWN_TIMEOUT). Letting
+                    // this exit through would kill the process mid-encrypt.
+                    api.prevent_exit();
+                }
+                TeardownAction::Start => {
+                    api.prevent_exit();
+                    let app_handle = app_handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if tokio::time::timeout(
+                            daemon::QUIT_TEARDOWN_TIMEOUT,
+                            daemon::shutdown(&app_handle),
+                        )
+                        .await
+                        .is_err()
+                        {
+                            tracing::warn!(
+                                "quit teardown exceeded its timeout; exiting anyway \
+                                 (boot-time wipe will clean up)"
+                            );
+                        }
+                        mark_teardown_done(&TEARDOWN_STATE);
+                        app_handle.exit(0);
+                    });
+                }
+            }
         }
     });
 }
@@ -538,18 +589,42 @@ mod smoke_argv_tests {
     }
 
     #[test]
-    fn first_exit_tears_down_then_later_ones_pass_through() {
-        // #179: the ExitRequested handler calls app.exit() after tearing down,
-        // which raises ExitRequested again. Without this claim the second pass
-        // would tear down a second time and never actually exit.
-        use std::sync::atomic::AtomicBool;
-        let flag = AtomicBool::new(false);
+    fn teardown_transition_table() {
+        // #179/#180: a plain bool flipped at claim time can't distinguish
+        // "teardown started" from "teardown finished" — a second
+        // ExitRequested arriving while teardown is still running must be
+        // HELD (prevent_exit + return), not passed through, or the process
+        // exits mid-encrypt. This is the regression a two-state bool missed.
+        use std::sync::atomic::AtomicU8;
+        let state = AtomicU8::new(super::TeardownState::Idle as u8);
 
-        assert!(super::claim_teardown(&flag), "first exit must tear down");
-        assert!(
-            !super::claim_teardown(&flag),
-            "second exit must pass through"
+        assert_eq!(
+            super::claim_teardown(&state),
+            super::TeardownAction::Start,
+            "first exit must own teardown"
         );
-        assert!(!super::claim_teardown(&flag), "and stay passed through");
+        assert_eq!(
+            super::claim_teardown(&state),
+            super::TeardownAction::Hold,
+            "a request during teardown must be held, not passed through"
+        );
+        assert_eq!(
+            super::claim_teardown(&state),
+            super::TeardownAction::Hold,
+            "and stay held while teardown keeps running"
+        );
+
+        super::mark_teardown_done(&state);
+
+        assert_eq!(
+            super::claim_teardown(&state),
+            super::TeardownAction::PassThrough,
+            "once torn down, the exit must proceed"
+        );
+        assert_eq!(
+            super::claim_teardown(&state),
+            super::TeardownAction::PassThrough,
+            "and stay passed through"
+        );
     }
 }
