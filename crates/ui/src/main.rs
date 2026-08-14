@@ -38,6 +38,20 @@ fn detect_version_flag(argv: &[String]) -> bool {
     argv.iter().any(|a| a == "--version" || a == "-V")
 }
 
+/// Set once the quit teardown has run, so the `app.exit()` we issue after
+/// tearing down does not re-enter the handler (#179).
+static TORN_DOWN: AtomicBool = AtomicBool::new(false);
+
+/// Claim the one-shot right to run the quit teardown.
+///
+/// Returns `true` exactly once per process: the caller that gets `true` owns
+/// the teardown, every later caller must let the exit proceed. Extracted from
+/// the `RunEvent::ExitRequested` handler so the decision is testable without
+/// a Tauri run loop.
+fn claim_teardown(flag: &AtomicBool) -> bool {
+    !flag.swap(true, Ordering::SeqCst)
+}
+
 /// The line printed for `--version`. Read from `CARGO_PKG_VERSION`, which the
 /// per-build version bump already edits, so this cannot drift from the build.
 fn version_line() -> String {
@@ -393,22 +407,51 @@ fn main() {
                             "window.dispatchEvent(new CustomEvent('skattr:close-to-tray-hidden'));",
                         );
                     }
-                } else {
-                    // No tray or close_to_tray disabled: normal quit path.
-                    let app = window.app_handle().clone();
-                    tauri::async_runtime::spawn(async move {
-                        daemon::shutdown(&app).await;
-                        app.exit(0);
-                    });
                 }
+                // No tray, or close_to_tray disabled: let the close proceed.
+                // Teardown is NOT spawned here — it would race the process
+                // exit it cannot win. `RunEvent::ExitRequested` below owns it.
             }
         })
-        .run(tauri::generate_context!());
+        .build(tauri::generate_context!());
 
-    if let Err(e) = result {
-        tracing::error!(error = %e, "Tauri runtime exited with error");
-        std::process::exit(1);
-    }
+    let app = match result {
+        Ok(app) => app,
+        Err(e) => {
+            tracing::error!(error = %e, "Tauri runtime failed to build");
+            std::process::exit(1);
+        }
+    };
+
+    // #179/#180: the single place every deliberate exit funnels through —
+    // tray Quit, window close, a termination signal, or anything added later.
+    // Without it, `app.exit(0)` ends the process with the database still in
+    // plaintext and decrypted attachments still on disk.
+    app.run(|app_handle, event| {
+        if let tauri::RunEvent::ExitRequested { api, .. } = event {
+            if !claim_teardown(&TORN_DOWN) {
+                // Already torn down — this is the exit we asked for. Let it go.
+                return;
+            }
+            api.prevent_exit();
+            let app_handle = app_handle.clone();
+            tauri::async_runtime::spawn(async move {
+                if tokio::time::timeout(
+                    daemon::QUIT_TEARDOWN_TIMEOUT,
+                    daemon::shutdown(&app_handle),
+                )
+                .await
+                .is_err()
+                {
+                    tracing::warn!(
+                        "quit teardown exceeded its timeout; exiting anyway \
+                         (boot-time wipe will clean up)"
+                    );
+                }
+                app_handle.exit(0);
+            });
+        }
+    });
 }
 
 #[cfg(test)]
@@ -492,5 +535,21 @@ mod smoke_argv_tests {
             version_line(),
             format!("skattr-ui {}", env!("CARGO_PKG_VERSION"))
         );
+    }
+
+    #[test]
+    fn first_exit_tears_down_then_later_ones_pass_through() {
+        // #179: the ExitRequested handler calls app.exit() after tearing down,
+        // which raises ExitRequested again. Without this claim the second pass
+        // would tear down a second time and never actually exit.
+        use std::sync::atomic::AtomicBool;
+        let flag = AtomicBool::new(false);
+
+        assert!(super::claim_teardown(&flag), "first exit must tear down");
+        assert!(
+            !super::claim_teardown(&flag),
+            "second exit must pass through"
+        );
+        assert!(!super::claim_teardown(&flag), "and stay passed through");
     }
 }

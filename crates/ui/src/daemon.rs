@@ -146,6 +146,15 @@ pub async fn start_in_process_cmd(state: tauri::State<'_, AppState>) -> Result<R
     Ok(ready)
 }
 
+/// Hard cap on the quit teardown (#179/#180).
+///
+/// Generous for a small DB encrypted with scrypt at `N = 2^12` plus a
+/// directory wipe, short enough that quitting never feels hung. Exceeding it
+/// warns and exits anyway: an app that will not close gets `kill -9`, which
+/// produces exactly the plaintext-on-disk outcome this is preventing. The
+/// boot-time wipe and `Pool::open` crash-residue re-encryption clean up then.
+pub const QUIT_TEARDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// Graceful shutdown — drains the daemon over the shutdown oneshot,
 /// joins the task with a timeout. Called from the close-window hook.
 pub async fn shutdown(app: &tauri::AppHandle) {
@@ -156,6 +165,6 @@ pub async fn shutdown(app: &tauri::AppHandle) {
     }
     let handle = state.task.lock().await.take();
     if let Some(handle) = handle {
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(30), handle).await;
+        let _ = tokio::time::timeout(QUIT_TEARDOWN_TIMEOUT, handle).await;
     }
 }
