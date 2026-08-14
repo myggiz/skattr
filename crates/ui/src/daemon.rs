@@ -148,11 +148,15 @@ pub async fn start_in_process_cmd(state: tauri::State<'_, AppState>) -> Result<R
 
 /// Hard cap on the quit teardown (#179/#180).
 ///
-/// Generous for a small DB encrypted with scrypt at `N = 2^12` plus a
-/// directory wipe, short enough that quitting never feels hung. Exceeding it
-/// warns and exits anyway: an app that will not close gets `kill -9`, which
-/// produces exactly the plaintext-on-disk outcome this is preventing. The
-/// boot-time wipe and `Pool::open` crash-residue re-encryption clean up then.
+/// Bounds the *entire* shutdown drain, not just the encrypt step: joining the
+/// IPC server, aborting and joining the sweepers, dropping the scheduler, and
+/// shutting down the transport all happen before the DB encrypt (a small DB
+/// encrypted with scrypt at `N = 2^12`) and the attachment-cache wipe even
+/// begin. Generous enough for all of that, short enough that quitting never
+/// feels hung. Exceeding it warns and exits anyway: an app that will not
+/// close gets `kill -9`, which produces exactly the plaintext-on-disk outcome
+/// this is preventing. The boot-time wipe and `Pool::open` crash-residue
+/// re-encryption clean up then.
 pub const QUIT_TEARDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Graceful shutdown — drains the daemon over the shutdown oneshot, joins the

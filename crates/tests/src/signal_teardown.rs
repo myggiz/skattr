@@ -95,10 +95,17 @@ fn sigterm_leaves_no_plaintext_and_a_fresh_age() {
     let stdout = child.stdout.take().expect("piped stdout");
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
+        let mut sent = false;
+        // Keep draining to EOF after signalling readiness, rather than
+        // `break`ing and closing the pipe read end. Harmless today (the only
+        // later `println!` happens after teardown), but closing early would
+        // make the daemon take EPIPE mid-teardown if a print ever moved
+        // earlier — this keeps the test's correctness independent of the
+        // daemon's print ordering.
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            if line.contains("Ctrl-C to shut down") {
+            if !sent && line.contains("Ctrl-C to shut down") {
                 let _ = tx.send(());
-                break;
+                sent = true;
             }
         }
     });

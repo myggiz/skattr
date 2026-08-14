@@ -79,7 +79,13 @@ so `skattr daemon` tears down on Ctrl-C but **not** on `systemctl stop` / `kill`
 
 All quit paths funnel through a single handler rather than each re-establishing the guarantee.
 
-On the first exit request: `api.prevent_exit()`, run the teardown, mark it done, then exit for real. A second request observes the flag and passes through, so the handler is idempotent and cannot recurse.
+The handler is a tri-state machine — `Idle -> TearingDown -> Done` — not a two-state flag:
+
+- **`Idle`**: this request claims teardown (`compare_exchange` into `TearingDown`), calls `api.prevent_exit()`, runs the teardown, transitions to `Done`, then `app.exit(0)`.
+- **`TearingDown`**: a request arriving *while teardown is still running* calls `api.prevent_exit()` and is **held** — it is not let through.
+- **`Done`**: teardown already finished; return without preventing, so this exit proceeds.
+
+The middle state is the point: a plain bool flipped at claim time can only say "teardown started," not "teardown finished," so a second `ExitRequested` arriving mid-teardown would pass straight through and let Tauri kill the process while `pool.close()` is mid-encrypt — the same class of bug this branch fixes, reintroduced by the handler itself. Holding that request instead keeps the process alive until the first request's teardown reaches `Done` and calls `app.exit(0)` itself, so the handler is idempotent and cannot recurse.
 
 Consequences:
 
@@ -140,13 +146,23 @@ Tray → Quit and window-close-without-tray need a desktop session. Verified by 
 - **Windows session-end** (`WM_QUERYENDSESSION`, console control events) — a Windows logoff/reboot still exits without teardown. Known limitation; own issue if wanted.
 - **No shutdown-progress UI.** A slow quit is silent beyond the log.
 - **#89 itself** (tray init failure) is not fixed here. This work makes its consequence harmless, since the close path now tears down properly.
-- **Signals during startup.** `run_with_transport` opens the pool at Step 2 but
-  only begins polling its shutdown future at Step 8, after Tor bootstrap — a
-  window of up to 180 s in which a SIGTERM still takes the default action and
-  leaves the plaintext DB. Closing it means restructuring startup so the
-  shutdown future is selected against from the moment the pool opens. Out of
-  scope here; the boot-time backstop covers it on next launch. This is also
-  why the Task 1 test must wait for readiness before signalling.
+- **Signals during startup — two distinct instances, both out of scope.**
+  (1) `run_with_transport` opens the pool at Step 2 but only begins polling
+  its shutdown future at Step 8, after Tor bootstrap — a window of up to
+  180 s in which a SIGTERM still takes the default action and leaves the
+  plaintext DB. (2) The UI has its own, separate instance of the same gap:
+  `daemon::shutdown` reads `AppState.shutdown_tx`, which
+  `start_in_process_cmd` only populates *after* its own 180 s readiness await
+  (`crates/ui/src/daemon.rs:110-146`). A tray Quit (or a termination signal,
+  via the choke point) arriving during that window finds `shutdown_tx` still
+  `None`, so `daemon::shutdown` returns instantly and `ExitRequested`'s
+  teardown reaches `Done` having done nothing — `app.exit(0)` then kills the
+  process with the database still open. Closing either gap means restructuring
+  startup so the shutdown future (or the tx that feeds it) is live from the
+  moment the pool opens. Out of scope here; the boot-time backstop covers both
+  on next launch. This is also why the Task 1 test must wait for readiness
+  before signalling, and it is why the CHANGELOG entry for this branch does
+  not claim quitting mid-startup is covered.
 
 ---
 
@@ -156,7 +172,7 @@ Tray → Quit and window-close-without-tray need a desktop session. Verified by 
 |---|---|---|
 | 1 | Tray → Quit encrypts the DB and wipes `cache/open` | §2.1, manual |
 | 2 | Window close with no tray does the same, with no race | §2.1, manual |
-| 3 | `SIGTERM` to `skattr daemon` leaves no plaintext and a fresh `.age` | §3.1, automated |
+| 3 | `SIGTERM` to `skattr daemon` leaves no plaintext and a fresh `.age` | §3.1, manual-invocation, automated assertions |
 | 4 | `SIGTERM`/`SIGINT` to the UI trigger the same teardown | §2.2 |
 | 5 | Teardown cannot wedge the app: bounded, warns, exits | §2.3 |
 | 6 | Teardown runs exactly once per exit | §3.2 |

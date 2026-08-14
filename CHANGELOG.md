@@ -154,12 +154,15 @@ accumulate here and are stamped with a date when a build is cut._
   transfer interrupted by restarting the app may still need a nudge — send that
   contact a message, or hit Retry once you're both back online.
 - **Quitting could leave your messages unencrypted on disk** (#179, #180):
-  closing the app from the tray — or closing the window on systems without a
-  tray, or shutting your computer down — could skip the step that locks your
-  data away again. The database, and any attachment you had opened, could be
-  left readable until the next time the app started. Every way of quitting now
-  performs that step, and if it cannot finish quickly the app says so in the
-  log and still closes rather than hanging.
+  closing the app from the tray, or closing the window on systems without a
+  tray, could skip the step that locks your data away again — and on Linux
+  and macOS, so could being asked to stop by the system (e.g. `systemctl
+  stop`, or logging out). The database, and any attachment you had opened,
+  could be left readable until the next time the app started. Those ways of
+  quitting now perform that step, and if it cannot finish quickly the app
+  says so in the log and still closes rather than hanging. Not yet covered:
+  shutting down or logging off on Windows still skips it — that is tracked
+  separately.
 
 ## [v0.1.1] — 2026-06-30
 
