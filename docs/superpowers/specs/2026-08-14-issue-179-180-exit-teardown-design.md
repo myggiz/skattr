@@ -140,6 +140,13 @@ Tray → Quit and window-close-without-tray need a desktop session. Verified by 
 - **Windows session-end** (`WM_QUERYENDSESSION`, console control events) — a Windows logoff/reboot still exits without teardown. Known limitation; own issue if wanted.
 - **No shutdown-progress UI.** A slow quit is silent beyond the log.
 - **#89 itself** (tray init failure) is not fixed here. This work makes its consequence harmless, since the close path now tears down properly.
+- **Signals during startup.** `run_with_transport` opens the pool at Step 2 but
+  only begins polling its shutdown future at Step 8, after Tor bootstrap — a
+  window of up to 180 s in which a SIGTERM still takes the default action and
+  leaves the plaintext DB. Closing it means restructuring startup so the
+  shutdown future is selected against from the moment the pool opens. Out of
+  scope here; the boot-time backstop covers it on next launch. This is also
+  why the Task 1 test must wait for readiness before signalling.
 
 ---
 

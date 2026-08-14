@@ -153,6 +153,13 @@ accumulate here and are stamped with a date when a build is cut._
   a transfer only reports a timeout when the sender genuinely didn't answer. A
   transfer interrupted by restarting the app may still need a nudge — send that
   contact a message, or hit Retry once you're both back online.
+- **Quitting could leave your messages unencrypted on disk** (#179, #180):
+  closing the app from the tray — or closing the window on systems without a
+  tray, or shutting your computer down — could skip the step that locks your
+  data away again. The database, and any attachment you had opened, could be
+  left readable until the next time the app started. Every way of quitting now
+  performs that step, and if it cannot finish quickly the app says so in the
+  log and still closes rather than hanging.
 
 ## [v0.1.1] — 2026-06-30
 
