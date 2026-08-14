@@ -198,6 +198,47 @@ fn set_close_to_tray(state: tauri::State<'_, CloseToTraySentinel>, enabled: bool
     state.0.store(enabled, Ordering::SeqCst);
 }
 
+/// #180: route termination signals into the normal quit path.
+///
+/// Calls `app.exit(0)` rather than tearing down here, so there is exactly one
+/// teardown implementation (`RunEvent::ExitRequested`). `Drop` never runs on
+/// signal death, so without this a logout, reboot or `kill` leaves the
+/// database in plaintext and decrypted attachments on disk.
+#[cfg(unix)]
+fn spawn_signal_handler(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        use tokio::signal::unix::{signal, SignalKind};
+        let (mut term, mut intr) = match (
+            signal(SignalKind::terminate()),
+            signal(SignalKind::interrupt()),
+        ) {
+            (Ok(t), Ok(i)) => (t, i),
+            _ => {
+                tracing::warn!("could not register termination handlers");
+                return;
+            }
+        };
+        tokio::select! {
+            _ = term.recv() => {}
+            _ = intr.recv() => {}
+        }
+        tracing::info!("termination signal received; shutting down");
+        app.exit(0);
+    });
+}
+
+/// Windows counterpart. Covers Ctrl-C only — session end (logoff/shutdown)
+/// is not handled; see the spec's out-of-scope section.
+#[cfg(not(unix))]
+fn spawn_signal_handler(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            tracing::info!("Ctrl-C received; shutting down");
+            app.exit(0);
+        }
+    });
+}
+
 fn main() {
     let argv: Vec<String> = std::env::args().collect();
     // #161: answer before anything else — no data dir, no migration, no Tauri
@@ -415,6 +456,8 @@ fn main() {
                     }
                 });
             }
+
+            spawn_signal_handler(app.handle().clone());
 
             Ok(())
         })
