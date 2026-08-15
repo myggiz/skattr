@@ -686,8 +686,34 @@ async fn daemon(
 
     println!("Bootstrapping Tor\u{2026}");
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    // #180: SIGTERM is what logout, reboot, systemd and `kill` send — not
+    // SIGINT. Handling only Ctrl-C meant those paths skipped the teardown
+    // that encrypts the DB and wipes decrypted attachment plaintext.
     let shutdown_fut = async {
-        let _ = tokio::signal::ctrl_c().await;
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            match (
+                signal(SignalKind::terminate()),
+                signal(SignalKind::interrupt()),
+            ) {
+                (Ok(mut term), Ok(mut intr)) => {
+                    tokio::select! {
+                        _ = term.recv() => {}
+                        _ = intr.recv() => {}
+                    }
+                }
+                // Registration failed (unusual): fall back to Ctrl-C so the
+                // daemon is still stoppable rather than unkillable-cleanly.
+                _ => {
+                    let _ = tokio::signal::ctrl_c().await;
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = tokio::signal::ctrl_c().await;
+        }
     };
 
     // Resolve config-file path so SetConfig can persist changes atomically.

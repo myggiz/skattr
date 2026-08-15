@@ -15,7 +15,7 @@ mod notifications;
 pub mod tray;
 
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU8, Ordering},
     Arc,
 };
 
@@ -36,6 +36,62 @@ fn detect_smoke_test_flag(argv: &[String]) -> bool {
 /// Returns true if a version flag appears anywhere in argv (#161).
 fn detect_version_flag(argv: &[String]) -> bool {
     argv.iter().any(|a| a == "--version" || a == "-V")
+}
+
+/// States for the one-shot quit teardown (#179/#180).
+///
+/// A plain bool flipped at *claim* time can only mean "teardown started", not
+/// "teardown finished" — a second `ExitRequested` arriving while teardown is
+/// still running would then pass through and let the process exit mid-encrypt.
+/// The third state closes that gap: a request during `TearingDown` must be
+/// held, not passed through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum TeardownState {
+    Idle = 0,
+    TearingDown = 1,
+    Done = 2,
+}
+
+/// What an `ExitRequested` handler should do, decided by `claim_teardown`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TeardownAction {
+    /// First request: this caller owns teardown. Must call `prevent_exit()`,
+    /// run the teardown, mark it `Done`, then exit for real.
+    Start,
+    /// A request arrived while teardown is still running. Must call
+    /// `prevent_exit()` and return — letting this one through would kill the
+    /// process mid-teardown.
+    Hold,
+    /// Teardown already finished. Let this exit proceed.
+    PassThrough,
+}
+
+static TEARDOWN_STATE: AtomicU8 = AtomicU8::new(TeardownState::Idle as u8);
+
+/// Decide what an `ExitRequested` handler should do, atomically claiming
+/// `Idle -> TearingDown` if this is the caller that owns teardown.
+///
+/// Extracted from the `RunEvent::ExitRequested` handler so the decision is
+/// testable without a Tauri run loop. Race-free under concurrent requests via
+/// `compare_exchange`.
+fn claim_teardown(state: &AtomicU8) -> TeardownAction {
+    match state.compare_exchange(
+        TeardownState::Idle as u8,
+        TeardownState::TearingDown as u8,
+        Ordering::SeqCst,
+        Ordering::SeqCst,
+    ) {
+        Ok(_) => TeardownAction::Start,
+        Err(current) if current == TeardownState::TearingDown as u8 => TeardownAction::Hold,
+        Err(_) => TeardownAction::PassThrough,
+    }
+}
+
+/// Mark teardown finished. Only the `Start` claimant calls this, after
+/// teardown has actually completed (or timed out).
+fn mark_teardown_done(state: &AtomicU8) {
+    state.store(TeardownState::Done as u8, Ordering::SeqCst);
 }
 
 /// The line printed for `--version`. Read from `CARGO_PKG_VERSION`, which the
@@ -140,6 +196,47 @@ impl Default for CloseToTraySentinel {
 #[tauri::command]
 fn set_close_to_tray(state: tauri::State<'_, CloseToTraySentinel>, enabled: bool) {
     state.0.store(enabled, Ordering::SeqCst);
+}
+
+/// #180: route termination signals into the normal quit path.
+///
+/// Calls `app.exit(0)` rather than tearing down here, so there is exactly one
+/// teardown implementation (`RunEvent::ExitRequested`). `Drop` never runs on
+/// signal death, so without this a logout, reboot or `kill` leaves the
+/// database in plaintext and decrypted attachments on disk.
+#[cfg(unix)]
+fn spawn_signal_handler(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        use tokio::signal::unix::{signal, SignalKind};
+        let (mut term, mut intr) = match (
+            signal(SignalKind::terminate()),
+            signal(SignalKind::interrupt()),
+        ) {
+            (Ok(t), Ok(i)) => (t, i),
+            _ => {
+                tracing::warn!("could not register termination handlers");
+                return;
+            }
+        };
+        tokio::select! {
+            _ = term.recv() => {}
+            _ = intr.recv() => {}
+        }
+        tracing::info!("termination signal received; shutting down");
+        app.exit(0);
+    });
+}
+
+/// Windows counterpart. Covers Ctrl-C only — session end (logoff/shutdown)
+/// is not handled; see the spec's out-of-scope section.
+#[cfg(not(unix))]
+fn spawn_signal_handler(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            tracing::info!("Ctrl-C received; shutting down");
+            app.exit(0);
+        }
+    });
 }
 
 fn main() {
@@ -360,6 +457,8 @@ fn main() {
                 });
             }
 
+            spawn_signal_handler(app.handle().clone());
+
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -393,22 +492,60 @@ fn main() {
                             "window.dispatchEvent(new CustomEvent('skattr:close-to-tray-hidden'));",
                         );
                     }
-                } else {
-                    // No tray or close_to_tray disabled: normal quit path.
-                    let app = window.app_handle().clone();
+                }
+                // No tray, or close_to_tray disabled: let the close proceed.
+                // Teardown is NOT spawned here — it would race the process
+                // exit it cannot win. `RunEvent::ExitRequested` below owns it.
+            }
+        })
+        .build(tauri::generate_context!());
+
+    let app = match result {
+        Ok(app) => app,
+        Err(e) => {
+            tracing::error!(error = %e, "Tauri runtime failed to build");
+            std::process::exit(1);
+        }
+    };
+
+    // #179/#180: the single place every deliberate exit funnels through —
+    // tray Quit, window close, a termination signal, or anything added later.
+    // Without it, `app.exit(0)` ends the process with the database still in
+    // plaintext and decrypted attachments still on disk.
+    app.run(|app_handle, event| {
+        if let tauri::RunEvent::ExitRequested { api, .. } = event {
+            match claim_teardown(&TEARDOWN_STATE) {
+                TeardownAction::PassThrough => {
+                    // Torn down already — this is the exit we asked for. Let it go.
+                }
+                TeardownAction::Hold => {
+                    // Teardown is still running (up to QUIT_TEARDOWN_TIMEOUT). Letting
+                    // this exit through would kill the process mid-encrypt.
+                    api.prevent_exit();
+                }
+                TeardownAction::Start => {
+                    api.prevent_exit();
+                    let app_handle = app_handle.clone();
                     tauri::async_runtime::spawn(async move {
-                        daemon::shutdown(&app).await;
-                        app.exit(0);
+                        if tokio::time::timeout(
+                            daemon::QUIT_TEARDOWN_TIMEOUT,
+                            daemon::shutdown(&app_handle),
+                        )
+                        .await
+                        .is_err()
+                        {
+                            tracing::warn!(
+                                "quit teardown exceeded its timeout; exiting anyway \
+                                 (boot-time wipe will clean up)"
+                            );
+                        }
+                        mark_teardown_done(&TEARDOWN_STATE);
+                        app_handle.exit(0);
                     });
                 }
             }
-        })
-        .run(tauri::generate_context!());
-
-    if let Err(e) = result {
-        tracing::error!(error = %e, "Tauri runtime exited with error");
-        std::process::exit(1);
-    }
+        }
+    });
 }
 
 #[cfg(test)]
@@ -491,6 +628,46 @@ mod smoke_argv_tests {
         assert_eq!(
             version_line(),
             format!("skattr-ui {}", env!("CARGO_PKG_VERSION"))
+        );
+    }
+
+    #[test]
+    fn teardown_transition_table() {
+        // #179/#180: a plain bool flipped at claim time can't distinguish
+        // "teardown started" from "teardown finished" — a second
+        // ExitRequested arriving while teardown is still running must be
+        // HELD (prevent_exit + return), not passed through, or the process
+        // exits mid-encrypt. This is the regression a two-state bool missed.
+        use std::sync::atomic::AtomicU8;
+        let state = AtomicU8::new(super::TeardownState::Idle as u8);
+
+        assert_eq!(
+            super::claim_teardown(&state),
+            super::TeardownAction::Start,
+            "first exit must own teardown"
+        );
+        assert_eq!(
+            super::claim_teardown(&state),
+            super::TeardownAction::Hold,
+            "a request during teardown must be held, not passed through"
+        );
+        assert_eq!(
+            super::claim_teardown(&state),
+            super::TeardownAction::Hold,
+            "and stay held while teardown keeps running"
+        );
+
+        super::mark_teardown_done(&state);
+
+        assert_eq!(
+            super::claim_teardown(&state),
+            super::TeardownAction::PassThrough,
+            "once torn down, the exit must proceed"
+        );
+        assert_eq!(
+            super::claim_teardown(&state),
+            super::TeardownAction::PassThrough,
+            "and stay passed through"
         );
     }
 }
