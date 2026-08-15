@@ -69,7 +69,7 @@ so `skattr daemon` tears down on Ctrl-C but **not** on `systemctl stop` / `kill`
 
 ### What already works (and stays)
 
-`daemon::shutdown` (`crates/ui/src/daemon.rs:151`) drains the daemon over its oneshot and joins the task. `state.rs:329` wipes `cache/open` at boot and `Pool::open` re-encrypts crash residue, so these leaks self-heal on next launch — verified during the field test (3 plaintext files before relaunch, 0 after). **The exposure is the window between exit and next launch**, which for a user who quits and walks away is when the machine is most likely to be off, imaged or backed up.
+`daemon::shutdown` (`crates/ui/src/daemon.rs:151`) drains the daemon over its oneshot and joins the task. `state.rs:329` wipes `cache/open` at boot and `Pool::open` re-encrypts crash residue, so these leaks self-heal on next successful unlock — verified during the field test (3 plaintext files before relaunch, 0 after). **The exposure is the window between exit and the next time the passphrase is entered**, which is unbounded: launching the app and walking away, or simply not unlocking, leaves the plaintext database on disk indefinitely. This is because `Vault::open` (which requires the passphrase) runs at `state.rs:138`, before `Pool::open` at `state.rs:149`, so the boot-time backstop cannot run until after successful unlock. Field observation (2026-08-15): plaintext `skattr.sqlite`, `skattr.sqlite-wal`, and the sentinel remained on disk 18 hours after exit and were still untouched four minutes after app launch; they cleared only when the passphrase was entered.
 
 ---
 
@@ -105,7 +105,7 @@ The CLI's `shutdown_fut` widens from `ctrl_c()` alone to *either* SIGTERM or SIG
 
 ### 2.3 Bounded teardown
 
-One named constant caps the quit teardown. Exceeding it logs a `warn!` and exits anyway; the boot-time backstop then cleans up on next launch.
+One named constant caps the quit teardown. Exceeding it logs a `warn!` and exits anyway; the boot-time backstop then cleans up on next successful unlock (when `Vault::open` runs at `state.rs:138` before `Pool::open` at `state.rs:149`).
 
 **Value: 15 seconds.** Generous for a ~1.3 MB DB encrypted with scrypt at `N = 2^12` (chosen in `hs_key.rs` precisely to be fast) plus a directory wipe, and short enough that quitting never feels hung. Never leaving the user with an app that will not close matters: the workaround for a hung quit is `kill -9`, which produces exactly the outcome being prevented.
 

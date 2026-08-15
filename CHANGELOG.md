@@ -158,7 +158,8 @@ accumulate here and are stamped with a date when a build is cut._
   tray, could skip the step that locks your data away again — and on Linux
   and macOS, so could being asked to stop by the system (e.g. `systemctl
   stop`, or logging out). The database, and any attachment you had opened,
-  could be left readable until the next time the app started. Those ways of
+  could be left readable until the next time the passphrase was entered (an
+  unbounded window if the app is launched and left without unlocking). Those ways of
   quitting now perform that step, and if it cannot finish quickly the app
   says so in the log and still closes rather than hanging. Not yet covered:
   shutting down or logging off on Windows still skips it — that is tracked
