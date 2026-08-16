@@ -4,13 +4,20 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — targeting v0.1.18
+## [Unreleased] — targeting v0.1.19
 
 _In-progress patch line. The version is bumped per build for tracking; entries
 accumulate here and are stamped with a date when a build is cut._
 
 ### Fixed
 
+- **The contact list no longer shows what people said to you** (#173): each
+  contact row displayed the text of their last message and how long ago it
+  arrived. That strip is on screen the whole time you have the app open, for
+  every contact at once — so anyone glancing at your screen could read your
+  latest messages and see who you had been talking to and when, without
+  opening anything. Rows now show only a dot when there is something new, and
+  a contact you are set up to message shows their name in green.
 - **`skattr-ui --version` opened the app instead of printing a version**
   (#161): there was no way to tell which build a copy of the desktop app
   was, short of launching it and digging through settings — and a script
