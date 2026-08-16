@@ -563,8 +563,8 @@ Personal/global standards live at `~/.claude/rules/standards/` (`rust.md`, `type
 **CI runs on every PR into `master`** and is a real gate again (changed 2026-08-08). The repo is public now, and every CI job uses a standard GitHub-hosted runner — free and unmetered for public repositories — so the Actions-minute pressure that made CI on-demand (#82, while the repo was private) no longer exists.
 
 - **`ci.yml` triggers on `pull_request` (into `master`) + `workflow_dispatch`**, with `cancel-in-progress` concurrency so a new push to a PR supersedes the previous run. Deliberately *not* on every branch push. `flatpak.yml` stays `workflow_dispatch`-only (it only parse-checks the manifest; see the Flatpak deferral).
-- **Run the local gate before pushing** — it is faster than waiting on CI and catches the obvious things: `cargo fmt --all -- --check`, `cargo clippy --workspace --exclude skattr-ui --all-targets --features test-harness -- -D warnings`, `cargo test`, `cargo clippy -p skattr-ui --all-targets -- -D warnings`, and (for UI) `pnpm check` + `pnpm exec vitest run`, plus `cargo deny check`. It is no longer the *only* verification, but a green local gate is still the price of opening a PR — do not outsource basic breakage to CI.
-- **CI covers what local cannot**: a clean-machine build (no stale `target/`, no local toolchain drift) and the Playwright e2e suite. The maintainer still builds/tests the **Windows** target locally on a separate box; CI is ubuntu-only.
+- **Run the local gate before pushing** — it is faster than waiting on CI and catches the obvious things: `cargo fmt --all -- --check`, `cargo clippy --workspace --exclude skattr-ui --all-targets --features test-harness -- -D warnings`, `cargo test`, `cargo clippy -p skattr-ui --all-targets -- -D warnings`, and (for UI) `pnpm check` + `pnpm exec vitest run`, plus `cargo deny check`. Note the UI clippy step is a **compile check**, not proof of a runnable app — see `custom-protocol` (#183). It is no longer the *only* verification, but a green local gate is still the price of opening a PR — do not outsource basic breakage to CI.
+- **CI covers what local cannot**: a clean-machine build (no stale `target/`, no local toolchain drift) and the Playwright e2e suite. The maintainer still builds/tests the **Windows** target locally on a separate box; CI is ubuntu-only. **That loop must build the UI with `cargo tauri build` (or `--features custom-protocol`)** — it is the only thing standing between a Windows-only regression and a tag, and a bare `cargo build` passes green while producing a binary that cannot start (#183).
 - **Reserve the tag-triggered `release.yml`** (signed multi-platform build) for **major/blessed releases (1.0, 2.0, …)** or when explicitly requested — a local field-test build does **not** need a tag.
 - **Versioning: SemVer, patch-bump per build.** `MAJOR.MINOR.PATCH`, each component an **integer** (so `0.1.9 → 0.1.10 → 0.1.47`; there is no "`.9` wall" — you go to `1.0`/`2.0` by decision, not by running out). Bump **PATCH** for each field-test build (bugfixes), **MINOR** when a batch of features lands, **MAJOR** for a blessed/breaking milestone. A bump is a local edit to `Cargo.toml` (`workspace.package.version`) + `crates/ui/tauri.conf.json` (`version`) + `Cargo.lock` (via `cargo check`) + a `CHANGELOG.md` entry listing the issues that build closes (`#NN`). The git commit/issue links are the record; the version number is the build tracker.
 
@@ -663,6 +663,15 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --all
 cargo deny check                     # licenses, advisories, sources (config in deny.toml)
 cargo audit                          # advisory scan
+
+# UI: a RUNNABLE desktop binary needs the `custom-protocol` feature (#183).
+# Tauri picks dev-vs-production from it, so a bare `cargo build -p skattr-ui`
+# compiles, lints, reports the right version, and produces a binary that loads
+# devUrl (http://localhost:1420) and cannot render the UI. build.rs warns when
+# a release build would be that dud, but the warning is easy to scroll past.
+cd crates/ui && cargo tauri build    # the runnable artifact (+ .deb/.rpm bundles)
+cargo build -p skattr-ui --release --features custom-protocol   # equivalent binary
+cargo build -p skattr-ui             # COMPILE-CHECK ONLY — not a runnable app
 
 # CLI (once implemented)
 cargo run -p cli -- init             # generate identity + seed phrase

@@ -16,6 +16,17 @@ publish = false
 [lints]
 workspace = true
 
+# Matches the upstream Tauri app template. Tauri picks dev-vs-production from
+# this feature (`tauri`'s build.rs: `let dev = !custom_protocol`): without it a
+# binary loads `devUrl` instead of the bundled frontend, so it compiles, lints,
+# reports the right version, and cannot render the UI (#183).
+#
+# Deliberately NOT a default feature — enabling it by default would break
+# `cargo tauri dev`, which needs dev mode. `cargo tauri build` passes it; a bare
+# `cargo build` does not, and `build.rs` warns when that would ship a dud.
+[features]
+custom-protocol = ["tauri/custom-protocol"]
+
 [build-dependencies]
 tauri-build = { version = "=2.6.0", features = [] }
 
