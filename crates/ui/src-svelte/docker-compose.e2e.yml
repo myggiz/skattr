@@ -75,8 +75,14 @@ services:
         # The image already ships the browsers for this Playwright version, so
         # no `playwright install` — that download is exactly what does not work
         # on the host.
-        # Unquoted on purpose: PW_ARGS must word-split into separate flags.
-        pnpm exec playwright test $PW_ARGS
+        # `eval set --` rather than bare $PW_ARGS: plain word-splitting breaks
+        # any value containing spaces, so PW_ARGS="--grep 'Enter sends message'"
+        # would arrive as four arguments and filter on the wrong thing. This
+        # honours the quoting the caller wrote. PW_ARGS comes from the developer
+        # running the command, in their own shell, so eval adds no reach they
+        # did not already have.
+        eval "set -- $PW_ARGS"
+        pnpm exec playwright test "$@"
 
 volumes:
   e2e-node-modules:

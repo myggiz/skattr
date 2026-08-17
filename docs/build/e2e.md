@@ -24,6 +24,13 @@ To pass Playwright arguments through, use `PW_ARGS`:
 PW_ARGS="--grep composer" docker compose -f docker-compose.e2e.yml run --rm e2e
 ```
 
+Values containing spaces must be quoted inside `PW_ARGS`, and that quoting is
+honoured:
+
+```bash
+PW_ARGS="--grep 'Enter sends message'" docker compose -f docker-compose.e2e.yml run --rm e2e
+```
+
 Trailing arguments do **not** work — `docker compose run SERVICE ARGS...`
 *replaces* the service's command rather than appending to it, so
 `run --rm e2e --grep composer` makes Docker try to execute `--grep`.
