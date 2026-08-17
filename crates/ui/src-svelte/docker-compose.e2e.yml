@@ -1,0 +1,89 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Myggiz B.V.
+#
+# Run the Playwright e2e suite in a pinned image that ships Playwright's
+# browsers and their system dependencies.
+#
+# Not byte-identical to CI: CI runs on an `ubuntu-latest` runner and installs
+# Chromium at job time (`playwright install --with-deps chromium`). This is the
+# same OS family and the browser build matching the same Playwright version, so
+# results should agree — but CI remains the authority.
+#
+#   docker compose -f docker-compose.e2e.yml run --rm e2e
+#
+# Why this exists: Playwright does not support Arch (it falls back to an
+# Ubuntu 20.04 browser build that may not launch), and a Flatpak browser
+# cannot be driven by Playwright at all. Without this, `pnpm test:e2e` is
+# simply not runnable on a non-Ubuntu host and the suite can only be
+# verified by pushing to CI. See docs/build/e2e.md.
+#
+# The image tag MUST match `@playwright/test` in package.json — the image
+# ships the browser build that version expects. Bump both together.
+
+name: skattr-e2e
+
+services:
+  e2e:
+    image: mcr.microsoft.com/playwright:v1.47.0-jammy
+    working_dir: /app
+    environment:
+      # playwright.config.ts sets this for its own webServer too; set here as
+      # well so an interactive shell in this container behaves the same.
+      TAURI_MOCK: "1"
+      CI: "true"
+      # Extra Playwright arguments, e.g.
+      #   PW_ARGS="--grep composer" docker compose -f ... run --rm e2e
+      # An env var rather than trailing arguments because `docker compose run
+      # SERVICE ARGS...` REPLACES the service command instead of appending to
+      # it — passing `--grep composer` there makes Docker try to exec `--grep`.
+      PW_ARGS: "${PW_ARGS:-}"
+    volumes:
+      # Source is READ-ONLY and copied into the container before building.
+      #
+      # A read-write bind would be simpler, but this image runs as root: the
+      # build would leave root-owned .svelte-kit/, build/ and node_modules/ in
+      # the working tree, which then breaks `pnpm build` on the host. Copying
+      # means the container writes nothing to your disk.
+      - .:/src:ro
+      # Container-local deps and pnpm store, cached across runs. Kept off the
+      # host so they never collide with the host's own node_modules, which is
+      # installed against a different libc.
+      - e2e-node-modules:/app/node_modules
+      - e2e-pnpm-store:/pnpm-store
+    command:
+      - bash
+      - -euc
+      - |
+        # tar rather than `cp -a`: it can exclude, and /app/node_modules is a
+        # mounted volume that must not be overwritten by the host's copy.
+        tar -C /src \
+          --exclude=./node_modules \
+          --exclude=./.svelte-kit \
+          --exclude=./build \
+          --exclude=./test-results \
+          --exclude=./playwright-report \
+          -cf - . | tar -C /app -xf -
+
+        # pnpm 10 via npm, not corepack: the corepack bundled with this image
+        # is too old to verify current pnpm release signatures and dies with
+        # "Cannot find matching keyid". Installing straight from the registry
+        # sidesteps that without disabling signature checking.
+        npm install -g pnpm@10 >/dev/null
+        pnpm config set store-dir /pnpm-store
+        pnpm install --frozen-lockfile
+
+        # The image already ships the browsers for this Playwright version, so
+        # no `playwright install` — that download is exactly what does not work
+        # on the host.
+        # `eval set --` rather than bare $PW_ARGS: plain word-splitting breaks
+        # any value containing spaces, so PW_ARGS="--grep 'Enter sends message'"
+        # would arrive as four arguments and filter on the wrong thing. This
+        # honours the quoting the caller wrote. PW_ARGS comes from the developer
+        # running the command, in their own shell, so eval adds no reach they
+        # did not already have.
+        eval "set -- $PW_ARGS"
+        pnpm exec playwright test "$@"
+
+volumes:
+  e2e-node-modules:
+  e2e-pnpm-store:
