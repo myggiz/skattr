@@ -124,7 +124,13 @@ pub struct ConfigPatch {
 pub enum Command {
     /// Generate a fresh invite link and surface it for display / QR.
     CreateInvite {
-        /// Optional human-readable nickname embedded in the welcome UX.
+        /// Optional local-only label for the contact this invite will produce.
+        ///
+        /// Applied to the inviter's own contact list when the invite's Welcome
+        /// arrives, so a new contact shows a name instead of hex (#174). It is
+        /// NOT embedded in the invite and never reaches the peer — the invitee
+        /// sees nothing of it. Same validation and same local-only scope as
+        /// [`Command::RenameContact`], which can override it afterwards.
         nickname: Option<String>,
         /// Optional TTL in seconds. `None` uses the default (24 h).
         #[serde(default)]

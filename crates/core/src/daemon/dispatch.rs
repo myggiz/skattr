@@ -240,7 +240,7 @@ fn truncate_preview(s: &str, max_chars: usize) -> String {
 
 async fn create_invite<S>(
     handle: &Arc<DaemonHandle<S>>,
-    _nickname: Option<String>,
+    nickname: Option<String>,
     ttl_secs: Option<u64>,
 ) -> std::result::Result<CommandResult, IpcError>
 where
@@ -306,6 +306,34 @@ where
     // key that OpenMLS needs to process the Welcome via join_from_welcome.
     let provider_snap = provider.snapshot().map_err(map_err)?;
     let oi = OutstandingInviteRepo::new(&handle.pool);
+    // #174: the nickname labels the contact this invite will produce; it is
+    // applied when the Welcome arrives. Trim and the 64-character cap match
+    // `rename_contact`, including its error message, so the two cannot report
+    // the same problem differently.
+    //
+    // One deliberate difference: `rename_contact` REJECTS an empty nickname,
+    // because renaming to nothing is a meaningless request. Here the field is
+    // optional — a blank box is the normal case — so empty simply means
+    // "unset". Failing invite creation because someone left an optional field
+    // blank would be a worse answer than the one they wanted.
+    let nickname = match nickname {
+        None => None,
+        Some(s) => {
+            let t = s.trim().to_string();
+            if t.is_empty() {
+                None
+            } else if t.chars().count() > 64 {
+                return Err(IpcError::Daemon(
+                    crate::daemon::error_kind::DaemonErrorKind::InvalidArgument {
+                        message: "nickname must be 64 characters or fewer".into(),
+                    },
+                ));
+            } else {
+                Some(t)
+            }
+        }
+    };
+
     oi.put_with_provider(
         &kp_ref,
         &psk,
@@ -313,6 +341,7 @@ where
         &provider_snap,
         now + ttl as i64,
         now,
+        nickname.as_deref(),
     )
     .map_err(map_err)?;
 
