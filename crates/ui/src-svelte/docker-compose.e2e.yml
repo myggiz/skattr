@@ -1,7 +1,13 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Myggiz B.V.
 #
-# Run the Playwright e2e suite in the same environment CI uses.
+# Run the Playwright e2e suite in a pinned image that ships Playwright's
+# browsers and their system dependencies.
+#
+# Not byte-identical to CI: CI runs on an `ubuntu-latest` runner and installs
+# Chromium at job time (`playwright install --with-deps chromium`). This is the
+# same OS family and the browser build matching the same Playwright version, so
+# results should agree — but CI remains the authority.
 #
 #   docker compose -f docker-compose.e2e.yml run --rm e2e
 #
@@ -25,6 +31,12 @@ services:
       # well so an interactive shell in this container behaves the same.
       TAURI_MOCK: "1"
       CI: "true"
+      # Extra Playwright arguments, e.g.
+      #   PW_ARGS="--grep composer" docker compose -f ... run --rm e2e
+      # An env var rather than trailing arguments because `docker compose run
+      # SERVICE ARGS...` REPLACES the service command instead of appending to
+      # it — passing `--grep composer` there makes Docker try to exec `--grep`.
+      PW_ARGS: "${PW_ARGS:-}"
     volumes:
       # Source is READ-ONLY and copied into the container before building.
       #
@@ -63,7 +75,8 @@ services:
         # The image already ships the browsers for this Playwright version, so
         # no `playwright install` — that download is exactly what does not work
         # on the host.
-        pnpm exec playwright test "$@"
+        # Unquoted on purpose: PW_ARGS must word-split into separate flags.
+        pnpm exec playwright test $PW_ARGS
 
 volumes:
   e2e-node-modules:

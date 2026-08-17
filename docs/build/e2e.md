@@ -8,15 +8,25 @@ cd crates/ui/src-svelte
 docker compose -f docker-compose.e2e.yml run --rm e2e
 ```
 
-That runs all of `tests/e2e` in the same Ubuntu image CI uses. First run pulls
-a ~1.5 GB image and installs dependencies into a named volume; later runs reuse
-both and finish in seconds.
+That runs all of `tests/e2e` in a pinned image carrying Playwright's browsers
+and their system dependencies. First run pulls a ~1.5 GB image and installs
+dependencies into a named volume; later runs reuse both and finish in seconds.
 
-To pass Playwright arguments through:
+This is **not** byte-identical to CI. CI runs on an `ubuntu-latest` runner and
+installs Chromium at job time (`playwright install --with-deps chromium`); this
+uses a prebuilt image. Same OS family, and the browser build matching the same
+Playwright version, so results should agree — but where they disagree, CI is
+the authority.
+
+To pass Playwright arguments through, use `PW_ARGS`:
 
 ```bash
-docker compose -f docker-compose.e2e.yml run --rm e2e --grep composer
+PW_ARGS="--grep composer" docker compose -f docker-compose.e2e.yml run --rm e2e
 ```
+
+Trailing arguments do **not** work — `docker compose run SERVICE ARGS...`
+*replaces* the service's command rather than appending to it, so
+`run --rm e2e --grep composer` makes Docker try to execute `--grep`.
 
 ## Why Docker rather than `pnpm test:e2e`
 
