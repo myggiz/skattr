@@ -13,6 +13,13 @@ export type OptimisticMessage = MessageRecord & {
   __failed?: string;
   __attachName?: string;
   __attachSize?: number;
+  /**
+   * Hex attachment id, learned from FileQueued and attached at promotion.
+   * The placeholder's manifest is empty, so the bubble cannot decode the id
+   * the way it does for a real record — without this it reads the transfer
+   * store under `null` and never reflects the transfer (#177).
+   */
+  __attachId?: string;
 };
 
 /**
@@ -344,6 +351,7 @@ export async function sendFile(
       const promoted: PromotedMessage = {
         ...(next[idx] as OptimisticMessage),
         __optimistic: false,
+        __attachId: hex16ToString(attachment_id),
       };
       next[idx] = promoted;
       return { ...s, messages: next };

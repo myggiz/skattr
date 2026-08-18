@@ -303,6 +303,35 @@ describe("FileAttachmentBubble", () => {
     expect(container.textContent).not.toContain("Delivered");
   });
 
+  // #177: a just-sent bubble is the optimistic placeholder promoted in place.
+  // It carries an EMPTY manifest (the real bytes only exist after SendFile
+  // returns), so there is nothing to decode and the bubble cannot learn its
+  // attachment id that way. sendFile does know it — from FileQueued — and
+  // carries it on the record as __attachId. Without that link the bubble reads
+  // the transfer store under `null` and can never show Delivered, no matter how
+  // long the transfer runs; it only appears once a conversation reload replaces
+  // the placeholder with the real record.
+  test("promoted outgoing bubble with an empty manifest still shows Delivered", async () => {
+    const promoted = {
+      ...fileRecord("outgoing"),
+      kind: { kind: "file", manifest: [] as unknown as string },
+      __tempId: "tmp-177",
+      __optimistic: false,
+      __attachId: AID,
+      __attachName: "photo.jpg",
+      __attachSize: 2048,
+    };
+    const { findByText } = render(FileAttachmentBubble, {
+      props: { record: promoted as unknown as MessageRecord },
+    });
+    await tick();
+
+    // The sender's completion signal: a progress event with received == total.
+    applyProgress(AID, 8, 8);
+
+    expect(await findByText("Delivered")).toBeTruthy();
+  });
+
   test("outgoing bubble shows Delivered once the transfer completes", async () => {
     const { container, findByText } = render(FileAttachmentBubble, {
       props: { record: fileRecord("outgoing") },

@@ -49,7 +49,11 @@
       .catch(() => (decodeFailed = true));
   });
 
-  let aidHex = $derived(summary ? summary.attachment_id : null);
+  // The optimistic outgoing path carries the id directly: its manifest is
+  // empty, so there is nothing to decode (#177).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let optimisticAid = $derived((record as any).__attachId as string | undefined);
+  let aidHex = $derived(summary ? summary.attachment_id : (optimisticAid ?? null));
   let xferState = $derived(aidHex ? $attachments.get(aidHex) : undefined);
 
   // Rehydrate after restart: the transfer store is session-scoped. Ask the
