@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Myggiz B.V.
 import { describe, expect, test, vi, beforeEach } from "vitest";
-import { render } from "@testing-library/svelte";
+import { render, fireEvent } from "@testing-library/svelte";
 import { tick } from "svelte";
 
 // invoke comes from @tauri-apps/api/core (convertFileSrc removed in Task 6).
@@ -129,6 +129,36 @@ describe("FileAttachmentBubble", () => {
     // Open and Save… buttons are present.
     expect(getByRole("button", { name: /open/i })).toBeTruthy();
     expect(getByRole("button", { name: /save/i })).toBeTruthy();
+  });
+
+  // #175: after saving there was no lasting sign it happened — only a toast
+  // that disappears, leaving the user with no answer to "where did it go?".
+  test("after a successful save, shows a Saved marker and Show, and relabels the button", async () => {
+    saveMock.mockResolvedValueOnce("/home/u/Downloads/photo.jpg");
+    ipcRequestMock.mockResolvedValue({ resp: "ok", data: { result: "ok" } });
+
+    const { findByText, getByRole, queryByText } = render(FileAttachmentBubble, {
+      props: { record: fileRecord("incoming") },
+    });
+    await findByText("photo.jpg");
+    markAvailable(AID, { filename: "photo.jpg", mime: "image/jpeg", size: 2048 });
+    await tick();
+
+    // Before saving there is no marker, and the button offers the first save.
+    expect(queryByText("✓ Saved")).toBeNull();
+    expect(getByRole("button", { name: /save decrypted file/i })).toBeTruthy();
+
+    await fireEvent.click(getByRole("button", { name: /save decrypted file/i }));
+    await tick();
+    await tick();
+
+    // The marker reports state and does not rely on colour to do it.
+    expect(await findByText("✓ Saved")).toBeTruthy();
+    // Show answers "where did it go?" once the toast is gone.
+    expect(getByRole("button", { name: /show saved file in folder/i })).toBeTruthy();
+    // The action button still describes the action, so a second save to a
+    // different destination stays obviously available.
+    expect(getByRole("button", { name: /save another copy/i })).toBeTruthy();
   });
 
   test("complete non-image shows Open and Save… buttons, no <img>", async () => {

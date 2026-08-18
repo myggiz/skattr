@@ -156,6 +156,12 @@
     }
   }
 
+  // #175: where the file went, once the toast is gone. Session-scoped on
+  // purpose — "was saved" is persisted nowhere, so after a restart this is
+  // simply absent rather than asserting something we cannot know. The marker
+  // reports state; the button keeps describing its action.
+  let savedTo = $state<string | null>(null);
+
   async function doSave() {
     if (!aidHex) return;
     const dest = await save({ defaultPath: filename || undefined });
@@ -167,9 +173,21 @@
         dest_path: dest,
       } as any);
       if (resp.resp !== "ok") throw new Error("save failed");
+      savedTo = dest;
       toast.show(`Saved to ${dest}`);
     } catch {
       toast.show("Couldn't save the file");
+    }
+  }
+
+  // #175: reveal the saved copy where the user put it — not the cache copy
+  // doReveal() surfaces, which is a different file in a different place.
+  async function revealSaved() {
+    if (!savedTo) return;
+    try {
+      await invoke("reveal_in_folder", { path: savedTo });
+    } catch {
+      toast.show("Couldn't open the folder");
     }
   }
 
@@ -213,9 +231,19 @@
         <DeliveryIcon status={deliveryStatus} />
       {/if}
       {#if complete}
+        {#if savedTo}
+          <!-- #175: text + check, never colour alone — a colour-only signal is
+               invisible to many users with colour-vision deficiency. -->
+          <span class="saved-marker">✓ Saved</span>
+          <button type="button" class="linkish" onclick={revealSaved} aria-label="Show saved file in folder">Show</button>
+        {/if}
         <div class="actions">
           <button type="button" onclick={doOpen} aria-label="Open">Open</button>
-          <button type="button" onclick={doSave} aria-label="Save decrypted file">Save…</button>
+          <button
+            type="button"
+            onclick={doSave}
+            aria-label={savedTo ? "Save another copy" : "Save decrypted file"}
+          >{savedTo ? "Save again…" : "Save…"}</button>
         </div>
       {/if}
       {#if failed}
@@ -265,6 +293,22 @@
   .fsize { color: var(--text-muted); font: var(--t-ui); }
   .file-bubble.outgoing .fsize { color: rgba(255, 255, 255, 0.7); }
   .actions { display: flex; gap: var(--s-1); }
+  /* #175: state marker. Weight + the check carry the meaning, so it does not
+     depend on colour being perceived. */
+  .saved-marker {
+    font: var(--t-ui);
+    font-weight: 600;
+    color: var(--success, #2e9e4f);
+  }
+  .linkish {
+    background: transparent;
+    border: none;
+    padding: 0;
+    font: var(--t-ui);
+    color: var(--accent);
+    text-decoration: underline;
+    cursor: pointer;
+  }
   .actions button {
     padding: 2px var(--s-2);
     background: var(--bg);

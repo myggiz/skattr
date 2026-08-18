@@ -44,6 +44,27 @@ export const conversation = writable<ConversationState>({
 });
 
 
+/**
+ * #178: collapse back to the no-conversation state.
+ *
+ * Clears the loaded messages as well as the active contact — the point of the
+ * toggle is that a user can leave the app open with no conversation content on
+ * screen, so leaving the array populated would defeat it.
+ *
+ * Purely local: no IPC, and in particular no read-state write, so closing a
+ * conversation never marks anything read that the user did not read.
+ */
+export function closeConversation(): void {
+  conversation.set({
+    contact: null,
+    messages: [],
+    nextBeforeId: null,
+    loadingOlder: false,
+    unreadAnchorRowId: null,
+    readCursor: 0n,
+  });
+}
+
 export function appendOptimistic(
   contact: PublicKey,
   body: string,
