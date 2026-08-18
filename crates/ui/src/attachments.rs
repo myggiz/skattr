@@ -187,7 +187,9 @@ mod tests {
         let path = p.to_string_lossy().to_string();
 
         // Confined validation rejects it — this is what `open_file` still does.
-        assert!(validate_openable(&path, &[std::path::PathBuf::from("/nonexistent-root")]).is_err());
+        assert!(
+            validate_openable(&path, &[std::path::PathBuf::from("/nonexistent-root")]).is_err()
+        );
 
         // Reveal accepts it.
         let canon = validate_revealable(&path).unwrap();
