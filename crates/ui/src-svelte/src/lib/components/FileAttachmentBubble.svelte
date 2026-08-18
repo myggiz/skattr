@@ -4,7 +4,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { save, ask } from "@tauri-apps/plugin-dialog";
   import type { MessageRecord } from "$lib/ipc/types";
-  import type { OptimisticMessage } from "$lib/stores/conversation";
+  import type { OptimisticMessage, PromotedMessage } from "$lib/stores/conversation";
   import { attachments, applyManifest, markAvailable, markRetrying } from "$lib/stores/attachments";
   import { delivery, deliveryToIconStatus, hex16ToString } from "$lib/stores/delivery";
   import { decodeManifestMemo, mimeIconName, formatBytes } from "$lib/attachments";
@@ -15,7 +15,7 @@
   import { unwrapOk } from "$lib/ipc/client";
   import DeliveryIcon from "./DeliveryIcon.svelte";
 
-  let { record }: { record: MessageRecord | OptimisticMessage } = $props();
+  let { record }: { record: MessageRecord | OptimisticMessage | PromotedMessage } = $props();
 
   let isOutgoing = $derived(record.direction === "outgoing");
   // The optimistic outgoing path carries display fields directly (Task 10).
@@ -50,9 +50,9 @@
   });
 
   // The optimistic outgoing path carries the id directly: its manifest is
-  // empty, so there is nothing to decode (#177).
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let optimisticAid = $derived((record as any).__attachId as string | undefined);
+  // empty, so there is nothing to decode (#177). `in` narrows the union, so
+  // the field is checked rather than cast away.
+  let optimisticAid = $derived("__attachId" in record ? record.__attachId : undefined);
   let aidHex = $derived(summary ? summary.attachment_id : (optimisticAid ?? null));
   let xferState = $derived(aidHex ? $attachments.get(aidHex) : undefined);
 
