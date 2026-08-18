@@ -255,6 +255,39 @@ where
     use rand_core::{OsRng, RngCore as _};
     use zeroize::Zeroizing;
 
+    // #174: validated FIRST, before anything persists. `KeyPackage::generate`
+    // stores a key-package row and `build_next_self_card` increments the
+    // persisted card version, so rejecting after them would burn both on a
+    // request that returns no invite.
+    //
+    // The nickname labels the contact this invite will produce; it is applied
+    // when the Welcome arrives. Trim and the 64-character cap match
+    // `rename_contact`, including its error message, so the two cannot report
+    // the same problem differently.
+    //
+    // One deliberate difference: `rename_contact` REJECTS an empty nickname,
+    // because renaming to nothing is a meaningless request. Here the field is
+    // optional — a blank box is the normal case — so empty simply means
+    // "unset". Failing invite creation because someone left an optional field
+    // blank would be a worse answer than the one they wanted.
+    let nickname = match nickname {
+        None => None,
+        Some(s) => {
+            let t = s.trim().to_string();
+            if t.is_empty() {
+                None
+            } else if t.chars().count() > 64 {
+                return Err(IpcError::Daemon(
+                    crate::daemon::error_kind::DaemonErrorKind::InvalidArgument {
+                        message: "nickname must be 64 characters or fewer".into(),
+                    },
+                ));
+            } else {
+                Some(t)
+            }
+        }
+    };
+
     let onion = handle
         .onion()
         .ok_or(IpcError::Daemon(DaemonErrorKind::TorNotReady))?;
@@ -306,34 +339,6 @@ where
     // key that OpenMLS needs to process the Welcome via join_from_welcome.
     let provider_snap = provider.snapshot().map_err(map_err)?;
     let oi = OutstandingInviteRepo::new(&handle.pool);
-    // #174: the nickname labels the contact this invite will produce; it is
-    // applied when the Welcome arrives. Trim and the 64-character cap match
-    // `rename_contact`, including its error message, so the two cannot report
-    // the same problem differently.
-    //
-    // One deliberate difference: `rename_contact` REJECTS an empty nickname,
-    // because renaming to nothing is a meaningless request. Here the field is
-    // optional — a blank box is the normal case — so empty simply means
-    // "unset". Failing invite creation because someone left an optional field
-    // blank would be a worse answer than the one they wanted.
-    let nickname = match nickname {
-        None => None,
-        Some(s) => {
-            let t = s.trim().to_string();
-            if t.is_empty() {
-                None
-            } else if t.chars().count() > 64 {
-                return Err(IpcError::Daemon(
-                    crate::daemon::error_kind::DaemonErrorKind::InvalidArgument {
-                        message: "nickname must be 64 characters or fewer".into(),
-                    },
-                ));
-            } else {
-                Some(t)
-            }
-        }
-    };
-
     oi.put_with_provider(
         &kp_ref,
         &psk,
@@ -374,6 +379,7 @@ where
     use crate::daemon::events::Event;
     use crate::invite::InviteLink;
     use crate::mls::{group::Group, key_package::KeyPackage, provider::MlsProvider};
+
     use crate::storage::{ContactRepo, KeyPackageRepo, MlsGroupRepo};
 
     let now = std::time::SystemTime::now()
@@ -4787,6 +4793,49 @@ mod tests {
     }
 
     // ── Task 8: rename_contact dispatcher ───────────────────────────────────
+
+    #[tokio::test]
+    async fn create_invite_rejects_long_nickname_without_consuming_state() {
+        use crate::daemon::error_kind::DaemonErrorKind;
+        let handle = test_handle();
+
+        // #174 review: validation must run BEFORE anything persists.
+        // `KeyPackage::generate` stores a key-package row and
+        // `build_next_self_card` bumps the persisted card version, so rejecting
+        // after them would burn both on a request that returns no invite.
+        let count_kps = |h: &Arc<DaemonHandle<tokio::io::DuplexStream>>| -> i64 {
+            h.pool
+                .with(|c| {
+                    c.query_row("SELECT COUNT(*) FROM key_packages", [], |r| {
+                        r.get::<_, i64>(0)
+                    })
+                    .map_err(|e| {
+                        crate::error::CoreError::Storage(crate::storage::StorageErrorKind::Other(
+                            e.to_string(),
+                        ))
+                    })
+                })
+                .unwrap()
+        };
+        let kps_before = count_kps(&handle);
+
+        let err = create_invite(&handle, Some("x".repeat(65)), None)
+            .await
+            .expect_err("a 65-character nickname must be rejected");
+        assert!(
+            matches!(
+                err,
+                IpcError::Daemon(DaemonErrorKind::InvalidArgument { .. })
+            ),
+            "expected InvalidArgument, got {err:?}"
+        );
+
+        assert_eq!(
+            count_kps(&handle),
+            kps_before,
+            "a rejected invite must not leave an unconsumed key package behind"
+        );
+    }
 
     #[tokio::test]
     async fn rename_contact_validates_nickname() {
