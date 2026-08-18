@@ -9,7 +9,13 @@ use zeroize::Zeroizing;
 
 /// Tuple returned by `get_psk_and_kp_bytes`: PSK, inviter KP TLS bytes,
 /// optional MlsProvider snapshot, expires_at unix seconds.
-type OutstandingInviteRow = (Zeroizing<[u8; 32]>, Vec<u8>, Option<Vec<u8>>, i64);
+type OutstandingInviteRow = (
+    Zeroizing<[u8; 32]>,
+    Vec<u8>,
+    Option<Vec<u8>>,
+    i64,
+    Option<String>,
+);
 
 use super::StorageErrorKind;
 use crate::error::{CoreError, Result};
@@ -63,6 +69,11 @@ impl<'p> OutstandingInviteRepo<'p> {
 
     /// Like `put` but also stores the MLS provider snapshot so it can be
     /// restored when processing the incoming Welcome.
+    // 8 parameters, one over clippy's default. Grouping them into a struct is
+    // the right long-term shape (cf. #49 for the same problem in
+    // `run_with_transport`), but doing it here would touch every caller for a
+    // change that only adds one optional column.
+    #[allow(clippy::too_many_arguments)]
     pub fn put_with_provider(
         &self,
         kp_hash: &[u8; 32],
@@ -71,12 +82,15 @@ impl<'p> OutstandingInviteRepo<'p> {
         provider_snapshot: &[u8],
         expires_at: i64,
         created_at: i64,
+        // Optional local-only label applied to the contact when this invite's
+        // Welcome arrives (#174). Never sent to the peer.
+        nickname: Option<&str>,
     ) -> Result<()> {
         self.pool.with_mut(|c| {
             c.execute(
                 "INSERT OR REPLACE INTO outstanding_invites \
-                 (kp_hash, psk, inviter_kp, provider_snapshot, expires_at, created_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                 (kp_hash, psk, inviter_kp, provider_snapshot, expires_at, created_at, nickname) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 rusqlite::params![
                     &kp_hash[..],
                     psk.as_ref(),
@@ -84,6 +98,7 @@ impl<'p> OutstandingInviteRepo<'p> {
                     provider_snapshot,
                     expires_at,
                     created_at,
+                    nickname,
                 ],
             )
             .map_err(|e| {
@@ -145,7 +160,7 @@ impl<'p> OutstandingInviteRepo<'p> {
     pub fn get_psk_and_kp_bytes(&self, kp_ref: &[u8; 32]) -> Result<Option<OutstandingInviteRow>> {
         self.pool.with(|c| {
             let result = c.query_row(
-                "SELECT psk, inviter_kp, provider_snapshot, expires_at \
+                "SELECT psk, inviter_kp, provider_snapshot, expires_at, nickname \
                  FROM outstanding_invites WHERE kp_hash = ?1",
                 rusqlite::params![&kp_ref[..]],
                 |r| {
@@ -153,11 +168,12 @@ impl<'p> OutstandingInviteRepo<'p> {
                     let kp_bytes: Vec<u8> = r.get(1)?;
                     let provider_snap: Option<Vec<u8>> = r.get(2)?;
                     let expires_at: i64 = r.get(3)?;
-                    Ok((psk_bytes, kp_bytes, provider_snap, expires_at))
+                    let nickname: Option<String> = r.get(4)?;
+                    Ok((psk_bytes, kp_bytes, provider_snap, expires_at, nickname))
                 },
             );
             match result {
-                Ok((psk_bytes, kp_bytes, provider_snap, expires_at)) => {
+                Ok((psk_bytes, kp_bytes, provider_snap, expires_at, nickname)) => {
                     if psk_bytes.len() != 32 {
                         return Err(CoreError::Storage(StorageErrorKind::Other(format!(
                             "oi: psk wrong length: {}",
@@ -171,6 +187,7 @@ impl<'p> OutstandingInviteRepo<'p> {
                         kp_bytes,
                         provider_snap,
                         expires_at,
+                        nickname,
                     )))
                 }
                 Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -261,6 +278,29 @@ mod tests {
         let (got_psk, got_exp) = repo.get_psk(&kp_hash).unwrap().unwrap();
         assert_eq!(*got_psk.as_ref(), [0xBBu8; 32]);
         assert_eq!(got_exp, expires_at);
+    }
+
+    #[test]
+    fn nickname_round_trips_and_defaults_to_none() {
+        // #174: the nickname is applied when the invite's Welcome arrives,
+        // which may be days later and across a daemon restart — so it has to
+        // survive in the row, not in memory. A round-trip through the DB is
+        // exactly that guarantee.
+        let pool = Pool::in_memory();
+        let repo = OutstandingInviteRepo::new(&pool);
+        let psk = Zeroizing::new([7u8; 32]);
+
+        let with = [1u8; 32];
+        repo.put_with_provider(&with, &psk, b"kp", b"snap", 999, 1, Some("Bob from work"))
+            .unwrap();
+        let (_, _, _, _, nick) = repo.get_psk_and_kp_bytes(&with).unwrap().unwrap();
+        assert_eq!(nick.as_deref(), Some("Bob from work"));
+
+        let without = [2u8; 32];
+        repo.put_with_provider(&without, &psk, b"kp", b"snap", 999, 1, None)
+            .unwrap();
+        let (_, _, _, _, nick) = repo.get_psk_and_kp_bytes(&without).unwrap().unwrap();
+        assert_eq!(nick, None, "an invite with no nickname reads back as None");
     }
 
     #[test]

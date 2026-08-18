@@ -40,6 +40,25 @@ describe("InviteGenerateDialog", () => {
     });
   });
 
+  // #174: the nickname was collected and then silently discarded by the
+  // daemon. The daemon side is fixed; this pins the UI half — that a typed
+  // name actually reaches the command, and that a blank one is sent as null
+  // rather than an empty string.
+  it("sends a typed nickname, and null when left blank", async () => {
+    const { getByLabelText, getByText } = render(InviteGenerateDialog, {
+      props: { onClose: vi.fn() },
+    });
+    await fireEvent.input(getByLabelText(/nickname/i), {
+      target: { value: "  Bob from work  " },
+    });
+    await fireEvent.click(getByText("Generate"));
+    expect(ipcClient.request).toHaveBeenCalledWith({
+      cmd: "create_invite",
+      nickname: "Bob from work",
+      ttl_secs: 86400,
+    });
+  });
+
   it("renders QR after successful generate", async () => {
     const { getByText, findByText } = render(InviteGenerateDialog, {
       props: { onClose: vi.fn() },

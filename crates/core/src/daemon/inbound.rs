@@ -476,7 +476,7 @@ impl DaemonInbound {
         let kp_ref = parse_welcome_kp_hash(welcome_bytes)?;
 
         let oi = OutstandingInviteRepo::new(&self.pool);
-        let (psk, inviter_kp_bytes, provider_snap_opt, expires_at) =
+        let (psk, inviter_kp_bytes, provider_snap_opt, expires_at, invite_nickname) =
             oi.get_psk_and_kp_bytes(&kp_ref)?.ok_or_else(|| {
                 CoreError::from(MlsErrorKind::Other(
                     "inbound welcome: unknown kp_ref".into(),
@@ -570,10 +570,20 @@ impl DaemonInbound {
                 // hidden=0 on conflict mirrors ContactRepo::upsert_in_tx: a
                 // previously-removed (soft-deleted) contact that rejoins via an
                 // inbound Welcome must be un-hidden, or it stays invisible.
+                // #174: display_name carries the nickname the user typed when
+                // creating this invite, so the new contact is named rather than
+                // rendering as raw hex. Local-only; never sent to the peer.
+                //
+                // COALESCE, not a bare assignment: this statement also runs when
+                // an EXISTING contact rejoins, and `excluded.display_name` is
+                // NULL whenever the invite carried no nickname — which would
+                // silently erase a name the user had set with RenameContact.
                 "INSERT INTO contacts (identity_pubkey, display_name, added_at) \
                  VALUES (?1, ?2, ?3) \
-                 ON CONFLICT(identity_pubkey) DO UPDATE SET display_name=excluded.display_name, hidden=0",
-                rusqlite::params![&derived.0[..], Option::<String>::None, now],
+                 ON CONFLICT(identity_pubkey) DO UPDATE SET \
+                   display_name=COALESCE(excluded.display_name, contacts.display_name), \
+                   hidden=0",
+                rusqlite::params![&derived.0[..], invite_nickname.as_deref(), now],
             )
             .map_err(|e| {
                 CoreError::Storage(crate::storage::StorageErrorKind::Other(format!(
@@ -1391,6 +1401,8 @@ mod tests {
             &provider_snap,
             crate::daemon::clock::now_unix_seconds() + 3600,
             crate::daemon::clock::now_unix_seconds(),
+            // #174: the nickname the inviter typed when creating this invite.
+            Some("Bob from work"),
         )
         .unwrap();
 
@@ -1448,6 +1460,54 @@ mod tests {
             .unwrap_or_else(|| panic!("gid must be set"));
         assert_eq!(gid.len(), 32);
         assert_eq!(stored.identity, bob_pubkey);
+        // #174: the invite's nickname names the contact, instead of the UI
+        // falling back to eight hex characters.
+        assert_eq!(
+            stored.display_name.as_deref(),
+            Some("Bob from work"),
+            "invite nickname must be applied to the new contact"
+        );
+    }
+
+    /// #174: a Welcome for a contact that already has a user-chosen name must
+    /// not erase it. `welcome_join_persist` upserts with the invite's nickname,
+    /// which is NULL whenever the invite carried none — a bare
+    /// `SET display_name = excluded.display_name` would blank the rename.
+    #[tokio::test]
+    async fn welcome_does_not_clobber_an_existing_rename() {
+        use crate::contact::Contact;
+
+        let pool = Arc::new(Pool::in_memory());
+        let (inbound, bob, welcome_bytes, _alice_kp_ref, _rx) = bootstrap_fixture(&pool);
+        let bob_pubkey = bob.public();
+
+        // The user had already named this contact.
+        let cr = crate::storage::ContactRepo::new(&pool);
+        cr.upsert(&Contact {
+            identity: bob_pubkey,
+            display_name: Some("Renamed By Hand".into()),
+            added_at: 0,
+            card: None,
+            muted: false,
+        })
+        .unwrap();
+
+        // The fixture's invite carries no nickname, so the upsert supplies NULL.
+        let _ = crate::delivery::peer::InboundDispatch::dispatch_welcome(
+            &inbound,
+            bob_pubkey,
+            &welcome_bytes,
+        );
+
+        let stored = cr
+            .get(&bob_pubkey)
+            .unwrap()
+            .unwrap_or_else(|| panic!("contact must exist"));
+        assert_eq!(
+            stored.display_name.as_deref(),
+            Some("Renamed By Hand"),
+            "a Welcome carrying no nickname must not erase an existing name"
+        );
     }
 
     /// Build Alice (inviter) + an outstanding invite, then have Bob (invitee)
@@ -1488,6 +1548,7 @@ mod tests {
             &provider_snap,
             crate::daemon::clock::now_unix_seconds() + 3600,
             crate::daemon::clock::now_unix_seconds(),
+            None, // #174: no invite nickname in this fixture
         )
         .unwrap();
 
@@ -2000,6 +2061,7 @@ mod tests {
                 &provider_snap,
                 crate::daemon::clock::now_unix_seconds() - 1, // expired
                 crate::daemon::clock::now_unix_seconds() - 3600,
+                None, // #174: no invite nickname in this fixture
             )
             .unwrap();
 
