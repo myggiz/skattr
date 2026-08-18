@@ -44,6 +44,38 @@ export const conversation = writable<ConversationState>({
 });
 
 
+/**
+ * #178: collapse back to the no-conversation state.
+ *
+ * Clears the loaded messages as well as the active contact — the point of the
+ * toggle is that a user can leave the app open with no conversation content on
+ * screen, so leaving the array populated would defeat it.
+ *
+ * Purely local: no IPC, and in particular no read-state write, so closing a
+ * conversation never marks anything read that the user did not read.
+ */
+/**
+ * Monotonic load token. A conversation load is async, so its response can land
+ * after the user has already closed the conversation or picked another contact.
+ * Every call that establishes conversation state claims a fresh token; a load
+ * only commits its response if its token is still the current one. Without
+ * this, a close that lands mid-load is silently undone when the response
+ * arrives (found reviewing #178).
+ */
+let loadToken = 0;
+
+export function closeConversation(): void {
+  loadToken++;
+  conversation.set({
+    contact: null,
+    messages: [],
+    nextBeforeId: null,
+    loadingOlder: false,
+    unreadAnchorRowId: null,
+    readCursor: 0n,
+  });
+}
+
 export function appendOptimistic(
   contact: PublicKey,
   body: string,
@@ -97,6 +129,7 @@ export function markFailed(tempId: string, reason: string): void {
 export async function openConversationFromSummary(
   summary: ContactSummary,
 ): Promise<void> {
+  const token = ++loadToken;
   const resp = await ipcClient.request({
     cmd: "recent_messages",
     contact: summary.pubkey,
@@ -104,6 +137,9 @@ export async function openConversationFromSummary(
     before_id: null,
     paged: true,
   });
+  // Superseded while in flight — by a close, or by a later selection whose
+  // response may well arrive first. Drop this one rather than overwrite.
+  if (token !== loadToken) return;
   const result = unwrapOk(resp);
   const records: MessageRecord[] = [];
   let nextBeforeId: bigint | null = null;

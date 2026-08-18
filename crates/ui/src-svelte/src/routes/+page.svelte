@@ -16,7 +16,12 @@
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
   import { contacts, refreshContacts, expandedPubkey, toggleExpanded, pendingState, dropContact, removeContact } from "$lib/stores/contacts";
   import { now } from "$lib/stores/now";
-  import { conversation, openConversationFromSummary, appendMessage } from "$lib/stores/conversation";
+  import {
+    conversation,
+    openConversationFromSummary,
+    closeConversation,
+    appendMessage,
+  } from "$lib/stores/conversation";
   import { torStatus } from "$lib/stores/tor_status";
   import { recordDeliveryStatus, hex16ToString } from "$lib/stores/delivery";
   import { applyProgress, applyReceived, applyFailed } from "$lib/stores/attachments";
@@ -65,7 +70,18 @@
     if (!destroyed) startMainShellSubscriptions();
   });
 
+  // #178: the row is a toggle. Clicking the contact whose conversation is
+  // already open closes it, so the app can sit open with no conversation
+  // content displayed. Clicking a different contact switches, as before.
+  //
+  // The chevron (contact details) is a separate control and is deliberately
+  // left alone — closing the conversation does not collapse an open details
+  // panel, since they answer different questions.
   async function selectContact(summary: ContactSummary) {
+    if (pubkeyEq($conversation.contact, summary.pubkey)) {
+      closeConversation();
+      return;
+    }
     await openConversationFromSummary(summary);
   }
 

@@ -7,6 +7,7 @@ import {
   appendOptimistic,
   reconcile,
   markFailed,
+  closeConversation,
 } from "./conversation";
 import type { MessageRecord, PublicKey } from "$lib/ipc/types";
 
@@ -393,5 +394,34 @@ describe("send status mapping", () => {
     } as any);
     await send(peer, "y");
     expect(statusForMessageHex(messageHex)).toBe("Queued");
+  });
+});
+
+describe("close vs. an in-flight load (#178 review)", () => {
+  test("a load that resolves after closeConversation does not repopulate", async () => {
+    // A load is in flight for `peer` when the user closes the conversation.
+    // Its response must not resurrect content the user dismissed.
+    let release: (v: unknown) => void = () => {};
+    const pending = new Promise((r) => (release = r));
+    const spy = vi.spyOn(ipcClient, "request").mockReturnValueOnce(pending as never);
+
+    const summary = { pubkey: peer, last_read_row_id: null } as unknown as ContactSummary;
+    const load = openConversationFromSummary(summary);
+
+    closeConversation();
+    expect(get(conversation).contact).toBeNull();
+
+    release({
+      resp: "ok",
+      data: {
+        result: "messages_page",
+        data: { records: [fakeRecord(1, "hi")], next_before_id: null },
+      },
+    });
+    await load;
+
+    expect(get(conversation).contact).toBeNull();
+    expect(get(conversation).messages).toEqual([]);
+    spy.mockRestore();
   });
 });
