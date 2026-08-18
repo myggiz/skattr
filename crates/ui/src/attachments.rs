@@ -44,12 +44,27 @@ pub async fn decode_attachment_manifest(manifest: Vec<u8>) -> Result<ManifestSum
     })
 }
 
-/// Canonicalize a UI-supplied path, assert it is an existing regular file, AND
-/// confine it to one of `roots` (downloads or the managed open-cache).
-/// A root that fails to canonicalize simply doesn't match — it does not error
-/// out the whole check or accept the path.
-fn validate_openable(path: &str, roots: &[std::path::PathBuf]) -> Result<PathBuf, String> {
+/// Canonicalize a UI-supplied path and assert it is an existing regular file.
+///
+/// Deliberately NOT confined to the managed roots. This is the check behind
+/// `reveal_in_folder`, whose destination is a path the user just chose in a
+/// native OS save dialog (#175) — Desktop, Documents, a USB stick. Revealing
+/// only points a file manager at a location; it never hands the file to a
+/// handler. `open_file` does, and stays confined via [`validate_openable`].
+fn validate_revealable(path: &str) -> Result<PathBuf, String> {
     let canon = std::fs::canonicalize(path).map_err(|e| format!("canonicalize {path}: {e}"))?;
+    let meta = std::fs::metadata(&canon).map_err(|e| format!("{path}: not found: {e}"))?;
+    if !meta.is_file() {
+        return Err(format!("{path}: not a regular file"));
+    }
+    Ok(canon)
+}
+
+/// [`validate_revealable`] plus confinement to one of `roots` (downloads or the
+/// managed open-cache). A root that fails to canonicalize simply doesn't match —
+/// it does not error out the whole check or accept the path.
+fn validate_openable(path: &str, roots: &[std::path::PathBuf]) -> Result<PathBuf, String> {
+    let canon = validate_revealable(path)?;
     let ok = roots.iter().any(|r| {
         std::fs::canonicalize(r)
             .map(|cr| canon.starts_with(&cr))
@@ -57,10 +72,6 @@ fn validate_openable(path: &str, roots: &[std::path::PathBuf]) -> Result<PathBuf
     });
     if !ok {
         return Err(format!("{path}: outside allowed dirs"));
-    }
-    let meta = std::fs::metadata(&canon).map_err(|e| format!("{path}: not found: {e}"))?;
-    if !meta.is_file() {
-        return Err(format!("{path}: not a regular file"));
     }
     Ok(canon)
 }
@@ -110,13 +121,8 @@ pub async fn open_file(
 
 /// Reveal a received file in the OS file manager.
 #[tauri::command]
-pub async fn reveal_in_folder(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, crate::daemon::AppState>,
-    path: String,
-) -> Result<(), String> {
-    let roots = vec![downloads_dir(&state)?, open_cache_dir(&state)?];
-    let canon = validate_openable(&path, &roots)?;
+pub async fn reveal_in_folder(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    let canon = validate_revealable(&path)?;
     app.opener()
         .reveal_item_in_dir(canon)
         .map_err(|e| format!("reveal_in_folder: {e}"))
@@ -166,6 +172,37 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("decode manifest"));
+    }
+
+    // #175: the save destination comes from a native OS save dialog the user
+    // just operated, so it is legitimately anywhere — Desktop, Documents, a USB
+    // stick. Revealing only opens a file manager at a location, so it is not
+    // confined to the managed roots the way `open_file` is (which hands the
+    // file to an OS handler and stays confined).
+    #[test]
+    fn revealable_accepts_a_user_chosen_path_outside_the_managed_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("saved.pdf");
+        std::fs::write(&p, b"x").unwrap();
+        let path = p.to_string_lossy().to_string();
+
+        // Confined validation rejects it — this is what `open_file` still does.
+        assert!(validate_openable(&path, &[std::path::PathBuf::from("/nonexistent-root")]).is_err());
+
+        // Reveal accepts it.
+        let canon = validate_revealable(&path).unwrap();
+        assert_eq!(canon, std::fs::canonicalize(&p).unwrap());
+    }
+
+    #[test]
+    fn revealable_rejects_a_directory_and_a_missing_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let derr = validate_revealable(&dir.path().to_string_lossy()).unwrap_err();
+        assert!(derr.contains("not a regular file"), "got {derr}");
+
+        let missing = dir.path().join("nope.bin").to_string_lossy().to_string();
+        let merr = validate_revealable(&missing).unwrap_err();
+        assert!(merr.contains("canonicalize"), "got {merr}");
     }
 
     #[tokio::test]
