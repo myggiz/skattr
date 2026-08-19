@@ -355,6 +355,14 @@ pub enum Command {
         /// 16-byte attachment id.
         attachment_id: crate::daemon::hex::Hex16,
     },
+    /// Report the persisted state of an attachment row, either direction.
+    /// Unlike `AttachmentAvailable` (which answers "can I open this?" for
+    /// inbound files only), this answers "what does the daemon know about
+    /// this transfer?" — the sender's post-restart question (#176).
+    AttachmentStatus {
+        /// 16-byte attachment id.
+        attachment_id: crate::daemon::hex::Hex16,
+    },
     /// Re-arm a failed inbound attachment for another fetch attempt (#144).
     /// Best-effort: it can only succeed while the sender still has the file
     /// staged, or its mailbox deposits are still unexpired.
@@ -650,6 +658,44 @@ pub enum CommandResult {
         /// True iff a completed inbound attachment exists for the id.
         available: bool,
     },
+    /// Persisted-state answer for `Command::AttachmentStatus`.
+    AttachmentStatus {
+        /// `None` when no attachment row exists for the id — the daemon has
+        /// no record, which is not the same as "not finished" (#176).
+        report: Option<AttachmentStatusReport>,
+    },
+}
+
+/// Which side of a transfer an attachment row belongs to.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
+#[ts(export, export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/")]
+pub enum AttachmentDirection {
+    /// Received from a peer.
+    In,
+    /// Sent to a peer.
+    Out,
+}
+
+/// The persisted lifecycle state of an attachment row.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
+#[ts(export, export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/")]
+pub enum AttachmentState {
+    /// Transfer has not reached a terminal state.
+    Pending,
+    /// Every chunk moved; for an `out` row the peer acknowledged it.
+    Complete,
+    /// Terminal failure.
+    Failed,
+}
+
+/// What the daemon knows about one attachment (`Command::AttachmentStatus`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
+#[ts(export, export_to = "../../../crates/ui/src-svelte/src/lib/ipc/types/")]
+pub struct AttachmentStatusReport {
+    /// Which side of the transfer this row belongs to.
+    pub direction: AttachmentDirection,
+    /// Its persisted lifecycle state.
+    pub state: AttachmentState,
 }
 
 /// Wire-safe projection of a `mailboxes` row for CLI / UI display.

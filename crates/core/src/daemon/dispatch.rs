@@ -102,6 +102,9 @@ where
         Command::AttachmentAvailable { attachment_id } => {
             attachment_available_cmd(handle, attachment_id.0).await
         }
+        Command::AttachmentStatus { attachment_id } => {
+            attachment_status_cmd(handle, attachment_id.0).await
+        }
         Command::RetryAttachment { attachment_id } => {
             retry_attachment_cmd(handle, attachment_id.0).await
         }
@@ -2063,6 +2066,59 @@ where
         Some(row) if row.direction == "in" && row.status == "complete"
     );
     Ok(CommandResult::AttachmentAvailability { available })
+}
+
+/// Report what the daemon has persisted about an attachment, either direction.
+///
+/// The sender's completion is written on the `out` row when the peer's
+/// `AttachmentComplete` arrives, but the UI's transfer store is session-scoped,
+/// so after a restart it had no way to learn that and rendered every sent file
+/// as if still in flight (#176). Reads one row; produces no plaintext.
+async fn attachment_status_cmd<S>(
+    handle: Arc<DaemonHandle<S>>,
+    attachment_id: [u8; 16],
+) -> std::result::Result<CommandResult, IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    use crate::daemon::commands::{AttachmentDirection, AttachmentState, AttachmentStatusReport};
+
+    let repo = crate::storage::attachments::AttachmentRepo::new(&handle.pool);
+    let report = match repo.get(&attachment_id).map_err(map_err)? {
+        None => None,
+        Some(row) => {
+            // Only this crate writes these columns; an unrecognized value means
+            // the store is inconsistent with the code, so say so rather than
+            // guessing a state the caller would then act on.
+            let direction = match row.direction.as_str() {
+                "in" => AttachmentDirection::In,
+                "out" => AttachmentDirection::Out,
+                other => {
+                    return Err(map_err(
+                        crate::storage::StorageErrorKind::Other(format!(
+                            "attachment row has unknown direction: {other}"
+                        ))
+                        .into(),
+                    ))
+                }
+            };
+            let state = match row.status.as_str() {
+                "pending" => AttachmentState::Pending,
+                "complete" => AttachmentState::Complete,
+                "failed" => AttachmentState::Failed,
+                other => {
+                    return Err(map_err(
+                        crate::storage::StorageErrorKind::Other(format!(
+                            "attachment row has unknown status: {other}"
+                        ))
+                        .into(),
+                    ))
+                }
+            };
+            Some(AttachmentStatusReport { direction, state })
+        }
+    };
+    Ok(CommandResult::AttachmentStatus { report })
 }
 
 /// Re-arm a failed inbound attachment (#144).
@@ -6048,6 +6104,95 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
+    use crate::daemon::commands::{AttachmentDirection, AttachmentState, AttachmentStatusReport};
+
+    /// #176: a sent attachment's delivered state is persisted on its `out` row,
+    /// but the UI had no way to ask for it — after a restart every sent file
+    /// rendered as if still in flight. `AttachmentStatus` answers for either
+    /// direction, and reports `None` when there is genuinely no record, so
+    /// "unknown" stays distinguishable from "not finished".
+    #[tokio::test]
+    async fn attachment_status_reports_a_completed_outgoing_row() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().to_path_buf();
+
+        let seed = Seed::generate().unwrap();
+        let pool = Arc::new(Pool::open(&data_dir, &seed).unwrap());
+        let identity = IdentityKey::from_seed(&seed).unwrap();
+        let hub: Arc<DeliveryHub<tokio::io::DuplexStream>> =
+            Arc::new(DeliveryHub::new(pool.clone()));
+        let (events_tx, _) = broadcast::channel::<Event>(16);
+        let mut cfg = crate::daemon::config::Config::fallback_for_tests();
+        cfg.data_dir = data_dir.clone();
+        let handle: Arc<DaemonHandle<tokio::io::DuplexStream>> =
+            Arc::new(DaemonHandle::new_with_config(
+                pool.clone(),
+                hub,
+                identity,
+                events_tx,
+                cfg,
+                data_dir.join("config.toml"),
+            ));
+
+        let attachment_id = [0x5au8; 16];
+        let repo = crate::storage::attachments::AttachmentRepo::new(&pool);
+        repo.insert(&attachment_id, "out", b"manifest-bytes", 4, 0)
+            .unwrap();
+
+        // Still in flight: the row exists but has not completed.
+        let pending = execute_command(
+            handle.clone(),
+            Command::AttachmentStatus {
+                attachment_id: crate::daemon::hex::Hex16::from(attachment_id),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            pending,
+            CommandResult::AttachmentStatus {
+                report: Some(AttachmentStatusReport {
+                    direction: AttachmentDirection::Out,
+                    state: AttachmentState::Pending,
+                }),
+            }
+        ));
+
+        // The peer acked: the daemon persisted completion on the out row.
+        repo.set_status(&attachment_id, "complete").unwrap();
+        let complete = execute_command(
+            handle.clone(),
+            Command::AttachmentStatus {
+                attachment_id: crate::daemon::hex::Hex16::from(attachment_id),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            complete,
+            CommandResult::AttachmentStatus {
+                report: Some(AttachmentStatusReport {
+                    direction: AttachmentDirection::Out,
+                    state: AttachmentState::Complete,
+                }),
+            }
+        ));
+
+        // No row at all — genuinely unknown, not "not finished".
+        let unknown = execute_command(
+            handle.clone(),
+            Command::AttachmentStatus {
+                attachment_id: crate::daemon::hex::Hex16::from([0x11u8; 16]),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            unknown,
+            CommandResult::AttachmentStatus { report: None }
+        ));
+    }
+
     // OpenAttachment / SaveAttachment / AttachmentAvailable tests
     // ---------------------------------------------------------------------------
 
