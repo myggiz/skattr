@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <!-- Copyright (C) 2026 Myggiz B.V. -->
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
+  import { invoke, convertFileSrc } from "@tauri-apps/api/core";
   import { save, ask } from "@tauri-apps/plugin-dialog";
   import type { MessageRecord } from "$lib/ipc/types";
   import type { OptimisticMessage, PromotedMessage } from "$lib/stores/conversation";
@@ -151,6 +151,38 @@
       : null,
   );
 
+  /**
+   * Ceiling for the inline image view (#172). The asset protocol streams the
+   * file from disk, but the webview still decodes it into memory, and this app
+   * moves files far larger than is sensible to decode. Above this, the bubble
+   * offers Open/Save only.
+   */
+  const MAX_INLINE_PREVIEW_BYTES = 16 * 1024 * 1024;
+
+  // #172: images only, and only once the file is actually available. The view
+  // is opt-in — clicking View is what produces plaintext, in the same
+  // cache/open directory Open uses, wiped on exit by the #52 guard.
+  let canView = $derived(
+    complete &&
+      (mime?.startsWith("image/") ?? false) &&
+      size !== undefined &&
+      size <= MAX_INLINE_PREVIEW_BYTES,
+  );
+  let previewSrc = $state<string | null>(null);
+
+  async function doView() {
+    if (!aidHex) return;
+    if (previewSrc) {
+      previewSrc = null; // toggle closed; the plaintext stays for the session
+      return;
+    }
+    try {
+      previewSrc = convertFileSrc(await decryptToCache());
+    } catch {
+      toast.show("Couldn't open the attachment — it may be corrupted or unavailable.");
+    }
+  }
+
   // Returns the managed-cache plaintext path, or throws.
   async function decryptToCache(): Promise<string> {
     const resp = await ipcClient.request({ cmd: "open_attachment", attachment_id: aidHex } as any);
@@ -274,6 +306,11 @@
           <button type="button" class="linkish" onclick={revealSaved} aria-label="Show saved file in folder">Show</button>
         {/if}
         <div class="actions">
+          {#if canView}
+            <button type="button" onclick={doView} aria-label={previewSrc ? "Hide image" : "View image"}
+              >{previewSrc ? "Hide" : "View"}</button
+            >
+          {/if}
           <button type="button" onclick={doOpen} aria-label="Open">Open</button>
           <button
             type="button"
@@ -281,6 +318,11 @@
             aria-label={savedTo ? "Save another copy" : "Save decrypted file"}
           >{savedTo ? "Save again…" : "Save…"}</button>
         </div>
+        {#if previewSrc}
+          <!-- #172: streamed from <data_dir>/cache/open via the asset protocol,
+               not copied into the renderer as a data URL. -->
+          <img class="preview" src={previewSrc} alt={filename} />
+        {/if}
       {/if}
       {#if failed}
         <span class="failed">⚠️ {xferState?.reason ?? "Transfer failed"}</span>
@@ -328,6 +370,15 @@
   .fname { font: var(--t-ui); word-break: break-word; }
   .fsize { color: var(--text-muted); font: var(--t-ui); }
   .file-bubble.outgoing .fsize { color: rgba(255, 255, 255, 0.7); }
+  .preview {
+    display: block;
+    margin-top: 0.5rem;
+    max-width: 100%;
+    max-height: 22rem;
+    border-radius: 4px;
+    object-fit: contain;
+  }
+
   .actions { display: flex; gap: var(--s-1); }
   /* #175: state marker. Weight + the check carry the meaning, so it does not
      depend on colour being perceived. */

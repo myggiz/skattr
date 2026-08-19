@@ -239,8 +239,8 @@ into 3.A → 3.B → 3.C → 3.D.
   `attachment_id`, mirrors `delivery.ts`), `lib/attachments.ts` (formatBytes /
   mime helpers / `decodeManifest` wrapper + per-message memo),
   `components/FileAttachmentBubble.svelte` (sender card + delivery status /
-  receiver progress / inline image preview via the Tauri asset protocol /
-  Open-Reveal / failed / decode-unavailable). Wiring: `Composer.svelte` paperclip
+  receiver progress / opt-in inline image view (#172) / Open-Reveal / failed /
+  decode-unavailable). Wiring: `Composer.svelte` paperclip
   → `@tauri-apps/plugin-dialog` picker → pre-send size gate (>100 MiB block,
   10–100 MiB soft-warn; daemon's `MAX_ATTACHMENT_BYTES` stays authoritative) →
   optimistic `Kind::File` bubble + `SendFile`; `MessageBubble.svelte` switches
@@ -248,10 +248,17 @@ into 3.A → 3.B → 3.C → 3.D.
   `Event::Attachment{Progress,Received,Failed}`. **The `Kind::File.manifest` is a
   runtime byte array** (serde_json number array; the ts-rs `string` type is a
   `#[ts(type="string")]` annotation) — the UI passes it straight to the Rust
-  decoder, never base64. Tauri config: `dialog`+`opener` plugins, `protocol-asset`
-  feature, an asset-protocol scope confined at runtime to `<data_dir>/downloads`,
-  `img-src` CSP gains `asset: http://asset.localhost`, minimal
-  `capabilities/default.json`. CI: `pnpm test` (vitest) added as a hard gate to
+  decoder, never base64. Tauri config: `dialog`+`opener` plugins, minimal
+  `capabilities/default.json`. (3.D's asset-protocol preview was **removed** by
+  #19 when attachments became encrypted-at-rest — nothing lands in
+  `download_dir` any more — and reinstated by **#172** pointed at
+  `<data_dir>/cache/open` instead: `protocol-asset` feature, `assetProtocol`
+  enabled, runtime scope confined to that one directory, `img-src` CSP gains
+  `asset: http://asset.localhost`. The view is opt-in per attachment — clicking
+  **View** is what produces plaintext, via the same `OpenAttachment` decrypt,
+  with the same lifetime; images are never decrypted by scrolling past them.
+  Ceiling: `MAX_INLINE_PREVIEW_BYTES` = 16 MiB, above which only Open/Save are
+  offered.) CI: `pnpm test` (vitest) added as a hard gate to
   the `ui` job. Deferred to v1.1 (see limitations): confine
   `open_file`/`reveal_in_folder` to the downloads dir (currently safe-by-context —
   paths are daemon-authored from `AttachmentReceived` + `script-src 'self'`); a

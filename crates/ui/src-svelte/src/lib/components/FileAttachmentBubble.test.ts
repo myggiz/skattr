@@ -5,11 +5,13 @@ import { render, fireEvent } from "@testing-library/svelte";
 import { tick } from "svelte";
 
 // invoke comes from @tauri-apps/api/core (convertFileSrc removed in Task 6).
-const { invokeMock } = vi.hoisted(() => ({
+const { invokeMock, convertFileSrcMock } = vi.hoisted(() => ({
   invokeMock: vi.fn(),
+  convertFileSrcMock: vi.fn((p: string) => `asset://localhost/${p}`),
 }));
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: invokeMock,
+  convertFileSrc: convertFileSrcMock,
 }));
 
 // Mock ipcClient so we can inspect attachment_available and other IPC calls.
@@ -253,6 +255,92 @@ describe("FileAttachmentBubble", () => {
     await findByText("photo.jpg");
     expect(container.querySelector(".progress")).toBeNull();
     expect(container.querySelector(".icon")).not.toBeNull();
+  });
+
+  // #172: viewing a received image in-app. The bytes are encrypted at rest, so
+  // a preview must go through the same explicit decrypt as Open — plaintext
+  // exists only because the user asked, and #52 wipes cache/open on exit.
+  test("an image attachment offers View, which decrypts and renders it inline", async () => {
+    ipcRequestMock.mockImplementation((req: { cmd: string }) => {
+      if (req.cmd === "open_attachment") {
+        return Promise.resolve({
+          resp: "ok",
+          data: { result: "attachment_decrypted", data: { path: "/data/cache/open/ab/photo.jpg" } },
+        });
+      }
+      return Promise.resolve({
+        resp: "ok",
+        data: { result: "attachment_availability", data: { available: false } },
+      });
+    });
+
+    const { container, findByText, getByRole } = render(FileAttachmentBubble, {
+      props: { record: fileRecord("incoming") },
+    });
+    await findByText("photo.jpg");
+    markAvailable(AID, { filename: "photo.jpg", mime: "image/jpeg", size: 2048 });
+    await tick();
+
+    // Nothing decrypted yet.
+    expect(container.querySelector("img")).toBeNull();
+
+    await fireEvent.click(getByRole("button", { name: /view/i }));
+    await tick();
+    await tick();
+
+    const img = container.querySelector("img");
+    expect(img).not.toBeNull();
+    expect(img?.getAttribute("src")).toContain("/data/cache/open/ab/photo.jpg");
+    expect(
+      ipcRequestMock.mock.calls.some((c) => (c[0] as { cmd: string }).cmd === "open_attachment"),
+    ).toBe(true);
+  });
+
+  test("a non-image attachment offers no View action", async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "decode_attachment_manifest") {
+        return Promise.resolve({
+          attachment_id: AID,
+          filename: "notes.pdf",
+          mime: "application/pdf",
+          total_size: 2048,
+        });
+      }
+      return Promise.resolve(null);
+    });
+
+    const { findByText, queryByRole } = render(FileAttachmentBubble, {
+      props: { record: fileRecord("incoming") },
+    });
+    await findByText("notes.pdf");
+    markAvailable(AID, { filename: "notes.pdf", mime: "application/pdf", size: 2048 });
+    await tick();
+
+    expect(queryByRole("button", { name: /view/i })).toBeNull();
+  });
+
+  test("an image over the inline-preview ceiling offers no View action", async () => {
+    const huge = 64 * 1024 * 1024;
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "decode_attachment_manifest") {
+        return Promise.resolve({
+          attachment_id: AID,
+          filename: "huge.jpg",
+          mime: "image/jpeg",
+          total_size: huge,
+        });
+      }
+      return Promise.resolve(null);
+    });
+
+    const { findByText, queryByRole } = render(FileAttachmentBubble, {
+      props: { record: fileRecord("incoming") },
+    });
+    await findByText("huge.jpg");
+    markAvailable(AID, { filename: "huge.jpg", mime: "image/jpeg", size: huge });
+    await tick();
+
+    expect(queryByRole("button", { name: /view/i })).toBeNull();
   });
 
   test("decode failure shows the unavailable card", async () => {
