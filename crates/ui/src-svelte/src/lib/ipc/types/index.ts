@@ -6,6 +6,9 @@
 // This file is hand-maintained: add a new export line here whenever a new
 // type is added to the codegen set.
 
+export * from "./AttachmentDirection";
+export * from "./AttachmentState";
+export * from "./AttachmentStatusReport";
 export * from "./Command";
 export * from "./CommandResult";
 export * from "./ConfigPatch";

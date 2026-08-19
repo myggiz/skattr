@@ -5,7 +5,13 @@
   import { save, ask } from "@tauri-apps/plugin-dialog";
   import type { MessageRecord } from "$lib/ipc/types";
   import type { OptimisticMessage, PromotedMessage } from "$lib/stores/conversation";
-  import { attachments, applyManifest, markAvailable, markRetrying } from "$lib/stores/attachments";
+  import {
+    attachments,
+    applyManifest,
+    markAvailable,
+    markDelivered,
+    markRetrying,
+  } from "$lib/stores/attachments";
   import { delivery, deliveryToIconStatus, hex16ToString } from "$lib/stores/delivery";
   import { decodeManifestMemo, mimeIconName, formatBytes } from "$lib/attachments";
   import type { ManifestSummary } from "$lib/attachments";
@@ -59,6 +65,27 @@
   // Rehydrate after restart: the transfer store is session-scoped. Ask the
   // daemon whether this completed attachment is decryptable and, if so, enable
   // Open/Save. No plaintext is produced by this query.
+  // Sender side (#176): the daemon persisted the peer's ack on the out row.
+  // Ask for it once, so a delivered attachment still reads as delivered after
+  // a restart instead of showing the in-flight clock forever.
+  $effect(() => {
+    if (!isOutgoing || !aidHex || sendComplete) return;
+    const aid = aidHex;
+    ipcClient
+      .request({ cmd: "attachment_status", attachment_id: aid } as any)
+      .then((resp) => {
+        if (resp.resp !== "ok") return;
+        const result = resp.data;
+        if (
+          result.result === "attachment_status" &&
+          result.data.report?.state === "Complete"
+        ) {
+          markDelivered(aid);
+        }
+      })
+      .catch(() => {});
+  });
+
   $effect(() => {
     if (isOutgoing || !summary || xferState?.available) return;
     const s = summary;
@@ -115,8 +142,13 @@
     return s === "delivered" ? "sent" : s;
   }
 
+  // No delivery record at all means we do not know — which is not the same as
+  // "queued". Render nothing rather than a clock that implies work in progress
+  // (#176); `deliveryToIconStatus` defaults undefined to "pending".
   let deliveryStatus = $derived(
-    isOutgoing ? capFileDelivery(deliveryToIconStatus($delivery.get(hex16ToString(record.message_id)))) : null,
+    isOutgoing && $delivery.has(hex16ToString(record.message_id))
+      ? capFileDelivery(deliveryToIconStatus($delivery.get(hex16ToString(record.message_id))))
+      : null,
   );
 
   // Returns the managed-cache plaintext path, or throws.

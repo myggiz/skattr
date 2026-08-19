@@ -123,6 +123,16 @@ export function markRetrying(aidHex: string): void {
   }));
 }
 
+/**
+ * Record a completion the daemon already persisted, rather than one observed
+ * live. Used by the sender's post-restart rehydration (#176): the transfer
+ * store is session-scoped, so a delivered attachment has no state after a
+ * restart even though the daemon's `out` row says it completed.
+ */
+export function markDelivered(aidHex: string): void {
+  patch(aidHex, (prev) => ({ ...prev, status: "complete" }));
+}
+
 export function attachmentFor(aidHex: string): AttachmentState | undefined {
   return get(attachments).get(aidHex);
 }

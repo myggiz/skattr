@@ -52,6 +52,7 @@ fn command_variant_tag(c: &Command) -> &'static str {
         Command::OpenAttachment { .. } => "open_attachment",
         Command::SaveAttachment { .. } => "save_attachment",
         Command::AttachmentAvailable { .. } => "attachment_available",
+        Command::AttachmentStatus { .. } => "attachment_status",
         Command::RetryAttachment { .. } => "retry_attachment",
     }
 }
@@ -82,6 +83,7 @@ fn command_result_variant_tag(r: &CommandResult) -> &'static str {
         CommandResult::Subscribed => "subscribed",
         CommandResult::AttachmentDecrypted { .. } => "attachment_decrypted",
         CommandResult::AttachmentAvailability { .. } => "attachment_availability",
+        CommandResult::AttachmentStatus { .. } => "attachment_status",
         CommandResult::ContactRemoved { .. } => "contact_removed",
     }
 }

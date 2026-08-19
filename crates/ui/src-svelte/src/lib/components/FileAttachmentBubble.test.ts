@@ -243,6 +243,10 @@ describe("FileAttachmentBubble", () => {
   });
 
   test("outgoing bubble shows a delivery icon and no progress bar", async () => {
+    // Needs an actual delivery record: with none at all the bubble now
+    // deliberately renders no icon, because "we have no record" must not look
+    // like "in flight" (#176).
+    recordDeliveryStatus("cd".repeat(16), "Queued");
     const { container, findByText } = render(FileAttachmentBubble, {
       props: { record: fileRecord("outgoing") },
     });
@@ -366,6 +370,63 @@ describe("FileAttachmentBubble", () => {
     expect(container.querySelector(".icon")).not.toBeNull();
     expect(container.querySelector(".icon.delivered")).toBeNull();
     expect(container.querySelector(".icon.sent")).not.toBeNull();
+  });
+
+  // #176: the transfer store is session-scoped, so after a restart a sent
+  // attachment has no in-memory state at all. The daemon persisted the
+  // completion on the out row; the bubble must ask for it rather than
+  // rendering the in-flight clock forever.
+  test("post-restart outgoing bubble rehydrates Delivered from the daemon", async () => {
+    ipcRequestMock.mockImplementation((req: { cmd: string }) => {
+      if (req.cmd === "attachment_status") {
+        return Promise.resolve({
+          resp: "ok",
+          data: {
+            result: "attachment_status",
+            data: { report: { direction: "Out", state: "Complete" } },
+          },
+        });
+      }
+      return Promise.resolve({
+        resp: "ok",
+        data: { result: "attachment_availability", data: { available: false } },
+      });
+    });
+
+    const { findByText } = render(FileAttachmentBubble, {
+      props: { record: fileRecord("outgoing") },
+    });
+
+    expect(await findByText("Delivered")).toBeTruthy();
+  });
+
+  // #176: "we have no record" must not animate as though something were still
+  // happening. With no persisted row and no delivery status, the bubble
+  // asserts nothing.
+  test("an outgoing bubble with no record shows neither Delivered nor an in-flight icon", async () => {
+    ipcRequestMock.mockImplementation((req: { cmd: string }) => {
+      if (req.cmd === "attachment_status") {
+        return Promise.resolve({
+          resp: "ok",
+          data: { result: "attachment_status", data: { report: null } },
+        });
+      }
+      return Promise.resolve({
+        resp: "ok",
+        data: { result: "attachment_availability", data: { available: false } },
+      });
+    });
+
+    const { container, findByText } = render(FileAttachmentBubble, {
+      props: { record: fileRecord("outgoing") },
+    });
+    await findByText("photo.jpg");
+    await tick();
+    await tick();
+
+    expect(container.textContent).not.toContain("Delivered");
+    expect(container.querySelector(".progress")).toBeNull();
+    expect(container.querySelector(".icon")).toBeNull();
   });
 
   test("a failed transfer offers Retry, which re-arms it (#144)", async () => {
