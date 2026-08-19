@@ -101,10 +101,15 @@ disk read.
 - `skattr.sqlite.age` under `HKDF(seed, "skattr-storage-v1")`.
 - Received attachment chunks under `<data_dir>/attachments/<hex id>/<index>` are
   stored as AEAD ciphertext (keys live inside the MLS-protected manifest).
-  Plaintext is produced only on an explicit *Open* or *Save* command: *Open*
-  decrypts into `<data_dir>/cache/open/`, which the app makes a *best-effort*
-  attempt to wipe on start and clean shutdown; *Save* decrypts to a user-chosen
-  path. The wipe is `remove_dir_all` with failures logged (not fatal): a delete
+  Plaintext is produced only on an explicit *Open*, *View*, or *Save* command:
+  *Open* and *View* decrypt into `<data_dir>/cache/open/`, which the app makes a
+  *best-effort* attempt to wipe on start and clean shutdown; *Save* decrypts to a
+  user-chosen path. *View* (the in-app image preview, #172) streams that same
+  cache copy into the webview over the Tauri asset protocol, whose scope is
+  confined at runtime to that one directory. It is deliberately opt-in per
+  attachment — images are never decrypted merely by scrolling past them — so the
+  plaintext lifetime is identical to *Open*'s and no new one is introduced.
+  The wipe is `remove_dir_all` with failures logged (not fatal): a delete
   failure — or a crash / kill that skips the clean-shutdown path — can leave
   decrypted attachment plaintext in the open-cache until the next successful
   wipe.

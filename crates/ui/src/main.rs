@@ -415,6 +415,18 @@ fn main() {
             full_cfg.data_dir = data_dir.clone();
             let ui_cfg = full_cfg.ui.clone();
 
+            // #172: the inline image view streams plaintext from the managed
+            // decrypt cache over the asset protocol. Scope the protocol to that
+            // one directory — nothing else on disk is reachable from the
+            // webview. Created eagerly so the grant targets an existing path.
+            // Its contents are covered by the existing open-cache wipe
+            // (best-effort, on start and clean shutdown — see THREAT_MODEL).
+            let open_cache = data_dir.join("cache").join("open");
+            std::fs::create_dir_all(&open_cache).ok();
+            app.asset_protocol_scope()
+                .allow_directory(&open_cache, true)
+                .map_err(|e| format!("asset scope: {e}"))?;
+
             *state.data_dir.write() = Some(data_dir);
 
             // Initialise the close-to-tray sentinel from the persisted value.
