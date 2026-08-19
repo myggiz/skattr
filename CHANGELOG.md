@@ -4,13 +4,53 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — targeting v0.1.19
+## [Unreleased] — targeting v0.1.20
 
 _In-progress patch line. The version is bumped per build for tracking; entries
 accumulate here and are stamped with a date when a build is cut._
 
+### Added
+
+- **You can now look at a picture someone sent you, inside Skattr** (#172):
+  receiving an image worked, but there was no way to actually see it — you had
+  to save it somewhere and open it in another app, and on some systems opening
+  it did not work at all. Image attachments now offer a **View** button that
+  shows the picture in the conversation. Viewing is a deliberate click, not
+  automatic: files you receive stay encrypted on disk, and scrolling past an
+  image never decrypts it. Only the image you asked to see is decrypted, into
+  the same temporary place the Open button already used, which is cleared when
+  the app shuts down. Very large images (over 16 MB) still offer Save and Open
+  only.
+- **A name you give someone when inviting them now sticks** (#174): the invite
+  screen let you type a name for the person you were inviting, then threw it
+  away — once they accepted, they appeared under their raw identity instead of
+  the name you chose. The name you type is now the name they get.
+
 ### Fixed
 
+- **A file you sent no longer looks stuck after it has arrived** (#177): the
+  bubble for a file you had just sent kept showing the in-flight clock even
+  after the other side confirmed it arrived, and only corrected itself later —
+  often only when you clicked the contact. It now flips to Delivered as soon as
+  the confirmation arrives.
+- **Files you sent no longer look unconfirmed after restarting the app**
+  (#176): every attachment you had ever sent went back to showing as though it
+  were still being delivered once you restarted, no matter how successfully it
+  had arrived — so old conversations could not be trusted about what had
+  actually gone through. The app now asks for what it already recorded, and a
+  delivered file still reads as delivered. Where the outcome genuinely is not
+  known, the bubble now shows nothing rather than pretending something is still
+  in progress.
+- **Saving a file now leaves a visible sign that it worked** (#175): after
+  saving an attachment there was only a brief message that disappeared,
+  leaving nothing to say the file had been saved or where it went. The bubble
+  now keeps a "✓ Saved" marker with a **Show** button that opens the folder
+  you saved it to, and the save button reads "Save again…" so making a second
+  copy stays available.
+- **Clicking a contact you are already reading now closes the conversation**
+  (#178): there was no way to put the conversation away — once you opened one,
+  something was always on screen. Clicking the contact whose conversation is
+  open now closes it.
 - **The contact list no longer shows what people said to you** (#173): each
   contact row displayed the text of their last message and how long ago it
   arrived. That strip is on screen the whole time you have the app open, for
