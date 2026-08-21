@@ -371,6 +371,15 @@ pub trait InboundDispatch: Send + Sync + 'static {
 
     /// Emit `Event::AttachmentFailed`. Default no-op.
     fn attachment_failed(&self, _attachment_id: [u8; 16], _reason: &str) {}
+
+    /// Record that the peer ACKed one of our sent messages: persist
+    /// `delivered_at` and emit `Event::DeliveryStatusChanged{Delivered}` (#200).
+    ///
+    /// The send path only waits 2s for an ACK before reporting `Queued`, so for
+    /// anything but an already-live connection this is the *only* signal the
+    /// message arrived — and the only one that survives a restart.
+    /// Default no-op.
+    fn message_delivered(&self, _peer: PublicKey, _message_id: MessageId) {}
 }
 
 /// Per-peer actor. Owns an `Option<AuthenticatedConnection<S>>`, a
@@ -947,7 +956,20 @@ where
                             let _ = tx.send(Ok(()));
                         }
                         let ob = Outbox::new(&pool);
-                        let _ = ob.ack(&peer, mid);
+                        // The outbox row is peer-scoped, so its removal is the
+                        // proof that THIS peer had an outstanding message from
+                        // us. Only then is the ACK a delivery receipt — else a
+                        // peer could ACK an id of its choosing and have us
+                        // record a delivery that never happened.
+                        match ob.ack(&peer, mid) {
+                            Ok(true) => {
+                                if let Some(d) = inbound.as_ref() {
+                                    d.message_delivered(peer, mid);
+                                }
+                            }
+                            Ok(false) => {}
+                            Err(e) => tracing::warn!(err = %e, "ack: outbox delete failed"),
+                        }
                         last_traffic = tokio::time::Instant::now();
                     }
                     Ok(Some(Frame::Bye)) => break,

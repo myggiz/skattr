@@ -738,6 +738,10 @@ where
         mls_generation,
         ts_daemon_recv,
         crate::daemon::commands::Direction::Outgoing,
+        // Just persisted; an ACK cannot have been recorded yet. The 2s fast
+        // path below reports the immediate outcome, and a later ACK arrives as
+        // Event::DeliveryStatusChanged (#200).
+        None,
     );
 
     Ok(CommandResult::MessageSent {
@@ -905,6 +909,7 @@ where
                 u64::try_from(row.mls_generation).unwrap_or(0),
                 row.ts_daemon_recv,
                 direction,
+                row.delivered_at,
             ))
         })
         .collect();
@@ -1016,6 +1021,7 @@ where
                     u64::try_from(h.message.mls_generation).unwrap_or(0),
                     h.message.ts_daemon_recv,
                     direction,
+                    h.message.delivered_at,
                 ),
                 bm25: h.bm25,
                 snippet: h.snippet,
@@ -1169,6 +1175,7 @@ where
             u64::try_from(row.mls_generation).unwrap_or(0),
             row.ts_daemon_recv,
             direction,
+            row.delivered_at,
         ));
     }
 

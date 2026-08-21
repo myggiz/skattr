@@ -126,6 +126,48 @@ async fn run_exchange_script(ready_a: &Ready, ready_b: &Ready) {
         Duration::from_secs(30),
     )
     .await;
+
+    // --- #200: the ACK must be *persisted*, not just awaited ---
+    //
+    // `SendMessage` only waits 2s for the ACK before reporting `Queued`, so a
+    // synchronous result proves nothing about durable state. Before this,
+    // `mark_delivered` had no caller at all and `delivered_at` was NULL for
+    // every message ever sent — which is invisible until you reload history,
+    // and is exactly what a field test found. Assert against the history
+    // projection, which is what a restarted UI reads.
+    let mut hist_a = IpcClient::connect(&ready_a.ipc_socket).await.unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let delivered_at = loop {
+        let records = match hist_a
+            .execute(Command::RecentMessages {
+                contact: Some(bob_pubkey),
+                limit: 50,
+                before_id: None,
+                paged: false,
+            })
+            .await
+            .unwrap()
+        {
+            CommandResult::Messages(v) => v,
+            other => panic!("expected Messages, got {other:?}"),
+        };
+        let sent = records
+            .iter()
+            .find(|r| matches!(&r.kind, Kind::Text { body } if body == "hello-bob"))
+            .expect("Alice's own sent message is in her history");
+        if let Some(t) = sent.delivered_at {
+            break t;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "ACK never persisted: delivered_at still NULL 30 s after Bob received the message"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    assert!(
+        delivered_at > 0,
+        "delivered_at must carry a real timestamp, got {delivered_at}"
+    );
 }
 
 // ---------------------------------------------------------------------------

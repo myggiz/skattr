@@ -347,6 +347,7 @@ impl DaemonInbound {
                     *mls_generation,
                     *ts_daemon_recv,
                     Direction::Incoming,
+                    None, // sender-side concept; never set on an incoming row
                 );
                 // Failure to deliver to an event subscriber is non-fatal — no
                 // receivers is expected on startup before the CLI subscribes.
@@ -904,6 +905,32 @@ impl InboundDispatch for DaemonInbound {
             attachment_id: crate::daemon::hex::Hex16::from(attachment_id),
             received,
             total,
+        });
+    }
+
+    fn message_delivered(&self, _peer: PublicKey, message_id: crate::envelope::MessageId) {
+        // Only rows we sent may be marked delivered (see the repo method).
+        let Some(identity) = self.identity.read().ok().and_then(|g| g.clone()) else {
+            return;
+        };
+        let repo = crate::storage::messages::MessageRepo::new(&self.pool);
+        match repo.mark_delivered_by_envelope_id(
+            &message_id.0,
+            &identity.public().0,
+            crate::daemon::clock::now_unix_seconds(),
+        ) {
+            // Nothing updated: the ACK is for a message we no longer hold, or
+            // one already marked. Not an error, and not worth an event.
+            Ok(false) => return,
+            Ok(true) => {}
+            Err(e) => {
+                tracing::warn!(err = %e, "ack: failed to persist delivered_at");
+                return;
+            }
+        }
+        let _ = self.events_tx.send(Event::DeliveryStatusChanged {
+            message: message_id,
+            status: crate::daemon::events::DeliveryStatus::Delivered,
         });
     }
 

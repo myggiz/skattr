@@ -39,8 +39,13 @@ pub enum IpcClientError {
     #[error("ipc server error: {0:?}")]
     Server(IpcError),
     /// Expected `Event` frame but received something else.
+    ///
+    /// Boxed: `IpcResponse` is 192 bytes (it carries a `CommandResult`), which
+    /// made every `Result<_, IpcClientError>` in this module that large and
+    /// tripped `clippy::result_large_err` on its 128-byte threshold. The error
+    /// path is cold, so the indirection costs nothing that matters.
     #[error("ipc protocol: expected Event, got {0:?}")]
-    UnexpectedFrame(IpcResponse),
+    UnexpectedFrame(Box<IpcResponse>),
 }
 
 impl From<CodecError> for IpcClientError {
@@ -87,7 +92,7 @@ where
         let result = match resp {
             IpcResponse::Ok(r) => Ok(r),
             IpcResponse::Err(e) => Err(IpcClientError::Server(e)),
-            other => Err(IpcClientError::UnexpectedFrame(other)),
+            other => Err(IpcClientError::UnexpectedFrame(Box::new(other))),
         };
         // Drain the `Bye` best-effort; don't fail the call if the
         // server already hung up.
@@ -108,7 +113,7 @@ where
                 Ok(())
             }
             IpcResponse::Err(e) => Err(IpcClientError::Server(e)),
-            other => Err(IpcClientError::UnexpectedFrame(other)),
+            other => Err(IpcClientError::UnexpectedFrame(Box::new(other))),
         }
     }
 
@@ -117,18 +122,19 @@ where
     /// anything other than `Event(..)`.
     pub async fn next_event(&mut self) -> std::result::Result<Event, IpcClientError> {
         if !self.subscribed {
-            return Err(IpcClientError::UnexpectedFrame(IpcResponse::Bye));
+            return Err(IpcClientError::UnexpectedFrame(Box::new(IpcResponse::Bye)));
         }
         match read_frame::<_, IpcResponse>(&mut self.stream).await? {
             IpcResponse::Event(e) => Ok(e),
-            IpcResponse::Bye => Err(IpcClientError::UnexpectedFrame(IpcResponse::Bye)),
-            other => Err(IpcClientError::UnexpectedFrame(other)),
+            IpcResponse::Bye => Err(IpcClientError::UnexpectedFrame(Box::new(IpcResponse::Bye))),
+            other => Err(IpcClientError::UnexpectedFrame(Box::new(other))),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use crate::daemon::commands::{Command, CommandResult};
     use crate::daemon::events::Event;

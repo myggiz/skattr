@@ -2302,6 +2302,7 @@ mod tests {
             mls_generation: 0,
             ts_daemon_recv: 1_700_000_000,
             ts_envelope: 1_699_999_999,
+            delivered_at: None,
         }];
         let out = render_messages_human(&rows, &AvailMap::new());
         assert!(out.contains("hello"));
@@ -2461,6 +2462,7 @@ mod tests {
             mls_generation: 0,
             ts_daemon_recv: 1_700_000_000,
             ts_envelope: 1_699_999_999,
+            delivered_at: None,
         }];
         let mut avail = AvailMap::new();
         avail.insert([0xAB; 16], true);
@@ -2506,6 +2508,7 @@ mod tests {
             mls_generation: 1,
             ts_daemon_recv: 1_700_000_000,
             ts_envelope: 1_700_000_000,
+            delivered_at: None,
         };
         let line = render_export_text_line(&rec, &AvailMap::new());
         assert!(line.starts_with('['));
@@ -2544,6 +2547,7 @@ mod tests {
             mls_generation: 7,
             ts_daemon_recv: 1_700_000_000,
             ts_envelope: 1_700_000_000,
+            delivered_at: None,
         };
         let hit = SearchHitRecord {
             record: rec,
@@ -2581,6 +2585,7 @@ mod tests {
             mls_generation: 11,
             ts_daemon_recv: 1_700_000_900,
             ts_envelope: 1_700_000_900,
+            delivered_at: None,
         };
         // Per-row formatter must match exactly what a one-shot dump of a single row produces.
         let line = render_message_record_human(&rec, &AvailMap::new());
@@ -2605,6 +2610,7 @@ mod tests {
             mls_generation: 0,
             ts_daemon_recv: 1_700_000_000,
             ts_envelope: 1_699_999_999,
+            delivered_at: None,
         }
     }
 
@@ -2671,6 +2677,7 @@ mod tests {
             mls_generation: 0,
             ts_daemon_recv: 1_700_000_000,
             ts_envelope: 1_699_999_999,
+            delivered_at: None,
         }];
         assert!(resolve_attachment_id(&rows, "abab", 500).is_err());
     }
