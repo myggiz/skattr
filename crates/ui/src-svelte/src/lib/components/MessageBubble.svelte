@@ -72,7 +72,9 @@
     margin-top: var(--s-1);
   }
   .ts { color: var(--text-muted); font: var(--t-ui); }
-  .bubble.outgoing .ts { color: rgba(255, 255, 255, 0.7); }
+  /* #197: a hard-coded white at 70% was 1.69:1 on the accent fill. Inherit the
+     bubble foreground so it tracks the theme, and keep it above 3:1. */
+  .bubble.outgoing .ts { color: currentColor; opacity: 0.75; }
   .focus-highlight {
     outline: 2px solid var(--accent, #6c6);
     transition: outline 0.6s;

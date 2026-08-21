@@ -22,14 +22,14 @@
     return pk.length > 8 ? pk.slice(0, 8) : pk;
   }
 
-  // #173: "connected" means the MLS group is established and this conversation
+  // #173/#195: the MLS group is established and this conversation
   // is usable — NOT that the peer is reachable right now. No presence signal
   // exists in ContactSummary today.
   //
   // Tested against "active" rather than `pstate === null`: pendingState() only
   // reports on `pending_join`, so its null case also covers `corrupt` and a
   // missing group_state, which must not read as connected.
-  let connected = $derived(summary.group_state === "active");
+  let established = $derived(summary.group_state === "active");
 
   // #173: something unread, with no count. "7 unread" is itself a weak activity
   // signal; the row only needs to say "there is something new here".
@@ -38,7 +38,7 @@
 
 <div class="row-wrap">
   <button class="row" class:active class:pending={pstate !== null} onclick={onclick}>
-    <div class="title" class:connected>
+    <div class="title" class:established>
       {summary.nickname ?? shortHash(summary.pubkey)}
       {#if pstate === "connecting"}
         <span class="pending-badge" title="First contact still connecting">Connecting…</span>
@@ -107,10 +107,13 @@
   }
   .row:hover, .row.active { background: var(--bg-elevated); }
   .title { font-weight: 500; display: flex; align-items: center; gap: 4px; }
-  /* #173: an established (MLS-active) contact reads as connected. Mutually
-     exclusive with `.row.pending` by construction — pendingState() only fires
-     on `pending_join`, and this only on `active`. */
-  .title.connected { font-weight: 700; color: var(--success, #2e9e4f); }
+  /* #173/#195: an established (MLS-active) contact reads as ready to message.
+     Weight only — the green this used to carry read as an online indicator,
+     and Skattr deliberately has no presence signal (#196), so nothing in the
+     list may look like one. Mutually exclusive with `.row.pending` by
+     construction: pendingState() only fires on `pending_join`, this only on
+     `active`. */
+  .title.established { font-weight: 700; }
   .mute-icon { color: var(--text-muted, #888); font-size: 0.85em; }
   /* #101: a pending (unconfirmed) first contact is de-emphasised so it never
      reads as a normal, successfully-added contact. */

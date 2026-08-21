@@ -24,6 +24,10 @@
   --text-muted: #9aa0a6;
   --accent: #7aa2f7;
   --danger: #ef4444;
+  /* #197: --accent is also a FILL (sent bubbles, buttons), so foregrounds drawn
+     on it need their own value — --danger on an accent fill is 1.3:1. This is
+     the red to use on top of --accent, not on the page background. */
+  --danger-on-accent: #7f1d1d;
 
   --s-1: 4px;
   --s-2: 8px;
@@ -42,6 +46,11 @@
     --text: #1a1d21;
     --text-muted: #5f6368;
     --danger: #dc2626;
+    /* #197: the dark-tuned #7aa2f7 was never overridden here, so every
+       accent-filled surface carried a near-white foreground at 2.4:1 —
+       sent-message text included. Darkened until --bg on it clears 4.5:1. */
+    --accent: #3b6fd4;
+    --danger-on-accent: #fecaca;
   }
 }
 

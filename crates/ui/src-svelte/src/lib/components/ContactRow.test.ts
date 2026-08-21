@@ -92,27 +92,27 @@ describe("ContactRow privacy (#173)", () => {
   });
 });
 
-describe("ContactRow connected styling (#173)", () => {
-  it("marks an active contact as connected", () => {
+describe("ContactRow established styling (#173, #195)", () => {
+  it("marks an active contact as established", () => {
     const { container } = render(ContactRow, {
       summary: c({ group_state: "active" }),
     });
-    expect(container.querySelector(".title.connected")).not.toBeNull();
+    expect(container.querySelector(".title.established")).not.toBeNull();
   });
 
-  it("does not mark a pending contact as connected", () => {
+  it("does not mark a pending contact as established", () => {
     const { container } = render(ContactRow, {
       summary: c({ group_state: "pending_join" }),
     });
-    expect(container.querySelector(".title.connected")).toBeNull();
+    expect(container.querySelector(".title.established")).toBeNull();
   });
 
-  it("does not mark a corrupt contact as connected", () => {
+  it("does not mark a corrupt contact as established", () => {
     // Reusing pendingState() === null would have wrongly painted this green.
     const { container } = render(ContactRow, {
       summary: c({ group_state: "corrupt" }),
     });
-    expect(container.querySelector(".title.connected")).toBeNull();
+    expect(container.querySelector(".title.established")).toBeNull();
   });
 
   it("never renders a row as both pending and connected", () => {
@@ -123,7 +123,7 @@ describe("ContactRow connected styling (#173)", () => {
       });
       const both =
         container.querySelector(".row.pending") !== null &&
-        container.querySelector(".title.connected") !== null;
+        container.querySelector(".title.established") !== null;
       expect(both).toBe(false);
     }
   });

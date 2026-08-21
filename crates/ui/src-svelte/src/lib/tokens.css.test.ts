@@ -28,6 +28,7 @@ test("tokens.css contains all required custom properties", () => {
     "--text-muted",
     "--accent",
     "--danger",
+    "--danger-on-accent",
     "--s-1",
     "--s-2",
     "--s-3",

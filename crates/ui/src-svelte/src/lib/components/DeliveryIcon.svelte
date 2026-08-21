@@ -39,8 +39,13 @@
     width: 14px;
     height: 14px;
   }
-  .pending  :global(svg) { color: var(--text-muted); }
-  .sent     :global(svg) { color: var(--text-muted); }
-  .delivered :global(svg) { color: var(--accent); }
-  .failed   :global(svg) { color: var(--danger); }
+  /* #197: this icon is only ever rendered inside an accent-filled outgoing
+     bubble, so page-background tokens do not apply — --text-muted was 1.05:1
+     there and --accent (delivered) was 1.00:1, i.e. invisible. Inherit the
+     bubble's own foreground instead and let the icon SHAPE carry the state,
+     which also keeps the distinction off colour alone. */
+  .pending  :global(svg) { color: currentColor; opacity: 0.8; }
+  .sent     :global(svg) { color: currentColor; opacity: 0.8; }
+  .delivered :global(svg) { color: currentColor; }
+  .failed   :global(svg) { color: var(--danger-on-accent); }
 </style>
