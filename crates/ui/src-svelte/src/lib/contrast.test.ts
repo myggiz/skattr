@@ -75,3 +75,60 @@ for (const theme of ["dark", "light"] as const) {
     expect(ratio).toBeGreaterThanOrEqual(3);
   });
 }
+
+/**
+ * Composite a foreground over a backdrop at `alpha`, the way CSS `opacity`
+ * does. Token-level contrast is not the whole story: a rule that dims an
+ * inherited colour toward an accent fill can fail even when both tokens are
+ * fine, which is exactly what a review caught on the timestamp here.
+ */
+function composite(fg: string, bg: string, alpha: number): string {
+  const parse = (h: string) => [0, 2, 4].map((i) => parseInt(h.replace("#", "").slice(i, i + 2), 16));
+  const [f, b] = [parse(fg), parse(bg)];
+  const mix = f.map((c, i) => Math.round(c * alpha + b[i] * (1 - alpha)));
+  return `#${mix.map((c) => c.toString(16).padStart(2, "0")).join("")}`;
+}
+
+/** Read a component's stylesheet so the assertions track the real rules. */
+function component(name: string): string {
+  return fsModule.readFileSync(
+    new URL(`components/${name}`, import.meta.url).pathname,
+    "utf-8",
+  );
+}
+
+for (const theme of ["dark", "light"] as const) {
+  test(`${theme}: the outgoing-bubble timestamp meets text contrast (4.5:1)`, () => {
+    // `.bubble.outgoing` sets `color: var(--bg)`, and `.ts` inherits it.
+    // A timestamp is text, so WCAG 1.4.3 applies — 3:1 is not enough.
+    const css = component("MessageBubble.svelte");
+    const rule = css.match(/\.bubble\.outgoing \.ts \{[^}]*\}/)?.[0] ?? "";
+    const alpha = Number(rule.match(/opacity:\s*([0-9.]+)/)?.[1] ?? 1);
+    const accent = token("--accent", theme);
+    const ratio = contrast(accent, composite(token("--bg", theme), accent, alpha));
+    expect(ratio, `timestamp at opacity ${alpha} in ${theme} is ${ratio.toFixed(2)}:1`).toBeGreaterThanOrEqual(4.5);
+  });
+
+  test(`${theme}: delivery icons meet non-text contrast (3:1)`, () => {
+    // Icons are non-text UI components (WCAG 1.4.11), so 3:1 applies. They may
+    // legitimately be dimmed relative to the delivered state, but not below it.
+    const css = component("DeliveryIcon.svelte");
+    const accent = token("--accent", theme);
+    for (const state of ["pending", "sent", "delivered"]) {
+      const rule = css.match(new RegExp(`\\.${state}\\s+:global\\(svg\\) \\{[^}]*\\}`))?.[0] ?? "";
+      const alpha = Number(rule.match(/opacity:\s*([0-9.]+)/)?.[1] ?? 1);
+      const ratio = contrast(accent, composite(token("--bg", theme), accent, alpha));
+      expect(ratio, `${state} icon at opacity ${alpha} in ${theme} is ${ratio.toFixed(2)}:1`).toBeGreaterThanOrEqual(3);
+    }
+  });
+
+  test(`${theme}: search-result highlight meets text contrast (4.5:1)`, () => {
+    // The one accent fill that does not inherit --bg: it sets its own colour.
+    const css = component("SearchPalette.svelte");
+    const rule = css.match(/\.snippet :global\(mark\) \{[^}]*\}/)?.[0] ?? "";
+    expect(rule, "mark rule not found").not.toBe("");
+    const fgToken = rule.match(/color:\s*var\((--[a-z-]+)/)?.[1] ?? "--text";
+    const ratio = contrast(token("--accent", theme), token(fgToken, theme));
+    expect(ratio, `mark uses ${fgToken}: ${ratio.toFixed(2)}:1 in ${theme}`).toBeGreaterThanOrEqual(4.5);
+  });
+}

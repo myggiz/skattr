@@ -220,7 +220,7 @@
     max-width: 60vw;
     margin: 10vh auto;
     background: var(--bg-elevated, #1a1a1a);
-    color: var(--text, #ddd);
+    color: var(--bg, #ddd);
     padding: var(--s-2, 12px);
     border-radius: 8px;
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
@@ -233,7 +233,7 @@
   input[type="text"] {
     width: 100%;
     background: var(--bg, #111);
-    color: var(--text, #ddd);
+    color: var(--bg, #ddd);
     border: 1px solid var(--border, #2a2a2a);
     padding: var(--s-1, 6px) var(--s-2, 12px);
     border-radius: 4px;
@@ -272,7 +272,11 @@
   }
   .snippet :global(mark) {
     background: var(--accent, #5b5fc7);
-    color: var(--text, #ddd);
+    /* #197: --accent is a fill, so this needs a foreground chosen against it,
+       not the page-background text colour. --text on the darkened light-theme
+       accent is 3.55:1, below the 4.5:1 this snippet text needs; --bg is what
+       every other accent-filled surface uses and gives 4.56:1 / 7.61:1. */
+    color: var(--bg, #ddd);
     border-radius: 2px;
     padding: 0 2px;
   }
