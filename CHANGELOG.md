@@ -4,10 +4,33 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — targeting v0.1.20
+## [Unreleased] — targeting v0.1.21
 
 _In-progress patch line. The version is bumped per build for tracking; entries
 accumulate here and are stamped with a date when a build is cut._
+
+### Fixed
+
+- **Messages you send now show when they actually arrived** (#200): a sent
+  message showed the in-flight clock and simply stayed there — including
+  messages the other side had received days earlier. Nothing was ever recorded
+  when they confirmed receipt, so restarting the app left every message you
+  had ever sent looking unconfirmed. The confirmation is now saved when it
+  arrives and survives a restart, and a message confirmed later than a couple
+  of seconds after sending updates on its own instead of waiting for you to
+  click somewhere.
+- **Sent messages are readable again in light mode** (#197): the blue of your
+  own messages was chosen for the dark theme and never adjusted for the light
+  one, so in light mode the text inside them sat far below the readable
+  contrast threshold — as did the little delivery icon, which in one state was
+  literally the same colour as the bubble behind it. The blue is darker in
+  light mode now, which fixes the message text, the timestamp, and the
+  delivery icon together. Sent messages look a deeper blue than before.
+- **The contact list no longer looks like it shows who is online** (#195): an
+  established contact's name was shown in green, which reads as "online" —
+  but it only ever meant that you are set up to message them, which stays true
+  while they are switched off. Skattr deliberately has no online indicator, so
+  nothing in the list should imply one; the name is simply bold instead.
 
 ### Added
 
