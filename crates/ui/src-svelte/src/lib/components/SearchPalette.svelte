@@ -272,7 +272,11 @@
   }
   .snippet :global(mark) {
     background: var(--accent, #5b5fc7);
-    color: var(--text, #ddd);
+    /* #197: --accent is a fill, so this needs a foreground chosen against it,
+       not the page-background text colour. --text on the darkened light-theme
+       accent is 3.55:1, below the 4.5:1 this snippet text needs; --bg is what
+       every other accent-filled surface uses and gives 4.56:1 / 7.61:1. */
+    color: var(--bg, #ddd);
     border-radius: 2px;
     padding: 0 2px;
   }

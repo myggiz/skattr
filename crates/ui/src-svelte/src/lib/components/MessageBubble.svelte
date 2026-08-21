@@ -72,7 +72,11 @@
     margin-top: var(--s-1);
   }
   .ts { color: var(--text-muted); font: var(--t-ui); }
-  .bubble.outgoing .ts { color: rgba(255, 255, 255, 0.7); }
+  /* #197: a hard-coded white at 70% was 1.69:1 on the accent fill. Inherit the
+     bubble foreground so it tracks the theme. No opacity: this is TEXT, so it
+     needs 4.5:1 (WCAG 1.4.3), and compositing even 0.75 toward the accent drops
+     it to 3.29:1 in light mode. Full strength gives 4.56:1 / 7.61:1. */
+  .bubble.outgoing .ts { color: currentColor; }
   .focus-highlight {
     outline: 2px solid var(--accent, #6c6);
     transition: outline 0.6s;
