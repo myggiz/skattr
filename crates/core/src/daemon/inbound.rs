@@ -908,11 +908,17 @@ impl InboundDispatch for DaemonInbound {
         });
     }
 
-    fn message_delivered(&self, message_id: crate::envelope::MessageId) {
+    fn message_delivered(&self, _peer: PublicKey, message_id: crate::envelope::MessageId) {
+        // Only rows we sent may be marked delivered (see the repo method).
+        let Some(identity) = self.identity.read().ok().and_then(|g| g.clone()) else {
+            return;
+        };
         let repo = crate::storage::messages::MessageRepo::new(&self.pool);
-        match repo
-            .mark_delivered_by_envelope_id(&message_id.0, crate::daemon::clock::now_unix_seconds())
-        {
+        match repo.mark_delivered_by_envelope_id(
+            &message_id.0,
+            &identity.public().0,
+            crate::daemon::clock::now_unix_seconds(),
+        ) {
             // Nothing updated: the ACK is for a message we no longer hold, or
             // one already marked. Not an error, and not worth an event.
             Ok(false) => return,

@@ -486,20 +486,22 @@ impl<'p> MessageRepo<'p> {
     /// arrive for a message this node no longer holds (retention pruning), or
     /// after the row was already marked.
     ///
-    /// Scoped by `envelope_id` alone rather than `(group_id, envelope_id)`:
-    /// the id is 16 random bytes and the ack path knows the id but not the
-    /// group, and `delivered_at IS NULL` keeps a re-delivered ACK from moving
-    /// an already-recorded timestamp.
+    /// Scoped to rows **we** sent (`sender = self_pubkey`): a delivery receipt
+    /// is only meaningful for an outgoing message, and without that scope an
+    /// authenticated peer could ACK the envelope id of a message *it* sent us
+    /// and forge a Delivered receipt on an incoming row. `delivered_at IS NULL`
+    /// keeps a re-delivered ACK from moving an already-recorded timestamp.
     pub(crate) fn mark_delivered_by_envelope_id(
         &self,
         envelope_id: &[u8; 16],
+        self_pubkey: &[u8; 32],
         delivered_at: i64,
     ) -> Result<bool> {
         self.pool.with_mut(|c| {
             let n = c
                 .execute(
-                    "UPDATE messages SET delivered_at = ?1                      WHERE envelope_id = ?2 AND delivered_at IS NULL",
-                    rusqlite::params![delivered_at, &envelope_id[..]],
+                    "UPDATE messages SET delivered_at = ?1                      WHERE envelope_id = ?2 AND sender = ?3 AND delivered_at IS NULL",
+                    rusqlite::params![delivered_at, &envelope_id[..], &self_pubkey[..]],
                 )
                 .map_err(|e| {
                     CoreError::Storage(StorageErrorKind::Other(format!("mark delivered: {e}")))
@@ -911,7 +913,9 @@ mod tests {
         })
         .unwrap();
 
-        let marked = repo.mark_delivered_by_envelope_id(&env.id.0, 4242).unwrap();
+        let marked = repo
+            .mark_delivered_by_envelope_id(&env.id.0, &[0u8; 32], 4242)
+            .unwrap();
         assert!(marked, "the row should have been found by its envelope id");
         assert_eq!(
             repo.recent(&[0x44; 32], 10).unwrap()[0].delivered_at,
@@ -921,9 +925,39 @@ mod tests {
         // An unknown envelope id marks nothing and is not an error: an ACK can
         // legitimately arrive for a message this node no longer holds.
         let unknown = repo
-            .mark_delivered_by_envelope_id(&[0xEE; 16], 5555)
+            .mark_delivered_by_envelope_id(&[0xEE; 16], &[0u8; 32], 5555)
             .unwrap();
         assert!(!unknown);
+    }
+
+    /// #200 review (P1, security): a delivery receipt is only meaningful for a
+    /// message we sent. Without the sender scope an authenticated peer could
+    /// ACK the envelope id of a message *it* sent us and forge a Delivered
+    /// receipt on an incoming row.
+    #[test]
+    fn mark_delivered_refuses_a_row_this_node_did_not_send() {
+        let pool = Pool::in_memory();
+        let repo = MessageRepo::new(&pool);
+        let me = [0x11u8; 32];
+        let peer = [0x22u8; 32];
+
+        // An INCOMING message: sender is the peer, not us.
+        let env = sample_envelope("from-them");
+        repo.insert(InsertParams {
+            group_id: &[0x55; 32],
+            sender: &peer,
+            envelope: &env,
+            mls_generation: 0,
+            ts_daemon_recv: env.ts,
+        })
+        .unwrap();
+
+        // The peer ACKs the id of the message it sent us.
+        let forged = repo
+            .mark_delivered_by_envelope_id(&env.id.0, &me, 7777)
+            .unwrap();
+        assert!(!forged, "an incoming row must not be markable as delivered");
+        assert_eq!(repo.recent(&[0x55; 32], 10).unwrap()[0].delivered_at, None);
     }
 
     #[test]
