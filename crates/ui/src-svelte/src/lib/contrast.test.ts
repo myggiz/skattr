@@ -122,6 +122,24 @@ for (const theme of ["dark", "light"] as const) {
     }
   });
 
+  test(`${theme}: the search palette's own text is readable`, () => {
+    // Regression guard for a self-inflicted one: an unanchored sed during a
+    // mutation check rewrote every `color: var(--bg)` in this file, not just
+    // the one on the accent-filled <mark>, which set the panel and the search
+    // input to draw their text in the page-background colour — invisible.
+    const css = component("SearchPalette.svelte");
+    const pairs: Array<[string, string, string]> = [
+      [".panel", "--bg-elevated", css.match(/\.panel \{[^}]*\}/)?.[0] ?? ""],
+      ["input", "--bg", css.match(/input\[type="text"\] \{[^}]*\}/)?.[0] ?? ""],
+    ];
+    for (const [label, bgToken, rule] of pairs) {
+      expect(rule, `${label} rule not found`).not.toBe("");
+      const fgToken = rule.match(/color:\s*var\((--[a-z-]+)/)?.[1] ?? "--text";
+      const ratio = contrast(token(bgToken, theme), token(fgToken, theme));
+      expect(ratio, `${label} draws ${fgToken} on ${bgToken}: ${ratio.toFixed(2)}:1 in ${theme}`).toBeGreaterThanOrEqual(4.5);
+    }
+  });
+
   test(`${theme}: search-result highlight meets text contrast (4.5:1)`, () => {
     // The one accent fill that does not inherit --bg: it sets its own colour.
     const css = component("SearchPalette.svelte");

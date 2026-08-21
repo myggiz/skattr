@@ -220,7 +220,7 @@
     max-width: 60vw;
     margin: 10vh auto;
     background: var(--bg-elevated, #1a1a1a);
-    color: var(--bg, #ddd);
+    color: var(--text, #ddd);
     padding: var(--s-2, 12px);
     border-radius: 8px;
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
@@ -233,7 +233,7 @@
   input[type="text"] {
     width: 100%;
     background: var(--bg, #111);
-    color: var(--bg, #ddd);
+    color: var(--text, #ddd);
     border: 1px solid var(--border, #2a2a2a);
     padding: var(--s-1, 6px) var(--s-2, 12px);
     border-radius: 4px;
