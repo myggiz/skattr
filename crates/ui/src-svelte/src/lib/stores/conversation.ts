@@ -103,6 +103,7 @@ export function appendOptimistic(
       mls_generation: 0n,
       ts_daemon_recv: BigInt(Math.floor(Date.now() / 1000)),
       ts_envelope: BigInt(Date.now()),
+      delivered_at: null,
     };
     return { ...state, messages: [...state.messages, placeholder] };
   });
@@ -133,6 +134,22 @@ export function markFailed(tempId: string, reason: string): void {
   });
 }
 
+/**
+ * Seed the delivery store from persisted history (#200).
+ *
+ * The store is session-scoped, so without this a reloaded conversation shows
+ * nothing for messages the daemon has recorded as delivered — which is how
+ * every sent message came back as "still in flight" after a restart. Only
+ * records that actually carry `delivered_at` are seeded; absent stays absent.
+ */
+function seedDeliveryFromHistory(records: MessageRecord[]): void {
+  for (const r of records) {
+    if (r.direction === "outgoing" && r.delivered_at !== null && r.delivered_at !== undefined) {
+      recordDeliveryStatus(hex16ToString(r.message_id), "Delivered");
+    }
+  }
+}
+
 export async function openConversationFromSummary(
   summary: ContactSummary,
 ): Promise<void> {
@@ -154,6 +171,7 @@ export async function openConversationFromSummary(
     records.push(...[...result.data.records].reverse());
     nextBeforeId = result.data.next_before_id ?? null;
   }
+  seedDeliveryFromHistory(records);
   const anchor = summary.last_read_row_id ?? null;
   conversation.set({
     contact: summary.pubkey,
@@ -199,6 +217,7 @@ export async function loadOlder(): Promise<void> {
     const result = unwrapOk(resp);
     if (result.result === "messages_page") {
       const olderChrono = [...result.data.records].reverse();
+      seedDeliveryFromHistory(olderChrono);
       conversation.update((s) => {
         if (!pubkeyEq(s.contact, reqContact)) return s;
         return {
@@ -327,6 +346,7 @@ export async function sendFile(
       mls_generation: 0n,
       ts_daemon_recv: BigInt(Math.floor(Date.now() / 1000)),
       ts_envelope: BigInt(Date.now()),
+      delivered_at: null,
     };
     return { ...state, messages: [...state.messages, placeholder] };
   });

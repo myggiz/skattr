@@ -70,6 +70,7 @@ fn make_record(contact: PublicKey, body: &str, seq: u8) -> MessageRecord {
         1,
         1_700_000_000 + i64::from(seq),
         Direction::Incoming,
+        None,
     )
 }
 

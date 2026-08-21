@@ -486,6 +486,14 @@ pub struct MessageRecord {
     pub ts_daemon_recv: u64,
     /// Sender-claimed timestamp — display only (unix seconds signed).
     pub ts_envelope: i64,
+    /// When the peer ACKed this message, if it ever did (unix seconds).
+    ///
+    /// `None` means no delivery is recorded — which is deliberately *not* the
+    /// same as "still in flight". A never-acked message and one whose ack
+    /// predates this field are both unknown, and the UI must render unknown as
+    /// unknown rather than as pending (#200, same lesson as #176).
+    /// Sender-side only; always `None` on incoming messages.
+    pub delivered_at: Option<u64>,
 }
 
 impl MessageRecord {
@@ -506,6 +514,7 @@ impl MessageRecord {
         mls_generation: u64,
         ts_daemon_recv: i64,
         direction: Direction,
+        delivered_at: Option<i64>,
     ) -> Self {
         Self {
             row_id,
@@ -516,6 +525,7 @@ impl MessageRecord {
             mls_generation,
             ts_daemon_recv: u64::try_from(ts_daemon_recv).unwrap_or(0),
             ts_envelope: envelope.ts,
+            delivered_at: delivered_at.and_then(|t| u64::try_from(t).ok()),
         }
     }
 }
@@ -789,6 +799,7 @@ mod tests {
             7,             // mls_generation (must be carried, not zeroed)
             1_700_000_500, // ts_daemon_recv (must be carried, not aliased to env.ts)
             Direction::Incoming,
+            None,
         );
 
         assert_eq!(rec.mls_generation, 7);
@@ -826,6 +837,7 @@ mod tests {
                 mls_generation: 0,
                 ts_daemon_recv: 1_700_000_100,
                 ts_envelope: 1_700_000_000,
+                delivered_at: None,
             }]),
             CommandResult::MessageSent {
                 message_id: crate::daemon::hex::Hex16::from([3; 16]),
@@ -1018,6 +1030,7 @@ mod tests {
                 mls_generation: 1,
                 ts_daemon_recv: 100,
                 ts_envelope: 99,
+                delivered_at: None,
             }],
             next_before_id: Some(6),
         };
@@ -1061,6 +1074,7 @@ mod tests {
             mls_generation: 1,
             ts_daemon_recv: 200,
             ts_envelope: 199,
+            delivered_at: None,
         };
         let r = CommandResult::MessageSent {
             message_id: Hex16::from([3; 16]),

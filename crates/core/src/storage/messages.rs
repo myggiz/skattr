@@ -479,7 +479,37 @@ impl<'p> MessageRepo<'p> {
         })
     }
 
-    /// Mark a message delivered. Used by the ACK path.
+    /// Mark a message delivered, addressed by the 16-byte envelope id the peer
+    /// sends in its `Frame::Ack` (#200).
+    ///
+    /// Returns whether a row was updated. `false` is not an error: an ACK can
+    /// arrive for a message this node no longer holds (retention pruning), or
+    /// after the row was already marked.
+    ///
+    /// Scoped by `envelope_id` alone rather than `(group_id, envelope_id)`:
+    /// the id is 16 random bytes and the ack path knows the id but not the
+    /// group, and `delivered_at IS NULL` keeps a re-delivered ACK from moving
+    /// an already-recorded timestamp.
+    pub(crate) fn mark_delivered_by_envelope_id(
+        &self,
+        envelope_id: &[u8; 16],
+        delivered_at: i64,
+    ) -> Result<bool> {
+        self.pool.with_mut(|c| {
+            let n = c
+                .execute(
+                    "UPDATE messages SET delivered_at = ?1                      WHERE envelope_id = ?2 AND delivered_at IS NULL",
+                    rusqlite::params![delivered_at, &envelope_id[..]],
+                )
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!("mark delivered: {e}")))
+                })?;
+            Ok(n > 0)
+        })
+    }
+
+    /// Mark a message delivered by row id.
+    #[cfg(test)]
     pub(crate) fn mark_delivered(&self, id: i64, delivered_at: i64) -> Result<()> {
         self.pool.with_mut(|c| {
             c.execute(
@@ -861,6 +891,39 @@ mod tests {
         .unwrap();
         assert_eq!(repo.recent(&g1, 10).unwrap().len(), 1);
         assert_eq!(repo.recent(&g2, 10).unwrap().len(), 1);
+    }
+
+    /// #200: the ACK carries a 16-byte envelope id, not a SQLite row id, so
+    /// `mark_delivered(row_id, …)` was uncallable from the ack path — which is
+    /// why it had no production caller and `delivered_at` was NULL for every
+    /// message. Marking must be addressable by the id the peer actually sends.
+    #[test]
+    fn mark_delivered_by_envelope_id_sets_timestamp() {
+        let pool = Pool::in_memory();
+        let repo = MessageRepo::new(&pool);
+        let env = sample_envelope("hi");
+        repo.insert(InsertParams {
+            group_id: &[0x44; 32],
+            sender: &[0u8; 32],
+            envelope: &env,
+            mls_generation: 0,
+            ts_daemon_recv: env.ts,
+        })
+        .unwrap();
+
+        let marked = repo.mark_delivered_by_envelope_id(&env.id.0, 4242).unwrap();
+        assert!(marked, "the row should have been found by its envelope id");
+        assert_eq!(
+            repo.recent(&[0x44; 32], 10).unwrap()[0].delivered_at,
+            Some(4242)
+        );
+
+        // An unknown envelope id marks nothing and is not an error: an ACK can
+        // legitimately arrive for a message this node no longer holds.
+        let unknown = repo
+            .mark_delivered_by_envelope_id(&[0xEE; 16], 5555)
+            .unwrap();
+        assert!(!unknown);
     }
 
     #[test]

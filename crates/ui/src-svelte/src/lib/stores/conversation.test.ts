@@ -34,6 +34,7 @@ function fakeRecord(rowId: number, body: string): MessageRecord {
     mls_generation: 1n,
     ts_daemon_recv: 100n,
     ts_envelope: 99n,
+    delivered_at: null,
   };
 }
 
