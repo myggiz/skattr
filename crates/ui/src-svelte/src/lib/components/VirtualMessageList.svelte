@@ -97,7 +97,13 @@
   // `appliedCount` is a plain `let`: it is bookkeeping, not reactive state, and
   // it keeps the effect from re-applying a count that is already in force.
   let appliedCount = -1;
-  $effect(() => {
+  // `$effect.pre`, not `$effect`: this must land BEFORE the DOM update.
+  // `virtualItems`/`totalHeight` are pull-based deriveds read during render,
+  // so a plain `$effect` (which flushes after) would lay the list out while the
+  // virtualizer still had the OLD count — the appended row would fall outside
+  // the virtual range and out of `getTotalSize()`, and nothing would recompute
+  // afterwards because the adapter republishes the same instance identity.
+  $effect.pre(() => {
     const count = rows.length;
     if (!virtualizer || count === appliedCount) return;
     appliedCount = count;
