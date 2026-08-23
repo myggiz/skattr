@@ -83,11 +83,24 @@
    * an inline image finishing decode is the case that exposed this — is
    * re-measured rather than leaving the rows below it overlapping.
    */
-  function measureRow(node: HTMLDivElement) {
-    $virtualizer?.measureElement(node);
+  function measureRow(node: HTMLDivElement, index: number) {
+    const apply = (i: number) => {
+      // virtual-core resolves which item a measurement belongs to by reading
+      // `data-index` off the node AT CALL TIME, so set it before measuring
+      // rather than relying on attribute-vs-action flush ordering.
+      node.dataset.index = String(i);
+      $virtualizer?.measureElement(node);
+    };
+    apply(index);
     return {
-      update() {
-        $virtualizer?.measureElement(node);
+      // Takes the index as its argument specifically so this runs: an action
+      // with no argument never has `update` called. `loadOlder` prepends rows,
+      // and the keyed each-block reuses these DOM nodes while their indices
+      // shift, so without re-measuring, cached heights stay bound to the
+      // indices the nodes used to have — offsets drift, rows overlap again,
+      // and the scroll position jumps.
+      update(next: number) {
+        apply(next);
       },
     };
   }
@@ -196,9 +209,11 @@
   <div bind:this={topSentinel} class="sentinel"></div>
   <div style="height: {totalHeight}px; position: relative;">
     {#each virtualItems as row (rows[row.index]?.key ?? row.index)}
+      <!-- data-index is set by measureRow, which writes it immediately before
+           measuring; a declarative attribute here would be a second writer of
+           the same value. -->
       <div
-        data-index={row.index}
-        use:measureRow
+        use:measureRow={row.index}
         style="position: absolute; top: 0; left: 0; width: 100%; transform: translateY({row.start}px);"
       >
         {#if rows[row.index]}
