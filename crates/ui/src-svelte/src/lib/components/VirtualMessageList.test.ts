@@ -88,34 +88,48 @@ describe("VirtualMessageList row measurement (#210)", () => {
     expect(measureSpy, "each row element must be handed to measureElement").toHaveBeenCalledTimes(2);
   });
 
-  // #211 review: an action with NO argument never has `update` called, and
-  // virtual-core resolves a measurement to an item by reading `data-index` at
-  // call time. loadOlder prepends rows, so the keyed each-block reuses these
-  // DOM nodes while their indices shift — without a re-measure the cached
-  // heights stay bound to the indices the nodes used to have.
-  test("a row whose index shifts is re-measured under its new index", async () => {
-    const items = [record(1, "first"), record(2, "second")];
-    const { container, rerender } = render(VirtualMessageList, { props: { items } });
+  // #211 review: exercise measureRow.update, NOT a remount.
+  //
+  // The each-block key is `rows[row.index]?.key ?? row.index`. If the virtual
+  // indices move beyond the loaded rows, that key falls back to the raw index,
+  // the keys change, Svelte destroys and recreates the nodes, and the ACTION
+  // MOUNTS AGAIN — which passes even when update-path remeasurement is broken.
+  //
+  // To reach `update`, the same records must still sit at the new indices, so
+  // the keys are unchanged and the DOM nodes are preserved. That is what
+  // loadOlder actually does: it prepends history above rows already on screen.
+  test("a preserved row whose index shifts is re-measured under its new index", async () => {
+    const first = record(1, "first");
+    const second = record(2, "second");
+    const { container, rerender } = render(VirtualMessageList, {
+      props: { items: [first, second] },
+    });
     await tick();
     await tick();
-    measureSpy.mockClear();
-
-    // Simulate older messages arriving above: same rows, higher indices.
-    virtualItems.current = [
-      { index: 10, start: 0, size: 72, key: 0 },
-      { index: 11, start: 72, size: 72, key: 1 },
-    ];
-    await rerender({ items: [...items] });
-    await tick();
-    await tick();
-
-    expect(
-      measureSpy.mock.calls.length,
-      "shifted rows must be handed to measureElement again",
-    ).toBeGreaterThan(0);
     expect(
       Array.from(container.querySelectorAll("[data-index]")).map((r) => r.getAttribute("data-index")),
-      "data-index must reflect the new indices",
-    ).toEqual(["10", "11"]);
+    ).toEqual(["0", "1"]);
+    const nodesBefore = Array.from(container.querySelectorAll("[data-index]"));
+    measureSpy.mockClear();
+
+    // Ten older messages arrive above: `first`/`second` are now at 10/11, so
+    // `rows[10]`/`rows[11]` resolve to the same records and the keys — and
+    // therefore the DOM nodes — are unchanged.
+    const older = Array.from({ length: 10 }, (_, i) => record(100 + i, `older-${i}`));
+    virtualItems.current = [
+      { index: 10, start: 0, size: 72, key: 10 },
+      { index: 11, start: 72, size: 72, key: 11 },
+    ];
+    await rerender({ items: [...older, first, second] });
+    await tick();
+    await tick();
+
+    const nodesAfter = Array.from(container.querySelectorAll("[data-index]"));
+    expect(nodesAfter[0], "the row element must be reused, not remounted").toBe(nodesBefore[0]);
+    expect(nodesAfter.map((r) => r.getAttribute("data-index"))).toEqual(["10", "11"]);
+    expect(
+      measureSpy.mock.calls.length,
+      "a preserved row must be re-measured when its index shifts",
+    ).toBeGreaterThan(0);
   });
 });
