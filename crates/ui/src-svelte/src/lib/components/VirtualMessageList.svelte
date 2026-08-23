@@ -27,6 +27,9 @@
   let topSentinel = $state<HTMLDivElement | undefined>(undefined);
   let bottomSentinel = $state<HTMLDivElement | undefined>(undefined);
 
+  // Seed for the FIRST paint only: rows are measured after mount (#210), so a
+  // wrong estimate costs one reflow rather than permanently mispositioning
+  // every row below a tall one.
   const ESTIMATED_ROW_HEIGHT = 72;
   const SKELETON_COUNT = 5;
 
@@ -70,6 +73,37 @@
         })
       : null,
   );
+
+  /**
+   * Hand a row element to the virtualizer so its real height replaces the
+   * estimate (#210).
+   *
+   * `measureElement` reads `data-index` off the node to know which item it is,
+   * and observes the element, so a row that changes height AFTER first layout —
+   * an inline image finishing decode is the case that exposed this — is
+   * re-measured rather than leaving the rows below it overlapping.
+   */
+  function measureRow(node: HTMLDivElement, index: number) {
+    const apply = (i: number) => {
+      // virtual-core resolves which item a measurement belongs to by reading
+      // `data-index` off the node AT CALL TIME, so set it before measuring
+      // rather than relying on attribute-vs-action flush ordering.
+      node.dataset.index = String(i);
+      $virtualizer?.measureElement(node);
+    };
+    apply(index);
+    return {
+      // Takes the index as its argument specifically so this runs: an action
+      // with no argument never has `update` called. `loadOlder` prepends rows,
+      // and the keyed each-block reuses these DOM nodes while their indices
+      // shift, so without re-measuring, cached heights stay bound to the
+      // indices the nodes used to have — offsets drift, rows overlap again,
+      // and the scroll position jumps.
+      update(next: number) {
+        apply(next);
+      },
+    };
+  }
 
   // Track which row is currently highlighted for the focus-jump animation.
   let highlightRowId = $state<bigint | null>(null);
@@ -175,7 +209,11 @@
   <div bind:this={topSentinel} class="sentinel"></div>
   <div style="height: {totalHeight}px; position: relative;">
     {#each virtualItems as row (rows[row.index]?.key ?? row.index)}
+      <!-- data-index is set by measureRow, which writes it immediately before
+           measuring; a declarative attribute here would be a second writer of
+           the same value. -->
       <div
+        use:measureRow={row.index}
         style="position: absolute; top: 0; left: 0; width: 100%; transform: translateY({row.start}px);"
       >
         {#if rows[row.index]}
