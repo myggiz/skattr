@@ -16,8 +16,12 @@ import { render } from "@testing-library/svelte";
 import { tick } from "svelte";
 import { readable, writable } from "svelte/store";
 
-const { measureSpy, virtualItems } = vi.hoisted(() => ({
+const { measureSpy, createSpy, setOptionsSpy, virtualItems } = vi.hoisted(() => ({
   measureSpy: vi.fn(),
+  // #214: a rebuild of the virtualizer drops every measured row height, so the
+  // regression guard counts constructions and setOptions calls.
+  createSpy: vi.fn(),
+  setOptionsSpy: vi.fn(),
   // Mutable so a test can simulate loadOlder prepending rows, which shifts the
   // index of every already-rendered row.
   virtualItems: {
@@ -42,12 +46,23 @@ vi.stubGlobal("IntersectionObserver", NoopObserver);
 vi.stubGlobal("ResizeObserver", NoopObserver);
 
 vi.mock("@tanstack/svelte-virtual", () => ({
-  createVirtualizer: () =>
-    readable({
+  createVirtualizer: (options: { count: number }) => {
+    createSpy(options);
+    const instance = {
       getVirtualItems: () => virtualItems.current,
       getTotalSize: () => 144,
       measureElement: measureSpy,
-    }),
+      setOptions: (next: { count: number }) => {
+        setOptionsSpy(next);
+        // The real @tanstack/svelte-virtual adapter republishes the instance
+        // from setOptions (via its onChange wrapper). Consumers re-read
+        // getVirtualItems() off that emission, so the mock must do it too.
+        store.set(instance);
+      },
+    };
+    const store = writable(instance);
+    return store;
+  },
 }));
 
 import VirtualMessageList from "./VirtualMessageList.svelte";
@@ -131,5 +146,51 @@ describe("VirtualMessageList row measurement (#210)", () => {
       measureSpy.mock.calls.length,
       "a preserved row must be re-measured when its index shifts",
     ).toBeGreaterThan(0);
+  });
+});
+
+// #214: appending a message rebuilt the virtualizer, and a fresh virtualizer has
+// an empty measurement cache — every row fell back to the 72px estimate. Nothing
+// repaired it: `measureRow`'s update path only runs when a row's INDEX changes,
+// and appending at the end shifts no existing index. Rows below a tall row were
+// then positioned by bad arithmetic, so they overlapped it and a newly appended
+// row could land off-screen ("the message never arrived"). Remounting the
+// conversation rebuilt the cache, which is why close/reopen was the workaround.
+describe("VirtualMessageList virtualizer lifetime (#214)", () => {
+  test("appending a message does not reconstruct the virtualizer", async () => {
+    virtualItems.current = [
+      { index: 0, start: 0, size: 72, key: 0 },
+      { index: 1, start: 72, size: 72, key: 1 },
+    ];
+    createSpy.mockClear();
+    setOptionsSpy.mockClear();
+
+    const first = record(1, "first");
+    const second = record(2, "second");
+    const { rerender } = render(VirtualMessageList, { props: { items: [first, second] } });
+    await tick();
+    await tick();
+
+    expect(createSpy, "the virtualizer is constructed once, after scrollEl binds").toHaveBeenCalledTimes(1);
+
+    // A third message arrives into the ALREADY-MOUNTED list. This is the field
+    // case: an incoming message while the conversation is open.
+    virtualItems.current = [
+      { index: 0, start: 0, size: 72, key: 0 },
+      { index: 1, start: 72, size: 72, key: 1 },
+      { index: 2, start: 144, size: 72, key: 2 },
+    ];
+    await rerender({ items: [first, second, record(3, "third")] });
+    await tick();
+    await tick();
+
+    expect(
+      createSpy,
+      "appending must NOT rebuild the virtualizer — a rebuild discards every measured row height",
+    ).toHaveBeenCalledTimes(1);
+    expect(
+      setOptionsSpy.mock.calls.some((c) => c[0]?.count === 3),
+      "the new row count must reach the existing virtualizer via setOptions",
+    ).toBe(true);
   });
 });
