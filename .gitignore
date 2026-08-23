@@ -32,3 +32,8 @@ proptest-regressions/
 
 # Machine-specific local build helper (exFAT/Windows workaround, personal paths)
 build-ui-local.ps1
+
+# Screenshots dropped in the repo root for sharing during field testing.
+# Root-anchored so the tracked PNGs under crates/ (app icons, test fixtures)
+# are unaffected.
+/*.png
