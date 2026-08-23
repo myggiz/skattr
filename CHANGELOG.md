@@ -4,12 +4,27 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — targeting v0.1.21
+## [Unreleased] — targeting v0.1.22
 
 _In-progress patch line. The version is bumped per build for tracking; entries
 accumulate here and are stamped with a date when a build is cut._
 
 ### Fixed
+
+- **Viewing a received image actually works now** (#172): the View button was
+  added in the previous build but never showed anything — it decrypted the
+  picture correctly and then the app refused to display it, leaving just the
+  filename on screen. The app applies two separate security policies for what
+  it is allowed to load, and only one of them had been told that images from
+  its own decrypted-file store are permitted; the other, stricter one silently
+  refused every image. Both now agree. (The same mismatch is why an earlier
+  attempt at this feature never worked either.)
+- **Messages no longer overlap each other** (#210): the conversation assumed
+  every message was the same height, so anything taller — a long message, and
+  dramatically a picture — was drawn over by the message after it. Heights are
+  now measured, so messages sit below one another whatever their size, and
+  scrolling reaches the end of the conversation properly.
+
 
 - **Messages you send now show when they actually arrived** (#200): a sent
   message showed the in-flight clock and simply stayed there — including
