@@ -14,9 +14,19 @@
 import { describe, expect, test, vi } from "vitest";
 import { render } from "@testing-library/svelte";
 import { tick } from "svelte";
-import { readable } from "svelte/store";
+import { readable, writable } from "svelte/store";
 
-const { measureSpy } = vi.hoisted(() => ({ measureSpy: vi.fn() }));
+const { measureSpy, virtualItems } = vi.hoisted(() => ({
+  measureSpy: vi.fn(),
+  // Mutable so a test can simulate loadOlder prepending rows, which shifts the
+  // index of every already-rendered row.
+  virtualItems: {
+    current: [
+      { index: 0, start: 0, size: 72, key: 0 },
+      { index: 1, start: 72, size: 72, key: 1 },
+    ],
+  },
+}));
 
 // jsdom has neither observer. The component uses IntersectionObserver for
 // load-older / mark-read sentinels, which are not under test here.
@@ -34,10 +44,7 @@ vi.stubGlobal("ResizeObserver", NoopObserver);
 vi.mock("@tanstack/svelte-virtual", () => ({
   createVirtualizer: () =>
     readable({
-      getVirtualItems: () => [
-        { index: 0, start: 0, size: 72, key: 0 },
-        { index: 1, start: 72, size: 72, key: 1 },
-      ],
+      getVirtualItems: () => virtualItems.current,
       getTotalSize: () => 144,
       measureElement: measureSpy,
     }),
@@ -79,5 +86,36 @@ describe("VirtualMessageList row measurement (#210)", () => {
     // Without this the virtualizer keeps its constant estimate forever and
     // tall rows collide.
     expect(measureSpy, "each row element must be handed to measureElement").toHaveBeenCalledTimes(2);
+  });
+
+  // #211 review: an action with NO argument never has `update` called, and
+  // virtual-core resolves a measurement to an item by reading `data-index` at
+  // call time. loadOlder prepends rows, so the keyed each-block reuses these
+  // DOM nodes while their indices shift — without a re-measure the cached
+  // heights stay bound to the indices the nodes used to have.
+  test("a row whose index shifts is re-measured under its new index", async () => {
+    const items = [record(1, "first"), record(2, "second")];
+    const { container, rerender } = render(VirtualMessageList, { props: { items } });
+    await tick();
+    await tick();
+    measureSpy.mockClear();
+
+    // Simulate older messages arriving above: same rows, higher indices.
+    virtualItems.current = [
+      { index: 10, start: 0, size: 72, key: 0 },
+      { index: 11, start: 72, size: 72, key: 1 },
+    ];
+    await rerender({ items: [...items] });
+    await tick();
+    await tick();
+
+    expect(
+      measureSpy.mock.calls.length,
+      "shifted rows must be handed to measureElement again",
+    ).toBeGreaterThan(0);
+    expect(
+      Array.from(container.querySelectorAll("[data-index]")).map((r) => r.getAttribute("data-index")),
+      "data-index must reflect the new indices",
+    ).toEqual(["10", "11"]);
   });
 });
