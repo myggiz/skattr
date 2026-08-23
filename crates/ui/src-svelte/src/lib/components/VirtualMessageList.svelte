@@ -82,6 +82,13 @@
    */
   let virtualizer = $derived.by(() => {
     if (!scrollEl) return null;
+    // Rebuild when the CONVERSATION changes identity — but never on append.
+    // The measurement cache is keyed by row index, so carrying it into another
+    // conversation makes its rows inherit the previous one's heights. Visible
+    // rows remount and re-measure, but rows outside the rendered window keep
+    // the stale heights, so getTotalSize() — and the scroll extent — stays
+    // wrong until you scroll far enough to render them.
+    void $conversation.contact;
     const initialCount = untrack(() => rows.length);
     return createVirtualizer<HTMLDivElement, HTMLDivElement>({
       count: initialCount,
@@ -97,6 +104,9 @@
   // `appliedCount` is a plain `let`: it is bookkeeping, not reactive state, and
   // it keeps the effect from re-applying a count that is already in force.
   let appliedCount = -1;
+  // Also tracked so a REBUILT virtualizer gets the count pushed into it even
+  // when the row total happens to be unchanged across the switch.
+  let appliedFor: unknown = null;
   // `$effect.pre`, not `$effect`: this must land BEFORE the DOM update.
   // `virtualItems`/`totalHeight` are pull-based deriveds read during render,
   // so a plain `$effect` (which flushes after) would lay the list out while the
@@ -105,7 +115,9 @@
   // afterwards because the adapter republishes the same instance identity.
   $effect.pre(() => {
     const count = rows.length;
-    if (!virtualizer || count === appliedCount) return;
+    if (!virtualizer) return;
+    if (virtualizer === appliedFor && count === appliedCount) return;
+    appliedFor = virtualizer;
     appliedCount = count;
     untrack(() => {
       $virtualizer?.setOptions({ count });

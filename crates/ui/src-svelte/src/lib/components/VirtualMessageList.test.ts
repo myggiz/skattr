@@ -66,6 +66,7 @@ vi.mock("@tanstack/svelte-virtual", () => ({
 }));
 
 import VirtualMessageList from "./VirtualMessageList.svelte";
+import { conversation } from "$lib/stores/conversation";
 import type { MessageRecord } from "$lib/ipc/types";
 
 function record(rowId: number, body: string): MessageRecord {
@@ -192,5 +193,57 @@ describe("VirtualMessageList virtualizer lifetime (#214)", () => {
       setOptionsSpy.mock.calls.some((c) => c[0]?.count === 3),
       "the new row count must reach the existing virtualizer via setOptions",
     ).toBe(true);
+  });
+
+  // #220 review: the measurement cache is keyed by row index, so keeping one
+  // virtualizer across a conversation SWITCH makes the new conversation's rows
+  // inherit the previous one's heights. Visible rows remount and re-measure,
+  // but rows outside the rendered window keep the stale heights, so
+  // getTotalSize() — and the scroll extent — stays wrong until they render.
+  //
+  // Rebuilding on switch is safe; rebuilding on APPEND is what #214 fixed.
+  test("switching conversations rebuilds the virtualizer, appending does not", async () => {
+    const a = "aa".repeat(32);
+    const b = "bb".repeat(32);
+    conversation.set({
+      contact: a,
+      messages: [],
+      nextBeforeId: null,
+      loadingOlder: false,
+      unreadAnchorRowId: null,
+      readCursor: 0n,
+    });
+
+    const first = record(1, "first");
+    const { rerender } = render(VirtualMessageList, { props: { items: [first] } });
+    await tick();
+    await tick();
+    createSpy.mockClear();
+
+    // Same conversation, one more message: must reuse the virtualizer.
+    await rerender({ items: [first, record(2, "second")] });
+    await tick();
+    await tick();
+    expect(
+      createSpy,
+      "appending must not rebuild (it would discard every measured height)",
+    ).toHaveBeenCalledTimes(0);
+
+    // Different conversation: must NOT carry the index-keyed cache over.
+    conversation.set({
+      contact: b,
+      messages: [],
+      nextBeforeId: null,
+      loadingOlder: false,
+      unreadAnchorRowId: null,
+      readCursor: 0n,
+    });
+    await rerender({ items: [record(10, "other-first"), record(11, "other-second")] });
+    await tick();
+    await tick();
+    expect(
+      createSpy,
+      "switching conversations must rebuild so heights are not inherited",
+    ).toHaveBeenCalledTimes(1);
   });
 });
