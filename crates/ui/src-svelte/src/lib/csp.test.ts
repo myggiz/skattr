@@ -23,16 +23,30 @@ import { expect, test, vi } from "vitest";
 const fsModule = (await vi.importActual("fs")) as {
   readFileSync: (path: string, encoding: string) => string;
 };
+const urlModule = (await vi.importActual("url")) as {
+  fileURLToPath: (u: URL | string) => string;
+};
+// fileURLToPath, not `.pathname`: the latter stays percent-encoded, so a
+// checkout path containing a space or a non-ASCII character would be read as a
+// literal "%20" path and fail.
 const read = (rel: string) =>
-  fsModule.readFileSync(new URL(rel, import.meta.url).pathname, "utf-8");
+  fsModule.readFileSync(urlModule.fileURLToPath(new URL(rel, import.meta.url)), "utf-8");
 
-/** Extract one directive's source list from a CSP string. */
-function directive(csp: string, name: string): string {
+/**
+ * Extract one directive's source list as discrete tokens.
+ *
+ * Tokens, not a substring: `toContain("asset://localhost")` is also satisfied
+ * by `asset://localhost.example`, so a substring check could pass while the
+ * policy names a different origin entirely — precisely the failure this test
+ * exists to catch.
+ */
+function sources(csp: string, name: string): string[] {
   const found = csp
     .split(";")
     .map((d) => d.trim())
-    .find((d) => d.startsWith(`${name} `));
-  return found ?? "";
+    .find((d) => d === name || d.startsWith(`${name} `));
+  if (!found) return [];
+  return found.split(/\s+/).slice(1);
 }
 
 const metaCsp = (() => {
@@ -60,8 +74,10 @@ for (const [label, csp] of [
   ["tauri.conf.json header CSP", configCsp],
 ] as const) {
   test(`${label} allows the asset protocol for images`, () => {
-    const imgSrc = directive(csp, "img-src");
-    expect(imgSrc, `${label} has no img-src directive`).not.toBe("");
+    const imgSrc = sources(csp, "img-src");
+    expect(imgSrc.length, `${label} has no img-src directive`).toBeGreaterThan(0);
+    // Linux/macOS serve the protocol as asset://localhost/…, Windows as
+    // http://asset.localhost/…, so both are required.
     expect(imgSrc, `${label} img-src must allow asset://localhost`).toContain("asset://localhost");
     expect(imgSrc, `${label} img-src must allow http://asset.localhost`).toContain(
       "http://asset.localhost",
