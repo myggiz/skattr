@@ -27,6 +27,9 @@
   let topSentinel = $state<HTMLDivElement | undefined>(undefined);
   let bottomSentinel = $state<HTMLDivElement | undefined>(undefined);
 
+  // Seed for the FIRST paint only: rows are measured after mount (#210), so a
+  // wrong estimate costs one reflow rather than permanently mispositioning
+  // every row below a tall one.
   const ESTIMATED_ROW_HEIGHT = 72;
   const SKELETON_COUNT = 5;
 
@@ -70,6 +73,24 @@
         })
       : null,
   );
+
+  /**
+   * Hand a row element to the virtualizer so its real height replaces the
+   * estimate (#210).
+   *
+   * `measureElement` reads `data-index` off the node to know which item it is,
+   * and observes the element, so a row that changes height AFTER first layout —
+   * an inline image finishing decode is the case that exposed this — is
+   * re-measured rather than leaving the rows below it overlapping.
+   */
+  function measureRow(node: HTMLDivElement) {
+    $virtualizer?.measureElement(node);
+    return {
+      update() {
+        $virtualizer?.measureElement(node);
+      },
+    };
+  }
 
   // Track which row is currently highlighted for the focus-jump animation.
   let highlightRowId = $state<bigint | null>(null);
@@ -176,6 +197,8 @@
   <div style="height: {totalHeight}px; position: relative;">
     {#each virtualItems as row (rows[row.index]?.key ?? row.index)}
       <div
+        data-index={row.index}
+        use:measureRow
         style="position: absolute; top: 0; left: 0; width: 100%; transform: translateY({row.start}px);"
       >
         {#if rows[row.index]}
