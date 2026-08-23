@@ -17,8 +17,13 @@ import { expect, test, vi } from "vitest";
 const fsModule = (await vi.importActual("fs")) as {
   readFileSync: (path: string, encoding: string) => string;
 };
+const urlModule = (await vi.importActual("url")) as {
+  fileURLToPath: (u: URL | string) => string;
+};
+// fileURLToPath, not `.pathname`: the latter stays percent-encoded and would
+// break on a checkout path containing a space or non-ASCII character.
 const css: string = fsModule.readFileSync(
-  new URL("tokens.css", import.meta.url).pathname,
+  urlModule.fileURLToPath(new URL("tokens.css", import.meta.url)),
   "utf-8",
 );
 
@@ -92,7 +97,7 @@ function composite(fg: string, bg: string, alpha: number): string {
 /** Read a component's stylesheet so the assertions track the real rules. */
 function component(name: string): string {
   return fsModule.readFileSync(
-    new URL(`components/${name}`, import.meta.url).pathname,
+    urlModule.fileURLToPath(new URL(`components/${name}`, import.meta.url)),
     "utf-8",
   );
 }

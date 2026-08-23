@@ -2,7 +2,13 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self' tauri: ipc:; img-src 'self' data:; font-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' tauri: ipc: ws:; script-src 'self' 'unsafe-inline' 'unsafe-eval'" />
+    <!-- #172: this policy is enforced IN ADDITION to the header CSP in
+         tauri.conf.json — a resource must satisfy BOTH. It is the stricter of
+         the two, so anything added there must be added here or it has no
+         effect. The asset: sources below back the inline image view; without
+         them the asset protocol is refused at the document level no matter
+         what tauri.conf.json says. -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self' tauri: ipc:; img-src 'self' data: asset: asset://localhost http://asset.localhost; font-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' tauri: ipc: ws:; script-src 'self' 'unsafe-inline' 'unsafe-eval'" />
     <link rel="icon" href="%sveltekit.assets%/favicon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     %sveltekit.head%
