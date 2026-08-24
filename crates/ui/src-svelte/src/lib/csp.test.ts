@@ -84,3 +84,37 @@ for (const [label, csp] of [
     );
   });
 }
+
+// #215: the Tauri IPC custom protocol is served from `ipc://localhost` on
+// Linux/macOS and `http://ipc.localhost` on Windows. Neither CSP listed the
+// Windows origin, so the webview refused the IPC `fetch` and Tauri fell back to
+// `postMessage`:
+//
+//   IPC custom protocol failed, Tauri will now use the postMessage interface
+//   instead TypeError: Failed to fetch. Refused to connect because it violates
+//   the document's Content Security Policy.
+//
+// The fallback still carries request/response `invoke`, so the app looked fine:
+// contacts loaded, opening a conversation loaded its history, sending worked.
+// What it did NOT carry was `Channel`-streamed events, so nothing in the UI
+// updated live — an arriving message appeared only after closing and reopening
+// the conversation, which issues a fresh one-shot `invoke`.
+//
+// Identical in shape to the #172 asset-protocol bug above, in the very build
+// that fixed it: the asset origin was added to `img-src` and the IPC origin was
+// left out of `connect-src`.
+for (const [label, csp] of [
+  ["app.html meta CSP", metaCsp],
+  ["tauri.conf.json header CSP", configCsp],
+] as const) {
+  test(`${label} allows the IPC custom protocol`, () => {
+    const connectSrc = sources(csp, "connect-src");
+    expect(connectSrc.length, `${label} has no connect-src directive`).toBeGreaterThan(0);
+    // Linux/macOS: the `ipc:` scheme-source covers ipc://localhost.
+    expect(connectSrc, `${label} connect-src must allow the ipc: scheme`).toContain("ipc:");
+    // Windows: an http: origin, which `ipc:` does NOT cover.
+    expect(connectSrc, `${label} connect-src must allow http://ipc.localhost`).toContain(
+      "http://ipc.localhost",
+    );
+  });
+}

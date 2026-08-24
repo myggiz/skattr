@@ -9,6 +9,7 @@
    - inline SkeletonBubble × 5 at the top during loadingOlder
 -->
 <script lang="ts">
+  import { untrack } from "svelte";
   import { createVirtualizer } from "@tanstack/svelte-virtual";
   import type { MessageRecord } from "$lib/ipc/types";
   import {
@@ -63,16 +64,65 @@
     return out;
   });
 
-  let virtualizer = $derived(
-    scrollEl
-      ? createVirtualizer<HTMLDivElement, HTMLDivElement>({
-          count: rows.length,
-          getScrollElement: () => scrollEl!,
-          estimateSize: () => ESTIMATED_ROW_HEIGHT,
-          overscan: 5,
-        })
-      : null,
-  );
+  /**
+   * Built ONCE, as soon as `scrollEl` is bound (#214).
+   *
+   * `count` is read untracked on purpose. If it were a dependency, every
+   * appended message would re-run this and construct a NEW virtualizer — and a
+   * new virtualizer starts with an EMPTY measurement cache, so every row
+   * reverts to `ESTIMATED_ROW_HEIGHT`. Nothing repairs that: `measureRow`'s
+   * update path only fires when a row's index changes, and appending at the end
+   * shifts no existing index. The rows below a tall one are then positioned
+   * from a 72px estimate, so they overlap it, and a freshly appended row can be
+   * placed outside the viewport — which reads as "the message never arrived".
+   * Remounting rebuilt the cache, which is why closing and reopening the
+   * conversation appeared to fix it.
+   *
+   * The row count is kept current by the `setOptions` effect below.
+   */
+  let virtualizer = $derived.by(() => {
+    if (!scrollEl) return null;
+    // Rebuild when the CONVERSATION changes identity — but never on append.
+    // The measurement cache is keyed by row index, so carrying it into another
+    // conversation makes its rows inherit the previous one's heights. Visible
+    // rows remount and re-measure, but rows outside the rendered window keep
+    // the stale heights, so getTotalSize() — and the scroll extent — stays
+    // wrong until you scroll far enough to render them.
+    void $conversation.contact;
+    const initialCount = untrack(() => rows.length);
+    return createVirtualizer<HTMLDivElement, HTMLDivElement>({
+      count: initialCount,
+      getScrollElement: () => scrollEl!,
+      estimateSize: () => ESTIMATED_ROW_HEIGHT,
+      overscan: 5,
+    });
+  });
+
+  // Push row-count changes into the LIVE virtualizer (#214). The svelte adapter
+  // merges `setOptions` over the current options, so the measurement cache —
+  // the state that keeps tall rows positioned correctly — survives an append.
+  // `appliedCount` is a plain `let`: it is bookkeeping, not reactive state, and
+  // it keeps the effect from re-applying a count that is already in force.
+  let appliedCount = -1;
+  // Also tracked so a REBUILT virtualizer gets the count pushed into it even
+  // when the row total happens to be unchanged across the switch.
+  let appliedFor: unknown = null;
+  // `$effect.pre`, not `$effect`: this must land BEFORE the DOM update.
+  // `virtualItems`/`totalHeight` are pull-based deriveds read during render,
+  // so a plain `$effect` (which flushes after) would lay the list out while the
+  // virtualizer still had the OLD count — the appended row would fall outside
+  // the virtual range and out of `getTotalSize()`, and nothing would recompute
+  // afterwards because the adapter republishes the same instance identity.
+  $effect.pre(() => {
+    const count = rows.length;
+    if (!virtualizer) return;
+    if (virtualizer === appliedFor && count === appliedCount) return;
+    appliedFor = virtualizer;
+    appliedCount = count;
+    untrack(() => {
+      $virtualizer?.setOptions({ count });
+    });
+  });
 
   /**
    * Hand a row element to the virtualizer so its real height replaces the
@@ -108,8 +158,24 @@
   // Track which row is currently highlighted for the focus-jump animation.
   let highlightRowId = $state<bigint | null>(null);
 
-  let virtualItems = $derived($virtualizer?.getVirtualItems() ?? []);
-  let totalHeight = $derived($virtualizer?.getTotalSize() ?? 0);
+  /**
+   * `rows.length` is a dependency here on purpose (#214).
+   *
+   * The virtualizer is now long-lived, and the adapter republishes the SAME
+   * instance object (`derived(writable, (i) => Object.assign(i, {...}))`), so
+   * the value behind `$virtualizer` does not change identity when the row count
+   * changes. Reading `rows.length` gives these deriveds a dependency that DOES
+   * change on an append, so a newly arrived message is laid out immediately
+   * instead of only after the conversation is closed and reopened.
+   */
+  let virtualItems = $derived.by(() => {
+    rows.length;
+    return $virtualizer?.getVirtualItems() ?? [];
+  });
+  let totalHeight = $derived.by(() => {
+    rows.length;
+    return $virtualizer?.getTotalSize() ?? 0;
+  });
 
   // Autoscroll ("tail") — follow the latest message, but only while the user is
   // already at (or near) the bottom. If they've scrolled up to read history,
