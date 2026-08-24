@@ -181,6 +181,9 @@
   // already at (or near) the bottom. If they've scrolled up to read history,
   // don't yank them back down.
   let stickToBottom = $state(true);
+  // True while an auto-scroll is in flight, so `onListScroll` can tell our own
+  // scrolling apart from the user's (#222).
+  let programmaticScroll = false;
 
   // Reset tail-scroll state when the active contact changes so that switching
   // conversations always starts pinned to the bottom, regardless of how far the
@@ -193,17 +196,58 @@
   function onListScroll() {
     if (!scrollEl) return;
     const dist = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight;
+    // Ignore scroll events we caused ourselves (#222): the auto-scroll above
+    // fires again as rows are measured, and a programmatic scroll that lands
+    // short would otherwise compute dist >= 80 and clear the flag — leaving the
+    // list no longer following new messages through no user action.
+    if (programmaticScroll) return;
     stickToBottom = dist < 80;
   }
 
-  // When the message set grows (new message, or first load of a conversation)
-  // and we're stuck to the bottom, scroll to the end so the latest is visible.
+  // When a message is appended and we're stuck to the bottom, scroll to the end
+  // so the latest is visible.
+  // Which row we last auto-scrolled for, and whether we are still waiting for
+  // its measured height to land (#222).
+  let scrolledForKey: string | null = null;
+  let awaitingMeasure = false;
+
   $effect(() => {
-    const n = rows.length; // track growth
-    if (n === 0 || !stickToBottom || !scrollEl) return;
+    const last = rows.length ? rows[rows.length - 1].key : null;
+    // Depend on the measured total so the scroll re-runs once a newly appended
+    // row's real height replaces ESTIMATED_ROW_HEIGHT (#222) — otherwise the
+    // message lands below the fold.
+    const measured = totalHeight;
+    void measured;
+    if (!scrollEl || !stickToBottom || last === null) return;
+
+    if (last !== scrolledForKey) {
+      // A row was appended at the END. Scroll now (on the estimate) and once
+      // more when its measurement lands.
+      scrolledForKey = last;
+      awaitingMeasure = true;
+    } else if (awaitingMeasure) {
+      // That measurement has now landed.
+      awaitingMeasure = false;
+    } else {
+      // The total changed but the last row did not: loadOlder PREPENDED rows.
+      // Scrolling here would drag the reader away from the history they just
+      // asked for, and races the top-sentinel into loading another page.
+      return;
+    }
+
     const el = scrollEl;
     requestAnimationFrame(() => {
+      // Re-check: the user may have scrolled up between scheduling this and it
+      // running. Measurement schedules extra scrolls, so without this a reader
+      // browsing history gets pulled back to the latest message.
+      if (!stickToBottom) return;
+      programmaticScroll = true;
       el.scrollTop = el.scrollHeight;
+      // Cleared on the next frame: the scroll event is dispatched
+      // asynchronously, after this assignment returns.
+      requestAnimationFrame(() => {
+        programmaticScroll = false;
+      });
     });
   });
 

@@ -16,7 +16,11 @@ import { render } from "@testing-library/svelte";
 import { tick } from "svelte";
 import { readable, writable } from "svelte/store";
 
-const { measureSpy, createSpy, setOptionsSpy, virtualItems } = vi.hoisted(() => ({
+const { measureSpy, createSpy, setOptionsSpy, virtualItems, totalSize, emit } = vi.hoisted(() => ({
+  totalSize: { current: 144 },
+  // Set by the mock so a test can make the virtualizer republish itself with a
+  // larger total — what really happens a frame after a tall row is measured.
+  emit: { republish: () => {} },
   measureSpy: vi.fn(),
   // #214: a rebuild of the virtualizer drops every measured row height, so the
   // regression guard counts constructions and setOptions calls.
@@ -50,7 +54,7 @@ vi.mock("@tanstack/svelte-virtual", () => ({
     createSpy(options);
     const instance = {
       getVirtualItems: () => virtualItems.current,
-      getTotalSize: () => 144,
+      getTotalSize: () => totalSize.current,
       measureElement: measureSpy,
       setOptions: (next: { count: number }) => {
         setOptionsSpy(next);
@@ -61,6 +65,7 @@ vi.mock("@tanstack/svelte-virtual", () => ({
       },
     };
     const store = writable(instance);
+    emit.republish = () => store.set(instance);
     return store;
   },
 }));
@@ -245,5 +250,92 @@ describe("VirtualMessageList virtualizer lifetime (#214)", () => {
       createSpy,
       "switching conversations must rebuild so heights are not inherited",
     ).toHaveBeenCalledTimes(1);
+  });
+
+  // #222: a newly appended row is still at ESTIMATED_ROW_HEIGHT for the first
+  // frame, so an auto-scroll keyed only on the row COUNT lands on a bottom
+  // computed from the estimate; the row is then measured, the total grows, and
+  // the message ends up below the fold.
+  //
+  // jsdom has no layout — scrollHeight is always 0 — so this cannot assert the
+  // view lands at the bottom. It pins the dependency that makes the re-scroll
+  // happen, and it must do so WITHOUT touching `items`: re-rendering with a new
+  // items array re-runs the effect by itself, which would make this pass even
+  // with the dependency removed (it did, first time round).
+  test("a measured height change alone re-runs the auto-scroll", async () => {
+    const rafSpy = vi.fn((cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
+    });
+    vi.stubGlobal("requestAnimationFrame", rafSpy);
+
+    render(VirtualMessageList, { props: { items: [record(1, "first"), record(2, "second")] } });
+    await tick();
+    await tick();
+    rafSpy.mockClear();
+
+    // No prop change at all: only the measured total grows, exactly as it does
+    // one frame after a tall row mounts and is measured.
+    totalSize.current = 520;
+    emit.republish();
+    await tick();
+    await tick();
+
+    expect(
+      rafSpy.mock.calls.length,
+      "growing the measured total must re-run the auto-scroll, or the new row stays below the fold",
+    ).toBeGreaterThan(0);
+
+    vi.unstubAllGlobals();
+    vi.stubGlobal("IntersectionObserver", NoopObserver);
+    vi.stubGlobal("ResizeObserver", NoopObserver);
+  });
+
+  // #223 review: the auto-scroll re-checks the flag INSIDE the frame callback.
+  // A measurement schedules the callback; if the user scrolls up in that gap,
+  // running it unconditionally drags them back to the latest message. #222 made
+  // this more likely by scheduling an extra scroll per measurement.
+  test("a scroll queued before the user scrolls up is abandoned", async () => {
+    // Deferred rAF: hold the callback so the race can actually be staged.
+    const queued: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
+      queued.push(cb);
+      return queued.length;
+    });
+
+    const { container } = render(VirtualMessageList, {
+      props: { items: [record(1, "first"), record(2, "second")] },
+    });
+    await tick();
+    await tick();
+
+    const list = container.querySelector(".list") as HTMLElement;
+    // jsdom reports 0 for every dimension, so give the element a geometry in
+    // which the user is clearly scrolled AWAY from the bottom.
+    Object.defineProperty(list, "scrollHeight", { value: 1000, configurable: true });
+    Object.defineProperty(list, "clientHeight", { value: 100, configurable: true });
+    list.scrollTop = 0;
+
+    // A measurement lands, queueing a scroll.
+    totalSize.current = 900;
+    emit.republish();
+    await tick();
+    await tick();
+    expect(queued.length, "a measurement should queue a scroll").toBeGreaterThan(0);
+
+    // The user scrolls up before that frame runs: dist = 1000 - 0 - 100 = 900.
+    list.dispatchEvent(new Event("scroll"));
+    await tick();
+
+    const before = list.scrollTop;
+    queued.forEach((cb) => cb(0));
+    expect(
+      list.scrollTop,
+      "the queued scroll must be abandoned once the user has scrolled away",
+    ).toBe(before);
+
+    vi.unstubAllGlobals();
+    vi.stubGlobal("IntersectionObserver", NoopObserver);
+    vi.stubGlobal("ResizeObserver", NoopObserver);
   });
 });
