@@ -4,12 +4,26 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — targeting v0.1.22
+## [Unreleased] — targeting v0.1.23
 
 _In-progress patch line. The version is bumped per build for tracking; entries
 accumulate here and are stamped with a date when a build is cut._
 
 ### Fixed
+
+- **A message you receive shows up straight away again** (#214): an arriving
+  message would not appear until you closed and reopened the conversation. The
+  list had started rebuilding itself from scratch every time a message came in,
+  which threw away everything it knew about how tall each message was — so the
+  new message could be placed off-screen entirely, and messages above it could
+  end up drawn over one another. It now keeps what it has measured and just
+  adds the new row. Switching to a different conversation still starts fresh,
+  so one conversation cannot inherit another's layout.
+- **The Windows build could not talk to its own backend** (#215): the app
+  refused its own internal connection because one of the two security policies
+  it applies had never been told about the channel Windows uses, so the app
+  fell back to a slower path or failed outright. Both policies now allow it.
+
 
 - **Viewing a received image actually works now** (#172): the View button was
   added in the previous build but never showed anything — it decrypted the
