@@ -181,6 +181,9 @@
   // already at (or near) the bottom. If they've scrolled up to read history,
   // don't yank them back down.
   let stickToBottom = $state(true);
+  // True while an auto-scroll is in flight, so `onListScroll` can tell our own
+  // scrolling apart from the user's (#222).
+  let programmaticScroll = false;
 
   // Reset tail-scroll state when the active contact changes so that switching
   // conversations always starts pinned to the bottom, regardless of how far the
@@ -193,6 +196,11 @@
   function onListScroll() {
     if (!scrollEl) return;
     const dist = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight;
+    // Ignore scroll events we caused ourselves (#222): the auto-scroll above
+    // fires again as rows are measured, and a programmatic scroll that lands
+    // short would otherwise compute dist >= 80 and clear the flag — leaving the
+    // list no longer following new messages through no user action.
+    if (programmaticScroll) return;
     stickToBottom = dist < 80;
   }
 
@@ -200,10 +208,25 @@
   // and we're stuck to the bottom, scroll to the end so the latest is visible.
   $effect(() => {
     const n = rows.length; // track growth
+    // ...and track the MEASURED total (#222). A newly appended row is still at
+    // ESTIMATED_ROW_HEIGHT for the first frame, so scrolling on the count alone
+    // lands on a bottom computed from the estimate; the row is then measured,
+    // the total grows, and the message ends up below the fold. Depending on the
+    // total re-runs this once the real height lands — which is also the flicker
+    // the user sees. The taller the row the worse it is: an inline image is
+    // ~400px against a 72px estimate.
+    const measured = totalHeight;
+    void measured;
     if (n === 0 || !stickToBottom || !scrollEl) return;
     const el = scrollEl;
     requestAnimationFrame(() => {
+      programmaticScroll = true;
       el.scrollTop = el.scrollHeight;
+      // Cleared on the next frame: the scroll event is dispatched
+      // asynchronously, after this assignment returns.
+      requestAnimationFrame(() => {
+        programmaticScroll = false;
+      });
     });
   });
 
