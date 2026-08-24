@@ -204,25 +204,42 @@
     stickToBottom = dist < 80;
   }
 
-  // When the message set grows (new message, or first load of a conversation)
-  // and we're stuck to the bottom, scroll to the end so the latest is visible.
+  // When a message is appended and we're stuck to the bottom, scroll to the end
+  // so the latest is visible.
+  // Which row we last auto-scrolled for, and whether we are still waiting for
+  // its measured height to land (#222).
+  let scrolledForKey: string | null = null;
+  let awaitingMeasure = false;
+
   $effect(() => {
-    const n = rows.length; // track growth
-    // ...and track the MEASURED total (#222). A newly appended row is still at
-    // ESTIMATED_ROW_HEIGHT for the first frame, so scrolling on the count alone
-    // lands on a bottom computed from the estimate; the row is then measured,
-    // the total grows, and the message ends up below the fold. Depending on the
-    // total re-runs this once the real height lands — which is also the flicker
-    // the user sees. The taller the row the worse it is: an inline image is
-    // ~400px against a 72px estimate.
+    const last = rows.length ? rows[rows.length - 1].key : null;
+    // Depend on the measured total so the scroll re-runs once a newly appended
+    // row's real height replaces ESTIMATED_ROW_HEIGHT (#222) — otherwise the
+    // message lands below the fold.
     const measured = totalHeight;
     void measured;
-    if (n === 0 || !stickToBottom || !scrollEl) return;
+    if (!scrollEl || !stickToBottom || last === null) return;
+
+    if (last !== scrolledForKey) {
+      // A row was appended at the END. Scroll now (on the estimate) and once
+      // more when its measurement lands.
+      scrolledForKey = last;
+      awaitingMeasure = true;
+    } else if (awaitingMeasure) {
+      // That measurement has now landed.
+      awaitingMeasure = false;
+    } else {
+      // The total changed but the last row did not: loadOlder PREPENDED rows.
+      // Scrolling here would drag the reader away from the history they just
+      // asked for, and races the top-sentinel into loading another page.
+      return;
+    }
+
     const el = scrollEl;
     requestAnimationFrame(() => {
       // Re-check: the user may have scrolled up between scheduling this and it
-      // running. Measurement now schedules extra scrolls (#222), so without
-      // this a reader browsing history gets pulled back to the latest message.
+      // running. Measurement schedules extra scrolls, so without this a reader
+      // browsing history gets pulled back to the latest message.
       if (!stickToBottom) return;
       programmaticScroll = true;
       el.scrollTop = el.scrollHeight;
