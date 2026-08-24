@@ -290,4 +290,52 @@ describe("VirtualMessageList virtualizer lifetime (#214)", () => {
     vi.stubGlobal("IntersectionObserver", NoopObserver);
     vi.stubGlobal("ResizeObserver", NoopObserver);
   });
+
+  // #223 review: the auto-scroll re-checks the flag INSIDE the frame callback.
+  // A measurement schedules the callback; if the user scrolls up in that gap,
+  // running it unconditionally drags them back to the latest message. #222 made
+  // this more likely by scheduling an extra scroll per measurement.
+  test("a scroll queued before the user scrolls up is abandoned", async () => {
+    // Deferred rAF: hold the callback so the race can actually be staged.
+    const queued: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
+      queued.push(cb);
+      return queued.length;
+    });
+
+    const { container } = render(VirtualMessageList, {
+      props: { items: [record(1, "first"), record(2, "second")] },
+    });
+    await tick();
+    await tick();
+
+    const list = container.querySelector(".list") as HTMLElement;
+    // jsdom reports 0 for every dimension, so give the element a geometry in
+    // which the user is clearly scrolled AWAY from the bottom.
+    Object.defineProperty(list, "scrollHeight", { value: 1000, configurable: true });
+    Object.defineProperty(list, "clientHeight", { value: 100, configurable: true });
+    list.scrollTop = 0;
+
+    // A measurement lands, queueing a scroll.
+    totalSize.current = 900;
+    emit.republish();
+    await tick();
+    await tick();
+    expect(queued.length, "a measurement should queue a scroll").toBeGreaterThan(0);
+
+    // The user scrolls up before that frame runs: dist = 1000 - 0 - 100 = 900.
+    list.dispatchEvent(new Event("scroll"));
+    await tick();
+
+    const before = list.scrollTop;
+    queued.forEach((cb) => cb(0));
+    expect(
+      list.scrollTop,
+      "the queued scroll must be abandoned once the user has scrolled away",
+    ).toBe(before);
+
+    vi.unstubAllGlobals();
+    vi.stubGlobal("IntersectionObserver", NoopObserver);
+    vi.stubGlobal("ResizeObserver", NoopObserver);
+  });
 });

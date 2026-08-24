@@ -220,6 +220,10 @@
     if (n === 0 || !stickToBottom || !scrollEl) return;
     const el = scrollEl;
     requestAnimationFrame(() => {
+      // Re-check: the user may have scrolled up between scheduling this and it
+      // running. Measurement now schedules extra scrolls (#222), so without
+      // this a reader browsing history gets pulled back to the latest message.
+      if (!stickToBottom) return;
       programmaticScroll = true;
       el.scrollTop = el.scrollHeight;
       // Cleared on the next frame: the scroll event is dispatched
