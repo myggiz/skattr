@@ -9,6 +9,13 @@ import { continuesGroup, GROUP_WINDOW_SECS } from "./messageGrouping";
 const msg = (direction: "incoming" | "outgoing", ts: number) => ({
   direction,
   ts_daemon_recv: BigInt(ts),
+  kind: { kind: "text" },
+});
+
+const file = (direction: "incoming" | "outgoing", ts: number) => ({
+  direction,
+  ts_daemon_recv: BigInt(ts),
+  kind: { kind: "file" },
 });
 
 test("consecutive messages from the same side, close in time, are one group", () => {
@@ -28,6 +35,15 @@ test("a long pause breaks the group", () => {
 test("the boundary itself still groups", () => {
   const edge = 1000 + GROUP_WINDOW_SECS;
   expect(continuesGroup(msg("incoming", 1000), msg("incoming", edge))).toBe(true);
+});
+
+test("an attachment does not start or continue a group", () => {
+  // The file bubble is a card with its own silhouette and never receives the
+  // grouped prop, so grouping across one leaves the text bubble tailless
+  // beneath a card that kept its tail.
+  expect(continuesGroup(file("incoming", 1000), msg("incoming", 1010))).toBe(false);
+  expect(continuesGroup(msg("incoming", 1000), file("incoming", 1010))).toBe(false);
+  expect(continuesGroup(file("incoming", 1000), file("incoming", 1010))).toBe(false);
 });
 
 test("no previous message means no group", () => {

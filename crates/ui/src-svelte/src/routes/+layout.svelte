@@ -3,11 +3,22 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import "$lib/tokens.css";
+  import { applyTheme, theme } from "$lib/stores/theme";
   import SearchPalette from "$lib/components/SearchPalette.svelte";
   import { openPalette } from "$lib/stores/searchPalette";
   import { deepLinkInviteUrl } from "$lib/stores/deepLink";
 
   let { children } = $props();
+
+  // Applied at module scope rather than from an inline <script> in app.html:
+  // the CSP in tauri.conf.json is `script-src 'self'` with no 'unsafe-inline',
+  // and BOTH that policy and the meta one in app.html must admit a resource
+  // (#172, #215). Weakening the app-wide script policy to avoid one frame of
+  // the wrong background is not a trade worth making, so the stamp happens as
+  // early as the bundle can run instead.
+  if (typeof document !== "undefined") {
+    applyTheme(document.documentElement, $theme);
+  }
 
   function onGlobalKey(e: KeyboardEvent) {
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
