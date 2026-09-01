@@ -4,10 +4,36 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — targeting v0.1.23
+## [Unreleased] — targeting v0.1.24
 
 _In-progress patch line. The version is bumped per build for tracking; entries
 accumulate here and are stamped with a date when a build is cut._
+
+### Changed
+
+- **A new look** (#225): the interface has been redesigned. Contacts now have
+  an avatar, drawn from their public key — nobody picks it, and somebody
+  pretending to be your contact cannot reproduce it, so a face that suddenly
+  looks different is worth a second look. (It is a first glance, not a
+  security check; the fingerprint in the contact panel is still the thing to
+  compare.)
+
+  Colour now means something consistent: warm gold is you — the messages you
+  sent and the controls you press — and cyan is the network, used for a live
+  Tor circuit, unread conversations and search hits. Anything a machine
+  produced and you might need to read character by character (onion addresses,
+  fingerprints, sizes, timestamps) is set in a typeface where zero and O
+  cannot be confused.
+
+  The Tor indicator is no longer a grey pill: it is a three-hop trace whose
+  hops light up as the connection builds. A run of messages you send in quick
+  succession now stacks together instead of each sitting in its own bubble.
+
+- **Light, dark, or follow the system** (#225): a theme control now sits in the
+  new left-hand strip, along with search — which previously had no button at
+  all and could only be reached with Ctrl+K — and settings. Choosing "system"
+  keeps following your desktop when it changes, rather than freezing on
+  whichever theme it happened to be.
 
 ### Fixed
 
