@@ -211,7 +211,7 @@
   .muted { color: var(--text-muted, #888); font-size: 0.9em; margin-top: var(--s-1, 6px); }
   kbd {
     background: var(--bg-elevated, #1a1a1a);
-    border: 1px solid var(--border, #2a2a2a);
+    border: 1px solid var(--hairline);
     padding: 1px 5px;
     border-radius: 3px;
     font-family: monospace;

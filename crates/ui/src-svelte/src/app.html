@@ -11,6 +11,17 @@
     <meta http-equiv="Content-Security-Policy" content="default-src 'self' tauri: ipc:; img-src 'self' data: asset: asset://localhost http://asset.localhost; font-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' tauri: ipc: ws: http://ipc.localhost; script-src 'self' 'unsafe-inline' 'unsafe-eval'" />
     <link rel="icon" href="%sveltekit.assets%/favicon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- Stamp the saved theme before first paint so an explicit light/dark
+         choice does not flash the other theme. "system" stores nothing, which
+         leaves the prefers-color-scheme rules in charge. -->
+    <script>
+      try {
+        var t = localStorage.getItem("skattr.theme");
+        if (t === "dark" || t === "light") {
+          document.documentElement.setAttribute("data-theme", t);
+        }
+      } catch (e) {}
+    </script>
     %sveltekit.head%
   </head>
   <body data-sveltekit-preload-data="hover">

@@ -22,6 +22,7 @@
   import UnreadSeparator from "./UnreadSeparator.svelte";
   import SkeletonBubble from "./SkeletonBubble.svelte";
   import { focusedRowId, setFocusedRowId } from "$lib/stores/searchPalette";
+  import { continuesGroup } from "$lib/messageGrouping";
 
   let { items }: { items: (MessageRecord | OptimisticMessage)[] } = $props();
   let scrollEl = $state<HTMLDivElement | undefined>(undefined);
@@ -287,6 +288,12 @@
     return () => obs.disconnect();
   });
 
+  /** The record of row `index`, or null if that row is not a message. */
+  function messageAt(index: number): MessageRecord | OptimisticMessage | null {
+    const r = rows[index];
+    return r && r.kind === "message" ? r.record : null;
+  }
+
   // Scroll-to-row effect for search-palette deep links.
   // Watches focusedRowId (set by SearchPalette.pick()); scrolls the matching
   // DOM element into view (block: center) and briefly highlights it (1200 ms).
@@ -328,9 +335,11 @@
       >
         {#if rows[row.index]}
           {#if rows[row.index].kind === "message"}
+            {@const record = (rows[row.index] as { kind: "message"; key: string; record: MessageRecord | OptimisticMessage }).record}
             <MessageBubble
-              record={(rows[row.index] as { kind: "message"; key: string; record: MessageRecord | OptimisticMessage }).record}
-              highlighted={highlightRowId !== null && (rows[row.index] as { kind: "message"; key: string; record: MessageRecord | OptimisticMessage }).record.row_id === highlightRowId}
+              {record}
+              grouped={continuesGroup(messageAt(row.index - 1), record)}
+              highlighted={highlightRowId !== null && record.row_id === highlightRowId}
             />
           {:else if rows[row.index].kind === "separator"}
             <UnreadSeparator />

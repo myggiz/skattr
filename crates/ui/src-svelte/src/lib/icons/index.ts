@@ -15,6 +15,11 @@ import qrCodeSvg from "./qr-code.svg?raw";
 import paperclipSvg from "./paperclip.svg?raw";
 import fileSvg from "./file.svg?raw";
 import imageSvg from "./image.svg?raw";
+import searchSvg from "./search.svg?raw";
+import settingsSvg from "./settings.svg?raw";
+import sunSvg from "./sun.svg?raw";
+import moonSvg from "./moon.svg?raw";
+import monitorSvg from "./monitor.svg?raw";
 
 export const icons = {
   clock: clockSvg,
@@ -25,6 +30,11 @@ export const icons = {
   paperclip: paperclipSvg,
   file: fileSvg,
   image: imageSvg,
+  search: searchSvg,
+  settings: settingsSvg,
+  sun: sunSvg,
+  moon: moonSvg,
+  monitor: monitorSvg,
 } as const;
 
 export type IconName = keyof typeof icons;

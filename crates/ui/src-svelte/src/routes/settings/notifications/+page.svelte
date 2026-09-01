@@ -71,7 +71,7 @@
 
 <style>
   fieldset {
-    border: 1px solid var(--border, #2a2a2a);
+    border: 1px solid var(--hairline);
     border-radius: 6px;
     padding: var(--s-2, 12px);
     margin-bottom: var(--s-3, 16px);
