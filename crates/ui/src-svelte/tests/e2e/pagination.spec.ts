@@ -43,13 +43,17 @@ async function wheelToBottom(page: import("@playwright/test").Page): Promise<voi
 }
 
 /** Scroll the list to the very top using mouse wheel.
- *  The mock resolves with 80 ms delay so we give IO time to fire. */
+ *  Deliberately does NOT wait: the caller waits for the CONDITION it expects
+ *  (#224). A fixed budget here has to cover IntersectionObserver + loadOlder +
+ *  the mock'"'"'s 80 ms delay, and under concurrent workers 300 ms did not, which
+ *  failed this spec about one full run in two. */
 async function wheelToTop(page: import("@playwright/test").Page): Promise<void> {
   await page.locator(".list").hover();
   await page.mouse.wheel(0, -999_999);
-  // Allow IntersectionObserver + loadOlder + 80 ms mock delay to complete.
-  await page.waitForTimeout(300);
 }
+
+/** Settle time allowed for an UNEXPECTED extra page to show up. */
+const OVERSHOOT_WINDOW_MS = 400;
 
 test.describe("conversation pagination", () => {
   test.beforeEach(async ({ page }) => {
@@ -67,8 +71,10 @@ test.describe("conversation pagination", () => {
 
     // After the first page the list may be shorter than the viewport, causing
     // the top-sentinel IO to fire immediately and cascade-load page 2.
-    // Wait until loading stabilises before scrolling.
-    await page.waitForTimeout(300);
+    // Wait until loading stabilises before scrolling. This one is a genuine
+    // "nothing more should happen" wait, so it stays a fixed budget — but a
+    // generous one, since it gates every assertion after it.
+    await page.waitForTimeout(1_000);
     const afterCascade = await messageCount(page);
     // At most 2 pages can auto-cascade (beyond that content fills viewport).
     expect(afterCascade).toBeGreaterThanOrEqual(50);
@@ -80,10 +86,17 @@ test.describe("conversation pagination", () => {
     // Load remaining pages one at a time by scrolling to the top.
     let current = await messageCount(page);
     while (current < 200) {
+      const expected = Math.min(current + 50, 200);
       await wheelToTop(page);
+      // Wait for the page to actually arrive rather than for a wall clock —
+      // this fails loudly (and legibly) if it never does.
+      await waitForCount(page, expected, 5_000);
+      // Then confirm exactly ONE page arrived. Without this, a scroll that
+      // cascaded two pages would slip through on the transient match — which
+      // is the #222 regression this loop exists to catch.
+      await page.waitForTimeout(OVERSHOOT_WINDOW_MS);
       const next = await messageCount(page);
-      // Each scroll-to-top must advance by exactly one page (50 rows).
-      expect(next).toBe(Math.min(current + 50, 200));
+      expect(next).toBe(expected);
       current = next;
       if (current < 200) {
         await wheelToBottom(page);
@@ -97,7 +110,7 @@ test.describe("conversation pagination", () => {
     // A final scroll-to-top must not trigger any further fetches.
     await wheelToBottom(page);
     await wheelToTop(page);
-    await page.waitForTimeout(400);
+    await page.waitForTimeout(OVERSHOOT_WINDOW_MS);
     expect(await messageCount(page)).toBe(200);
 
     // Virtualizer should render only the visible subset (not 200 DOM nodes).
