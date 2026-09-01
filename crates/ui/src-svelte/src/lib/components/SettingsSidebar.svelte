@@ -31,7 +31,7 @@
 <style>
   .sidebar {
     width: 200px;
-    border-right: 1px solid var(--border, #2a2a2a);
+    border-right: 1px solid var(--hairline);
     padding: var(--s-2, 8px);
     background: var(--bg-elevated, #16181d);
     display: flex;

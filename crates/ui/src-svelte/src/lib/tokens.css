@@ -1,6 +1,21 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright (C) 2026 Myggiz B.V. */
-/* Phase 2.C design tokens — locked in 2026-05-01 spec; reused 2.D–2.F. */
+/* "Circuit" design tokens. Supersedes the Phase 2.C palette locked 2026-05-01.
+
+   Two accents, split warm/cool along a line that means something:
+     --accent (brass)  is YOU — controls you operate, messages you sent.
+     --live   (cyan)   is THE NETWORK — a live circuit, new activity, focus.
+   plus --danger (oxide) for loss. Neutrals are biased cyan so they sit under
+   both. Cyan is ~1.4:1 on a brass fill, so it is never drawn on one.
+
+   Three theme states, not two: an explicit choice stamps `data-theme` on the
+   root; "system" is the ABSENCE of that stamp, which leaves the
+   prefers-color-scheme block in charge so a later OS change is picked up.
+   The light palette is therefore written twice, on purpose — tokens.css.test.ts
+   asserts the two copies agree, which is cheaper than an indirection layer.
+
+   Every foreground here clears WCAG 4.5:1 on its own ground; contrast.test.ts
+   is the gate, not this comment. */
 
 @font-face {
   font-family: "Inter";
@@ -16,18 +31,47 @@
   font-display: block;
   src: url("./fonts/inter-medium.woff2") format("woff2");
 }
+/* Familjen Grotesk (SIL OFL 1.1) carries UI chrome: headings, contact names,
+   buttons, labels. It never sets a paragraph. */
+@font-face {
+  font-family: "Familjen Grotesk";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: block;
+  src: url("./fonts/familjen-grotesk-variable.woff2") format("woff2");
+}
+/* Martian Mono (SIL OFL 1.1) is reserved for machine-verifiable strings —
+   onion addresses, key fingerprints, versions, sizes, seed words. Its 0/O and
+   1/l/I are unmistakable, which is the point when a fingerprint is compared by
+   eye. Proportional type is human speech; this is machine fact. */
+@font-face {
+  font-family: "Martian Mono";
+  font-style: normal;
+  font-weight: 300 500;
+  font-display: block;
+  src: url("./fonts/martian-mono-variable.woff2") format("woff2");
+}
 
 :root {
-  --bg: #0e0f12;
-  --bg-elevated: #16181d;
-  --text: #e8eaed;
-  --text-muted: #9aa0a6;
-  --accent: #7aa2f7;
-  --danger: #ef4444;
+  color-scheme: dark;
+
+  --bg: #0f1417;
+  --bg-elevated: #161d21;
+  --bg-sunk: #0b0f11;
+  /* A real border colour. Panel edges used to be drawn in --bg-elevated, which
+     made every divider a surface rather than a line. */
+  --hairline: #232d32;
+  --text: #e4e9ea;
+  --text-muted: #8a989c;
+  --accent: #d09a45;
+  --live: #3ad8e8;
+  /* Cyan at low alpha, for the glow behind a live circuit node. */
+  --live-glow: #3ad8e833;
+  --danger: #c96a50;
   /* #197: --accent is also a FILL (sent bubbles, buttons), so foregrounds drawn
      on it need their own value — --danger on an accent fill is 1.3:1. This is
      the red to use on top of --accent, not on the page background. */
-  --danger-on-accent: #7f1d1d;
+  --danger-on-accent: #3d0f06;
 
   --s-1: 4px;
   --s-2: 8px;
@@ -35,23 +79,50 @@
   --s-4: 32px;
 
   --t-body: 14px / 1.5 "Inter", system-ui, sans-serif;
-  --t-ui: 13px / 1.4 "Inter", system-ui, sans-serif;
-  --t-display: 20px / 1.3 "Inter", system-ui, sans-serif;
+  --t-ui: 500 13px / 1.4 "Familjen Grotesk", "Inter", system-ui, sans-serif;
+  --t-display: 600 20px / 1.25 "Familjen Grotesk", "Inter", system-ui, sans-serif;
+  --t-mono: 12px / 1.5 "Martian Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  /* Uppercase micro-labels. Letter-spacing has to be set alongside. */
+  --t-label: 500 10px / 1.4 "Martian Mono", ui-monospace, monospace;
 }
 
+/* Follow the OS — only while no explicit choice is stamped. */
 @media (prefers-color-scheme: light) {
-  :root {
-    --bg: #fafafa;
+  :root:not([data-theme="dark"]) {
+    color-scheme: light;
+
+    --bg: #edf0ef;
     --bg-elevated: #ffffff;
-    --text: #1a1d21;
-    --text-muted: #5f6368;
-    --danger: #dc2626;
-    /* #197: the dark-tuned #7aa2f7 was never overridden here, so every
-       accent-filled surface carried a near-white foreground at 2.4:1 —
-       sent-message text included. Darkened until --bg on it clears 4.5:1. */
-    --accent: #3b6fd4;
-    --danger-on-accent: #fecaca;
+    --bg-sunk: #e2e7e6;
+    --hairline: #d3dad9;
+    --text: #101718;
+    --text-muted: #566165;
+    /* #197: a dark-tuned accent left every accent-filled surface carrying a
+       near-white foreground at 2.4:1. Brass is darkened here until --bg on it
+       clears 4.5:1 — it is a fill in both themes, so both need tuning. */
+    --accent: #8a6420;
+    --live: #0b6672;
+    --live-glow: #0b667226;
+    --danger: #a4402a;
+    --danger-on-accent: #ffd9d2;
   }
+}
+
+/* An explicit light choice, which must also beat a dark OS. */
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --bg: #edf0ef;
+  --bg-elevated: #ffffff;
+  --bg-sunk: #e2e7e6;
+  --hairline: #d3dad9;
+  --text: #101718;
+  --text-muted: #566165;
+  --accent: #8a6420;
+  --live: #0b6672;
+  --live-glow: #0b667226;
+  --danger: #a4402a;
+  --danger-on-accent: #ffd9d2;
 }
 
 html, body {
@@ -60,4 +131,10 @@ html, body {
   font: var(--t-body);
   margin: 0;
   padding: 0;
+}
+
+/* One focus treatment for the whole app, in the network colour. */
+:focus-visible {
+  outline: 2px solid var(--live);
+  outline-offset: 2px;
 }

@@ -6,6 +6,8 @@
   import { invoke } from "@tauri-apps/api/core";
 
   import TorPill from "$lib/components/TorPill.svelte";
+  import AppRail from "$lib/components/AppRail.svelte";
+  import Identicon from "$lib/components/Identicon.svelte";
   import ContactRow from "$lib/components/ContactRow.svelte";
   import ContactDetailsPanel from "$lib/components/ContactDetailsPanel.svelte";
   import VirtualMessageList from "$lib/components/VirtualMessageList.svelte";
@@ -202,6 +204,7 @@
 </script>
 
 <div class="shell">
+  <AppRail />
   <aside class="rail">
     <div class="rail-header">
       <button type="button" class="rail-btn" onclick={() => (inviteOpen = true)}>
@@ -209,15 +212,6 @@
       </button>
       <button type="button" class="rail-btn" onclick={() => (addOpen = true)}>
         + Add
-      </button>
-      <button
-        type="button"
-        class="rail-btn"
-        onclick={() => goto('/settings/identity')}
-        title="Settings"
-        aria-label="Open settings"
-      >
-        ⚙
       </button>
     </div>
     {#each $contacts as c}
@@ -235,10 +229,12 @@
   </aside>
   <main class="pane">
     <header>
-      <span class="title">{
-        $contacts.find((c) => pubkeyEq(c.pubkey, $conversation.contact))?.nickname
-        ?? "Select a contact"
-      }</span>
+      <div class="who">
+        {#if activeSummary}
+          <Identicon pubkey={activeSummary.pubkey} size={28} />
+        {/if}
+        <span class="title">{activeSummary?.nickname ?? "Select a contact"}</span>
+      </div>
       <TorPill />
     </header>
     {#if $conversation.contact !== null}
@@ -303,35 +299,37 @@
 {/if}
 
 <style>
-  .shell { display: grid; grid-template-columns: 280px 1fr; grid-template-rows: 100vh; height: 100vh; overflow: hidden; }
-  .rail { background: var(--bg); border-right: 1px solid var(--bg-elevated); overflow-y: auto; }
+  .shell { display: grid; grid-template-columns: auto 288px 1fr; grid-template-rows: 100vh; height: 100vh; overflow: hidden; }
+  .rail { background: var(--bg-elevated); border-right: 1px solid var(--hairline); overflow-y: auto; }
   .rail-header {
     display: flex;
     gap: var(--s-1);
     padding: var(--s-2) var(--s-3);
-    border-bottom: 1px solid var(--bg-elevated);
+    border-bottom: 1px solid var(--hairline);
   }
   .rail-btn {
     flex: 1;
     padding: 6px var(--s-2);
-    background: var(--bg-elevated);
-    border: none;
+    background: transparent;
+    border: 1px solid var(--hairline);
     border-radius: 4px;
     color: var(--text);
     font: var(--t-ui);
     cursor: pointer;
   }
-  .rail-btn:hover { background: var(--accent); color: var(--bg); }
+  .rail-btn:hover { background: var(--accent); border-color: var(--accent); color: var(--bg); }
   .pane { display: flex; flex-direction: column; background: var(--bg); height: 100%; }
   .pane :global(.list) { flex: 1; min-height: 0; }
-  .empty { padding: var(--s-3); color: var(--fg-dim, #888); margin: auto; }
+  .empty { padding: var(--s-3); color: var(--text-muted); margin: auto; }
   header {
     display: flex;
     align-items: center;
     justify-content: space-between;
     padding: var(--s-3);
-    border-bottom: 1px solid var(--bg-elevated);
+    background: var(--bg-elevated);
+    border-bottom: 1px solid var(--hairline);
   }
+  .who { display: flex; align-items: center; gap: var(--s-2); min-width: 0; }
   .title { font: var(--t-display); }
   .reconnect-banner {
     position: fixed;
@@ -341,7 +339,7 @@
     padding: var(--s-2) var(--s-3);
     background: var(--bg-elevated);
     color: var(--text);
-    border: 1px solid var(--fg-dim);
+    border: 1px solid var(--hairline);
     border-radius: 6px;
     font: var(--t-ui);
     box-shadow: 0 2px 12px rgba(0, 0, 0, 0.4);
@@ -360,15 +358,18 @@
     display: flex;
     justify-content: flex-end;
     padding: var(--s-1) var(--s-3);
-    border-top: 1px solid var(--bg-elevated);
+    border-top: 1px solid var(--hairline);
   }
+  /* Outlined, not filled: a solid red block invites the click it is warning
+     about. */
   .remove-btn {
     padding: 6px var(--s-2);
-    background: var(--danger);
-    color: var(--text);
-    border: none;
+    background: transparent;
+    color: var(--danger);
+    border: 1px solid var(--danger);
     border-radius: 4px;
     font: var(--t-ui);
     cursor: pointer;
   }
+  .remove-btn:hover { background: var(--danger); color: var(--bg); }
 </style>

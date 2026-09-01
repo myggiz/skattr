@@ -18,37 +18,115 @@
     }
     return "";
   }
+
+  type Phase = "idle" | "connecting" | "ready" | "failed";
+
+  let phase = $derived.by<Phase>(() => {
+    const s = $torStatus;
+    if (s === "Ready") return "ready";
+    if (s !== null && typeof s === "object") {
+      return "Bootstrapping" in s ? "connecting" : "failed";
+    }
+    return "idle";
+  });
+
+  let label = $derived.by(() => {
+    switch (phase) {
+      case "ready":      return "Tor connected";
+      case "connecting": return `Connecting ${bootstrapPct($torStatus)}%`;
+      case "failed":     return "Tor failed";
+      default:           return "Disconnected";
+    }
+  });
+
+  // How many of the three hops are drawn as established. Bootstrap percentage
+  // is not a hop count — it is the only progress the daemon reports, so it is
+  // shown as one, coarsely, alongside the exact number in the label.
+  let hops = $derived.by(() => {
+    if (phase === "ready") return 3;
+    if (phase !== "connecting") return 0;
+    const pct = bootstrapPct($torStatus);
+    return pct >= 66 ? 2 : pct >= 33 ? 1 : 0;
+  });
 </script>
 
-<div class="pill">
-  {#if $torStatus === null || $torStatus === "Idle"}
-    <span class="dot grey"></span> Disconnected
-  {:else if typeof $torStatus === "object" && "Bootstrapping" in $torStatus}
-    <span class="dot grey"></span> Connecting ({bootstrapPct($torStatus)}%)
-  {:else if $torStatus === "Ready"}
-    <span class="dot accent"></span> Tor connected
-  {:else if typeof $torStatus === "object" && "Failed" in $torStatus}
-    <span class="dot danger" title={failMsg($torStatus)}></span> Failed
-  {/if}
+<!-- The circuit is the one ornament in the shell: in a messenger whose premise
+     is a hostile network, its health is the most characteristic thing on
+     screen. State is carried by the label as well as the colour. -->
+<div class="circuit {phase}" title={phase === "failed" ? failMsg($torStatus) : undefined}>
+  <span class="node" class:on={hops >= 1}></span>
+  <span class="wire" class:on={hops >= 2}><i></i></span>
+  <span class="node" class:on={hops >= 2}></span>
+  <span class="wire" class:on={hops >= 3}><i></i></span>
+  <span class="node" class:on={hops >= 3}></span>
+  <span class="label">{label}</span>
 </div>
 
 <style>
-  .pill {
+  .circuit {
     display: inline-flex;
     align-items: center;
-    gap: var(--s-1);
-    padding: var(--s-1) var(--s-2);
-    background: var(--bg-elevated);
-    border-radius: 999px;
-    font: var(--t-ui);
+    /* Nodes and wires meet edge to edge — the trace has to read as one line. */
+    gap: 0;
+    color: var(--text-muted);
   }
-  .dot {
-    width: 8px;
-    height: 8px;
+  .circuit.ready { color: var(--live); }
+  .circuit.connecting { color: var(--accent); }
+  .circuit.failed { color: var(--danger); }
+
+  .node {
+    width: 7px;
+    height: 7px;
     border-radius: 50%;
-    display: inline-block;
+    border: 1px solid currentColor;
+    flex: none;
   }
-  .grey { background: var(--text-muted); }
-  .accent { background: var(--accent); }
-  .danger { background: var(--danger); }
+  .node.on { background: currentColor; }
+  /* The only glow in the app, on the only thing that is genuinely live. */
+  .circuit.ready .node.on { box-shadow: 0 0 0 3px var(--live-glow); }
+
+  .wire {
+    position: relative;
+    width: 26px;
+    height: 1px;
+    background: var(--hairline);
+    overflow: hidden;
+  }
+  .wire.on { background: currentColor; }
+
+  /* The travelling pulse only exists on a live circuit — motion here means
+     traffic, so it must not run while nothing is connected. */
+  .wire i { display: none; }
+  .circuit.ready .wire i {
+    display: block;
+    position: absolute;
+    top: -1px;
+    left: -12px;
+    width: 12px;
+    height: 3px;
+    border-radius: 2px;
+    background: linear-gradient(90deg, transparent, currentColor);
+    animation: travel 2.6s linear infinite;
+  }
+  /* Second wire only: nodes and wires are both spans, so nth-of-type would
+     not tell them apart. */
+  .circuit.ready > span:nth-child(4) i { animation-delay: 0.32s; }
+
+  @keyframes travel {
+    0%   { transform: translateX(0); opacity: 0; }
+    12%  { opacity: 1; }
+    70%  { opacity: 1; }
+    100% { transform: translateX(38px); opacity: 0; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .circuit.ready .wire i { animation: none; opacity: 0; }
+  }
+
+  .label {
+    font: var(--t-label);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin-left: var(--s-2);
+    white-space: nowrap;
+  }
 </style>

@@ -5,7 +5,9 @@
 <style>
   .skeleton {
     background: var(--bg-elevated);
-    border-radius: 12px;
+    border: 1px solid var(--hairline);
+    /* Same silhouette as an incoming bubble, so loading does not reshape. */
+    border-radius: 12px 12px 12px 3px;
     margin: var(--s-1) 0;
     height: 56px;
     max-width: 60ch;

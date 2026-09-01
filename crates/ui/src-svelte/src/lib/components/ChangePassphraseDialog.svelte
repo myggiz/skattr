@@ -149,7 +149,7 @@
   input {
     background: var(--bg, #111);
     color: var(--text, #ddd);
-    border: 1px solid var(--border, #2a2a2a);
+    border: 1px solid var(--hairline);
     padding: var(--s-1, 6px);
     border-radius: 4px;
     font: var(--t-body);

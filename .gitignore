@@ -37,3 +37,5 @@ build-ui-local.ps1
 # Root-anchored so the tracked PNGs under crates/ (app icons, test fixtures)
 # are unaffected.
 /*.png
+/*.jpg
+/*.jpeg

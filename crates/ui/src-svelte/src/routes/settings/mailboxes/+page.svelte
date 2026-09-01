@@ -168,7 +168,7 @@
     gap: var(--s-2, 12px);
     align-items: center;
     padding: var(--s-1, 6px) 0;
-    border-bottom: 1px solid var(--border, #2a2a2a);
+    border-bottom: 1px solid var(--hairline);
     flex-wrap: wrap;
   }
 
@@ -256,7 +256,7 @@
   .modal input {
     padding: 8px 10px;
     border-radius: 4px;
-    border: 1px solid var(--border, #2a2a2a);
+    border: 1px solid var(--hairline);
     background: var(--bg, #111);
     color: var(--text, #eee);
     font-family: monospace;

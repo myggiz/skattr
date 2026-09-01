@@ -117,7 +117,7 @@
     align-items: flex-end;
     gap: var(--s-2);
     padding: var(--s-2) var(--s-3);
-    border-top: 1px solid var(--bg-elevated);
+    border-top: 1px solid var(--hairline);
   }
   textarea {
     flex: 1;
@@ -127,8 +127,8 @@
     padding: var(--s-2);
     background: var(--bg-elevated);
     color: var(--text);
-    border: 1px solid transparent;
-    border-radius: 8px;
+    border: 1px solid var(--hairline);
+    border-radius: 4px;
     font: inherit;
   }
   textarea:focus { outline: none; border-color: var(--accent); }
@@ -137,9 +137,9 @@
     padding: var(--s-2) var(--s-3);
     background: var(--accent);
     color: var(--bg);
-    border: 0;
-    border-radius: 8px;
-    font: inherit;
+    border: 1px solid var(--accent);
+    border-radius: 4px;
+    font: var(--t-ui);
     cursor: pointer;
   }
   button:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -147,12 +147,13 @@
     display: inline-flex;
     align-items: center;
     padding: var(--s-2);
-    background: var(--bg-elevated);
-    color: var(--text);
-    border: 0;
-    border-radius: 8px;
+    background: transparent;
+    color: var(--text-muted);
+    border: 1px solid var(--hairline);
+    border-radius: 4px;
     cursor: pointer;
   }
+  .attach:hover:not(:disabled) { color: var(--text); border-color: var(--accent); }
   .attach :global(svg) { width: 18px; height: 18px; }
   .attach:disabled { opacity: 0.5; cursor: not-allowed; }
 </style>

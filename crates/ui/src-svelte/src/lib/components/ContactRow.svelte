@@ -3,6 +3,7 @@
 <script lang="ts">
   import type { ContactSummary } from "$lib/ipc/types";
   import { pendingState } from "$lib/stores/contacts";
+  import Identicon from "./Identicon.svelte";
   import { now } from "$lib/stores/now";
 
   let { summary, active = false, expanded = false, onclick, onToggleExpanded }: {
@@ -38,6 +39,7 @@
 
 <div class="row-wrap">
   <button class="row" class:active class:pending={pstate !== null} onclick={onclick}>
+    <Identicon pubkey={summary.pubkey} />
     <div class="title" class:established>
       {summary.nickname ?? shortHash(summary.pubkey)}
       {#if pstate === "connecting"}
@@ -94,19 +96,34 @@
   }
   .row {
     display: grid;
-    grid-template-columns: 1fr auto;
-    gap: var(--s-1);
+    /* avatar | name | unread */
+    grid-template-columns: auto 1fr auto;
+    align-items: center;
+    gap: var(--s-2);
     padding: var(--s-2) var(--s-3);
     background: transparent;
     border: none;
+    /* Always present so selecting a row cannot shift its contents by 2px. */
+    border-left: 2px solid transparent;
     text-align: left;
     color: var(--text);
     font: var(--t-body);
     cursor: pointer;
     flex: 1;
   }
-  .row:hover, .row.active { background: var(--bg-elevated); }
-  .title { font-weight: 500; display: flex; align-items: center; gap: 4px; }
+  .row:hover { background: var(--bg); }
+  /* Selection is a rail, not a fill: an accent-filled row would compete with
+     the accent-filled sent bubbles it sits next to. */
+  .row.active { background: var(--bg); border-left-color: var(--accent); }
+  .title {
+    font: var(--t-ui);
+    font-size: 14px;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--s-1);
+    min-width: 0;
+  }
   /* #173/#195: an established (MLS-active) contact reads as ready to message.
      Weight only — the green this used to carry read as an online indicator,
      and Skattr deliberately has no presence signal (#196), so nothing in the
@@ -118,15 +135,26 @@
   /* #101: a pending (unconfirmed) first contact is de-emphasised so it never
      reads as a normal, successfully-added contact. */
   .row.pending { opacity: 0.6; }
-  .pending-badge { color: var(--text-muted, #888); font-size: 0.75em; font-weight: 400; }
-  .pending-badge.unconfirmed { color: var(--warning, #c90); }
-  .pending-badge.failed { color: var(--danger, #c33); }
+  /* A bordered chip rather than coloured text: the state is about the
+     connection, not about the contact's name, so it reads as an annotation. */
+  .pending-badge {
+    font: var(--t-label);
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+    border: 1px solid var(--hairline);
+    border-radius: 2px;
+    padding: 1px 5px;
+    white-space: nowrap;
+  }
+  .pending-badge.unconfirmed { color: var(--accent); border-color: var(--accent); }
+  .pending-badge.failed { color: var(--danger); border-color: var(--danger); }
   /* #173: fixed geometry so the row does not shift as unread state changes. */
   .unread-dot {
     width: 8px;
     height: 8px;
     border-radius: 999px;
-    background: var(--accent);
+    background: var(--live);
+    box-shadow: 0 0 0 3px var(--live-glow);
     align-self: center;
     visibility: hidden;
   }

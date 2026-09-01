@@ -55,7 +55,7 @@
     max-height: 400px;
     overflow: auto;
     background: var(--bg);
-    border: 1px solid var(--border, #2a2a2a);
+    border: 1px solid var(--hairline);
     border-radius: 4px;
     margin: var(--s-2) 0;
   }
@@ -84,7 +84,7 @@
     display: grid;
     grid-template-columns: 80px 52px 220px 1fr;
     gap: var(--s-1);
-    border-bottom: 1px solid var(--border, #1a1a1a);
+    border-bottom: 1px solid var(--hairline);
   }
   li:last-child {
     border-bottom: none;
