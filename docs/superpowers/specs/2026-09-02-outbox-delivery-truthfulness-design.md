@@ -161,6 +161,29 @@ direct rows whose envelope `ts` is older than the expiry deadline:
   where `reason` names the actual cause and the actual remedy: that the
   contact has no mailbox, so messages cannot reach them while offline.
 
+**Why "no expiry" is safe here: the mailbox lane terminates.** A deposit is
+not an open-ended wait. `run_mailbox_sweep` deletes the outbox row on a
+successful deposit and emits `DeliveryStatus::Deposited`, which the UI
+already renders as the single-check "sent" glyph titled *"Delivered to
+mailbox"*. So the three states are already distinct and honest:
+
+| icon | meaning |
+|---|---|
+| clock | ours; still trying |
+| ✓ | handed to the recipient's mailbox — our responsibility ends |
+| ✓✓ | the peer itself acked, directly |
+
+`Deposited` is terminal by design. We never learn whether the recipient
+fetched it, and we should not: there is no fetch signal to leak, which is
+the metadata-minimisation property we want. The cost is social rather than
+technical — a contact reading from a mailbox looks, from the sender's side,
+identical to one ignoring them — and that is the correct trade here.
+
+The consequence for this design is that "pending forever" is structurally
+impossible once a mailbox is in play. Removing expiry on that lane removes
+nothing, because the lane ends on its own. Expiry is needed only where no
+mailbox exists and the row therefore has no terminal state at all.
+
 **Edge case — a mailbox contact whose row was never retargeted.** Leaving
 the row alone assumes the direct-timeout fallback will retarget it, which
 #227's arming fix makes true for the case observed. If retargeting never
