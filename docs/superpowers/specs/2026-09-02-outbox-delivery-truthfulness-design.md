@@ -161,6 +161,17 @@ direct rows whose envelope `ts` is older than the expiry deadline:
   where `reason` names the actual cause and the actual remedy: that the
   contact has no mailbox, so messages cannot reach them while offline.
 
+**Edge case — a mailbox contact whose row was never retargeted.** Leaving
+the row alone assumes the direct-timeout fallback will retarget it, which
+#227's arming fix makes true for the case observed. If retargeting never
+happens for some other reason, the row ages past the window while still
+marked `direct` and becomes undeliverable without ever being expired — the
+original bug, narrowed to a smaller window. The sweeper must therefore treat
+"aged past the deadline, contact has a mailbox, still `target_kind='direct'`"
+as a retarget trigger rather than a no-op, so the mailbox lane is entered
+even if the peer actor never armed the timer. A row that has already been
+retargeted is untouched.
+
 The deadline is derived, not a free constant:
 
 ```rust
