@@ -16,6 +16,7 @@
 use crate::envelope::Envelope;
 use crate::error::{CoreError, Result};
 use crate::storage::{Pool, StorageErrorKind};
+use rusqlite::OptionalExtension;
 
 /// Map a message string to either a [`StorageErrorKind::FtsSyntax`] or
 /// [`StorageErrorKind::Other`] `CoreError::Storage` variant.
@@ -510,6 +511,73 @@ impl<'p> MessageRepo<'p> {
         })
     }
 
+    /// Record that the daemon gave up on an outgoing message, storing the
+    /// reason so the remedy survives a restart — a reason computed at read
+    /// time would be lost, and the row would come back as a bare "failed".
+    ///
+    /// Scoped to rows **we** sent (`sender = self_pubkey`) for the same
+    /// reason as [`Self::mark_delivered_by_envelope_id`]: without that scope
+    /// an authenticated peer could steer a failure marker onto an incoming
+    /// row that happens to share the envelope id. `delivered_at IS NULL`
+    /// keeps a late failure sweep from overwriting an already-acked send.
+    ///
+    /// Returns whether a row changed.
+    pub(crate) fn mark_failed(
+        &self,
+        envelope_id: &[u8; 16],
+        self_pubkey: &[u8; 32],
+        reason: &str,
+    ) -> Result<bool> {
+        self.pool.with_mut(|c| {
+            let n = c
+                .execute(
+                    "UPDATE messages SET failed_reason = ?1 \
+                     WHERE envelope_id = ?2 AND sender = ?3 AND delivered_at IS NULL",
+                    rusqlite::params![reason, &envelope_id[..], &self_pubkey[..]],
+                )
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!("mark failed: {e}")))
+                })?;
+            Ok(n > 0)
+        })
+    }
+
+    /// Mark a failed message dismissed. The row is KEPT — it stays in
+    /// history and in FTS; this only hides the failed bubble's actions.
+    pub(crate) fn mark_dismissed(&self, envelope_id: &[u8; 16], now: i64) -> Result<bool> {
+        self.pool.with_mut(|c| {
+            let n = c
+                .execute(
+                    "UPDATE messages SET dismissed_at = ?1 WHERE envelope_id = ?2",
+                    rusqlite::params![now, &envelope_id[..]],
+                )
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!("mark dismissed: {e}")))
+                })?;
+            Ok(n > 0)
+        })
+    }
+
+    /// `(dismissed_at, failed_reason)` for one message, addressed by
+    /// envelope id. `(None, None)` if the row is unknown.
+    pub(crate) fn delivery_outcome(
+        &self,
+        envelope_id: &[u8; 16],
+    ) -> Result<(Option<i64>, Option<String>)> {
+        self.pool.with(|c| {
+            c.query_row(
+                "SELECT dismissed_at, failed_reason FROM messages WHERE envelope_id = ?1",
+                rusqlite::params![&envelope_id[..]],
+                |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, Option<String>>(1)?)),
+            )
+            .optional()
+            .map(|row| row.unwrap_or((None, None)))
+            .map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!("delivery_outcome: {e}")))
+            })
+        })
+    }
+
     /// Mark a message delivered by row id.
     #[cfg(test)]
     pub(crate) fn mark_delivered(&self, id: i64, delivered_at: i64) -> Result<()> {
@@ -814,6 +882,38 @@ mod tests {
         }
     }
 
+    /// The sender pubkey used by [`insert_outgoing_test_row`] and
+    /// [`insert_outgoing_test_row_with_body`] — an outgoing row is one whose
+    /// `sender` is our own pubkey.
+    const SELF_PUBKEY: [u8; 32] = [0x99; 32];
+
+    /// Insert a row that looks like a message *we sent* (`sender ==
+    /// SELF_PUBKEY`), addressed by the given envelope id, so
+    /// `mark_failed`/`mark_delivered_by_envelope_id` can find it.
+    fn insert_outgoing_test_row(repo: &MessageRepo<'_>, eid: &[u8; 16]) {
+        insert_outgoing_test_row_with_body(repo, eid, "outgoing");
+    }
+
+    fn insert_outgoing_test_row_with_body(repo: &MessageRepo<'_>, eid: &[u8; 16], body: &str) {
+        let env = Envelope {
+            v: 1,
+            id: MessageId(*eid),
+            ts: 1_700_000_000,
+            reply_to: None,
+            kind: Kind::Text {
+                body: body.to_string(),
+            },
+        };
+        repo.insert(InsertParams {
+            group_id: &[0x01; 32],
+            sender: &SELF_PUBKEY,
+            envelope: &env,
+            mls_generation: 0,
+            ts_daemon_recv: env.ts,
+        })
+        .unwrap();
+    }
+
     #[test]
     fn insert_returns_rowid_and_round_trips() {
         let pool = Pool::in_memory();
@@ -958,6 +1058,93 @@ mod tests {
             .unwrap();
         assert!(!forged, "an incoming row must not be markable as delivered");
         assert_eq!(repo.recent(&[0x55; 32], 10).unwrap()[0].delivered_at, None);
+    }
+
+    #[test]
+    fn failed_reason_and_dismissed_at_round_trip() {
+        let pool = Pool::in_memory();
+        let repo = MessageRepo::new(&pool);
+        let eid = [0xAB; 16];
+        insert_outgoing_test_row(&repo, &eid);
+
+        // Fresh row: neither set.
+        let (dismissed, reason) = repo.delivery_outcome(&eid).unwrap();
+        assert_eq!(dismissed, None);
+        assert_eq!(reason, None);
+
+        // Giving up stores the reason, so the remedy survives a restart.
+        assert!(repo
+            .mark_failed(&eid, &SELF_PUBKEY, "this contact has no mailbox")
+            .unwrap());
+        let (_, reason) = repo.delivery_outcome(&eid).unwrap();
+        assert_eq!(reason.as_deref(), Some("this contact has no mailbox"));
+
+        // Dismissal is independent and keeps the row.
+        assert!(repo.mark_dismissed(&eid, 2_000).unwrap());
+        let (dismissed, reason) = repo.delivery_outcome(&eid).unwrap();
+        assert_eq!(dismissed, Some(2_000));
+        assert_eq!(reason.as_deref(), Some("this contact has no mailbox"));
+    }
+
+    #[test]
+    fn dismiss_keeps_the_row_searchable() {
+        let pool = Pool::in_memory();
+        let repo = MessageRepo::new(&pool);
+        let eid = [0xAC; 16];
+        insert_outgoing_test_row_with_body(&repo, &eid, "findable haystack needle");
+
+        repo.mark_dismissed(&eid, 1_000).unwrap();
+
+        // Decision 4: Dismiss keeps the row in history AND in FTS. This is the
+        // test that stops a later "tidy up" turning Dismiss into a delete.
+        let hits = repo.search("needle", None, 10, 0, false).unwrap();
+        assert_eq!(hits.len(), 1, "a dismissed message must stay searchable");
+    }
+
+    #[test]
+    fn mark_failed_on_unknown_envelope_id_changes_nothing() {
+        let pool = Pool::in_memory();
+        let repo = MessageRepo::new(&pool);
+        assert!(!repo.mark_failed(&[0xFF; 16], &SELF_PUBKEY, "nope").unwrap());
+    }
+
+    /// A late failure sweep must not overwrite an already-acked send, and it
+    /// must not touch an INCOMING row that happens to carry the same
+    /// envelope id — `mark_failed` is scoped to `sender = self_pubkey` for
+    /// the same reason `mark_delivered_by_envelope_id` is.
+    #[test]
+    fn mark_failed_does_not_touch_an_incoming_row_with_the_same_envelope_id() {
+        let pool = Pool::in_memory();
+        let repo = MessageRepo::new(&pool);
+        let peer = [0x22u8; 32];
+        let eid = [0xAD; 16];
+
+        // An INCOMING message: sender is the peer, not us.
+        let env = Envelope {
+            v: 1,
+            id: MessageId(eid),
+            ts: 1_700_000_000,
+            reply_to: None,
+            kind: Kind::Text {
+                body: "from-them".to_string(),
+            },
+        };
+        repo.insert(InsertParams {
+            group_id: &[0x66; 32],
+            sender: &peer,
+            envelope: &env,
+            mls_generation: 0,
+            ts_daemon_recv: env.ts,
+        })
+        .unwrap();
+
+        let marked = repo
+            .mark_failed(&eid, &SELF_PUBKEY, "should not apply")
+            .unwrap();
+        assert!(!marked, "an incoming row must not be markable as failed");
+        let (dismissed, reason) = repo.delivery_outcome(&eid).unwrap();
+        assert_eq!(dismissed, None);
+        assert_eq!(reason, None);
     }
 
     #[test]
