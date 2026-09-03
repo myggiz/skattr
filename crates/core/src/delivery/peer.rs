@@ -490,8 +490,7 @@ async fn minimal_run<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let mut pending: HashMap<MessageId, oneshot::Sender<std::result::Result<(), ()>>> =
-        HashMap::new();
+    let mut pending: HashMap<MessageId, PendingSend> = HashMap::new();
 
     loop {
         tokio::select! {
@@ -501,13 +500,13 @@ where
                     let _ = job.ack_tx.send(Err(()));
                     return Err(e);
                 }
-                pending.insert(job.message_id, job.ack_tx);
+                pending.insert(job.message_id, (job.ack_tx, tokio::time::Instant::now()));
             }
             frame = conn.recv() => {
                 match frame {
                     Ok(Some(Frame::Ack(bytes))) => {
                         let mid = MessageId(bytes);
-                        if let Some(tx) = pending.remove(&mid) {
+                        if let Some((tx, _sent_at)) = pending.remove(&mid) {
                             let _ = tx.send(Ok(()));
                         }
                     }
@@ -539,11 +538,22 @@ where
     Ok(())
 }
 
+/// An in-flight send: the ACK oneshot plus the instant it went out (#229).
+type PendingSend = (
+    oneshot::Sender<std::result::Result<(), ()>>,
+    tokio::time::Instant,
+);
+
 /// Tick intervals for the full actor.
 const RETRY_TICK: std::time::Duration = std::time::Duration::from_secs(1);
 const KEEPALIVE_PERIOD: std::time::Duration = std::time::Duration::from_secs(60);
 const PONG_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 const IDLE_CLOSE: std::time::Duration = std::time::Duration::from_secs(180);
+
+/// How long a sent-but-unacknowledged message blocks its own outbox row
+/// (#229). Same 30 s the chunk-request path uses. A peer that accepts a
+/// frame and never ACKs must not wedge the row permanently.
+const PENDING_INFLIGHT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Pacing for dials issued on behalf of a pending inbound attachment (#76).
 /// Same shape as `chunk_sweep`'s deposit backoff, held at the last entry. A
@@ -577,8 +587,11 @@ where
 {
     use crate::delivery::outbox::Outbox;
 
-    let mut pending: HashMap<MessageId, oneshot::Sender<std::result::Result<(), ()>>> =
-        HashMap::new();
+    // #229: the send instant rides along so an un-acked retry-tick send can
+    // be evicted. Without it, only an `Ack` or a connection drop removes an
+    // entry, and the `pending.contains_key` guard below then skips that outbox
+    // row on every later tick — forever, while the connection stays healthy.
+    let mut pending: HashMap<MessageId, PendingSend> = HashMap::new();
     let mut retry_tick = tokio::time::interval(RETRY_TICK);
     retry_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // Start keepalive after the first full period to avoid an immediate
@@ -646,7 +659,7 @@ where
                     arm_failure(&mut first_failure_at);
                     continue;
                 }
-                pending.insert(job.message_id, job.ack_tx);
+                pending.insert(job.message_id, (job.ack_tx, tokio::time::Instant::now()));
                 last_traffic = tokio::time::Instant::now();
                 first_failure_at = None;
             }
@@ -685,7 +698,7 @@ where
                     arm_failure(&mut first_failure_at);
                     continue;
                 }
-                pending.insert(synthetic_id, wj.ack_tx);
+                pending.insert(synthetic_id, (wj.ack_tx, tokio::time::Instant::now()));
                 last_traffic = tokio::time::Instant::now();
                 first_failure_at = None;
             }
@@ -697,6 +710,14 @@ where
                 // exception to "dial-on-demand happens on the next job send":
                 // that fetch is background work with no local user action
                 // behind it, so nothing else will ever give it a connection.
+                // #229: evict in-flight entries the peer never acknowledged, so
+                // their outbox rows become eligible again under their own
+                // backoff. A row genuinely in flight is still protected for the
+                // length of the deadline.
+                let now_i = tokio::time::Instant::now();
+                pending.retain(|_, (_, sent_at)| {
+                    now_i.duration_since(*sent_at) < PENDING_INFLIGHT_DEADLINE
+                });
                 let ob = Outbox::new(&pool);
                 let now = now_ms();
                 // A transient outbox read error must not also skip the #76
@@ -717,7 +738,7 @@ where
                         break;
                     }
                     let (tx, _rx) = oneshot::channel::<std::result::Result<(), ()>>();
-                    pending.insert(entry.message_id, tx);
+                    pending.insert(entry.message_id, (tx, tokio::time::Instant::now()));
                     let _ = ob.reschedule(entry.id, entry.attempts, now);
                     last_traffic = tokio::time::Instant::now();
                     first_failure_at = None;
@@ -952,7 +973,7 @@ where
                 match frame {
                     Ok(Some(Frame::Ack(bytes))) => {
                         let mid = MessageId(bytes);
-                        if let Some(tx) = pending.remove(&mid) {
+                        if let Some((tx, _sent_at)) = pending.remove(&mid) {
                             let _ = tx.send(Ok(()));
                         }
                         let ob = Outbox::new(&pool);
@@ -1314,8 +1335,8 @@ where
     }
 }
 
-fn drain_pending(pending: &mut HashMap<MessageId, oneshot::Sender<std::result::Result<(), ()>>>) {
-    for (_, tx) in pending.drain() {
+fn drain_pending(pending: &mut HashMap<MessageId, PendingSend>) {
+    for (_, (tx, _sent_at)) in pending.drain() {
         let _ = tx.send(Err(()));
     }
 }
@@ -1515,6 +1536,75 @@ mod tests {
 
         handle.abort();
         let _ = echo.await;
+    }
+
+    /// #229: the retry tick inserted into `pending` with a dropped receiver,
+    /// so an un-acked send was never evicted and `pending.contains_key`
+    /// skipped that row on every later tick — forever, while the connection
+    /// stayed healthy. A peer that accepts frames and never ACKs must not
+    /// permanently block its own outbox row.
+    #[tokio::test(start_paused = true)]
+    async fn unacked_retry_tick_send_is_retried_not_wedged() {
+        use crate::delivery::outbox::Outbox;
+        use crate::envelope::MessageId as EMid;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let (client_stream, server_stream) = tokio::io::duplex(64 * 1024);
+        let initiator_id = IdentityKey::generate().unwrap();
+        let responder_id = IdentityKey::generate().unwrap();
+        let responder_static = responder_id.noise_static_public();
+
+        // Peer end: accepts every frame and NEVER sends an Ack.
+        let seen = std::sync::Arc::new(AtomicUsize::new(0));
+        let seen_task = seen.clone();
+        let responder = tokio::spawn(async move {
+            let (mut conn, _) = handshake_responder(server_stream, &responder_id, None)
+                .await
+                .unwrap();
+            while let Ok(Some(frame)) = conn.recv().await {
+                if matches!(frame, Frame::MlsApp(_)) {
+                    seen_task.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        });
+
+        let (conn, _) = handshake_initiator(client_stream, &initiator_id, &responder_static, None)
+            .await
+            .unwrap();
+
+        let mid = [0x77u8; 16];
+        let pool = std::sync::Arc::new(Pool::in_memory());
+        let peer = PublicKey([0xBB; 32]);
+        Outbox::new(&pool)
+            .enqueue(&peer, EMid(mid), &[0x01, 0x02, 0x03], 0)
+            .unwrap()
+            .unwrap();
+
+        let (_job_tx, job_rx) = mpsc::channel::<DeliveryJob>(4);
+        let handle =
+            PeerConnection::spawn_full_for_test(peer, Box::new(conn), job_rx, pool.clone(), None);
+
+        // The row is due at once, so the first retry tick delivers it.
+        tokio::time::advance(std::time::Duration::from_millis(1_100)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(seen.load(Ordering::SeqCst), 1, "first send must go out");
+
+        // The outbox's own backoff is wall-clock (`now_ms`), which tokio's
+        // paused clock does not move — let real time pass so the row falls
+        // due again independently of the virtual-time advance below.
+        std::thread::sleep(std::time::Duration::from_millis(1_300));
+
+        // Past the in-flight deadline the row must be re-sent. Wedged, the
+        // actor sits forever holding an entry nothing will ever remove.
+        tokio::time::advance(std::time::Duration::from_secs(45)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            seen.load(Ordering::SeqCst) >= 2,
+            "an un-acked row must be retried, not wedged by its own pending entry (#229)"
+        );
+
+        handle.abort();
+        responder.abort();
     }
 
     #[tokio::test(start_paused = true)]
