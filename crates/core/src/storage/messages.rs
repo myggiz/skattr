@@ -542,6 +542,24 @@ impl<'p> MessageRepo<'p> {
         })
     }
 
+    /// The sender's wall-clock `ts` (millis) of one message, addressed by
+    /// envelope id. `None` if the row is unknown.
+    ///
+    /// The outbox joins to history on `outbox.message_id == messages
+    /// .envelope_id`, so this is how a queue row recovers the age of the
+    /// message it is carrying.
+    pub(crate) fn envelope_ts(&self, envelope_id: &[u8; 16]) -> Result<Option<i64>> {
+        self.pool.with(|c| {
+            c.query_row(
+                "SELECT ts FROM messages WHERE envelope_id = ?1",
+                rusqlite::params![&envelope_id[..]],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|e| CoreError::Storage(StorageErrorKind::Other(format!("envelope_ts: {e}"))))
+        })
+    }
+
     /// Mark a failed message dismissed. The row is KEPT — it stays in
     /// history and in FTS; this only hides the failed bubble's actions.
     pub(crate) fn mark_dismissed(&self, envelope_id: &[u8; 16], now: i64) -> Result<bool> {
