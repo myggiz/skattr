@@ -500,14 +500,18 @@ where
                     let _ = job.ack_tx.send(Err(()));
                     return Err(e);
                 }
-                pending.insert(job.message_id, (job.ack_tx, tokio::time::Instant::now()));
+                pending.insert(job.message_id, PendingSend {
+                    ack_tx: job.ack_tx,
+                    sent_at: tokio::time::Instant::now(),
+                    origin: PendingOrigin::Outbox,
+                });
             }
             frame = conn.recv() => {
                 match frame {
                     Ok(Some(Frame::Ack(bytes))) => {
                         let mid = MessageId(bytes);
-                        if let Some((tx, _sent_at)) = pending.remove(&mid) {
-                            let _ = tx.send(Ok(()));
+                        if let Some(p) = pending.remove(&mid) {
+                            let _ = p.ack_tx.send(Ok(()));
                         }
                     }
                     Ok(Some(Frame::Bye)) => {
@@ -538,11 +542,24 @@ where
     Ok(())
 }
 
-/// An in-flight send: the ACK oneshot plus the instant it went out (#229).
-type PendingSend = (
-    oneshot::Sender<std::result::Result<(), ()>>,
-    tokio::time::Instant,
-);
+/// Where an in-flight entry came from. Only `Outbox`-originated entries can
+/// block an outbox row, so only they are evicted on the deadline (#229). A
+/// `Welcome` entry is keyed by `welcome_msg_id`, which is never an outbox
+/// `message_id`, and its `ack_tx` is awaited by `welcome_sweep` under that
+/// module's own 45 s `ACK_TIMEOUT` — evicting it would resolve that receiver
+/// early for no gain, costing a sweep backoff and `MAX_WELCOME_AGE` budget.
+enum PendingOrigin {
+    Outbox,
+    Welcome,
+}
+
+/// An in-flight send: the ACK oneshot, the instant it went out, and what put
+/// it here (#229).
+struct PendingSend {
+    ack_tx: oneshot::Sender<std::result::Result<(), ()>>,
+    sent_at: tokio::time::Instant,
+    origin: PendingOrigin,
+}
 
 /// Tick intervals for the full actor.
 const RETRY_TICK: std::time::Duration = std::time::Duration::from_secs(1);
@@ -659,7 +676,11 @@ where
                     arm_failure(&mut first_failure_at);
                     continue;
                 }
-                pending.insert(job.message_id, (job.ack_tx, tokio::time::Instant::now()));
+                pending.insert(job.message_id, PendingSend {
+                    ack_tx: job.ack_tx,
+                    sent_at: tokio::time::Instant::now(),
+                    origin: PendingOrigin::Outbox,
+                });
                 last_traffic = tokio::time::Instant::now();
                 first_failure_at = None;
             }
@@ -698,7 +719,11 @@ where
                     arm_failure(&mut first_failure_at);
                     continue;
                 }
-                pending.insert(synthetic_id, (wj.ack_tx, tokio::time::Instant::now()));
+                pending.insert(synthetic_id, PendingSend {
+                    ack_tx: wj.ack_tx,
+                    sent_at: tokio::time::Instant::now(),
+                    origin: PendingOrigin::Welcome,
+                });
                 last_traffic = tokio::time::Instant::now();
                 first_failure_at = None;
             }
@@ -710,13 +735,17 @@ where
                 // exception to "dial-on-demand happens on the next job send":
                 // that fetch is background work with no local user action
                 // behind it, so nothing else will ever give it a connection.
-                // #229: evict in-flight entries the peer never acknowledged, so
-                // their outbox rows become eligible again under their own
-                // backoff. A row genuinely in flight is still protected for the
-                // length of the deadline.
+                // #229: evict outbox-originated in-flight entries the peer never
+                // acknowledged, so their rows become eligible again under their
+                // own backoff. A row genuinely in flight is still protected for
+                // the length of the deadline. Welcome entries are exempt: they
+                // block no outbox row, and `welcome_sweep` owns their timeout.
                 let now_i = tokio::time::Instant::now();
-                pending.retain(|_, (_, sent_at)| {
-                    now_i.duration_since(*sent_at) < PENDING_INFLIGHT_DEADLINE
+                pending.retain(|_, p| match p.origin {
+                    PendingOrigin::Welcome => true,
+                    PendingOrigin::Outbox => {
+                        now_i.duration_since(p.sent_at) < PENDING_INFLIGHT_DEADLINE
+                    }
                 });
                 let ob = Outbox::new(&pool);
                 let now = now_ms();
@@ -738,7 +767,11 @@ where
                         break;
                     }
                     let (tx, _rx) = oneshot::channel::<std::result::Result<(), ()>>();
-                    pending.insert(entry.message_id, (tx, tokio::time::Instant::now()));
+                    pending.insert(entry.message_id, PendingSend {
+                        ack_tx: tx,
+                        sent_at: tokio::time::Instant::now(),
+                        origin: PendingOrigin::Outbox,
+                    });
                     let _ = ob.reschedule(entry.id, entry.attempts, now);
                     last_traffic = tokio::time::Instant::now();
                     first_failure_at = None;
@@ -973,8 +1006,8 @@ where
                 match frame {
                     Ok(Some(Frame::Ack(bytes))) => {
                         let mid = MessageId(bytes);
-                        if let Some((tx, _sent_at)) = pending.remove(&mid) {
-                            let _ = tx.send(Ok(()));
+                        if let Some(p) = pending.remove(&mid) {
+                            let _ = p.ack_tx.send(Ok(()));
                         }
                         let ob = Outbox::new(&pool);
                         // The outbox row is peer-scoped, so its removal is the
@@ -1336,8 +1369,8 @@ where
 }
 
 fn drain_pending(pending: &mut HashMap<MessageId, PendingSend>) {
-    for (_, (tx, _sent_at)) in pending.drain() {
-        let _ = tx.send(Err(()));
+    for (_, p) in pending.drain() {
+        let _ = p.ack_tx.send(Err(()));
     }
 }
 
@@ -1604,6 +1637,113 @@ mod tests {
         );
 
         handle.abort();
+        responder.abort();
+    }
+
+    /// #229 boundary: the eviction deadline is for outbox rows only. A
+    /// Welcome entry is keyed by `welcome_msg_id`, blocks no outbox row, and
+    /// its `ack_tx` is awaited by `welcome_sweep` under that module's own 45 s
+    /// `ACK_TIMEOUT` — so it must survive past `PENDING_INFLIGHT_DEADLINE`
+    /// while an outbox entry inserted alongside it is evicted and re-sent.
+    #[tokio::test(start_paused = true)]
+    async fn welcome_pending_entry_survives_the_inflight_deadline() {
+        use crate::delivery::outbox::Outbox;
+        use crate::envelope::MessageId as EMid;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let actor_id = IdentityKey::generate().unwrap();
+        let responder_id = IdentityKey::generate().unwrap();
+        let responder_static = responder_id.noise_static_public();
+        let peer = PublicKey(responder_id.public().0);
+
+        let (client_stream, server_stream) = tokio::io::duplex(64 * 1024);
+
+        // Peer end: reads every frame, counts `MlsApp`, and NEVER Acks.
+        let apps = std::sync::Arc::new(AtomicUsize::new(0));
+        let welcomes = std::sync::Arc::new(AtomicUsize::new(0));
+        let (apps_t, welcomes_t) = (apps.clone(), welcomes.clone());
+        let responder = tokio::spawn(async move {
+            let (mut conn, _) = handshake_responder(server_stream, &responder_id, None)
+                .await
+                .unwrap();
+            while let Ok(Some(frame)) = conn.recv().await {
+                match frame {
+                    Frame::MlsApp(_) => {
+                        apps_t.fetch_add(1, Ordering::SeqCst);
+                    }
+                    Frame::MlsWelcome(_) => {
+                        welcomes_t.fetch_add(1, Ordering::SeqCst);
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        let (actor_conn, _) =
+            handshake_initiator(client_stream, &actor_id, &responder_static, None)
+                .await
+                .unwrap();
+
+        let pool = std::sync::Arc::new(Pool::in_memory());
+        Outbox::new(&pool)
+            .enqueue(&peer, EMid([0x33; 16]), &[0x01, 0x02, 0x03], 0)
+            .unwrap()
+            .unwrap();
+
+        let (_jobs_tx, jobs_rx) = mpsc::channel::<DeliveryJob>(4);
+        let (welcome_tx, welcome_rx) = mpsc::channel::<WelcomeJob>(4);
+        let (_ctrl_tx, ctrl_rx) = mpsc::channel::<PeerCtrl<tokio::io::DuplexStream>>(4);
+        let actor = tokio::spawn(async move {
+            let _ = super::full_run::<tokio::io::DuplexStream>(
+                peer,
+                Some(actor_conn),
+                jobs_rx,
+                welcome_rx,
+                ctrl_rx,
+                pool,
+                None,
+                None,
+                std::time::Duration::from_secs(0),
+                None,
+                None,
+                None,
+            )
+            .await;
+        });
+
+        // Both entries go in-flight at (virtually) the same moment: the first
+        // retry tick sends the outbox row, and the Welcome follows it.
+        let (ack_tx, mut ack_rx) = oneshot::channel::<std::result::Result<(), ()>>();
+        welcome_tx
+            .send(WelcomeJob {
+                welcome_bytes: b"fake welcome bytes".to_vec(),
+                ack_tx,
+            })
+            .await
+            .unwrap();
+        tokio::time::advance(std::time::Duration::from_millis(1_100)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(apps.load(Ordering::SeqCst), 1, "outbox row must go out");
+        assert_eq!(welcomes.load(Ordering::SeqCst), 1, "welcome must go out");
+
+        // The outbox row's own backoff is wall-clock (`now_ms`), which tokio's
+        // paused clock does not move — let real time pass so it falls due.
+        std::thread::sleep(std::time::Duration::from_millis(1_300));
+        tokio::time::advance(std::time::Duration::from_secs(45)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        assert!(
+            apps.load(Ordering::SeqCst) >= 2,
+            "the outbox entry must be evicted and its row re-sent (#229)"
+        );
+        assert_eq!(
+            ack_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty),
+            "the welcome ack_tx must still be held — welcome_sweep's 45 s \
+             ACK_TIMEOUT owns this timeout, not PENDING_INFLIGHT_DEADLINE"
+        );
+
+        actor.abort();
         responder.abort();
     }
 
