@@ -902,15 +902,18 @@ where
             };
             // `contact` field is always the peer — outgoing rows were sent
             // to `peer`; incoming rows were sent by `peer` (the sender).
-            Some(MessageRecord::project(
-                row.id,
-                &env,
-                peer,
-                u64::try_from(row.mls_generation).unwrap_or(0),
-                row.ts_daemon_recv,
-                direction,
-                row.delivered_at,
-            ))
+            Some(
+                MessageRecord::project(
+                    row.id,
+                    &env,
+                    peer,
+                    u64::try_from(row.mls_generation).unwrap_or(0),
+                    row.ts_daemon_recv,
+                    direction,
+                    row.delivered_at,
+                )
+                .with_persisted_status(row.dismissed_at, row.failed_reason),
+            )
         })
         .collect();
 
@@ -1168,15 +1171,18 @@ where
         } else {
             Direction::Incoming
         };
-        records.push(MessageRecord::project(
-            row.id,
-            &env,
-            contact, // scoped to the requested peer
-            u64::try_from(row.mls_generation).unwrap_or(0),
-            row.ts_daemon_recv,
-            direction,
-            row.delivered_at,
-        ));
+        records.push(
+            MessageRecord::project(
+                row.id,
+                &env,
+                contact, // scoped to the requested peer
+                u64::try_from(row.mls_generation).unwrap_or(0),
+                row.ts_daemon_recv,
+                direction,
+                row.delivered_at,
+            )
+            .with_persisted_status(row.dismissed_at, row.failed_reason.clone()),
+        );
     }
 
     // Cursor logic: a FULL page (rows.len() == lim_usize) means there may

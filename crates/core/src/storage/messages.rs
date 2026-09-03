@@ -64,6 +64,12 @@ pub struct StoredMessage {
     pub mls_generation: i64,
     /// Local-clock unix seconds at persist time. 0 for legacy rows.
     pub ts_daemon_recv: i64,
+    /// When the user dismissed a failed send (unix millis), if ever.
+    /// `None` if the query didn't select it (e.g. `search`).
+    pub dismissed_at: Option<i64>,
+    /// Why the daemon gave up on this send, if it did. `None` if the
+    /// query didn't select it (e.g. `search`).
+    pub failed_reason: Option<String>,
 }
 
 /// All fields required to persist a single message row.
@@ -186,7 +192,7 @@ impl<'p> MessageRepo<'p> {
             let mut stmt = c
                 .prepare(
                     "SELECT id, group_id, sender, kind, body_blob, ts, delivered_at, \
-                            mls_generation, ts_daemon_recv \
+                            mls_generation, ts_daemon_recv, dismissed_at, failed_reason \
                      FROM messages \
                      WHERE group_id = ?1 \
                      ORDER BY mls_generation DESC, id DESC LIMIT ?2",
@@ -208,6 +214,8 @@ impl<'p> MessageRepo<'p> {
                             delivered_at: r.get(6)?,
                             mls_generation: r.get(7)?,
                             ts_daemon_recv: r.get(8)?,
+                            dismissed_at: r.get(9)?,
+                            failed_reason: r.get(10)?,
                         })
                     },
                 )
@@ -234,7 +242,7 @@ impl<'p> MessageRepo<'p> {
             let mut stmt = c
                 .prepare(
                     "SELECT id, group_id, sender, kind, body_blob, ts, delivered_at, \
-                            mls_generation, ts_daemon_recv \
+                            mls_generation, ts_daemon_recv, dismissed_at, failed_reason \
                      FROM messages \
                      WHERE group_id = ?1 AND id < ?2 \
                      ORDER BY mls_generation DESC, id DESC LIMIT ?3",
@@ -262,6 +270,8 @@ impl<'p> MessageRepo<'p> {
                             delivered_at: r.get(6)?,
                             mls_generation: r.get(7)?,
                             ts_daemon_recv: r.get(8)?,
+                            dismissed_at: r.get(9)?,
+                            failed_reason: r.get(10)?,
                         })
                     },
                 )
@@ -346,6 +356,8 @@ impl<'p> MessageRepo<'p> {
                         delivered_at: r.get(6)?,
                         mls_generation: r.get(7)?,
                         ts_daemon_recv: r.get(8)?,
+                        dismissed_at: None,
+                        failed_reason: None,
                     },
                     bm25: r.get::<_, f64>(9).unwrap_or(0.0),
                     snippet: r.get::<_, String>(10).unwrap_or_default(),
@@ -440,7 +452,7 @@ impl<'p> MessageRepo<'p> {
             let mut stmt = c
                 .prepare(
                     "SELECT id, group_id, sender, kind, body_blob, ts, delivered_at, \
-                            mls_generation, ts_daemon_recv \
+                            mls_generation, ts_daemon_recv, dismissed_at, failed_reason \
                      FROM messages \
                      WHERE group_id = ?1 AND id > ?2 \
                      ORDER BY id ASC \
@@ -467,6 +479,8 @@ impl<'p> MessageRepo<'p> {
                             delivered_at: r.get(6)?,
                             mls_generation: r.get(7)?,
                             ts_daemon_recv: r.get(8)?,
+                            dismissed_at: r.get(9)?,
+                            failed_reason: r.get(10)?,
                         })
                     },
                 )
@@ -865,6 +879,8 @@ impl<'p> MessageRepo<'p> {
                         delivered_at: r.get(6)?,
                         mls_generation: r.get(7)?,
                         ts_daemon_recv: r.get(8)?,
+                        dismissed_at: None,
+                        failed_reason: None,
                     })
                 })
                 .map_err(|e| {

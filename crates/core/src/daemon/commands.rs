@@ -494,6 +494,13 @@ pub struct MessageRecord {
     /// unknown rather than as pending (#200, same lesson as #176).
     /// Sender-side only; always `None` on incoming messages.
     pub delivered_at: Option<u64>,
+    /// When the user dismissed a failed send (unix millis). The row is
+    /// KEPT — dismissal only hides the bubble's actions and greys it.
+    /// Sender-side only.
+    pub dismissed_at: Option<u64>,
+    /// Why the daemon gave up, if it did. Stored rather than derived so
+    /// the remedy survives a restart. Sender-side only.
+    pub failed_reason: Option<String>,
 }
 
 impl MessageRecord {
@@ -526,7 +533,22 @@ impl MessageRecord {
             ts_daemon_recv: u64::try_from(ts_daemon_recv).unwrap_or(0),
             ts_envelope: envelope.ts,
             delivered_at: delivered_at.and_then(|t| u64::try_from(t).ok()),
+            dismissed_at: None,
+            failed_reason: None,
         }
+    }
+
+    /// Attach persisted delivery outcome to a projection read from storage.
+    /// Live-emit call sites never have these and do not call it.
+    #[must_use]
+    pub fn with_persisted_status(
+        mut self,
+        dismissed_at: Option<i64>,
+        failed_reason: Option<String>,
+    ) -> Self {
+        self.dismissed_at = dismissed_at.and_then(|t| u64::try_from(t).ok());
+        self.failed_reason = failed_reason;
+        self
     }
 }
 
@@ -810,6 +832,42 @@ mod tests {
         assert_eq!(rec.contact.0, [0x33; 32]);
     }
 
+    /// A representative outgoing `MessageRecord` as `project` would emit it —
+    /// no persisted outcome attached.
+    fn sample_outgoing_record() -> MessageRecord {
+        use crate::envelope::{Envelope, MessageId};
+        use crate::identity::PublicKey;
+
+        let env = Envelope {
+            v: 1,
+            id: MessageId([0x11; 16]),
+            ts: 1_700_000_000,
+            reply_to: None,
+            kind: Kind::Text { body: "hi".into() },
+        };
+
+        MessageRecord::project(
+            1,
+            &env,
+            PublicKey([0x22; 32]),
+            0,
+            1_700_000_100,
+            Direction::Outgoing,
+            None,
+        )
+    }
+
+    #[test]
+    fn with_persisted_status_attaches_outcome_without_touching_project() {
+        let rec = sample_outgoing_record();
+        assert_eq!(rec.dismissed_at, None);
+        assert_eq!(rec.failed_reason, None);
+
+        let rec = rec.with_persisted_status(Some(1_700), Some("no mailbox".into()));
+        assert_eq!(rec.dismissed_at, Some(1_700));
+        assert_eq!(rec.failed_reason.as_deref(), Some("no mailbox"));
+    }
+
     #[test]
     fn new_result_variants_serde_roundtrip() {
         let results: Vec<CommandResult> = vec![
@@ -838,6 +896,8 @@ mod tests {
                 ts_daemon_recv: 1_700_000_100,
                 ts_envelope: 1_700_000_000,
                 delivered_at: None,
+                dismissed_at: None,
+                failed_reason: None,
             }]),
             CommandResult::MessageSent {
                 message_id: crate::daemon::hex::Hex16::from([3; 16]),
@@ -1031,6 +1091,8 @@ mod tests {
                 ts_daemon_recv: 100,
                 ts_envelope: 99,
                 delivered_at: None,
+                dismissed_at: None,
+                failed_reason: None,
             }],
             next_before_id: Some(6),
         };
@@ -1075,6 +1137,8 @@ mod tests {
             ts_daemon_recv: 200,
             ts_envelope: 199,
             delivered_at: None,
+            dismissed_at: None,
+            failed_reason: None,
         };
         let r = CommandResult::MessageSent {
             message_id: Hex16::from([3; 16]),
