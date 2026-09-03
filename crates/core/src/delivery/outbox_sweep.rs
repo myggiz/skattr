@@ -124,29 +124,50 @@ pub(crate) async fn run_outbox_sweep(
             continue;
         }
 
-        // Rule 2. Delete first, then record. If the process dies between the
-        // two the row is gone and the message shows as unknown, which is
-        // recoverable; the reverse would leave a failed message that is still
-        // being retried.
+        // Rule 2. Mark first, then delete, and report only what the DB
+        // actually did. `mark_failed` is guarded on `delivered_at IS NULL`, so
+        // a `false` here means the message was already acked and this row is
+        // stale garbage — announcing `Failed` for it would invert the truth,
+        // which is the exact class of bug this sweeper exists to remove.
+        //
+        // No transaction is needed. Crash after mark, before delete: the row
+        // survives, the next sweep marks again (still `delivered_at IS NULL`,
+        // so still `true`), deletes and emits — one duplicate `Failed` at
+        // worst, and the UI's status map is last-write-wins to the same value.
+        // Crash after delete, before emit: the reason is already persisted, so
+        // the UI hydrates `Failed` from the record on next load. That is why
+        // the reason is stored rather than derived.
+        let marked = match messages.mark_failed(&row.message_id, &self_pubkey, NO_MAILBOX_REASON) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!(
+                    target: "skattr::delivery::outbox_sweep",
+                    error = %e,
+                    "mark_failed failed; leaving row for the next sweep"
+                );
+                continue;
+            }
+        };
+
+        // Delete regardless: an aged direct row for a contact with no mailbox
+        // is terminal either way, and dropping an already-delivered message's
+        // stale row stops it being re-examined every tick.
         match outbox.delete_by_id(row.id) {
             Ok(true) => {}
-            Ok(false) => continue, // another sweep won the race
+            Ok(false) => {} // another sweep won the race; the mark stands
             Err(e) => {
                 tracing::warn!(
                     target: "skattr::delivery::outbox_sweep",
                     error = %e,
                     "delete failed"
                 );
-                continue;
             }
         }
-        if let Err(e) = messages.mark_failed(&row.message_id, &self_pubkey, NO_MAILBOX_REASON) {
-            tracing::warn!(
-                target: "skattr::delivery::outbox_sweep",
-                error = %e,
-                "mark_failed failed"
-            );
+
+        if !marked {
+            continue; // already delivered — no give-up log, no Failed event
         }
+
         // Redaction: no pubkey, no onion, no body.
         tracing::info!(
             target: "skattr::delivery::outbox_sweep",
@@ -466,7 +487,8 @@ mod tests {
         let _ = tokio::time::timeout(std::time::Duration::from_secs(1), server).await;
     }
 
-    /// Rows inside the window are untouched on both lanes.
+    /// A row inside the window is untouched on the no-mailbox lane: not
+    /// deleted, not failed, no event.
     #[tokio::test]
     async fn fresh_row_is_left_alone() {
         let mut fx = fixture_no_mailbox();
@@ -484,6 +506,65 @@ mod tests {
         assert_eq!(row.target_kind, OutboxTargetKind::Direct);
         assert_eq!(failed_reason(&fx.pool, &eid), None);
         assert!(fx.events.try_recv().is_err(), "no event for a fresh row");
+    }
+
+    /// The same, on the mailbox lane: being inside the window must not trigger
+    /// a retarget. Together with `fresh_row_is_left_alone` this covers both
+    /// lanes' in-window behaviour.
+    #[tokio::test]
+    async fn fresh_row_with_mailbox_is_not_retargeted() {
+        let mut fx = fixture(Arc::new(UnreachableFactory));
+        let peer = PublicKey([0x34; 32]);
+        seed_contact_with_mailboxes(&fx.pool, peer, vec!["mb1.onion".into()]);
+        let eid = seed_outgoing_message(&fx.pool, fx.me, 0);
+        let row_id = seed_due_direct_outbox_row(&fx.pool, peer, eid);
+
+        run_outbox_sweep(&fx.pool, &fx.shared, DIRECT_EXPIRY_MS - 60_000, 32).await;
+
+        let row = OutboxRepo::new(&fx.pool)
+            .get(row_id)
+            .unwrap()
+            .expect("a fresh row must survive");
+        assert_eq!(
+            row.target_kind,
+            OutboxTargetKind::Direct,
+            "an in-window row must stay on the direct lane"
+        );
+        assert_eq!(failed_reason(&fx.pool, &eid), None);
+        assert!(fx.events.try_recv().is_err(), "no event for a fresh row");
+    }
+
+    /// A message that was acked but whose outbox row survived (the ack path's
+    /// row delete is only `warn!`-logged, never retried) must NOT be reported
+    /// as failed. `mark_failed` is guarded on `delivered_at IS NULL`, so the DB
+    /// refuses the write; the sweeper reports what the DB actually did, and
+    /// still clears the stale row so it stops being re-examined every tick.
+    #[tokio::test]
+    async fn already_delivered_row_is_cleaned_up_without_a_failed_event() {
+        let mut fx = fixture_no_mailbox();
+        let peer = PublicKey([0x55; 32]);
+        seed_contact_without_mailbox(&fx.pool, peer);
+        let eid = seed_outgoing_message(&fx.pool, fx.me, 0);
+        let row_id = seed_due_direct_outbox_row(&fx.pool, peer, eid);
+        assert!(MessageRepo::new(&fx.pool)
+            .mark_delivered_by_envelope_id(&eid, &fx.me.0, 1_234)
+            .unwrap());
+
+        run_outbox_sweep(&fx.pool, &fx.shared, DIRECT_EXPIRY_MS + 1, 32).await;
+
+        assert!(
+            OutboxRepo::new(&fx.pool).get(row_id).unwrap().is_none(),
+            "the stale row must be cleared, not re-examined every tick"
+        );
+        assert_eq!(
+            failed_reason(&fx.pool, &eid),
+            None,
+            "a delivered message must not acquire a failure reason"
+        );
+        assert!(
+            fx.events.try_recv().is_err(),
+            "a delivered message must never be reported Failed"
+        );
     }
 
     /// Sweeping twice must not emit a second Failed.
