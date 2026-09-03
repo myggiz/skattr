@@ -215,32 +215,56 @@ rules still apply: no onion, no pubkey.
 
 ### 5. Durable state
 
-Failed-ness needs no storage: "no outbox row, `delivered_at` is null, and
-outgoing" already means the daemon gave up. Dismissal is not derivable and
-does need a column.
+Dismissal is not derivable and needs storage. So does the failure *reason*:
+the design promises the failed bubble names the no-mailbox cause, and a
+reason derived at read time would be lost across a restart — the message
+would come back as a bare "failed" with no remedy attached, which is most of
+what makes it useful.
 
-Migration `0021_messages_dismissed_at.sql`:
+Migration `0021_messages_delivery_outcome.sql`:
 
 ```sql
 ALTER TABLE messages ADD COLUMN dismissed_at INTEGER;
+ALTER TABLE messages ADD COLUMN failed_reason TEXT;
 ```
 
-Nullable, mirroring the existing `delivered_at` on the same table — same
-shape, same convention, no new concept.
+Both nullable, mirroring the existing `delivered_at` on the same table.
 
-`MessageRecord` gains one computed field:
+Storing the reason also removes the need for a computed `delivery_state`
+enum and for exposing outbox membership on the wire: the daemon writes
+`failed_reason` at the moment it gives up, so the three durable states read
+directly off the row.
+
+| condition | state |
+|---|---|
+| `delivered_at` set | Delivered |
+| `dismissed_at` set | Dismissed |
+| `failed_reason` set | Failed (reason is the text to show) |
+| none of the above | Pending |
+
+`MessageRecord` gains `dismissed_at: Option<u64>` and
+`failed_reason: Option<String>`.
+
+`MessageRecord::project` keeps its current signature. The three live-emit
+call sites (`inbound.rs:343`, `dispatch.rs:734`, `dispatch.rs:1017`) always
+have neither value, so they are untouched. The read-from-storage sites
+(`dispatch.rs:905`, `dispatch.rs:1171`, `ipc/server/mod.rs:442`) chain a new
+builder:
 
 ```rust
-/// Durable delivery state, derived daemon-side. The session-scoped UI
-/// store remains the live overlay; this is the baseline that survives a
-/// restart.
-delivery_state: DeliveryState,  // Pending | Delivered | Failed | Dismissed
+/// Attach persisted delivery outcome to a projection read from storage.
+/// Live-emit call sites never have these and do not call it.
+#[must_use]
+pub fn with_persisted_status(
+    mut self,
+    dismissed_at: Option<i64>,
+    failed_reason: Option<String>,
+) -> Self
 ```
 
-An enum, not a pair of bool flags, per the repo's Rust standard. Computing
-it daemon-side from `delivered_at`, `dismissed_at` and outbox membership
-keeps one source of truth, so the UI never re-derives the deadline and
-cannot drift from the daemon on it.
+A builder rather than two more parameters, so the seven existing
+`project` call sites do not all have to change for a value six of them
+cannot supply.
 
 ### 6. IPC
 
