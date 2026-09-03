@@ -491,9 +491,13 @@ pub(crate) async fn run_mailbox_fallback(
         }
     };
     if onions.is_empty() {
-        tracing::debug!(
+        // Was debug!, i.e. below the shipped default filter (`skattr_core=info`)
+        // — so in the field this declined silently and the messages simply
+        // rotted. Redaction: no onion, no pubkey, no body.
+        tracing::info!(
             target: "skattr::delivery::hub",
-            "fallback: peer has no advertised mailboxes; leaving outbox row untouched"
+            "fallback: contact advertises no mailbox; \
+             messages cannot reach them while they are offline"
         );
         return;
     }
