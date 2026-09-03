@@ -644,6 +644,11 @@ where
     // changed.
     let mut next_chunk_dial_at: Option<tokio::time::Instant> = None;
     let mut chunk_dial_step: usize = 0;
+    // #227 dial pacing for queued outbox rows. Actor-local and not persisted,
+    // for the same reason as the #76 state above. Shares the ladder rather
+    // than introducing a second pacing scheme.
+    let mut next_outbox_dial_at: Option<tokio::time::Instant> = None;
+    let mut outbox_dial_step: usize = 0;
 
     loop {
         tokio::select! {
@@ -728,13 +733,18 @@ where
                 first_failure_at = None;
             }
             _ = retry_tick.tick() => {
-                // One tick drives four jobs: (1) retry due direct-outbox rows,
-                // (2) fire the sustained-failure → mailbox fallback below, (3)
-                // time out stale chunk requests, and (4) dial on behalf of a
-                // pending inbound attachment fetch (#76) — the deliberate
-                // exception to "dial-on-demand happens on the next job send":
-                // that fetch is background work with no local user action
-                // behind it, so nothing else will ever give it a connection.
+                // One tick drives five jobs: (1) dial for due direct-outbox
+                // rows (#227), (2) retry those rows, (3) fire the
+                // sustained-failure → mailbox fallback below, (4) time out
+                // stale chunk requests, and (5) dial on behalf of a pending
+                // inbound attachment fetch (#76).
+                //
+                // (1) and (5) are both background work with no local user
+                // action behind them, so nothing else will ever give them a
+                // connection — "dial-on-demand happens on the next job send"
+                // does not reach them. Both dial on the same backoff ladder,
+                // for the same reason: a failed Tor dial burns up to
+                // DIAL_TIMEOUT inline against a 1 s tick.
                 // #229: evict outbox-originated in-flight entries the peer never
                 // acknowledged, so their rows become eligible again under their
                 // own backoff. A row genuinely in flight is still protected for
@@ -753,6 +763,50 @@ where
                 // dial block below, so fall back to an empty batch here
                 // rather than `continue`-ing the whole tick.
                 let due = ob.due(now, 32).unwrap_or_default();
+                // #227: a queued row has no live user action behind it, so
+                // nothing else will ever give it a connection. Dial for it,
+                // paced by backoff. Placed after the eviction above so a row
+                // that was just un-wedged is seen on this tick, not the next.
+                let has_direct_due = due.iter().any(|e| {
+                    e.target == peer
+                        && e.target_kind == crate::storage::outbox::OutboxTargetKind::Direct
+                        && !pending.contains_key(&e.message_id)
+                });
+                if has_direct_due && conn.is_none() {
+                    let ready = next_outbox_dial_at
+                        .map(|t| tokio::time::Instant::now() >= t)
+                        .unwrap_or(true);
+                    if ready {
+                        if ensure_conn::<S>(peer, &mut conn, &dialer).await {
+                            next_outbox_dial_at = None;
+                            outbox_dial_step = 0;
+                            // Mirror the ReplaceConn arm: this is also
+                            // "install a fresh connection", so idle/pong state
+                            // from before the outage must not survive it and
+                            // tear the new connection straight down.
+                            last_traffic = tokio::time::Instant::now();
+                            awaiting_pong_since = None;
+                        } else {
+                            // #227: arm the sustained-failure timer here too.
+                            // Only the `jobs` arm armed it before, so the
+                            // mailbox fallback was unreachable for a row merely
+                            // sitting in the queue — which is the case that
+                            // actually occurs in the field.
+                            arm_failure(&mut first_failure_at);
+                            let idx = outbox_dial_step.min(CHUNK_DIAL_BACKOFF_MS.len() - 1);
+                            // Deadline from now: the dial itself may have just
+                            // burned up to DIAL_TIMEOUT.
+                            next_outbox_dial_at = Some(
+                                tokio::time::Instant::now()
+                                    + std::time::Duration::from_millis(
+                                        CHUNK_DIAL_BACKOFF_MS[idx],
+                                    ),
+                            );
+                            outbox_dial_step =
+                                (outbox_dial_step + 1).min(CHUNK_DIAL_BACKOFF_MS.len() - 1);
+                        }
+                    }
+                }
                 for entry in due {
                     if pending.contains_key(&entry.message_id) { continue; }
                     if entry.target != peer { continue; }
@@ -2390,6 +2444,258 @@ mod tests {
         }
 
         handle.abort();
+    }
+
+    /// #227 test helper: a dialer that always fails and counts attempts.
+    /// Same shape as the `FailingDial` in
+    /// `pending_fetch_dials_are_paced_by_backoff`, hoisted so both #227 tests
+    /// share one construction.
+    struct CountingFailingDial {
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::delivery::dial::OutboundDial<tokio::io::DuplexStream> for CountingFailingDial {
+        async fn dial(
+            &self,
+            _peer: PublicKey,
+        ) -> Result<(
+            AuthenticatedConnection<tokio::io::DuplexStream>,
+            zeroize::Zeroizing<[u8; 32]>,
+        )> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(crate::delivery::DeliveryErrorKind::Timeout.into())
+        }
+        async fn dial_at(
+            &self,
+            peer: PublicKey,
+            _onion: &str,
+        ) -> Result<(
+            AuthenticatedConnection<tokio::io::DuplexStream>,
+            zeroize::Zeroizing<[u8; 32]>,
+        )> {
+            self.dial(peer).await
+        }
+    }
+
+    fn counting_failing_dialer(
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) -> std::sync::Arc<dyn crate::delivery::dial::OutboundDial<tokio::io::DuplexStream>> {
+        std::sync::Arc::new(CountingFailingDial { calls })
+    }
+
+    /// Keeps the actor's channel senders alive for the life of the test —
+    /// dropping them makes `jobs.recv()` return `None` and the actor exits
+    /// before any tick fires.
+    struct TestActor {
+        _handle: PeerHandle,
+        _jobs_tx: mpsc::Sender<DeliveryJob>,
+        _welcome_tx: mpsc::Sender<WelcomeJob>,
+        _ctrl_tx: mpsc::Sender<PeerCtrl<tokio::io::DuplexStream>>,
+    }
+
+    /// A full actor started COLD (no connection) with a dialer — the exact
+    /// shape of the #227 field case.
+    fn spawn_full_actor_no_conn_for_test(
+        peer: PublicKey,
+        pool: std::sync::Arc<Pool>,
+        dialer: std::sync::Arc<dyn crate::delivery::dial::OutboundDial<tokio::io::DuplexStream>>,
+    ) -> TestActor {
+        let (jobs_tx, jobs_rx) = mpsc::channel::<DeliveryJob>(4);
+        let (welcome_tx, welcome_rx) = mpsc::channel::<WelcomeJob>(4);
+        let (ctrl_tx, ctrl_rx) = mpsc::channel::<PeerCtrl<tokio::io::DuplexStream>>(4);
+        let handle = tokio::spawn(async move {
+            let _ = super::full_run::<tokio::io::DuplexStream>(
+                peer,
+                None,
+                jobs_rx,
+                welcome_rx,
+                ctrl_rx,
+                pool,
+                None,
+                Some(dialer),
+                std::time::Duration::ZERO,
+                None,
+                None,
+                None,
+            )
+            .await;
+        });
+        TestActor {
+            _handle: handle,
+            _jobs_tx: jobs_tx,
+            _welcome_tx: welcome_tx,
+            _ctrl_tx: ctrl_tx,
+        }
+    }
+
+    /// #227: the retry tick's due-rows loop breaks when there is no connection
+    /// and never dials, so a queued message waits for a connection something
+    /// else creates. With a dialer available, a due row must cause a dial.
+    #[tokio::test(start_paused = true)]
+    async fn retry_tick_dials_for_a_due_row_when_disconnected() {
+        use crate::delivery::outbox::Outbox;
+
+        let pool = std::sync::Arc::new(Pool::in_memory());
+        let peer = PublicKey([0x88; 32]);
+        Outbox::new(&pool)
+            .enqueue(&peer, MessageId([0x02; 16]), b"payload", 0)
+            .unwrap()
+            .unwrap();
+
+        // Actor starts with NO connection, but with a dialer that counts calls.
+        let dials = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let dialer = counting_failing_dialer(dials.clone());
+        let handle = spawn_full_actor_no_conn_for_test(peer, pool.clone(), dialer);
+
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        tokio::task::yield_now().await;
+
+        assert!(
+            dials.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+            "a due outbox row must cause a dial (#227); got 0"
+        );
+        drop(handle);
+    }
+
+    /// Dials must be paced. A failed Tor dial costs up to DIAL_TIMEOUT (30 s)
+    /// inline against a 1 s RETRY_TICK, so an unpaced dial is a storm against a
+    /// peer that is simply offline. Mirrors the existing assertion for the job
+    /// path.
+    #[tokio::test(start_paused = true)]
+    async fn retry_tick_dials_are_paced_by_backoff() {
+        use crate::delivery::outbox::Outbox;
+
+        let pool = std::sync::Arc::new(Pool::in_memory());
+        let peer = PublicKey([0x89; 32]);
+        Outbox::new(&pool)
+            .enqueue(&peer, MessageId([0x03; 16]), b"payload", 0)
+            .unwrap()
+            .unwrap();
+
+        let dials = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let dialer = counting_failing_dialer(dials.clone());
+        let handle = spawn_full_actor_no_conn_for_test(peer, pool.clone(), dialer);
+
+        // Ten minutes. The ladder is 15 s, 60 s, 300 s, 900 s (held), so a
+        // correct actor issues roughly four dials, not six hundred.
+        tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+        tokio::task::yield_now().await;
+
+        let n = dials.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            n <= 8,
+            "dials must be paced by backoff, not issued per retry tick (got {n})"
+        );
+        drop(handle);
+    }
+
+    /// #227: a row merely sitting in the queue must arm the sustained-failure
+    /// timer, so the mailbox fallback can eventually fire for it. Before the
+    /// fix only the `jobs` arm armed `first_failure_at`, so a queued row with
+    /// no live user action behind it never reached the fallback — there is no
+    /// job for a row the hub already handed off.
+    #[tokio::test(start_paused = true)]
+    async fn queued_row_dial_failure_reaches_the_mailbox_fallback() {
+        use crate::contact::card::{ContactCard, ContactCardBody};
+        use crate::contact::Contact;
+        use crate::identity::Signature;
+        use crate::mailbox::client::MailboxClient;
+        use crate::mailbox::poll::{MailboxConnectFactory, MailboxStream};
+        use crate::storage::outbox::OutboxRepo;
+        use crate::storage::ContactRepo;
+
+        // The deposit itself is irrelevant here: `run_mailbox_fallback`
+        // retargets the row BEFORE connecting, so an unreachable mailbox still
+        // proves the fallback ran.
+        struct UnreachableFactory;
+        #[async_trait::async_trait]
+        impl MailboxConnectFactory for UnreachableFactory {
+            async fn connect(&self, _onion: &str) -> Result<MailboxClient<Box<dyn MailboxStream>>> {
+                Err(crate::error::CoreError::MailboxClient(
+                    crate::error::MailboxClientErrorKind::Unreachable,
+                ))
+            }
+        }
+
+        let pool = std::sync::Arc::new(Pool::in_memory());
+        let peer = PublicKey([0x8A; 32]);
+        let mid = [0x04u8; 16];
+
+        let contacts = ContactRepo::new(&pool);
+        contacts
+            .upsert(&Contact {
+                identity: peer,
+                display_name: None,
+                added_at: 0,
+                card: None,
+                muted: false,
+            })
+            .unwrap();
+        contacts
+            .put_card(&ContactCard {
+                body: ContactCardBody {
+                    identity: peer,
+                    onion: "self.onion".into(),
+                    mailboxes: vec!["mb1.onion".into()],
+                    version: 1,
+                    expires_at: 9_999_999_999,
+                },
+                signature: Signature([0u8; 64]),
+            })
+            .unwrap();
+
+        // A due DIRECT row and NOTHING else — no job is ever submitted.
+        OutboxRepo::new(&pool)
+            .insert_direct(&peer.0, &mid, b"ct", 0)
+            .unwrap();
+
+        let (events_tx, _events_rx) =
+            tokio::sync::broadcast::channel::<crate::daemon::events::Event>(8);
+        let shared = std::sync::Arc::new(crate::delivery::hub::MailboxFallbackShared {
+            factory: std::sync::Arc::new(UnreachableFactory),
+            events: events_tx,
+            identity: std::sync::Arc::new(IdentityKey::generate().unwrap()),
+        });
+
+        let dials = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let dialer = counting_failing_dialer(dials.clone());
+
+        let (jobs_tx, jobs_rx) = mpsc::channel::<DeliveryJob>(4);
+        let (welcome_tx, welcome_rx) = mpsc::channel::<WelcomeJob>(4);
+        let (ctrl_tx, ctrl_rx) = mpsc::channel::<PeerCtrl<tokio::io::DuplexStream>>(4);
+        let run_pool = pool.clone();
+        let handle = tokio::spawn(async move {
+            let _ = super::full_run::<tokio::io::DuplexStream>(
+                peer,
+                None,
+                jobs_rx,
+                welcome_rx,
+                ctrl_rx,
+                run_pool,
+                None,
+                Some(dialer),
+                std::time::Duration::from_secs(5),
+                Some(shared),
+                None,
+                None,
+            )
+            .await;
+        });
+
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+
+        assert!(
+            OutboxRepo::new(&pool)
+                .find_direct_id(&peer.0, &mid)
+                .unwrap()
+                .is_none(),
+            "a queued row's own dial failure must arm the sustained-failure \
+             timer so the mailbox fallback retargets it (#227)"
+        );
+
+        handle.abort();
+        drop((jobs_tx, welcome_tx, ctrl_tx));
     }
 
     /// #76: an inbound attachment fetch must be able to establish its own
