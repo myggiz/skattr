@@ -1029,15 +1029,20 @@ where
                         // do not let stale failures from the old conn fire the
                         // fallback. (Re-armed on the next failure if it recurs.)
                         first_failure_at = None;
-                        // Same reasoning for the #76 dial pacing: the peer has
-                        // just proven reachable, so a backoff accumulated while
-                        // it was unreachable is stale evidence. Without this, a
-                        // conn that arrives during a 15-minute backoff and then
-                        // drops leaves the fetch idle until that stale deadline
+                        // Same reasoning for BOTH dial ladders — the #76
+                        // chunk-fetch pacing and the #227 queued-outbox-row
+                        // pacing: the peer has just proven reachable, so a
+                        // backoff accumulated while it was unreachable is stale
+                        // evidence. Without this, a conn that arrives during a
+                        // 15-minute backoff and then drops leaves the fetch (or
+                        // the queued row) idle until that stale deadline
                         // expires, even though we know the peer was up moments
-                        // ago. Re-armed from the first step if dialing fails again.
+                        // ago. Both are re-armed from the first step if dialing
+                        // fails again.
                         next_chunk_dial_at = None;
                         chunk_dial_step = 0;
+                        next_outbox_dial_at = None;
+                        outbox_dial_step = 0;
                         // 3.B: resume an in-flight inbound transfer on reconnect by
                         // re-issuing its outstanding requests over the fresh conn.
                         if let Some(rx) = active_rx.as_mut() {
@@ -2696,6 +2701,103 @@ mod tests {
 
         handle.abort();
         drop((jobs_tx, welcome_tx, ctrl_tx));
+    }
+
+    /// #227 + the `ReplaceConn` reasoning already applied to the #76 ladder: a
+    /// connection arriving via `ReplaceConn` (the peer dialed US) proves the
+    /// peer is reachable, so an outbox-dial backoff accumulated while it was
+    /// unreachable is stale evidence. If that connection then drops, a queued
+    /// row must be re-dialled promptly rather than waiting out the old
+    /// deadline — up to 15 minutes of silence after a peer we know was up
+    /// moments ago.
+    ///
+    /// The replacement conn's far end is dropped before it is handed over, so
+    /// the row is never successfully sent and never rescheduled. That keeps it
+    /// due (the outbox schedule runs on the wall clock, which a paused-time
+    /// test does not advance) and isolates the assertion to the dial pacing.
+    #[tokio::test(start_paused = true)]
+    async fn replace_conn_resets_the_outbox_dial_backoff() {
+        use crate::delivery::outbox::Outbox;
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+        use tokio::io::DuplexStream;
+
+        let actor_id = IdentityKey::generate().unwrap();
+        let responder_id = IdentityKey::generate().unwrap();
+        let responder_static = responder_id.noise_static_public();
+        let peer = PublicKey(responder_id.public().0);
+
+        let pool = std::sync::Arc::new(Pool::in_memory());
+        Outbox::new(&pool)
+            .enqueue(&peer, MessageId([0x05; 16]), b"payload", 0)
+            .unwrap()
+            .unwrap();
+
+        // A real handshaked conn for the ReplaceConn hand-off.
+        let (client_stream, server_stream) = tokio::io::duplex(64 * 1024);
+        let responder_task = tokio::spawn(async move {
+            handshake_responder(server_stream, &responder_id, None)
+                .await
+                .unwrap()
+        });
+        let (incoming, _) = handshake_initiator(client_stream, &actor_id, &responder_static, None)
+            .await
+            .unwrap();
+        let (peer_conn, _) = responder_task.await.unwrap();
+
+        let dials = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let dialer = counting_failing_dialer(dials.clone());
+
+        let (_jobs_tx, jobs_rx) = mpsc::channel::<DeliveryJob>(4);
+        let (_welcome_tx, welcome_rx) = mpsc::channel::<WelcomeJob>(4);
+        let (ctrl_tx, ctrl_rx) = mpsc::channel::<PeerCtrl<DuplexStream>>(4);
+        let run_pool = pool.clone();
+        let actor = tokio::spawn(async move {
+            let _ = super::full_run::<DuplexStream>(
+                peer,
+                None,
+                jobs_rx,
+                welcome_rx,
+                ctrl_rx,
+                run_pool,
+                None,
+                Some(dialer),
+                Duration::ZERO,
+                None,
+                None,
+                None,
+            )
+            .await;
+        });
+
+        // Let the outbox ladder climb to its last step (15 + 60 + 300 elapsed),
+        // so a surviving deadline would be 900 s out.
+        tokio::time::sleep(Duration::from_secs(400)).await;
+        let before = dials.load(Ordering::SeqCst);
+        assert!(
+            before >= 3,
+            "backoff should have reached a late step (got {before} dials)"
+        );
+
+        // The peer dials US with a conn whose far end is already gone.
+        drop(peer_conn);
+        ctrl_tx
+            .send(PeerCtrl::ReplaceConn(Box::new(incoming)))
+            .await
+            .unwrap();
+
+        // Well inside the stale 900 s deadline, but past a reset ladder's 15 s.
+        tokio::time::sleep(Duration::from_secs(60)).await;
+
+        let after = dials.load(Ordering::SeqCst);
+        assert!(
+            after > before,
+            "a ReplaceConn must reset the outbox dial backoff — a queued row \
+             must be re-dialled promptly after that conn drops, not after the \
+             stale deadline (dials before={before}, after={after})"
+        );
+
+        actor.abort();
     }
 
     /// #76: an inbound attachment fetch must be able to establish its own
