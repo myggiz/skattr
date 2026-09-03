@@ -323,6 +323,7 @@ impl<'p> MessageRepo<'p> {
             "SELECT messages.id, messages.group_id, messages.sender, messages.kind, \
                     messages.body_blob, messages.ts, messages.delivered_at, \
                     messages.mls_generation, messages.ts_daemon_recv, \
+                    messages.dismissed_at, messages.failed_reason, \
                     bm25(messages_fts) AS rank, \
                     snippet(messages_fts, 0, char(2), char(3), '...', 32) AS snippet \
              FROM messages_fts \
@@ -356,11 +357,11 @@ impl<'p> MessageRepo<'p> {
                         delivered_at: r.get(6)?,
                         mls_generation: r.get(7)?,
                         ts_daemon_recv: r.get(8)?,
-                        dismissed_at: None,
-                        failed_reason: None,
+                        dismissed_at: r.get(9)?,
+                        failed_reason: r.get(10)?,
                     },
-                    bm25: r.get::<_, f64>(9).unwrap_or(0.0),
-                    snippet: r.get::<_, String>(10).unwrap_or_default(),
+                    bm25: r.get::<_, f64>(11).unwrap_or(0.0),
+                    snippet: r.get::<_, String>(12).unwrap_or_default(),
                 })
             };
 

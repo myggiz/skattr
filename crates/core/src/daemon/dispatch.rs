@@ -1025,7 +1025,8 @@ where
                     h.message.ts_daemon_recv,
                     direction,
                     h.message.delivered_at,
-                ),
+                )
+                .with_persisted_status(h.message.dismissed_at, h.message.failed_reason),
                 bm25: h.bm25,
                 snippet: h.snippet,
             })
@@ -3483,6 +3484,94 @@ mod tests {
             }
             other => panic!("expected SearchResults, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn search_messages_carries_dismissed_and_failed_outcome_to_the_wire() {
+        // Decision 4 (dismiss keeps the row searchable) is only honored end
+        // to end if the search projection also reports *why* the row is
+        // stuck — otherwise a dismissed/failed hit renders as a bare
+        // pending clock in search results (the same lesson as the
+        // recent/export paths).
+        let handle = test_handle();
+        let alice = crate::identity::PublicKey([0x79; 32]);
+        let gid = [0x8Au8; 32];
+
+        let cr = ContactRepo::new(&handle.pool);
+        cr.upsert(&crate::contact::Contact {
+            identity: alice,
+            display_name: None,
+            added_at: 0,
+            card: None,
+            muted: false,
+        })
+        .unwrap();
+        cr.set_group_id(&alice, &gid).unwrap();
+
+        let msgs = crate::storage::MessageRepo::new(&handle.pool);
+        let dismissed_id = crate::envelope::MessageId::generate();
+        let failed_id = crate::envelope::MessageId::generate();
+
+        for (id, body) in [
+            (dismissed_id, "quokka was dismissed"),
+            (failed_id, "quokka delivery failed"),
+        ] {
+            let env = crate::envelope::Envelope {
+                v: 1,
+                id,
+                ts: 1_700_000_000,
+                reply_to: None,
+                kind: crate::envelope::Kind::Text { body: body.into() },
+            };
+            msgs.insert(crate::storage::messages::InsertParams {
+                group_id: &gid,
+                sender: &handle.identity.public().0,
+                envelope: &env,
+                mls_generation: 1,
+                ts_daemon_recv: 1_700_000_000,
+            })
+            .unwrap();
+        }
+
+        msgs.mark_dismissed(&dismissed_id.0, 1_234_000).unwrap();
+        msgs.mark_failed(&failed_id.0, &handle.identity.public().0, "no mailbox")
+            .unwrap();
+
+        let result = execute_command(
+            handle.clone(),
+            Command::SearchMessages {
+                query: "quokka".into(),
+                contact: None,
+                limit: 10,
+                offset: 0,
+                newest_first: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        let hits = match result {
+            CommandResult::SearchResults(hits) => hits,
+            other => panic!("expected SearchResults, got {other:?}"),
+        };
+        assert_eq!(hits.len(), 2);
+
+        let dismissed_hit = hits
+            .iter()
+            .find(|h| h.record.message_id.0 == dismissed_id.0)
+            .expect("dismissed message must still be searchable");
+        assert_eq!(dismissed_hit.record.dismissed_at, Some(1_234_000));
+        assert_eq!(dismissed_hit.record.failed_reason, None);
+
+        let failed_hit = hits
+            .iter()
+            .find(|h| h.record.message_id.0 == failed_id.0)
+            .expect("failed message must still be searchable");
+        assert_eq!(
+            failed_hit.record.failed_reason.as_deref(),
+            Some("no mailbox")
+        );
+        assert_eq!(failed_hit.record.dismissed_at, None);
     }
 
     #[tokio::test]
