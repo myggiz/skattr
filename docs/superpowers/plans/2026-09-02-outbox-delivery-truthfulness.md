@@ -370,7 +370,7 @@ Two nullable columns carry what cannot be derived: dismissal, and the failure *r
 **Interfaces:**
 - Consumes: nothing.
 - Produces:
-  - `MessageRepo::mark_failed(&self, envelope_id: &[u8; 16], reason: &str, now: i64) -> Result<bool>` — sets `failed_reason`; returns whether a row changed.
+  - `MessageRepo::mark_failed(&self, envelope_id: &[u8; 16], reason: &str) -> Result<bool>` — sets `failed_reason`; returns whether a row changed. **No `now` parameter** — the column stores the reason, not a timestamp.
   - `MessageRepo::mark_dismissed(&self, envelope_id: &[u8; 16], now: i64) -> Result<bool>` — sets `dismissed_at`.
   - `MessageRepo::delivery_outcome(&self, envelope_id: &[u8; 16]) -> Result<(Option<i64>, Option<String>)>` — `(dismissed_at, failed_reason)`.
 
@@ -420,9 +420,7 @@ fn failed_reason_and_dismissed_at_round_trip() {
     assert_eq!(reason, None);
 
     // Giving up stores the reason, so the remedy survives a restart.
-    assert!(repo
-        .mark_failed(&eid, "this contact has no mailbox", 1_000)
-        .unwrap());
+    assert!(repo.mark_failed(&eid, "this contact has no mailbox").unwrap());
     let (_, reason) = repo.delivery_outcome(&eid).unwrap();
     assert_eq!(reason.as_deref(), Some("this contact has no mailbox"));
 
@@ -452,7 +450,7 @@ fn dismiss_keeps_the_row_searchable() {
 fn mark_failed_on_unknown_envelope_id_changes_nothing() {
     let pool = Pool::in_memory();
     let repo = MessageRepo::new(&pool);
-    assert!(!repo.mark_failed(&[0xFF; 16], "nope", 1_000).unwrap());
+    assert!(!repo.mark_failed(&[0xFF; 16], "nope").unwrap());
 }
 ```
 
@@ -474,19 +472,13 @@ In `crates/core/src/storage/messages.rs`, following the file's existing method s
     /// Record that the daemon gave up on an outgoing message, storing the
     /// reason so the remedy survives a restart. Returns whether a row
     /// changed.
-    pub(crate) fn mark_failed(
-        &self,
-        envelope_id: &[u8; 16],
-        reason: &str,
-        now: i64,
-    ) -> Result<bool> {
+    pub(crate) fn mark_failed(&self, envelope_id: &[u8; 16], reason: &str) -> Result<bool> {
         let conn = self.pool.conn()?;
         let n = conn.execute(
             "UPDATE messages SET failed_reason = ?2 \
              WHERE envelope_id = ?1 AND delivered_at IS NULL",
             rusqlite::params![&envelope_id[..], reason],
         )?;
-        let _ = now;
         Ok(n > 0)
     }
 
@@ -518,7 +510,7 @@ In `crates/core/src/storage/messages.rs`, following the file's existing method s
     }
 ```
 
-Match the file's actual connection-access idiom (`self.pool.conn()?` vs a held `&Connection`) — copy it from an adjacent method rather than assuming. `mark_failed` drops `now` deliberately: the column stores the reason, not a timestamp; if the surrounding code has no use for the parameter, remove it from the signature and from the test rather than keeping a dead argument.
+Match the file's actual connection-access idiom (`self.pool.conn()?` vs a held `&Connection`) — copy it from an adjacent method rather than assuming. Note `mark_failed` takes no `now`: the column stores a reason, not a timestamp. The `delivered_at IS NULL` guard matters — an acked message must never be overwritten as failed by a late sweep.
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
@@ -560,7 +552,7 @@ Two rules, in order. A contact **with** a mailbox never expires — an aged dire
 
 **Interfaces:**
 - Consumes: `MessageRepo::mark_failed` from Task 3. Existing: `OutboxRepo::{due, delete_by_id, set_mailbox_target}`, `MailboxRepo::list_for_contact`, `MailboxFallbackShared` (`hub.rs`, field `.events`), `crate::daemon::clock::now_unix_millis`.
-- Produces: `pub(crate) async fn run_outbox_sweep(pool: &Pool, shared: &MailboxFallbackShared, now: i64, batch: usize)` and `pub(crate) const DIRECT_EXPIRY_MS: i64`.
+- Produces: `pub(crate) async fn run_outbox_sweep(pool: &Pool, shared: &MailboxFallbackShared, now: i64, batch: usize)`, `pub(crate) const DIRECT_EXPIRY_MS: i64`, `MessageRepo::envelope_ts(&self, envelope_id: &[u8; 16]) -> Result<Option<i64>>`, and `hub::retarget_to_mailbox(pool, peer, row) -> Result<()>` (extracted from the existing step inside `run_mailbox_fallback`).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -880,6 +872,55 @@ git commit -m "feat(delivery): outbox_sweep — retarget to mailbox, expire only
 
 ---
 
+### Task 4b: Make the silent no-mailbox case loud
+
+Spec §4. `hub.rs:494` logs "peer has no advertised mailboxes" at `debug!`, beneath the shipped default filter (`skattr_core=info`). It is the single most consequential fact the delivery path knows, and in the field it was invisible: the fallback ran 30 seconds into the outage, declined, and said so where no one could see it.
+
+**Files:**
+- Modify: `crates/core/src/delivery/hub.rs:494`
+- Test: `crates/core/src/delivery/hub.rs` (inline `mod tests`)
+
+**Interfaces:**
+- Consumes: nothing. Produces: nothing.
+
+- [ ] **Step 1: Raise the level**
+
+```rust
+    if onions.is_empty() {
+        // Was debug!, i.e. below the shipped default filter — so in the
+        // field this declined silently and the messages simply rotted.
+        // Redaction: no onion, no pubkey, no body.
+        tracing::info!(
+            target: "skattr::delivery::hub",
+            "fallback: contact advertises no mailbox; \
+             messages cannot reach them while they are offline"
+        );
+        return;
+    }
+```
+
+- [ ] **Step 2: Verify no secret reaches the log line**
+
+Confirm by reading the statement: no `peer`, no `onions`, no message body interpolated. This is a hard constraint, not a style note.
+
+- [ ] **Step 3: Run the hub suite**
+
+```bash
+. "$HOME/.cargo/env" && cargo test -p skattr-core --features test-harness delivery::hub
+```
+
+Expected: PASS.
+
+- [ ] **Step 4: Commit**
+
+```bash
+. "$HOME/.cargo/env" && cargo fmt --all
+git add crates/core/src/delivery/hub.rs
+git commit -m "fix(delivery): log the no-mailbox decline at info, not debug"
+```
+
+---
+
 ### Task 5: Carry the outcome to the wire
 
 **Files:**
@@ -1065,15 +1106,17 @@ async fn dismiss_message(
     crate::storage::messages::MessageRepo::new(&handle.pool)
         .mark_dismissed(&message_id.0, now)
         .map_err(|e| {
-            // Log the category only — never the error's payload (4.D item 1).
-            tracing::warn!(kind = %e.kind_str(), "dismiss_message failed");
+            // 4.D item 1: log the error CATEGORY only, never its payload —
+            // the payload can carry contact-identifying detail. Copy the
+            // exact mapping an adjacent handler uses; do not invent one.
+            tracing::warn!("dismiss_message failed: {}", e.category());
             IpcError::Internal
         })?;
     Ok(CommandResult::Ok)
 }
 ```
 
-Match the file's actual error-mapping idiom for `IpcError` — copy it from an adjacent handler. The redaction requirement is real: log the category, not the error.
+`e.category()` is a placeholder for whatever this codebase actually uses to render an error category — check an adjacent handler (`handle_remove_mailbox`, `handle_add_mailbox`) and copy its exact `map_err` shape rather than inventing a method. The redaction requirement is real: log the category, never the error payload.
 
 - [ ] **Step 4: Run it to verify it passes**
 
