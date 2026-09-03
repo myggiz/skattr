@@ -1,3 +1,6 @@
+-- SPDX-License-Identifier: GPL-3.0-or-later
+-- Copyright (C) 2026 Myggiz B.V.
+--
 -- 0021: durable delivery outcome for outgoing messages.
 --
 -- dismissed_at  — the user dismissed a failed send. The row STAYS in
