@@ -534,6 +534,44 @@ mod tests {
         assert!(fx.events.try_recv().is_err(), "no event for a fresh row");
     }
 
+    /// Pins the `target_kind != Direct → continue` guard directly: an
+    /// already-retargeted mailbox-kind row, well past `DIRECT_EXPIRY_MS`,
+    /// must be left completely untouched by this sweep — not deleted, not
+    /// marked failed, no event. Every other mailbox-lane test here seeds a
+    /// *direct* row and lets the sweep retarget it, so none of them would
+    /// notice a mutant that deleted this guard; this test seeds the mailbox
+    /// row up front so the no-mailbox expiry path is the only thing that
+    /// could touch it.
+    #[tokio::test]
+    async fn aged_mailbox_row_is_not_touched_by_the_direct_expiry_path() {
+        let mut fx = fixture_no_mailbox();
+        let peer = PublicKey([0x66; 32]);
+        seed_contact_without_mailbox(&fx.pool, peer);
+        let eid = seed_outgoing_message(&fx.pool, fx.me, 0);
+        OutboxRepo::new(&fx.pool)
+            .insert_for_mailbox(&peer.0, &eid, 1, b"ciphertext", 0)
+            .unwrap();
+
+        run_outbox_sweep(&fx.pool, &fx.shared, DIRECT_EXPIRY_MS + 1, 32).await;
+
+        let still_due = OutboxRepo::new(&fx.pool).due_mailbox(i64::MAX, 32).unwrap();
+        assert_eq!(
+            still_due.len(),
+            1,
+            "a mailbox-kind row must survive the direct expiry sweep untouched"
+        );
+        assert_eq!(still_due[0].target_kind, OutboxTargetKind::Mailbox);
+        assert_eq!(
+            failed_reason(&fx.pool, &eid),
+            None,
+            "a mailbox-kind row must never be marked failed by the direct expiry path"
+        );
+        assert!(
+            fx.events.try_recv().is_err(),
+            "no event for an untouched mailbox-kind row"
+        );
+    }
+
     /// A message that was acked but whose outbox row survived (the ack path's
     /// row delete is only `warn!`-logged, never retried) must NOT be reported
     /// as failed. `mark_failed` is guarded on `delivered_at IS NULL`, so the DB

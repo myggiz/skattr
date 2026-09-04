@@ -61,6 +61,20 @@ export function deliveryToIconStatus(
 }
 
 /**
+ * The reason string carried by a live `{ Failed: string }` wire status, or
+ * `null` for any other status (including `undefined` — no entry yet).
+ *
+ * The record's own `failed_reason` column is the durable source once the
+ * conversation is reloaded from storage; until then, a live
+ * `DeliveryStatusChanged { Failed }` event only reaches the in-memory
+ * `delivery` map (see `recordDeliveryStatus`), so a caller reading the
+ * record alone sees `null` even though the reason is known.
+ */
+export function failureReasonFromStatus(s: DeliveryStatus | undefined): string | null {
+  return s !== undefined && typeof s === "object" && "Failed" in s ? s.Failed : null;
+}
+
+/**
  * Resolve a MessageRecord's outbox state directly from its three
  * independent Option fields. The wire shape does not enforce any ordering
  * between them — a dismissed message legitimately still carries its

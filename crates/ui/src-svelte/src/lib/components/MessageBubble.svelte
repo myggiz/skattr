@@ -5,7 +5,13 @@
   import type { OptimisticMessage } from "$lib/stores/conversation";
   import DeliveryIcon from "./DeliveryIcon.svelte";
   import FileAttachmentBubble from "./FileAttachmentBubble.svelte";
-  import { delivery, deliveryToIconStatus, deliveryStateFromRecord, hex16ToString } from "$lib/stores/delivery";
+  import {
+    delivery,
+    deliveryToIconStatus,
+    deliveryStateFromRecord,
+    failureReasonFromStatus,
+    hex16ToString,
+  } from "$lib/stores/delivery";
   import { send, dismiss } from "$lib/stores/conversation";
 
   let {
@@ -35,13 +41,14 @@
   let recordState = $derived(deliveryStateFromRecord(record));
   let dismissed = $derived(recordState === "dismissed");
 
+  let hex = $derived(hex16ToString(record.message_id));
+
   let iconStatus = $derived.by(() => {
     if (!isOutgoing) return null;
     if (failed) return "failed" as const;
     if (optimistic) return "pending" as const;
     if (recordState === "delivered") return "delivered" as const;
     if (recordState === "dismissed" || recordState === "failed") return "failed" as const;
-    const hex = hex16ToString(record.message_id);
     return deliveryToIconStatus($delivery.get(hex));
   });
 
@@ -54,8 +61,14 @@
                                       : "Pending";
   });
 
+  // The record's own failed_reason is the durable source (survives a
+  // reload); a live Failed event lands in the delivery map first, so it is
+  // the fallback for the same in-memory window where iconStatus already
+  // reads "failed" off that map (see iconStatus above).
   let failureReason = $derived(
-    !dismissed && iconStatus === "failed" ? (record.failed_reason ?? null) : null,
+    !dismissed && iconStatus === "failed"
+      ? (record.failed_reason ?? failureReasonFromStatus($delivery.get(hex)))
+      : null,
   );
 
   function resend(): void {

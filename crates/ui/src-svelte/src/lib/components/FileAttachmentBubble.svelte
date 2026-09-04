@@ -16,6 +16,7 @@
     delivery,
     deliveryToIconStatus,
     deliveryStateFromRecord,
+    failureReasonFromStatus,
     hex16ToString,
   } from "$lib/stores/delivery";
   import { dismiss } from "$lib/stores/conversation";
@@ -124,9 +125,27 @@
   // than re-derived, so a dismissed attachment stops rendering as failed the
   // same way it does for MessageBubble. Dismiss only: resend needs the
   // original file path, which may no longer exist on the sender's disk.
-  let sendFailed = $derived(isOutgoing && deliveryStateFromRecord(record) === "failed");
-  // deliveryStateFromRecord only returns "failed" when failed_reason is set.
-  let sendFailureReason = $derived(sendFailed ? record.failed_reason : null);
+  let recordState = $derived(deliveryStateFromRecord(record));
+  let dismissed = $derived(recordState === "dismissed");
+  // A live DeliveryStatusChanged{Failed} event lands in the delivery map
+  // before the record is ever reloaded with failed_reason set — without this
+  // fallback, sendFailed/sendFailureReason stay false/null until the next
+  // conversation load, and the bubble shows a warning icon with no reason and
+  // no Dismiss action (only reached when recordState is still "pending": a
+  // "delivered" or "dismissed" record must not be reopened as failed by a
+  // stale map entry).
+  let sendFailed = $derived(
+    isOutgoing &&
+      (recordState === "failed" ||
+        (recordState === "pending" &&
+          failureReasonFromStatus($delivery.get(hex16ToString(record.message_id))) !== null)),
+  );
+  let sendFailureReason = $derived(
+    sendFailed
+      ? (record.failed_reason ??
+          failureReasonFromStatus($delivery.get(hex16ToString(record.message_id))))
+      : null,
+  );
 
   function handleDismiss(): void {
     void dismiss(record.message_id);
@@ -302,7 +321,7 @@
   let iconGlyph = $derived(icons[mimeIconName(mime)]);
 </script>
 
-<div class="file-bubble" class:outgoing={isOutgoing} data-row-id={record.row_id}>
+<div class="file-bubble" class:outgoing={isOutgoing} class:dismissed data-row-id={record.row_id}>
   {#if decodeFailed}
     <div class="card">
       <span class="ficon">{@html icons["paperclip"]}</span>
@@ -390,6 +409,9 @@
     max-width: 60ch;
   }
   .file-bubble.outgoing { background: var(--accent); color: var(--bg); margin-left: auto; }
+  /* Matches MessageBubble.svelte's .dismissed: recede via opacity, no new
+     colour token. */
+  .file-bubble.dismissed { opacity: 0.6; }
   .card { display: flex; align-items: center; gap: var(--s-2); flex-wrap: wrap; }
   .ficon :global(svg) { width: 20px; height: 20px; }
   .fname { font: var(--t-ui); word-break: break-word; }

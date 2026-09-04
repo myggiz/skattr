@@ -592,9 +592,32 @@ describe("FileAttachmentBubble", () => {
       failed_reason: "Not delivered — no mailbox.",
       dismissed_at: 1700n,
     });
-    const { findByText } = render(FileAttachmentBubble, { props: { record: rec } });
+    const { container, findByText } = render(FileAttachmentBubble, { props: { record: rec } });
 
     expect(await findByText("photo.jpg")).toBeTruthy();
     expect(screen.queryByRole("button", { name: /dismiss/i })).toBeNull();
+    expect(container.querySelector(".file-bubble.dismissed")).not.toBeNull();
+  });
+
+  // A live DeliveryStatusChanged{Failed} event lands in the delivery map
+  // (recordDeliveryStatus) before the record is ever reloaded with
+  // failed_reason set — the same gap MessageBubble had, for the file bubble.
+  test("a live Failed event (no record.failed_reason yet) renders the reason and Dismiss", () => {
+    const rec = makeOutgoingFile({ failed_reason: null });
+    recordDeliveryStatus("cd".repeat(16), { Failed: "Not delivered — no mailbox." });
+    render(FileAttachmentBubble, { props: { record: rec } });
+
+    expect(screen.getByText(/no mailbox/i)).toBeTruthy();
+    expect(screen.getByRole("button", { name: /dismiss/i })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /resend/i })).toBeNull();
+  });
+
+  test("a dismissed outgoing file shows no Dismiss action even when the delivery map still carries Failed", () => {
+    const rec = makeOutgoingFile({ failed_reason: null, dismissed_at: 1700n });
+    recordDeliveryStatus("cd".repeat(16), { Failed: "Not delivered — no mailbox." });
+    const { container } = render(FileAttachmentBubble, { props: { record: rec } });
+
+    expect(screen.queryByRole("button", { name: /dismiss/i })).toBeNull();
+    expect(container.querySelector(".file-bubble.dismissed")).not.toBeNull();
   });
 });

@@ -64,7 +64,7 @@ pub struct StoredMessage {
     pub mls_generation: i64,
     /// Local-clock unix seconds at persist time. 0 for legacy rows.
     pub ts_daemon_recv: i64,
-    /// When the user dismissed a failed send (unix millis), if ever.
+    /// When the user dismissed a failed send (unix seconds), if ever.
     /// `None` if the query didn't select it (e.g. `search`).
     pub dismissed_at: Option<i64>,
     /// Why the daemon gave up on this send, if it did. `None` if the
