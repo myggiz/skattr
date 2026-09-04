@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Myggiz B.V.
 import { describe, expect, test, vi, beforeEach } from "vitest";
-import { render, fireEvent } from "@testing-library/svelte";
+import { render, fireEvent, screen } from "@testing-library/svelte";
 import { tick } from "svelte";
 
 // invoke comes from @tauri-apps/api/core (convertFileSrc removed in Task 6).
@@ -69,6 +69,10 @@ function fileRecord(direction: "incoming" | "outgoing"): MessageRecord {
     dismissed_at: null,
     failed_reason: null,
   };
+}
+
+function makeOutgoingFile(overrides: Partial<MessageRecord> = {}): MessageRecord {
+  return { ...fileRecord("outgoing"), ...overrides };
 }
 
 beforeEach(() => {
@@ -562,5 +566,19 @@ describe("FileAttachmentBubble", () => {
 
     expect(attachmentFor(AID)).toMatchObject({ status: "failed", reason: "sender nack reason 1" });
     await findByText("⚠️ sender nack reason 1");
+  });
+
+  // Task 8: a Kind::File message rides the same outbox as text, so a send
+  // failure must not leave the file bubble showing an eternal clock either.
+  // Resend is explicitly out of scope (spec §7) — the original path may no
+  // longer exist on the sender's filesystem.
+  test("an outgoing file that failed to send shows the reason and Dismiss, but no Resend", () => {
+    const rec = makeOutgoingFile({ failed_reason: "Not delivered — no mailbox." });
+    render(FileAttachmentBubble, { props: { record: rec } });
+
+    expect(screen.getByText(/no mailbox/i)).toBeTruthy();
+    expect(screen.getByRole("button", { name: /dismiss/i })).toBeTruthy();
+    // Resend needs the original path, which may be gone (spec §7).
+    expect(screen.queryByRole("button", { name: /resend/i })).toBeNull();
   });
 });
