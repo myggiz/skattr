@@ -70,6 +70,8 @@ mod mls_pair;
 #[cfg(test)]
 mod offline_fallback;
 #[cfg(test)]
+mod queued_delivery_on_peer_return;
+#[cfg(test)]
 mod remove_mailbox_drains;
 #[cfg(test)]
 mod rotate_onion_during_offline;
