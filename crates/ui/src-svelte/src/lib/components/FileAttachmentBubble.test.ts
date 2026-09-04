@@ -581,4 +581,20 @@ describe("FileAttachmentBubble", () => {
     // Resend needs the original path, which may be gone (spec §7).
     expect(screen.queryByRole("button", { name: /resend/i })).toBeNull();
   });
+
+  // Dismissing does not clear failed_reason, so a dismissed attachment
+  // legitimately carries both fields. deliveryStateFromRecord's
+  // dismissed-before-failed ordering is what stops this rendering as failed
+  // with a Dismiss button that appears to do nothing — this exercises that
+  // precedence the same way MessageBubble's Task 7 test does for text.
+  test("a dismissed outgoing file keeps its content but offers no Dismiss action", async () => {
+    const rec = makeOutgoingFile({
+      failed_reason: "Not delivered — no mailbox.",
+      dismissed_at: 1700n,
+    });
+    const { findByText } = render(FileAttachmentBubble, { props: { record: rec } });
+
+    expect(await findByText("photo.jpg")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /dismiss/i })).toBeNull();
+  });
 });
