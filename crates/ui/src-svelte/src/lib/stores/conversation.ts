@@ -5,7 +5,7 @@ import { writable, get } from "svelte/store";
 import { ipcClient } from "$lib/ipc/tauri";
 import { unwrapOk } from "$lib/ipc/client";
 import { pubkeyEq } from "$lib/pubkey";
-import type { ContactSummary, MessageRecord, PublicKey } from "$lib/ipc/types";
+import type { ContactSummary, Hex16, MessageRecord, PublicKey } from "$lib/ipc/types";
 
 export type OptimisticMessage = MessageRecord & {
   __tempId: string;
@@ -104,6 +104,8 @@ export function appendOptimistic(
       ts_daemon_recv: BigInt(Math.floor(Date.now() / 1000)),
       ts_envelope: BigInt(Date.now()),
       delivered_at: null,
+      dismissed_at: null,
+      failed_reason: null,
     };
     return { ...state, messages: [...state.messages, placeholder] };
   });
@@ -135,17 +137,28 @@ export function markFailed(tempId: string, reason: string): void {
 }
 
 /**
- * Seed the delivery store from persisted history (#200).
+ * Seed the delivery store from persisted history (#200, extended for the
+ * outbox-delivery-truthfulness workstream).
  *
  * The store is session-scoped, so without this a reloaded conversation shows
- * nothing for messages the daemon has recorded as delivered — which is how
- * every sent message came back as "still in flight" after a restart. Only
- * records that actually carry `delivered_at` are seeded; absent stays absent.
+ * nothing for messages the daemon has recorded as delivered or given up on —
+ * which is how every sent message came back as "still in flight" after a
+ * restart. Delivered wins over a `failed_reason`: an ack is ground truth,
+ * while a stored failure reason could be stale from an earlier attempt that
+ * later succeeded. Exported so tests can hydrate the delivery store directly
+ * without a full `openConversationFromSummary` round trip.
  */
-function seedDeliveryFromHistory(records: MessageRecord[]): void {
+export function hydrateDeliveryFromRecords(records: MessageRecord[]): void {
   for (const r of records) {
-    if (r.direction === "outgoing" && r.delivered_at !== null && r.delivered_at !== undefined) {
-      recordDeliveryStatus(hex16ToString(r.message_id), "Delivered");
+    if (r.direction === "outgoing") {
+      const hex = hex16ToString(r.message_id);
+      if (r.delivered_at !== null && r.delivered_at !== undefined) {
+        recordDeliveryStatus(hex, "Delivered");
+      } else if (r.failed_reason !== null && r.failed_reason !== undefined) {
+        // Durable: the daemon stored the reason when it gave up, so the
+        // remedy survives a restart rather than coming back as a bare clock.
+        recordDeliveryStatus(hex, { Failed: r.failed_reason });
+      }
     }
   }
 }
@@ -171,7 +184,7 @@ export async function openConversationFromSummary(
     records.push(...[...result.data.records].reverse());
     nextBeforeId = result.data.next_before_id ?? null;
   }
-  seedDeliveryFromHistory(records);
+  hydrateDeliveryFromRecords(records);
   const anchor = summary.last_read_row_id ?? null;
   conversation.set({
     contact: summary.pubkey,
@@ -217,7 +230,7 @@ export async function loadOlder(): Promise<void> {
     const result = unwrapOk(resp);
     if (result.result === "messages_page") {
       const olderChrono = [...result.data.records].reverse();
-      seedDeliveryFromHistory(olderChrono);
+      hydrateDeliveryFromRecords(olderChrono);
       conversation.update((s) => {
         if (!pubkeyEq(s.contact, reqContact)) return s;
         return {
@@ -347,6 +360,8 @@ export async function sendFile(
       ts_daemon_recv: BigInt(Math.floor(Date.now() / 1000)),
       ts_envelope: BigInt(Date.now()),
       delivered_at: null,
+      dismissed_at: null,
+      failed_reason: null,
     };
     return { ...state, messages: [...state.messages, placeholder] };
   });
@@ -409,4 +424,21 @@ export function markReadIfAtBottom(rowId: bigint): void {
       console.warn("mark_read failed:", e);
     }
   }, MARK_READ_DEBOUNCE_MS);
+}
+
+/**
+ * Dismiss a failed send. The row is kept server-side (`dismissed_at` is set,
+ * `failed_reason` is not cleared) — dismissal only hides the bubble's actions
+ * and greys it. Local state is updated optimistically to match.
+ */
+export async function dismiss(messageId: Hex16): Promise<void> {
+  await ipcClient.request({ cmd: "dismiss_message", message_id: messageId });
+  conversation.update((s) => ({
+    ...s,
+    messages: s.messages.map((m) =>
+      m.message_id === messageId
+        ? { ...m, dismissed_at: BigInt(Math.floor(Date.now() / 1000)) }
+        : m,
+    ),
+  }));
 }

@@ -35,6 +35,26 @@ function fakeRecord(rowId: number, body: string): MessageRecord {
     ts_daemon_recv: 100n,
     ts_envelope: 99n,
     delivered_at: null,
+    dismissed_at: null,
+    failed_reason: null,
+  };
+}
+
+/** Options-bag fixture for the delivery/failure hydration tests below. */
+function makeRecord(overrides: Partial<MessageRecord> = {}): MessageRecord {
+  return {
+    row_id: 1n,
+    message_id: "0".repeat(32),
+    contact: peer,
+    direction: "outgoing",
+    kind: { kind: "text", body: "hi" },
+    mls_generation: 1n,
+    ts_daemon_recv: 100n,
+    ts_envelope: 99n,
+    delivered_at: null,
+    dismissed_at: null,
+    failed_reason: null,
+    ...overrides,
   };
 }
 
@@ -88,7 +108,8 @@ describe("optimistic send + reconcile", () => {
 
 import { vi } from "vitest";
 import { loadOlder, openConversationFromSummary, markReadIfAtBottom, isWithinBottomThreshold, send } from "./conversation";
-import { statusForMessageHex } from "./delivery";
+import { statusForMessageHex, hex16ToString } from "./delivery";
+import { hydrateDeliveryFromRecords } from "./conversation";
 import { ipcClient } from "$lib/ipc/tauri";
 import type { ContactSummary } from "$lib/ipc/types";
 
@@ -424,5 +445,28 @@ describe("close vs. an in-flight load (#178 review)", () => {
     expect(get(conversation).contact).toBeNull();
     expect(get(conversation).messages).toEqual([]);
     spy.mockRestore();
+  });
+});
+
+describe("hydrateDeliveryFromRecords", () => {
+  test("seeds Failed from a record's failed_reason on load", () => {
+    const rec = makeRecord({
+      direction: "outgoing",
+      delivered_at: null,
+      failed_reason: "Not delivered — this contact has no mailbox.",
+    });
+    hydrateDeliveryFromRecords([rec]);
+    const s = statusForMessageHex(hex16ToString(rec.message_id));
+    expect(s).toEqual({ Failed: "Not delivered — this contact has no mailbox." });
+  });
+
+  test("prefers delivered over a stale failed_reason", () => {
+    const rec = makeRecord({
+      direction: "outgoing",
+      delivered_at: 1700n,
+      failed_reason: "stale",
+    });
+    hydrateDeliveryFromRecords([rec]);
+    expect(statusForMessageHex(hex16ToString(rec.message_id))).toBe("Delivered");
   });
 });

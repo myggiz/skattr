@@ -66,6 +66,8 @@ function fileRecord(direction: "incoming" | "outgoing"): MessageRecord {
     ts_daemon_recv: 1_700_000_000n,
     ts_envelope: 1_700_000_000n,
     delivered_at: null,
+    dismissed_at: null,
+    failed_reason: null,
   };
 }
 

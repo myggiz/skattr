@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Myggiz B.V.
 import { writable, get } from "svelte/store";
-import type { DeliveryStatus, Hex16 } from "$lib/ipc/types";
+import type { DeliveryStatus, Hex16, MessageRecord } from "$lib/ipc/types";
 
 /**
  * Map keyed by lowercase-hex `message_id` (Hex16 stringified).
@@ -57,5 +57,27 @@ export function deliveryToIconStatus(
   if (s === "Delivered") return "delivered";
   if (s === "Deposited") return "sent";
   if (typeof s === "object" && "Failed" in s) return "failed";
+  return "pending";
+}
+
+/**
+ * Resolve a MessageRecord's outbox state directly from its three
+ * independent Option fields. The wire shape does not enforce any ordering
+ * between them — a dismissed message legitimately still carries its
+ * `failed_reason` — so this is the one place that pins the precedence:
+ *
+ *   delivered_at set   -> "delivered" (an ack is ground truth)
+ *   dismissed_at set   -> "dismissed" (checked BEFORE failed_reason, or a
+ *                         dismissed message renders as failed again with
+ *                         its actions still showing)
+ *   failed_reason set  -> "failed"
+ *   none of the above  -> "pending"
+ */
+export function deliveryStateFromRecord(
+  record: Pick<MessageRecord, "delivered_at" | "dismissed_at" | "failed_reason">,
+): "delivered" | "dismissed" | "failed" | "pending" {
+  if (record.delivered_at !== null && record.delivered_at !== undefined) return "delivered";
+  if (record.dismissed_at !== null && record.dismissed_at !== undefined) return "dismissed";
+  if (record.failed_reason !== null && record.failed_reason !== undefined) return "failed";
   return "pending";
 }
