@@ -107,7 +107,8 @@ describe("optimistic send + reconcile", () => {
 });
 
 import { vi } from "vitest";
-import { loadOlder, openConversationFromSummary, markReadIfAtBottom, isWithinBottomThreshold, send } from "./conversation";
+import { loadOlder, openConversationFromSummary, markReadIfAtBottom, isWithinBottomThreshold, send, dismiss } from "./conversation";
+import { currentToast, toast } from "./toast";
 import { statusForMessageHex, hex16ToString } from "./delivery";
 import { hydrateDeliveryFromRecords } from "./conversation";
 import { ipcClient } from "$lib/ipc/tauri";
@@ -468,5 +469,65 @@ describe("hydrateDeliveryFromRecords", () => {
     });
     hydrateDeliveryFromRecords([rec]);
     expect(statusForMessageHex(hex16ToString(rec.message_id))).toBe("Delivered");
+  });
+
+  test("a dismissed record is not pushed into the delivery map (no Dismissed wire variant)", () => {
+    const rec = makeRecord({
+      message_id: "ee".repeat(16),
+      direction: "outgoing",
+      delivered_at: null,
+      dismissed_at: 1700n,
+      failed_reason: "boom",
+    });
+    hydrateDeliveryFromRecords([rec]);
+    expect(statusForMessageHex(hex16ToString(rec.message_id))).toBeUndefined();
+  });
+});
+
+describe("dismiss", () => {
+  beforeEach(() => {
+    toast.clear();
+  });
+
+  test("a rejected dismiss_message reports the failure and leaves the record unchanged", async () => {
+    const rec = makeRecord({ failed_reason: "Not delivered — this contact has no mailbox." });
+    conversation.set({
+      contact: peer,
+      messages: [rec],
+      nextBeforeId: null,
+      loadingOlder: false,
+      unreadAnchorRowId: null,
+      readCursor: 0n,
+    });
+    const spy = vi
+      .spyOn(ipcClient, "request")
+      .mockRejectedValueOnce(new Error("daemon unreachable"));
+
+    await dismiss(rec.message_id);
+
+    expect(get(conversation).messages[0].dismissed_at).toBeNull();
+    expect(get(currentToast)?.message).toMatch(/couldn't dismiss/i);
+    spy.mockRestore();
+  });
+
+  test("a successful dismiss_message sets dismissed_at locally", async () => {
+    const rec = makeRecord({ failed_reason: "boom" });
+    conversation.set({
+      contact: peer,
+      messages: [rec],
+      nextBeforeId: null,
+      loadingOlder: false,
+      unreadAnchorRowId: null,
+      readCursor: 0n,
+    });
+    const spy = vi
+      .spyOn(ipcClient, "request")
+      .mockResolvedValueOnce({ resp: "ok", data: { result: "ok" } } as any);
+
+    await dismiss(rec.message_id);
+
+    expect(get(conversation).messages[0].dismissed_at).not.toBeNull();
+    expect(get(currentToast)).toBeNull();
+    spy.mockRestore();
   });
 });

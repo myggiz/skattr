@@ -143,22 +143,26 @@ export function markFailed(tempId: string, reason: string): void {
  * The store is session-scoped, so without this a reloaded conversation shows
  * nothing for messages the daemon has recorded as delivered or given up on —
  * which is how every sent message came back as "still in flight" after a
- * restart. Delivered wins over a `failed_reason`: an ack is ground truth,
- * while a stored failure reason could be stale from an earlier attempt that
- * later succeeded. Exported so tests can hydrate the delivery store directly
- * without a full `openConversationFromSummary` round trip.
+ * restart. Precedence is delegated to `deliveryStateFromRecord` (the one
+ * place that decides delivered/dismissed/failed/pending) rather than
+ * re-decided here. "dismissed" and "pending" are left untouched in the
+ * `DeliveryStatus` map: the wire enum has no Dismissed variant, and
+ * `MessageBubble` resolves dismissed state directly off the record via the
+ * same helper, ahead of ever consulting this map. Exported so tests can
+ * hydrate the delivery store directly without a full
+ * `openConversationFromSummary` round trip.
  */
 export function hydrateDeliveryFromRecords(records: MessageRecord[]): void {
   for (const r of records) {
-    if (r.direction === "outgoing") {
-      const hex = hex16ToString(r.message_id);
-      if (r.delivered_at !== null && r.delivered_at !== undefined) {
-        recordDeliveryStatus(hex, "Delivered");
-      } else if (r.failed_reason !== null && r.failed_reason !== undefined) {
-        // Durable: the daemon stored the reason when it gave up, so the
-        // remedy survives a restart rather than coming back as a bare clock.
-        recordDeliveryStatus(hex, { Failed: r.failed_reason });
-      }
+    if (r.direction !== "outgoing") continue;
+    const hex = hex16ToString(r.message_id);
+    const state = deliveryStateFromRecord(r);
+    if (state === "delivered") {
+      recordDeliveryStatus(hex, "Delivered");
+    } else if (state === "failed" && r.failed_reason !== null && r.failed_reason !== undefined) {
+      // Durable: the daemon stored the reason when it gave up, so the
+      // remedy survives a restart rather than coming back as a bare clock.
+      recordDeliveryStatus(hex, { Failed: r.failed_reason });
     }
   }
 }
@@ -278,8 +282,9 @@ let markReadTimer: ReturnType<typeof setTimeout> | null = null;
 let pendingHighestRowId: bigint = 0n;
 let pendingContact: PublicKey | null = null;
 
-import { recordDeliveryStatus, hex16ToString } from "./delivery";
+import { recordDeliveryStatus, hex16ToString, deliveryStateFromRecord } from "./delivery";
 import { markQueued } from "./attachments";
+import { toast } from "./toast";
 
 export async function send(contact: PublicKey, body: string): Promise<void> {
   const tempId = crypto.randomUUID();
@@ -427,12 +432,25 @@ export function markReadIfAtBottom(rowId: bigint): void {
 }
 
 /**
- * Dismiss a failed send. The row is kept server-side (`dismissed_at` is set,
- * `failed_reason` is not cleared) — dismissal only hides the bubble's actions
- * and greys it. Local state is updated optimistically to match.
+ * Dismiss a failed send. Confirm-then-update, not optimistic: local state is
+ * only touched after the daemon has confirmed the dismissal, so a failed
+ * request can't leave the UI falsely claiming the row was dismissed. The row
+ * is kept server-side either way (`dismissed_at` is set, `failed_reason` is
+ * not cleared) — dismissal only hides the bubble's actions and greys it.
+ *
+ * A rejected or non-"ok" response is reported via the toast store rather than
+ * swallowed — a silent no-op here would be exactly the kind of untruthful UI
+ * this workstream exists to eliminate.
  */
 export async function dismiss(messageId: Hex16): Promise<void> {
-  await ipcClient.request({ cmd: "dismiss_message", message_id: messageId });
+  try {
+    const resp = await ipcClient.request({ cmd: "dismiss_message", message_id: messageId });
+    if (resp.resp !== "ok") throw new Error(`dismiss_message rejected: ${resp.resp}`);
+  } catch (e) {
+    console.warn("dismiss_message failed:", e);
+    toast.show("Couldn't dismiss this message.");
+    return;
+  }
   conversation.update((s) => ({
     ...s,
     messages: s.messages.map((m) =>
