@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Myggiz B.V.
 import { describe, expect, test, vi, beforeEach } from "vitest";
-import { render, fireEvent } from "@testing-library/svelte";
+import { render, fireEvent, screen } from "@testing-library/svelte";
 import { tick } from "svelte";
 
 // invoke comes from @tauri-apps/api/core (convertFileSrc removed in Task 6).
@@ -66,7 +66,13 @@ function fileRecord(direction: "incoming" | "outgoing"): MessageRecord {
     ts_daemon_recv: 1_700_000_000n,
     ts_envelope: 1_700_000_000n,
     delivered_at: null,
+    dismissed_at: null,
+    failed_reason: null,
   };
+}
+
+function makeOutgoingFile(overrides: Partial<MessageRecord> = {}): MessageRecord {
+  return { ...fileRecord("outgoing"), ...overrides };
 }
 
 beforeEach(() => {
@@ -560,5 +566,58 @@ describe("FileAttachmentBubble", () => {
 
     expect(attachmentFor(AID)).toMatchObject({ status: "failed", reason: "sender nack reason 1" });
     await findByText("⚠️ sender nack reason 1");
+  });
+
+  // Task 8: a Kind::File message rides the same outbox as text, so a send
+  // failure must not leave the file bubble showing an eternal clock either.
+  // Resend is explicitly out of scope (spec §7) — the original path may no
+  // longer exist on the sender's filesystem.
+  test("an outgoing file that failed to send shows the reason and Dismiss, but no Resend", () => {
+    const rec = makeOutgoingFile({ failed_reason: "Not delivered — no mailbox." });
+    render(FileAttachmentBubble, { props: { record: rec } });
+
+    expect(screen.getByText(/no mailbox/i)).toBeTruthy();
+    expect(screen.getByRole("button", { name: /dismiss/i })).toBeTruthy();
+    // Resend needs the original path, which may be gone (spec §7).
+    expect(screen.queryByRole("button", { name: /resend/i })).toBeNull();
+  });
+
+  // Dismissing does not clear failed_reason, so a dismissed attachment
+  // legitimately carries both fields. deliveryStateFromRecord's
+  // dismissed-before-failed ordering is what stops this rendering as failed
+  // with a Dismiss button that appears to do nothing — this exercises that
+  // precedence the same way MessageBubble's Task 7 test does for text.
+  test("a dismissed outgoing file keeps its content but offers no Dismiss action", async () => {
+    const rec = makeOutgoingFile({
+      failed_reason: "Not delivered — no mailbox.",
+      dismissed_at: 1700n,
+    });
+    const { container, findByText } = render(FileAttachmentBubble, { props: { record: rec } });
+
+    expect(await findByText("photo.jpg")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /dismiss/i })).toBeNull();
+    expect(container.querySelector(".file-bubble.dismissed")).not.toBeNull();
+  });
+
+  // A live DeliveryStatusChanged{Failed} event lands in the delivery map
+  // (recordDeliveryStatus) before the record is ever reloaded with
+  // failed_reason set — the same gap MessageBubble had, for the file bubble.
+  test("a live Failed event (no record.failed_reason yet) renders the reason and Dismiss", () => {
+    const rec = makeOutgoingFile({ failed_reason: null });
+    recordDeliveryStatus("cd".repeat(16), { Failed: "Not delivered — no mailbox." });
+    render(FileAttachmentBubble, { props: { record: rec } });
+
+    expect(screen.getByText(/no mailbox/i)).toBeTruthy();
+    expect(screen.getByRole("button", { name: /dismiss/i })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /resend/i })).toBeNull();
+  });
+
+  test("a dismissed outgoing file shows no Dismiss action even when the delivery map still carries Failed", () => {
+    const rec = makeOutgoingFile({ failed_reason: null, dismissed_at: 1700n });
+    recordDeliveryStatus("cd".repeat(16), { Failed: "Not delivered — no mailbox." });
+    const { container } = render(FileAttachmentBubble, { props: { record: rec } });
+
+    expect(screen.queryByRole("button", { name: /dismiss/i })).toBeNull();
+    expect(container.querySelector(".file-bubble.dismissed")).not.toBeNull();
   });
 });

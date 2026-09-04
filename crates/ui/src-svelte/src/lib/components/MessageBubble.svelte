@@ -5,7 +5,14 @@
   import type { OptimisticMessage } from "$lib/stores/conversation";
   import DeliveryIcon from "./DeliveryIcon.svelte";
   import FileAttachmentBubble from "./FileAttachmentBubble.svelte";
-  import { delivery, deliveryToIconStatus, hex16ToString } from "$lib/stores/delivery";
+  import {
+    delivery,
+    deliveryToIconStatus,
+    deliveryStateFromRecord,
+    failureReasonFromStatus,
+    hex16ToString,
+  } from "$lib/stores/delivery";
+  import { send, dismiss } from "$lib/stores/conversation";
 
   let {
     record,
@@ -27,11 +34,21 @@
   let optimistic = $derived((record as OptimisticMessage).__optimistic === true);
   let failed = $derived((record as OptimisticMessage).__failed);
 
+  // Precedence for the persisted (non-optimistic) fields is pinned in one
+  // place — deliveryStateFromRecord — so it isn't repeated or re-decided
+  // here: delivered wins, a dismissal comes before a possibly-stale
+  // failed_reason, and only then does failed_reason apply.
+  let recordState = $derived(deliveryStateFromRecord(record));
+  let dismissed = $derived(recordState === "dismissed");
+
+  let hex = $derived(hex16ToString(record.message_id));
+
   let iconStatus = $derived.by(() => {
     if (!isOutgoing) return null;
     if (failed) return "failed" as const;
     if (optimistic) return "pending" as const;
-    const hex = hex16ToString(record.message_id);
+    if (recordState === "delivered") return "delivered" as const;
+    if (recordState === "dismissed" || recordState === "failed") return "failed" as const;
     return deliveryToIconStatus($delivery.get(hex));
   });
 
@@ -43,12 +60,30 @@
          : iconStatus === "failed"    ? "Failed"
                                       : "Pending";
   });
+
+  // The record's own failed_reason is the durable source (survives a
+  // reload); a live Failed event lands in the delivery map first, so it is
+  // the fallback for the same in-memory window where iconStatus already
+  // reads "failed" off that map (see iconStatus above).
+  let failureReason = $derived(
+    !dismissed && iconStatus === "failed"
+      ? (record.failed_reason ?? failureReasonFromStatus($delivery.get(hex)))
+      : null,
+  );
+
+  function resend(): void {
+    void send(record.contact, body);
+  }
+
+  function handleDismiss(): void {
+    void dismiss(record.message_id);
+  }
 </script>
 
 {#if record.kind.kind === "file"}
   <FileAttachmentBubble {record} />
 {:else}
-  <div class="bubble" class:outgoing={isOutgoing} class:grouped class:focus-highlight={highlighted} data-row-id={record.row_id}>
+  <div class="bubble" class:outgoing={isOutgoing} class:grouped class:dismissed class:focus-highlight={highlighted} data-row-id={record.row_id}>
     <p class="body">{body}</p>
     <div class="meta">
       <time class="ts">{new Date(tsMs).toLocaleTimeString()}</time>
@@ -56,6 +91,13 @@
         <DeliveryIcon status={iconStatus} title={iconTitle} />
       {/if}
     </div>
+    {#if failureReason}
+      <p class="failure">{failureReason}</p>
+      <div class="failure-actions">
+        <button type="button" onclick={resend}>Resend</button>
+        <button type="button" onclick={handleDismiss}>Dismiss</button>
+      </div>
+    {/if}
   </div>
 {/if}
 
@@ -102,5 +144,20 @@
   .focus-highlight {
     outline: 2px solid var(--live);
     transition: outline 0.6s;
+  }
+  /* Dismissed keeps the bubble in place but visibly de-emphasized — no new
+     colour token, just recede via opacity. */
+  .bubble.dismissed { opacity: 0.6; }
+  .failure { margin: var(--s-1) 0 0; font: var(--t-ui); color: var(--danger); }
+  .bubble.outgoing .failure { color: var(--danger-on-accent); }
+  .failure-actions { display: flex; gap: var(--s-1); margin-top: var(--s-1); }
+  .failure-actions button {
+    padding: 2px var(--s-2);
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--hairline);
+    border-radius: 6px;
+    font: var(--t-ui);
+    cursor: pointer;
   }
 </style>

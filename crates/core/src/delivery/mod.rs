@@ -12,6 +12,7 @@ pub(crate) use error_kind::DeliveryErrorKind;
 pub(crate) mod hub;
 pub(crate) mod mailbox_sweeper;
 pub(crate) mod outbox;
+pub(crate) mod outbox_sweep;
 pub(crate) mod peer;
 pub(crate) mod receiver;
 pub(crate) mod welcome_sweep;

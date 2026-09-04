@@ -16,6 +16,7 @@
 use crate::envelope::Envelope;
 use crate::error::{CoreError, Result};
 use crate::storage::{Pool, StorageErrorKind};
+use rusqlite::OptionalExtension;
 
 /// Map a message string to either a [`StorageErrorKind::FtsSyntax`] or
 /// [`StorageErrorKind::Other`] `CoreError::Storage` variant.
@@ -63,6 +64,12 @@ pub struct StoredMessage {
     pub mls_generation: i64,
     /// Local-clock unix seconds at persist time. 0 for legacy rows.
     pub ts_daemon_recv: i64,
+    /// When the user dismissed a failed send (unix seconds), if ever.
+    /// `None` if the query didn't select it (e.g. `search`).
+    pub dismissed_at: Option<i64>,
+    /// Why the daemon gave up on this send, if it did. `None` if the
+    /// query didn't select it (e.g. `search`).
+    pub failed_reason: Option<String>,
 }
 
 /// All fields required to persist a single message row.
@@ -185,7 +192,7 @@ impl<'p> MessageRepo<'p> {
             let mut stmt = c
                 .prepare(
                     "SELECT id, group_id, sender, kind, body_blob, ts, delivered_at, \
-                            mls_generation, ts_daemon_recv \
+                            mls_generation, ts_daemon_recv, dismissed_at, failed_reason \
                      FROM messages \
                      WHERE group_id = ?1 \
                      ORDER BY mls_generation DESC, id DESC LIMIT ?2",
@@ -207,6 +214,8 @@ impl<'p> MessageRepo<'p> {
                             delivered_at: r.get(6)?,
                             mls_generation: r.get(7)?,
                             ts_daemon_recv: r.get(8)?,
+                            dismissed_at: r.get(9)?,
+                            failed_reason: r.get(10)?,
                         })
                     },
                 )
@@ -233,7 +242,7 @@ impl<'p> MessageRepo<'p> {
             let mut stmt = c
                 .prepare(
                     "SELECT id, group_id, sender, kind, body_blob, ts, delivered_at, \
-                            mls_generation, ts_daemon_recv \
+                            mls_generation, ts_daemon_recv, dismissed_at, failed_reason \
                      FROM messages \
                      WHERE group_id = ?1 AND id < ?2 \
                      ORDER BY mls_generation DESC, id DESC LIMIT ?3",
@@ -261,6 +270,8 @@ impl<'p> MessageRepo<'p> {
                             delivered_at: r.get(6)?,
                             mls_generation: r.get(7)?,
                             ts_daemon_recv: r.get(8)?,
+                            dismissed_at: r.get(9)?,
+                            failed_reason: r.get(10)?,
                         })
                     },
                 )
@@ -312,6 +323,7 @@ impl<'p> MessageRepo<'p> {
             "SELECT messages.id, messages.group_id, messages.sender, messages.kind, \
                     messages.body_blob, messages.ts, messages.delivered_at, \
                     messages.mls_generation, messages.ts_daemon_recv, \
+                    messages.dismissed_at, messages.failed_reason, \
                     bm25(messages_fts) AS rank, \
                     snippet(messages_fts, 0, char(2), char(3), '...', 32) AS snippet \
              FROM messages_fts \
@@ -345,9 +357,11 @@ impl<'p> MessageRepo<'p> {
                         delivered_at: r.get(6)?,
                         mls_generation: r.get(7)?,
                         ts_daemon_recv: r.get(8)?,
+                        dismissed_at: r.get(9)?,
+                        failed_reason: r.get(10)?,
                     },
-                    bm25: r.get::<_, f64>(9).unwrap_or(0.0),
-                    snippet: r.get::<_, String>(10).unwrap_or_default(),
+                    bm25: r.get::<_, f64>(11).unwrap_or(0.0),
+                    snippet: r.get::<_, String>(12).unwrap_or_default(),
                 })
             };
 
@@ -439,7 +453,7 @@ impl<'p> MessageRepo<'p> {
             let mut stmt = c
                 .prepare(
                     "SELECT id, group_id, sender, kind, body_blob, ts, delivered_at, \
-                            mls_generation, ts_daemon_recv \
+                            mls_generation, ts_daemon_recv, dismissed_at, failed_reason \
                      FROM messages \
                      WHERE group_id = ?1 AND id > ?2 \
                      ORDER BY id ASC \
@@ -466,6 +480,8 @@ impl<'p> MessageRepo<'p> {
                             delivered_at: r.get(6)?,
                             mls_generation: r.get(7)?,
                             ts_daemon_recv: r.get(8)?,
+                            dismissed_at: r.get(9)?,
+                            failed_reason: r.get(10)?,
                         })
                     },
                 )
@@ -507,6 +523,102 @@ impl<'p> MessageRepo<'p> {
                     CoreError::Storage(StorageErrorKind::Other(format!("mark delivered: {e}")))
                 })?;
             Ok(n > 0)
+        })
+    }
+
+    /// Record that the daemon gave up on an outgoing message, storing the
+    /// reason so the remedy survives a restart — a reason computed at read
+    /// time would be lost, and the row would come back as a bare "failed".
+    ///
+    /// Scoped to rows **we** sent (`sender = self_pubkey`) for the same
+    /// reason as [`Self::mark_delivered_by_envelope_id`]: without that scope
+    /// an authenticated peer could steer a failure marker onto an incoming
+    /// row that happens to share the envelope id. `delivered_at IS NULL`
+    /// keeps a late failure sweep from overwriting an already-acked send.
+    ///
+    /// Returns whether a row changed.
+    pub(crate) fn mark_failed(
+        &self,
+        envelope_id: &[u8; 16],
+        self_pubkey: &[u8; 32],
+        reason: &str,
+    ) -> Result<bool> {
+        self.pool.with_mut(|c| {
+            let n = c
+                .execute(
+                    "UPDATE messages SET failed_reason = ?1 \
+                     WHERE envelope_id = ?2 AND sender = ?3 AND delivered_at IS NULL",
+                    rusqlite::params![reason, &envelope_id[..], &self_pubkey[..]],
+                )
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!("mark failed: {e}")))
+                })?;
+            Ok(n > 0)
+        })
+    }
+
+    /// The sender's wall-clock `ts` (millis) of one message, addressed by
+    /// envelope id. `None` if the row is unknown.
+    ///
+    /// The outbox joins to history on `outbox.message_id == messages
+    /// .envelope_id`, so this is how a queue row recovers the age of the
+    /// message it is carrying.
+    pub(crate) fn envelope_ts(&self, envelope_id: &[u8; 16]) -> Result<Option<i64>> {
+        self.pool.with(|c| {
+            c.query_row(
+                "SELECT ts FROM messages WHERE envelope_id = ?1",
+                rusqlite::params![&envelope_id[..]],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|e| CoreError::Storage(StorageErrorKind::Other(format!("envelope_ts: {e}"))))
+        })
+    }
+
+    /// Mark a failed message dismissed. The row is KEPT — it stays in
+    /// history and in FTS; this only hides the failed bubble's actions.
+    ///
+    /// Scoped to rows **we** sent (`sender = self_pubkey`) for the same
+    /// reason as [`Self::mark_failed`]: without that scope an authenticated
+    /// peer (or a wider caller than the UI, such as IPC/CLI) could steer a
+    /// dismissal onto an incoming row that happens to share the envelope id.
+    pub(crate) fn mark_dismissed(
+        &self,
+        envelope_id: &[u8; 16],
+        self_pubkey: &[u8; 32],
+        now: i64,
+    ) -> Result<bool> {
+        self.pool.with_mut(|c| {
+            let n = c
+                .execute(
+                    "UPDATE messages SET dismissed_at = ?1 \
+                     WHERE envelope_id = ?2 AND sender = ?3",
+                    rusqlite::params![now, &envelope_id[..], &self_pubkey[..]],
+                )
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!("mark dismissed: {e}")))
+                })?;
+            Ok(n > 0)
+        })
+    }
+
+    /// `(dismissed_at, failed_reason)` for one message, addressed by
+    /// envelope id. `(None, None)` if the row is unknown.
+    pub(crate) fn delivery_outcome(
+        &self,
+        envelope_id: &[u8; 16],
+    ) -> Result<(Option<i64>, Option<String>)> {
+        self.pool.with(|c| {
+            c.query_row(
+                "SELECT dismissed_at, failed_reason FROM messages WHERE envelope_id = ?1",
+                rusqlite::params![&envelope_id[..]],
+                |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, Option<String>>(1)?)),
+            )
+            .optional()
+            .map(|row| row.unwrap_or((None, None)))
+            .map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!("delivery_outcome: {e}")))
+            })
         })
     }
 
@@ -779,6 +891,8 @@ impl<'p> MessageRepo<'p> {
                         delivered_at: r.get(6)?,
                         mls_generation: r.get(7)?,
                         ts_daemon_recv: r.get(8)?,
+                        dismissed_at: None,
+                        failed_reason: None,
                     })
                 })
                 .map_err(|e| {
@@ -812,6 +926,38 @@ mod tests {
                 body: text.to_string(),
             },
         }
+    }
+
+    /// The sender pubkey used by [`insert_outgoing_test_row`] and
+    /// [`insert_outgoing_test_row_with_body`] — an outgoing row is one whose
+    /// `sender` is our own pubkey.
+    const SELF_PUBKEY: [u8; 32] = [0x99; 32];
+
+    /// Insert a row that looks like a message *we sent* (`sender ==
+    /// SELF_PUBKEY`), addressed by the given envelope id, so
+    /// `mark_failed`/`mark_delivered_by_envelope_id` can find it.
+    fn insert_outgoing_test_row(repo: &MessageRepo<'_>, eid: &[u8; 16]) {
+        insert_outgoing_test_row_with_body(repo, eid, "outgoing");
+    }
+
+    fn insert_outgoing_test_row_with_body(repo: &MessageRepo<'_>, eid: &[u8; 16], body: &str) {
+        let env = Envelope {
+            v: 1,
+            id: MessageId(*eid),
+            ts: 1_700_000_000,
+            reply_to: None,
+            kind: Kind::Text {
+                body: body.to_string(),
+            },
+        };
+        repo.insert(InsertParams {
+            group_id: &[0x01; 32],
+            sender: &SELF_PUBKEY,
+            envelope: &env,
+            mls_generation: 0,
+            ts_daemon_recv: env.ts,
+        })
+        .unwrap();
     }
 
     #[test]
@@ -958,6 +1104,129 @@ mod tests {
             .unwrap();
         assert!(!forged, "an incoming row must not be markable as delivered");
         assert_eq!(repo.recent(&[0x55; 32], 10).unwrap()[0].delivered_at, None);
+    }
+
+    #[test]
+    fn failed_reason_and_dismissed_at_round_trip() {
+        let pool = Pool::in_memory();
+        let repo = MessageRepo::new(&pool);
+        let eid = [0xAB; 16];
+        insert_outgoing_test_row(&repo, &eid);
+
+        // Fresh row: neither set.
+        let (dismissed, reason) = repo.delivery_outcome(&eid).unwrap();
+        assert_eq!(dismissed, None);
+        assert_eq!(reason, None);
+
+        // Giving up stores the reason, so the remedy survives a restart.
+        assert!(repo
+            .mark_failed(&eid, &SELF_PUBKEY, "this contact has no mailbox")
+            .unwrap());
+        let (_, reason) = repo.delivery_outcome(&eid).unwrap();
+        assert_eq!(reason.as_deref(), Some("this contact has no mailbox"));
+
+        // Dismissal is independent and keeps the row.
+        assert!(repo.mark_dismissed(&eid, &SELF_PUBKEY, 2_000).unwrap());
+        let (dismissed, reason) = repo.delivery_outcome(&eid).unwrap();
+        assert_eq!(dismissed, Some(2_000));
+        assert_eq!(reason.as_deref(), Some("this contact has no mailbox"));
+    }
+
+    #[test]
+    fn dismiss_keeps_the_row_searchable() {
+        let pool = Pool::in_memory();
+        let repo = MessageRepo::new(&pool);
+        let eid = [0xAC; 16];
+        insert_outgoing_test_row_with_body(&repo, &eid, "findable haystack needle");
+
+        repo.mark_dismissed(&eid, &SELF_PUBKEY, 1_000).unwrap();
+
+        // Decision 4: Dismiss keeps the row in history AND in FTS. This is the
+        // test that stops a later "tidy up" turning Dismiss into a delete.
+        let hits = repo.search("needle", None, 10, 0, false).unwrap();
+        assert_eq!(hits.len(), 1, "a dismissed message must stay searchable");
+    }
+
+    #[test]
+    fn mark_failed_on_unknown_envelope_id_changes_nothing() {
+        let pool = Pool::in_memory();
+        let repo = MessageRepo::new(&pool);
+        assert!(!repo.mark_failed(&[0xFF; 16], &SELF_PUBKEY, "nope").unwrap());
+    }
+
+    /// A late failure sweep must not overwrite an already-acked send, and it
+    /// must not touch an INCOMING row that happens to carry the same
+    /// envelope id — `mark_failed` is scoped to `sender = self_pubkey` for
+    /// the same reason `mark_delivered_by_envelope_id` is.
+    #[test]
+    fn mark_failed_does_not_touch_an_incoming_row_with_the_same_envelope_id() {
+        let pool = Pool::in_memory();
+        let repo = MessageRepo::new(&pool);
+        let peer = [0x22u8; 32];
+        let eid = [0xAD; 16];
+
+        // An INCOMING message: sender is the peer, not us.
+        let env = Envelope {
+            v: 1,
+            id: MessageId(eid),
+            ts: 1_700_000_000,
+            reply_to: None,
+            kind: Kind::Text {
+                body: "from-them".to_string(),
+            },
+        };
+        repo.insert(InsertParams {
+            group_id: &[0x66; 32],
+            sender: &peer,
+            envelope: &env,
+            mls_generation: 0,
+            ts_daemon_recv: env.ts,
+        })
+        .unwrap();
+
+        let marked = repo
+            .mark_failed(&eid, &SELF_PUBKEY, "should not apply")
+            .unwrap();
+        assert!(!marked, "an incoming row must not be markable as failed");
+        let (dismissed, reason) = repo.delivery_outcome(&eid).unwrap();
+        assert_eq!(dismissed, None);
+        assert_eq!(reason, None);
+    }
+
+    /// Mirrors `mark_failed_does_not_touch_an_incoming_row_with_the_same_envelope_id`:
+    /// `mark_dismissed` must not grey an INCOMING bubble that happens to share
+    /// an envelope id with an outgoing one. The UI only offers Dismiss on
+    /// failed outgoing bubbles, but IPC/CLI are a wider door than the UI.
+    #[test]
+    fn mark_dismissed_does_not_touch_an_incoming_row_with_the_same_envelope_id() {
+        let pool = Pool::in_memory();
+        let repo = MessageRepo::new(&pool);
+        let peer = [0x23u8; 32];
+        let eid = [0xAE; 16];
+
+        // An INCOMING message: sender is the peer, not us.
+        let env = Envelope {
+            v: 1,
+            id: MessageId(eid),
+            ts: 1_700_000_000,
+            reply_to: None,
+            kind: Kind::Text {
+                body: "from-them".to_string(),
+            },
+        };
+        repo.insert(InsertParams {
+            group_id: &[0x66; 32],
+            sender: &peer,
+            envelope: &env,
+            mls_generation: 0,
+            ts_daemon_recv: env.ts,
+        })
+        .unwrap();
+
+        let marked = repo.mark_dismissed(&eid, &SELF_PUBKEY, 3_000).unwrap();
+        assert!(!marked, "an incoming row must not be dismissable");
+        let (dismissed, _) = repo.delivery_outcome(&eid).unwrap();
+        assert_eq!(dismissed, None);
     }
 
     #[test]

@@ -490,8 +490,7 @@ async fn minimal_run<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let mut pending: HashMap<MessageId, oneshot::Sender<std::result::Result<(), ()>>> =
-        HashMap::new();
+    let mut pending: HashMap<MessageId, PendingSend> = HashMap::new();
 
     loop {
         tokio::select! {
@@ -501,14 +500,18 @@ where
                     let _ = job.ack_tx.send(Err(()));
                     return Err(e);
                 }
-                pending.insert(job.message_id, job.ack_tx);
+                pending.insert(job.message_id, PendingSend {
+                    ack_tx: job.ack_tx,
+                    sent_at: tokio::time::Instant::now(),
+                    origin: PendingOrigin::Outbox,
+                });
             }
             frame = conn.recv() => {
                 match frame {
                     Ok(Some(Frame::Ack(bytes))) => {
                         let mid = MessageId(bytes);
-                        if let Some(tx) = pending.remove(&mid) {
-                            let _ = tx.send(Ok(()));
+                        if let Some(p) = pending.remove(&mid) {
+                            let _ = p.ack_tx.send(Ok(()));
                         }
                     }
                     Ok(Some(Frame::Bye)) => {
@@ -539,11 +542,35 @@ where
     Ok(())
 }
 
+/// Where an in-flight entry came from. Only `Outbox`-originated entries can
+/// block an outbox row, so only they are evicted on the deadline (#229). A
+/// `Welcome` entry is keyed by `welcome_msg_id`, which is never an outbox
+/// `message_id`, and its `ack_tx` is awaited by `welcome_sweep` under that
+/// module's own 45 s `ACK_TIMEOUT` — evicting it would resolve that receiver
+/// early for no gain, costing a sweep backoff and `MAX_WELCOME_AGE` budget.
+enum PendingOrigin {
+    Outbox,
+    Welcome,
+}
+
+/// An in-flight send: the ACK oneshot, the instant it went out, and what put
+/// it here (#229).
+struct PendingSend {
+    ack_tx: oneshot::Sender<std::result::Result<(), ()>>,
+    sent_at: tokio::time::Instant,
+    origin: PendingOrigin,
+}
+
 /// Tick intervals for the full actor.
 const RETRY_TICK: std::time::Duration = std::time::Duration::from_secs(1);
 const KEEPALIVE_PERIOD: std::time::Duration = std::time::Duration::from_secs(60);
 const PONG_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 const IDLE_CLOSE: std::time::Duration = std::time::Duration::from_secs(180);
+
+/// How long a sent-but-unacknowledged message blocks its own outbox row
+/// (#229). Same 30 s the chunk-request path uses. A peer that accepts a
+/// frame and never ACKs must not wedge the row permanently.
+const PENDING_INFLIGHT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Pacing for dials issued on behalf of a pending inbound attachment (#76).
 /// Same shape as `chunk_sweep`'s deposit backoff, held at the last entry. A
@@ -577,8 +604,11 @@ where
 {
     use crate::delivery::outbox::Outbox;
 
-    let mut pending: HashMap<MessageId, oneshot::Sender<std::result::Result<(), ()>>> =
-        HashMap::new();
+    // #229: the send instant rides along so an un-acked retry-tick send can
+    // be evicted. Without it, only an `Ack` or a connection drop removes an
+    // entry, and the `pending.contains_key` guard below then skips that outbox
+    // row on every later tick — forever, while the connection stays healthy.
+    let mut pending: HashMap<MessageId, PendingSend> = HashMap::new();
     let mut retry_tick = tokio::time::interval(RETRY_TICK);
     retry_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // Start keepalive after the first full period to avoid an immediate
@@ -614,6 +644,11 @@ where
     // changed.
     let mut next_chunk_dial_at: Option<tokio::time::Instant> = None;
     let mut chunk_dial_step: usize = 0;
+    // #227 dial pacing for queued outbox rows. Actor-local and not persisted,
+    // for the same reason as the #76 state above. Shares the ladder rather
+    // than introducing a second pacing scheme.
+    let mut next_outbox_dial_at: Option<tokio::time::Instant> = None;
+    let mut outbox_dial_step: usize = 0;
 
     loop {
         tokio::select! {
@@ -646,7 +681,11 @@ where
                     arm_failure(&mut first_failure_at);
                     continue;
                 }
-                pending.insert(job.message_id, job.ack_tx);
+                pending.insert(job.message_id, PendingSend {
+                    ack_tx: job.ack_tx,
+                    sent_at: tokio::time::Instant::now(),
+                    origin: PendingOrigin::Outbox,
+                });
                 last_traffic = tokio::time::Instant::now();
                 first_failure_at = None;
             }
@@ -685,24 +724,89 @@ where
                     arm_failure(&mut first_failure_at);
                     continue;
                 }
-                pending.insert(synthetic_id, wj.ack_tx);
+                pending.insert(synthetic_id, PendingSend {
+                    ack_tx: wj.ack_tx,
+                    sent_at: tokio::time::Instant::now(),
+                    origin: PendingOrigin::Welcome,
+                });
                 last_traffic = tokio::time::Instant::now();
                 first_failure_at = None;
             }
             _ = retry_tick.tick() => {
-                // One tick drives four jobs: (1) retry due direct-outbox rows,
-                // (2) fire the sustained-failure → mailbox fallback below, (3)
-                // time out stale chunk requests, and (4) dial on behalf of a
-                // pending inbound attachment fetch (#76) — the deliberate
-                // exception to "dial-on-demand happens on the next job send":
-                // that fetch is background work with no local user action
-                // behind it, so nothing else will ever give it a connection.
+                // One tick drives five jobs: (1) dial for due direct-outbox
+                // rows (#227), (2) retry those rows, (3) fire the
+                // sustained-failure → mailbox fallback below, (4) time out
+                // stale chunk requests, and (5) dial on behalf of a pending
+                // inbound attachment fetch (#76).
+                //
+                // (1) and (5) are both background work with no local user
+                // action behind them, so nothing else will ever give them a
+                // connection — "dial-on-demand happens on the next job send"
+                // does not reach them. Both dial on the same backoff ladder,
+                // for the same reason: a failed Tor dial burns up to
+                // DIAL_TIMEOUT inline against a 1 s tick.
+                // #229: evict outbox-originated in-flight entries the peer never
+                // acknowledged, so their rows become eligible again under their
+                // own backoff. A row genuinely in flight is still protected for
+                // the length of the deadline. Welcome entries are exempt: they
+                // block no outbox row, and `welcome_sweep` owns their timeout.
+                let now_i = tokio::time::Instant::now();
+                pending.retain(|_, p| match p.origin {
+                    PendingOrigin::Welcome => true,
+                    PendingOrigin::Outbox => {
+                        now_i.duration_since(p.sent_at) < PENDING_INFLIGHT_DEADLINE
+                    }
+                });
                 let ob = Outbox::new(&pool);
                 let now = now_ms();
                 // A transient outbox read error must not also skip the #76
                 // dial block below, so fall back to an empty batch here
                 // rather than `continue`-ing the whole tick.
                 let due = ob.due(now, 32).unwrap_or_default();
+                // #227: a queued row has no live user action behind it, so
+                // nothing else will ever give it a connection. Dial for it,
+                // paced by backoff. Placed after the eviction above so a row
+                // that was just un-wedged is seen on this tick, not the next.
+                let has_direct_due = due.iter().any(|e| {
+                    e.target == peer
+                        && e.target_kind == crate::storage::outbox::OutboxTargetKind::Direct
+                        && !pending.contains_key(&e.message_id)
+                });
+                if has_direct_due && conn.is_none() {
+                    let ready = next_outbox_dial_at
+                        .map(|t| tokio::time::Instant::now() >= t)
+                        .unwrap_or(true);
+                    if ready {
+                        if ensure_conn::<S>(peer, &mut conn, &dialer).await {
+                            next_outbox_dial_at = None;
+                            outbox_dial_step = 0;
+                            // Mirror the ReplaceConn arm: this is also
+                            // "install a fresh connection", so idle/pong state
+                            // from before the outage must not survive it and
+                            // tear the new connection straight down.
+                            last_traffic = tokio::time::Instant::now();
+                            awaiting_pong_since = None;
+                        } else {
+                            // #227: arm the sustained-failure timer here too.
+                            // Only the `jobs` arm armed it before, so the
+                            // mailbox fallback was unreachable for a row merely
+                            // sitting in the queue — which is the case that
+                            // actually occurs in the field.
+                            arm_failure(&mut first_failure_at);
+                            let idx = outbox_dial_step.min(CHUNK_DIAL_BACKOFF_MS.len() - 1);
+                            // Deadline from now: the dial itself may have just
+                            // burned up to DIAL_TIMEOUT.
+                            next_outbox_dial_at = Some(
+                                tokio::time::Instant::now()
+                                    + std::time::Duration::from_millis(
+                                        CHUNK_DIAL_BACKOFF_MS[idx],
+                                    ),
+                            );
+                            outbox_dial_step =
+                                (outbox_dial_step + 1).min(CHUNK_DIAL_BACKOFF_MS.len() - 1);
+                        }
+                    }
+                }
                 for entry in due {
                     if pending.contains_key(&entry.message_id) { continue; }
                     if entry.target != peer { continue; }
@@ -717,7 +821,11 @@ where
                         break;
                     }
                     let (tx, _rx) = oneshot::channel::<std::result::Result<(), ()>>();
-                    pending.insert(entry.message_id, tx);
+                    pending.insert(entry.message_id, PendingSend {
+                        ack_tx: tx,
+                        sent_at: tokio::time::Instant::now(),
+                        origin: PendingOrigin::Outbox,
+                    });
                     let _ = ob.reschedule(entry.id, entry.attempts, now);
                     last_traffic = tokio::time::Instant::now();
                     first_failure_at = None;
@@ -921,15 +1029,20 @@ where
                         // do not let stale failures from the old conn fire the
                         // fallback. (Re-armed on the next failure if it recurs.)
                         first_failure_at = None;
-                        // Same reasoning for the #76 dial pacing: the peer has
-                        // just proven reachable, so a backoff accumulated while
-                        // it was unreachable is stale evidence. Without this, a
-                        // conn that arrives during a 15-minute backoff and then
-                        // drops leaves the fetch idle until that stale deadline
+                        // Same reasoning for BOTH dial ladders — the #76
+                        // chunk-fetch pacing and the #227 queued-outbox-row
+                        // pacing: the peer has just proven reachable, so a
+                        // backoff accumulated while it was unreachable is stale
+                        // evidence. Without this, a conn that arrives during a
+                        // 15-minute backoff and then drops leaves the fetch (or
+                        // the queued row) idle until that stale deadline
                         // expires, even though we know the peer was up moments
-                        // ago. Re-armed from the first step if dialing fails again.
+                        // ago. Both are re-armed from the first step if dialing
+                        // fails again.
                         next_chunk_dial_at = None;
                         chunk_dial_step = 0;
+                        next_outbox_dial_at = None;
+                        outbox_dial_step = 0;
                         // 3.B: resume an in-flight inbound transfer on reconnect by
                         // re-issuing its outstanding requests over the fresh conn.
                         if let Some(rx) = active_rx.as_mut() {
@@ -952,8 +1065,8 @@ where
                 match frame {
                     Ok(Some(Frame::Ack(bytes))) => {
                         let mid = MessageId(bytes);
-                        if let Some(tx) = pending.remove(&mid) {
-                            let _ = tx.send(Ok(()));
+                        if let Some(p) = pending.remove(&mid) {
+                            let _ = p.ack_tx.send(Ok(()));
                         }
                         let ob = Outbox::new(&pool);
                         // The outbox row is peer-scoped, so its removal is the
@@ -1314,9 +1427,9 @@ where
     }
 }
 
-fn drain_pending(pending: &mut HashMap<MessageId, oneshot::Sender<std::result::Result<(), ()>>>) {
-    for (_, tx) in pending.drain() {
-        let _ = tx.send(Err(()));
+fn drain_pending(pending: &mut HashMap<MessageId, PendingSend>) {
+    for (_, p) in pending.drain() {
+        let _ = p.ack_tx.send(Err(()));
     }
 }
 
@@ -1515,6 +1628,182 @@ mod tests {
 
         handle.abort();
         let _ = echo.await;
+    }
+
+    /// #229: the retry tick inserted into `pending` with a dropped receiver,
+    /// so an un-acked send was never evicted and `pending.contains_key`
+    /// skipped that row on every later tick — forever, while the connection
+    /// stayed healthy. A peer that accepts frames and never ACKs must not
+    /// permanently block its own outbox row.
+    #[tokio::test(start_paused = true)]
+    async fn unacked_retry_tick_send_is_retried_not_wedged() {
+        use crate::delivery::outbox::Outbox;
+        use crate::envelope::MessageId as EMid;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let (client_stream, server_stream) = tokio::io::duplex(64 * 1024);
+        let initiator_id = IdentityKey::generate().unwrap();
+        let responder_id = IdentityKey::generate().unwrap();
+        let responder_static = responder_id.noise_static_public();
+
+        // Peer end: accepts every frame and NEVER sends an Ack.
+        let seen = std::sync::Arc::new(AtomicUsize::new(0));
+        let seen_task = seen.clone();
+        let responder = tokio::spawn(async move {
+            let (mut conn, _) = handshake_responder(server_stream, &responder_id, None)
+                .await
+                .unwrap();
+            while let Ok(Some(frame)) = conn.recv().await {
+                if matches!(frame, Frame::MlsApp(_)) {
+                    seen_task.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        });
+
+        let (conn, _) = handshake_initiator(client_stream, &initiator_id, &responder_static, None)
+            .await
+            .unwrap();
+
+        let mid = [0x77u8; 16];
+        let pool = std::sync::Arc::new(Pool::in_memory());
+        let peer = PublicKey([0xBB; 32]);
+        Outbox::new(&pool)
+            .enqueue(&peer, EMid(mid), &[0x01, 0x02, 0x03], 0)
+            .unwrap()
+            .unwrap();
+
+        let (_job_tx, job_rx) = mpsc::channel::<DeliveryJob>(4);
+        let handle =
+            PeerConnection::spawn_full_for_test(peer, Box::new(conn), job_rx, pool.clone(), None);
+
+        // The row is due at once, so the first retry tick delivers it.
+        tokio::time::advance(std::time::Duration::from_millis(1_100)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(seen.load(Ordering::SeqCst), 1, "first send must go out");
+
+        // The outbox's own backoff is wall-clock (`now_ms`), which tokio's
+        // paused clock does not move — let real time pass so the row falls
+        // due again independently of the virtual-time advance below.
+        std::thread::sleep(std::time::Duration::from_millis(1_300));
+
+        // Past the in-flight deadline the row must be re-sent. Wedged, the
+        // actor sits forever holding an entry nothing will ever remove.
+        tokio::time::advance(std::time::Duration::from_secs(45)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            seen.load(Ordering::SeqCst) >= 2,
+            "an un-acked row must be retried, not wedged by its own pending entry (#229)"
+        );
+
+        handle.abort();
+        responder.abort();
+    }
+
+    /// #229 boundary: the eviction deadline is for outbox rows only. A
+    /// Welcome entry is keyed by `welcome_msg_id`, blocks no outbox row, and
+    /// its `ack_tx` is awaited by `welcome_sweep` under that module's own 45 s
+    /// `ACK_TIMEOUT` — so it must survive past `PENDING_INFLIGHT_DEADLINE`
+    /// while an outbox entry inserted alongside it is evicted and re-sent.
+    #[tokio::test(start_paused = true)]
+    async fn welcome_pending_entry_survives_the_inflight_deadline() {
+        use crate::delivery::outbox::Outbox;
+        use crate::envelope::MessageId as EMid;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let actor_id = IdentityKey::generate().unwrap();
+        let responder_id = IdentityKey::generate().unwrap();
+        let responder_static = responder_id.noise_static_public();
+        let peer = PublicKey(responder_id.public().0);
+
+        let (client_stream, server_stream) = tokio::io::duplex(64 * 1024);
+
+        // Peer end: reads every frame, counts `MlsApp`, and NEVER Acks.
+        let apps = std::sync::Arc::new(AtomicUsize::new(0));
+        let welcomes = std::sync::Arc::new(AtomicUsize::new(0));
+        let (apps_t, welcomes_t) = (apps.clone(), welcomes.clone());
+        let responder = tokio::spawn(async move {
+            let (mut conn, _) = handshake_responder(server_stream, &responder_id, None)
+                .await
+                .unwrap();
+            while let Ok(Some(frame)) = conn.recv().await {
+                match frame {
+                    Frame::MlsApp(_) => {
+                        apps_t.fetch_add(1, Ordering::SeqCst);
+                    }
+                    Frame::MlsWelcome(_) => {
+                        welcomes_t.fetch_add(1, Ordering::SeqCst);
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        let (actor_conn, _) =
+            handshake_initiator(client_stream, &actor_id, &responder_static, None)
+                .await
+                .unwrap();
+
+        let pool = std::sync::Arc::new(Pool::in_memory());
+        Outbox::new(&pool)
+            .enqueue(&peer, EMid([0x33; 16]), &[0x01, 0x02, 0x03], 0)
+            .unwrap()
+            .unwrap();
+
+        let (_jobs_tx, jobs_rx) = mpsc::channel::<DeliveryJob>(4);
+        let (welcome_tx, welcome_rx) = mpsc::channel::<WelcomeJob>(4);
+        let (_ctrl_tx, ctrl_rx) = mpsc::channel::<PeerCtrl<tokio::io::DuplexStream>>(4);
+        let actor = tokio::spawn(async move {
+            let _ = super::full_run::<tokio::io::DuplexStream>(
+                peer,
+                Some(actor_conn),
+                jobs_rx,
+                welcome_rx,
+                ctrl_rx,
+                pool,
+                None,
+                None,
+                std::time::Duration::from_secs(0),
+                None,
+                None,
+                None,
+            )
+            .await;
+        });
+
+        // Both entries go in-flight at (virtually) the same moment: the first
+        // retry tick sends the outbox row, and the Welcome follows it.
+        let (ack_tx, mut ack_rx) = oneshot::channel::<std::result::Result<(), ()>>();
+        welcome_tx
+            .send(WelcomeJob {
+                welcome_bytes: b"fake welcome bytes".to_vec(),
+                ack_tx,
+            })
+            .await
+            .unwrap();
+        tokio::time::advance(std::time::Duration::from_millis(1_100)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(apps.load(Ordering::SeqCst), 1, "outbox row must go out");
+        assert_eq!(welcomes.load(Ordering::SeqCst), 1, "welcome must go out");
+
+        // The outbox row's own backoff is wall-clock (`now_ms`), which tokio's
+        // paused clock does not move — let real time pass so it falls due.
+        std::thread::sleep(std::time::Duration::from_millis(1_300));
+        tokio::time::advance(std::time::Duration::from_secs(45)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        assert!(
+            apps.load(Ordering::SeqCst) >= 2,
+            "the outbox entry must be evicted and its row re-sent (#229)"
+        );
+        assert_eq!(
+            ack_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty),
+            "the welcome ack_tx must still be held — welcome_sweep's 45 s \
+             ACK_TIMEOUT owns this timeout, not PENDING_INFLIGHT_DEADLINE"
+        );
+
+        actor.abort();
+        responder.abort();
     }
 
     #[tokio::test(start_paused = true)]
@@ -2160,6 +2449,355 @@ mod tests {
         }
 
         handle.abort();
+    }
+
+    /// #227 test helper: a dialer that always fails and counts attempts.
+    /// Same shape as the `FailingDial` in
+    /// `pending_fetch_dials_are_paced_by_backoff`, hoisted so both #227 tests
+    /// share one construction.
+    struct CountingFailingDial {
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::delivery::dial::OutboundDial<tokio::io::DuplexStream> for CountingFailingDial {
+        async fn dial(
+            &self,
+            _peer: PublicKey,
+        ) -> Result<(
+            AuthenticatedConnection<tokio::io::DuplexStream>,
+            zeroize::Zeroizing<[u8; 32]>,
+        )> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(crate::delivery::DeliveryErrorKind::Timeout.into())
+        }
+        async fn dial_at(
+            &self,
+            peer: PublicKey,
+            _onion: &str,
+        ) -> Result<(
+            AuthenticatedConnection<tokio::io::DuplexStream>,
+            zeroize::Zeroizing<[u8; 32]>,
+        )> {
+            self.dial(peer).await
+        }
+    }
+
+    fn counting_failing_dialer(
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) -> std::sync::Arc<dyn crate::delivery::dial::OutboundDial<tokio::io::DuplexStream>> {
+        std::sync::Arc::new(CountingFailingDial { calls })
+    }
+
+    /// Keeps the actor's channel senders alive for the life of the test —
+    /// dropping them makes `jobs.recv()` return `None` and the actor exits
+    /// before any tick fires.
+    struct TestActor {
+        _handle: PeerHandle,
+        _jobs_tx: mpsc::Sender<DeliveryJob>,
+        _welcome_tx: mpsc::Sender<WelcomeJob>,
+        _ctrl_tx: mpsc::Sender<PeerCtrl<tokio::io::DuplexStream>>,
+    }
+
+    /// A full actor started COLD (no connection) with a dialer — the exact
+    /// shape of the #227 field case.
+    fn spawn_full_actor_no_conn_for_test(
+        peer: PublicKey,
+        pool: std::sync::Arc<Pool>,
+        dialer: std::sync::Arc<dyn crate::delivery::dial::OutboundDial<tokio::io::DuplexStream>>,
+    ) -> TestActor {
+        let (jobs_tx, jobs_rx) = mpsc::channel::<DeliveryJob>(4);
+        let (welcome_tx, welcome_rx) = mpsc::channel::<WelcomeJob>(4);
+        let (ctrl_tx, ctrl_rx) = mpsc::channel::<PeerCtrl<tokio::io::DuplexStream>>(4);
+        let handle = tokio::spawn(async move {
+            let _ = super::full_run::<tokio::io::DuplexStream>(
+                peer,
+                None,
+                jobs_rx,
+                welcome_rx,
+                ctrl_rx,
+                pool,
+                None,
+                Some(dialer),
+                std::time::Duration::ZERO,
+                None,
+                None,
+                None,
+            )
+            .await;
+        });
+        TestActor {
+            _handle: handle,
+            _jobs_tx: jobs_tx,
+            _welcome_tx: welcome_tx,
+            _ctrl_tx: ctrl_tx,
+        }
+    }
+
+    /// #227: the retry tick's due-rows loop breaks when there is no connection
+    /// and never dials, so a queued message waits for a connection something
+    /// else creates. With a dialer available, a due row must cause a dial.
+    #[tokio::test(start_paused = true)]
+    async fn retry_tick_dials_for_a_due_row_when_disconnected() {
+        use crate::delivery::outbox::Outbox;
+
+        let pool = std::sync::Arc::new(Pool::in_memory());
+        let peer = PublicKey([0x88; 32]);
+        Outbox::new(&pool)
+            .enqueue(&peer, MessageId([0x02; 16]), b"payload", 0)
+            .unwrap()
+            .unwrap();
+
+        // Actor starts with NO connection, but with a dialer that counts calls.
+        let dials = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let dialer = counting_failing_dialer(dials.clone());
+        let handle = spawn_full_actor_no_conn_for_test(peer, pool.clone(), dialer);
+
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        tokio::task::yield_now().await;
+
+        assert!(
+            dials.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+            "a due outbox row must cause a dial (#227); got 0"
+        );
+        drop(handle);
+    }
+
+    /// Dials must be paced. A failed Tor dial costs up to DIAL_TIMEOUT (30 s)
+    /// inline against a 1 s RETRY_TICK, so an unpaced dial is a storm against a
+    /// peer that is simply offline. Mirrors the existing assertion for the job
+    /// path.
+    #[tokio::test(start_paused = true)]
+    async fn retry_tick_dials_are_paced_by_backoff() {
+        use crate::delivery::outbox::Outbox;
+
+        let pool = std::sync::Arc::new(Pool::in_memory());
+        let peer = PublicKey([0x89; 32]);
+        Outbox::new(&pool)
+            .enqueue(&peer, MessageId([0x03; 16]), b"payload", 0)
+            .unwrap()
+            .unwrap();
+
+        let dials = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let dialer = counting_failing_dialer(dials.clone());
+        let handle = spawn_full_actor_no_conn_for_test(peer, pool.clone(), dialer);
+
+        // Ten minutes. The ladder is 15 s, 60 s, 300 s, 900 s (held), so a
+        // correct actor issues roughly four dials, not six hundred.
+        tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+        tokio::task::yield_now().await;
+
+        let n = dials.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            n <= 8,
+            "dials must be paced by backoff, not issued per retry tick (got {n})"
+        );
+        drop(handle);
+    }
+
+    /// #227: a row merely sitting in the queue must arm the sustained-failure
+    /// timer, so the mailbox fallback can eventually fire for it. Before the
+    /// fix only the `jobs` arm armed `first_failure_at`, so a queued row with
+    /// no live user action behind it never reached the fallback — there is no
+    /// job for a row the hub already handed off.
+    #[tokio::test(start_paused = true)]
+    async fn queued_row_dial_failure_reaches_the_mailbox_fallback() {
+        use crate::contact::card::{ContactCard, ContactCardBody};
+        use crate::contact::Contact;
+        use crate::identity::Signature;
+        use crate::mailbox::client::MailboxClient;
+        use crate::mailbox::poll::{MailboxConnectFactory, MailboxStream};
+        use crate::storage::outbox::OutboxRepo;
+        use crate::storage::ContactRepo;
+
+        // The deposit itself is irrelevant here: `run_mailbox_fallback`
+        // retargets the row BEFORE connecting, so an unreachable mailbox still
+        // proves the fallback ran.
+        struct UnreachableFactory;
+        #[async_trait::async_trait]
+        impl MailboxConnectFactory for UnreachableFactory {
+            async fn connect(&self, _onion: &str) -> Result<MailboxClient<Box<dyn MailboxStream>>> {
+                Err(crate::error::CoreError::MailboxClient(
+                    crate::error::MailboxClientErrorKind::Unreachable,
+                ))
+            }
+        }
+
+        let pool = std::sync::Arc::new(Pool::in_memory());
+        let peer = PublicKey([0x8A; 32]);
+        let mid = [0x04u8; 16];
+
+        let contacts = ContactRepo::new(&pool);
+        contacts
+            .upsert(&Contact {
+                identity: peer,
+                display_name: None,
+                added_at: 0,
+                card: None,
+                muted: false,
+            })
+            .unwrap();
+        contacts
+            .put_card(&ContactCard {
+                body: ContactCardBody {
+                    identity: peer,
+                    onion: "self.onion".into(),
+                    mailboxes: vec!["mb1.onion".into()],
+                    version: 1,
+                    expires_at: 9_999_999_999,
+                },
+                signature: Signature([0u8; 64]),
+            })
+            .unwrap();
+
+        // A due DIRECT row and NOTHING else — no job is ever submitted.
+        OutboxRepo::new(&pool)
+            .insert_direct(&peer.0, &mid, b"ct", 0)
+            .unwrap();
+
+        let (events_tx, _events_rx) =
+            tokio::sync::broadcast::channel::<crate::daemon::events::Event>(8);
+        let shared = std::sync::Arc::new(crate::delivery::hub::MailboxFallbackShared {
+            factory: std::sync::Arc::new(UnreachableFactory),
+            events: events_tx,
+            identity: std::sync::Arc::new(IdentityKey::generate().unwrap()),
+        });
+
+        let dials = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let dialer = counting_failing_dialer(dials.clone());
+
+        let (jobs_tx, jobs_rx) = mpsc::channel::<DeliveryJob>(4);
+        let (welcome_tx, welcome_rx) = mpsc::channel::<WelcomeJob>(4);
+        let (ctrl_tx, ctrl_rx) = mpsc::channel::<PeerCtrl<tokio::io::DuplexStream>>(4);
+        let run_pool = pool.clone();
+        let handle = tokio::spawn(async move {
+            let _ = super::full_run::<tokio::io::DuplexStream>(
+                peer,
+                None,
+                jobs_rx,
+                welcome_rx,
+                ctrl_rx,
+                run_pool,
+                None,
+                Some(dialer),
+                std::time::Duration::from_secs(5),
+                Some(shared),
+                None,
+                None,
+            )
+            .await;
+        });
+
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+
+        assert!(
+            OutboxRepo::new(&pool)
+                .find_direct_id(&peer.0, &mid)
+                .unwrap()
+                .is_none(),
+            "a queued row's own dial failure must arm the sustained-failure \
+             timer so the mailbox fallback retargets it (#227)"
+        );
+
+        handle.abort();
+        drop((jobs_tx, welcome_tx, ctrl_tx));
+    }
+
+    /// #227 + the `ReplaceConn` reasoning already applied to the #76 ladder: a
+    /// connection arriving via `ReplaceConn` (the peer dialed US) proves the
+    /// peer is reachable, so an outbox-dial backoff accumulated while it was
+    /// unreachable is stale evidence. If that connection then drops, a queued
+    /// row must be re-dialled promptly rather than waiting out the old
+    /// deadline — up to 15 minutes of silence after a peer we know was up
+    /// moments ago.
+    ///
+    /// The replacement conn's far end is dropped before it is handed over, so
+    /// the row is never successfully sent and never rescheduled. That keeps it
+    /// due (the outbox schedule runs on the wall clock, which a paused-time
+    /// test does not advance) and isolates the assertion to the dial pacing.
+    #[tokio::test(start_paused = true)]
+    async fn replace_conn_resets_the_outbox_dial_backoff() {
+        use crate::delivery::outbox::Outbox;
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+        use tokio::io::DuplexStream;
+
+        let actor_id = IdentityKey::generate().unwrap();
+        let responder_id = IdentityKey::generate().unwrap();
+        let responder_static = responder_id.noise_static_public();
+        let peer = PublicKey(responder_id.public().0);
+
+        let pool = std::sync::Arc::new(Pool::in_memory());
+        Outbox::new(&pool)
+            .enqueue(&peer, MessageId([0x05; 16]), b"payload", 0)
+            .unwrap()
+            .unwrap();
+
+        // A real handshaked conn for the ReplaceConn hand-off.
+        let (client_stream, server_stream) = tokio::io::duplex(64 * 1024);
+        let responder_task = tokio::spawn(async move {
+            handshake_responder(server_stream, &responder_id, None)
+                .await
+                .unwrap()
+        });
+        let (incoming, _) = handshake_initiator(client_stream, &actor_id, &responder_static, None)
+            .await
+            .unwrap();
+        let (peer_conn, _) = responder_task.await.unwrap();
+
+        let dials = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let dialer = counting_failing_dialer(dials.clone());
+
+        let (_jobs_tx, jobs_rx) = mpsc::channel::<DeliveryJob>(4);
+        let (_welcome_tx, welcome_rx) = mpsc::channel::<WelcomeJob>(4);
+        let (ctrl_tx, ctrl_rx) = mpsc::channel::<PeerCtrl<DuplexStream>>(4);
+        let run_pool = pool.clone();
+        let actor = tokio::spawn(async move {
+            let _ = super::full_run::<DuplexStream>(
+                peer,
+                None,
+                jobs_rx,
+                welcome_rx,
+                ctrl_rx,
+                run_pool,
+                None,
+                Some(dialer),
+                Duration::ZERO,
+                None,
+                None,
+                None,
+            )
+            .await;
+        });
+
+        // Let the outbox ladder climb to its last step (15 + 60 + 300 elapsed),
+        // so a surviving deadline would be 900 s out.
+        tokio::time::sleep(Duration::from_secs(400)).await;
+        let before = dials.load(Ordering::SeqCst);
+        assert!(
+            before >= 3,
+            "backoff should have reached a late step (got {before} dials)"
+        );
+
+        // The peer dials US with a conn whose far end is already gone.
+        drop(peer_conn);
+        ctrl_tx
+            .send(PeerCtrl::ReplaceConn(Box::new(incoming)))
+            .await
+            .unwrap();
+
+        // Well inside the stale 900 s deadline, but past a reset ladder's 15 s.
+        tokio::time::sleep(Duration::from_secs(60)).await;
+
+        let after = dials.load(Ordering::SeqCst);
+        assert!(
+            after > before,
+            "a ReplaceConn must reset the outbox dial backoff — a queued row \
+             must be re-dialled promptly after that conn drops, not after the \
+             stale deadline (dials before={before}, after={after})"
+        );
+
+        actor.abort();
     }
 
     /// #76: an inbound attachment fetch must be able to establish its own

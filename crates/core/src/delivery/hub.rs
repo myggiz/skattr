@@ -71,10 +71,9 @@ where
 pub(crate) struct MailboxFallbackShared {
     pub(crate) factory: Arc<dyn MailboxConnectFactory>,
     pub(crate) events: broadcast::Sender<Event>,
-    /// Held for forward-compat with signed-deposit variants; the current
-    /// Deposit frame is depositor-anonymous so identity isn't used at deposit
-    /// time.
-    #[allow(dead_code)]
+    /// Our own identity. The Deposit frame is depositor-anonymous, so this is
+    /// not used at deposit time; the outbox sweeper reads its pubkey to scope
+    /// `MessageRepo::mark_failed` to rows we actually sent.
     pub(crate) identity: Arc<IdentityKey>,
 }
 
@@ -492,9 +491,13 @@ pub(crate) async fn run_mailbox_fallback(
         }
     };
     if onions.is_empty() {
-        tracing::debug!(
+        // Was debug!, i.e. below the shipped default filter (`skattr_core=info`)
+        // — so in the field this declined silently and the messages simply
+        // rotted. Redaction: no onion, no pubkey, no body.
+        tracing::info!(
             target: "skattr::delivery::hub",
-            "fallback: peer has no advertised mailboxes; leaving outbox row untouched"
+            "fallback: contact advertises no mailbox; \
+             messages cannot reach them while they are offline"
         );
         return;
     }
