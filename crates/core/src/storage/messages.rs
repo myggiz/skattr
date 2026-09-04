@@ -577,12 +577,23 @@ impl<'p> MessageRepo<'p> {
 
     /// Mark a failed message dismissed. The row is KEPT — it stays in
     /// history and in FTS; this only hides the failed bubble's actions.
-    pub(crate) fn mark_dismissed(&self, envelope_id: &[u8; 16], now: i64) -> Result<bool> {
+    ///
+    /// Scoped to rows **we** sent (`sender = self_pubkey`) for the same
+    /// reason as [`Self::mark_failed`]: without that scope an authenticated
+    /// peer (or a wider caller than the UI, such as IPC/CLI) could steer a
+    /// dismissal onto an incoming row that happens to share the envelope id.
+    pub(crate) fn mark_dismissed(
+        &self,
+        envelope_id: &[u8; 16],
+        self_pubkey: &[u8; 32],
+        now: i64,
+    ) -> Result<bool> {
         self.pool.with_mut(|c| {
             let n = c
                 .execute(
-                    "UPDATE messages SET dismissed_at = ?1 WHERE envelope_id = ?2",
-                    rusqlite::params![now, &envelope_id[..]],
+                    "UPDATE messages SET dismissed_at = ?1 \
+                     WHERE envelope_id = ?2 AND sender = ?3",
+                    rusqlite::params![now, &envelope_id[..], &self_pubkey[..]],
                 )
                 .map_err(|e| {
                     CoreError::Storage(StorageErrorKind::Other(format!("mark dismissed: {e}")))
@@ -1115,7 +1126,7 @@ mod tests {
         assert_eq!(reason.as_deref(), Some("this contact has no mailbox"));
 
         // Dismissal is independent and keeps the row.
-        assert!(repo.mark_dismissed(&eid, 2_000).unwrap());
+        assert!(repo.mark_dismissed(&eid, &SELF_PUBKEY, 2_000).unwrap());
         let (dismissed, reason) = repo.delivery_outcome(&eid).unwrap();
         assert_eq!(dismissed, Some(2_000));
         assert_eq!(reason.as_deref(), Some("this contact has no mailbox"));
@@ -1128,7 +1139,7 @@ mod tests {
         let eid = [0xAC; 16];
         insert_outgoing_test_row_with_body(&repo, &eid, "findable haystack needle");
 
-        repo.mark_dismissed(&eid, 1_000).unwrap();
+        repo.mark_dismissed(&eid, &SELF_PUBKEY, 1_000).unwrap();
 
         // Decision 4: Dismiss keeps the row in history AND in FTS. This is the
         // test that stops a later "tidy up" turning Dismiss into a delete.
@@ -1180,6 +1191,42 @@ mod tests {
         let (dismissed, reason) = repo.delivery_outcome(&eid).unwrap();
         assert_eq!(dismissed, None);
         assert_eq!(reason, None);
+    }
+
+    /// Mirrors `mark_failed_does_not_touch_an_incoming_row_with_the_same_envelope_id`:
+    /// `mark_dismissed` must not grey an INCOMING bubble that happens to share
+    /// an envelope id with an outgoing one. The UI only offers Dismiss on
+    /// failed outgoing bubbles, but IPC/CLI are a wider door than the UI.
+    #[test]
+    fn mark_dismissed_does_not_touch_an_incoming_row_with_the_same_envelope_id() {
+        let pool = Pool::in_memory();
+        let repo = MessageRepo::new(&pool);
+        let peer = [0x23u8; 32];
+        let eid = [0xAE; 16];
+
+        // An INCOMING message: sender is the peer, not us.
+        let env = Envelope {
+            v: 1,
+            id: MessageId(eid),
+            ts: 1_700_000_000,
+            reply_to: None,
+            kind: Kind::Text {
+                body: "from-them".to_string(),
+            },
+        };
+        repo.insert(InsertParams {
+            group_id: &[0x66; 32],
+            sender: &peer,
+            envelope: &env,
+            mls_generation: 0,
+            ts_daemon_recv: env.ts,
+        })
+        .unwrap();
+
+        let marked = repo.mark_dismissed(&eid, &SELF_PUBKEY, 3_000).unwrap();
+        assert!(!marked, "an incoming row must not be dismissable");
+        let (dismissed, _) = repo.delivery_outcome(&eid).unwrap();
+        assert_eq!(dismissed, None);
     }
 
     #[test]

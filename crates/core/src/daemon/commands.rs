@@ -370,6 +370,12 @@ pub enum Command {
         /// 16-byte attachment id.
         attachment_id: crate::daemon::hex::Hex16,
     },
+    /// Mark a failed outgoing message dismissed. The row is KEPT — it
+    /// stays in history and in FTS; this only hides the bubble's actions.
+    DismissMessage {
+        /// 16-byte envelope id of the message to dismiss.
+        message_id: crate::daemon::hex::Hex16,
+    },
 }
 
 /// Outcome of a `SendMessage` command after the inline-delivery wait.

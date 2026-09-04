@@ -108,6 +108,7 @@ where
         Command::RetryAttachment { attachment_id } => {
             retry_attachment_cmd(handle, attachment_id.0).await
         }
+        Command::DismissMessage { message_id } => dismiss_message(&handle, message_id.0).await,
     }
 }
 
@@ -2202,6 +2203,27 @@ where
     Ok(CommandResult::Ok)
 }
 
+/// `DismissMessage` handler: mark a failed outgoing message dismissed. The
+/// row is KEPT — it stays in history and in FTS; this only hides the failed
+/// bubble's Resend/Dismiss actions. Scoped to rows we sent (see
+/// `MessageRepo::mark_dismissed`).
+async fn dismiss_message<S>(
+    handle: &Arc<DaemonHandle<S>>,
+    message_id: [u8; 16],
+) -> std::result::Result<CommandResult, IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    crate::storage::messages::MessageRepo::new(&handle.pool)
+        .mark_dismissed(
+            &message_id,
+            &handle.identity.public().0,
+            crate::daemon::clock::now_unix_seconds(),
+        )
+        .map_err(map_err)?;
+    Ok(CommandResult::Ok)
+}
+
 // ---------------------------------------------------------------------------
 // WipeAllData handler
 // ---------------------------------------------------------------------------
@@ -3533,7 +3555,8 @@ mod tests {
             .unwrap();
         }
 
-        msgs.mark_dismissed(&dismissed_id.0, 1_234_000).unwrap();
+        msgs.mark_dismissed(&dismissed_id.0, &handle.identity.public().0, 1_234_000)
+            .unwrap();
         msgs.mark_failed(&failed_id.0, &handle.identity.public().0, "no mailbox")
             .unwrap();
 
@@ -3572,6 +3595,49 @@ mod tests {
             Some("no mailbox")
         );
         assert_eq!(failed_hit.record.dismissed_at, None);
+    }
+
+    #[tokio::test]
+    async fn dismiss_message_marks_the_row_and_keeps_it() {
+        let handle = test_handle();
+        let gid = [0x8Bu8; 32];
+        let eid = crate::envelope::MessageId::generate();
+
+        let env = crate::envelope::Envelope {
+            v: 1,
+            id: eid,
+            ts: 1_700_000_000,
+            reply_to: None,
+            kind: crate::envelope::Kind::Text {
+                body: "gave up".into(),
+            },
+        };
+        let msgs = crate::storage::MessageRepo::new(&handle.pool);
+        msgs.insert(crate::storage::messages::InsertParams {
+            group_id: &gid,
+            sender: &handle.identity.public().0,
+            envelope: &env,
+            mls_generation: 1,
+            ts_daemon_recv: 1_700_000_000,
+        })
+        .unwrap();
+        msgs.mark_failed(&eid.0, &handle.identity.public().0, "no mailbox")
+            .unwrap();
+
+        let result = execute_command(
+            handle.clone(),
+            Command::DismissMessage {
+                message_id: crate::daemon::hex::Hex16::from(eid.0),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(result, CommandResult::Ok));
+
+        // Decision 4: the row is KEPT — dismissal is recorded, not deleted.
+        let (dismissed, reason) = msgs.delivery_outcome(&eid.0).unwrap();
+        assert!(dismissed.is_some(), "dismissal must be recorded");
+        assert_eq!(reason.as_deref(), Some("no mailbox"));
     }
 
     #[tokio::test]
