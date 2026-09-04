@@ -54,8 +54,10 @@
 //!
 //! Both waits are deadline-bounded polls with a wide margin, never sleeps
 //! sized to the expected latency, and the failure messages name what did not
-//! happen. The worst case is bounded: the second rung fires ~75 s after the
-//! first failure, by which point Bob has long been up.
+//! happen. The receive deadline is sized to clear the ladder's third rung
+//! (t = 375 s) rather than to the observed ~114 s, so that no timeout in this
+//! file is load-bearing on Bob booting before a particular rung — see the
+//! comment on that deadline.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -207,7 +209,17 @@ async fn queued_message_delivers_when_peer_returns_over_loopback() {
     let (ready_b, shutdown_b, task_b) = spawn(tmp_b.path(), &net, BOB_ONION).await;
 
     // Bob receives it.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    //
+    // The deadline must clear the THIRD rung of `CHUNK_DIAL_BACKOFF_MS`
+    // (`peer.rs`: 15 s, 60 s, 300 s, 900 s), which puts Alice's dial attempts
+    // at roughly t = 0, 15 s, 75 s, 375 s after her first failure. Anything
+    // shorter than ~330 s is load-bearing on Bob being ready before the t=75 s
+    // rung: miss it and the next attempt is 300 s later, so a deadline of e.g.
+    // 120 s expires first and blames #227 for what is really a slow boot — a
+    // flake with a diagnostic pointing at the wrong code. 330 s removes that
+    // coupling; the happy path still returns at ~114 s, so normal runtime is
+    // unchanged. Raise this if a rung is ever added or lengthened.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(330);
     loop {
         let got = recent(&ready_b.ipc_socket, alice_pubkey)
             .await
@@ -218,10 +230,11 @@ async fn queued_message_delivers_when_peer_returns_over_loopback() {
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "the queued message never reached Bob: 120 s after Bob came back \
+            "the queued message never reached Bob: 330 s after Bob came back \
              online, Alice's outbox row had still not been redialled and sent. \
-             This is the #227 field failure — a queued message that only moves \
-             when the peer dials in."
+             That is past the t = 15/75/375 s dial rungs of \
+             CHUNK_DIAL_BACKOFF_MS, so this is the #227 field failure — a \
+             queued message that only moves when the peer dials in."
         );
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
