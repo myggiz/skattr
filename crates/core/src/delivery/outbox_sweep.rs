@@ -152,6 +152,21 @@ pub(crate) async fn run_outbox_sweep(
         // Crash after delete, before emit: the reason is already persisted, so
         // the UI hydrates `Failed` from the record on next load. That is why
         // the reason is stored rather than derived.
+        // A contact card that starts advertising a mailbox between the
+        // `list_for_contact` read above and these writes would be missed, and
+        // the message failed instead of deposited. The window is as small as
+        // it can be made without a transaction: there is no `.await` between
+        // the read and the writes on this path (the only await is inside the
+        // has-mailbox branch, which returns), so no task can yield into it —
+        // on a current-thread runtime it cannot occur at all, and on a
+        // multi-threaded one it is a few microseconds between two pool
+        // acquisitions. If it does fire the outcome is recoverable rather
+        // than silent: the message is marked failed with the reason and a
+        // Resend, and a resend now finds the mailbox. Closing it fully would
+        // need `_in_tx` variants of the card read and both writes, which is
+        // more machinery than a microsecond window with a recoverable outcome
+        // justifies.
+        //
         // A late Ack can still race this in the 55-60 minute band, where we
         // have given up but the recipient's window has not yet closed. Both
         // updates are guarded `delivered_at IS NULL` and both would succeed,
