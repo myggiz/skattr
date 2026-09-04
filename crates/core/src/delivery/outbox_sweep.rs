@@ -85,6 +85,21 @@ pub(crate) async fn run_outbox_sweep(
                 continue;
             }
         };
+        // The 5-minute margin below `REPLAY_WINDOW_MS` is deliberately
+        // one-directional, and the direction matters.
+        //
+        // If the recipient's clock runs AHEAD of ours, it rejects at an
+        // envelope age of `60 min - skew`, so without a margin we would keep
+        // writing frames it will certainly refuse. The margin buys that back.
+        //
+        // If the recipient's clock runs BEHIND ours by more than the margin,
+        // the reverse happens: we give up while it would still have accepted,
+        // costing at most the remaining `skew - 5 min` of the window. That is
+        // the accepted cost of the trade — the outcome is a failed bubble with
+        // Resend, not a silent loss, and a contact with a mailbox never
+        // reaches this branch at all. Widening the margin trades one error for
+        // the other; it cannot remove both, because the two clocks are
+        // independent and neither side can measure the skew.
         if now.saturating_sub(envelope_ts) < DIRECT_EXPIRY_MS {
             continue; // still inside the window
         }
@@ -137,6 +152,22 @@ pub(crate) async fn run_outbox_sweep(
         // Crash after delete, before emit: the reason is already persisted, so
         // the UI hydrates `Failed` from the record on next load. That is why
         // the reason is stored rather than derived.
+        // A late Ack can still race this in the 55-60 minute band, where we
+        // have given up but the recipient's window has not yet closed. Both
+        // updates are guarded `delivered_at IS NULL` and both would succeed,
+        // leaving `failed_reason` and `delivered_at` set together.
+        //
+        // That resolves correctly rather than needing a lock: the UI's
+        // precedence is `delivered > dismissed > failed`, so the record reads
+        // as Delivered, and the later `Delivered` event overwrites `Failed` in
+        // the status map (last-write-wins). The stale `failed_reason` is never
+        // displayed. In the opposite order the Ack deletes the outbox row
+        // first, so `due()` never returns it and this branch is not reached.
+        //
+        // Outside that band the race cannot occur at all: an envelope past the
+        // recipient's window is refused by `receiver::receive_in_tx`, which
+        // `DaemonInbound::dispatch` surfaces as `Err` -> `None`, and
+        // `delivery::peer` explicitly does not Ack a rejected frame.
         let marked = match messages.mark_failed(&row.message_id, &self_pubkey, NO_MAILBOX_REASON) {
             Ok(m) => m,
             Err(e) => {
