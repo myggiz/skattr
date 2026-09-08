@@ -408,6 +408,29 @@ where
         }
     });
 
+    // Outbox queue lifecycle (#228): retarget aged direct rows onto the
+    // mailbox lane, and expire them only for a contact that advertises none.
+    let outbox_sweep_pool = pool.clone();
+    let outbox_sweep_shared = fallback_shared.clone();
+    let outbox_sweep_task = tokio::spawn(async move {
+        // A minute is ample: the deadline is 55 minutes, so tick precision is
+        // irrelevant and a slower tick keeps the query off the hot path.
+        const SWEEP_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+        let mut t = tokio::time::interval(SWEEP_EVERY);
+        t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            t.tick().await;
+            let now = crate::daemon::clock::now_unix_millis();
+            crate::delivery::outbox_sweep::run_outbox_sweep(
+                &outbox_sweep_pool,
+                &outbox_sweep_shared,
+                now,
+                32,
+            )
+            .await;
+        }
+    });
+
     let chunk_sweep_pool = pool.clone();
     let chunk_sweep_shared = fallback_shared.clone();
     let chunk_sweep_store = chunk_store.clone();
@@ -586,6 +609,10 @@ where
     // parity with the accept loop (an in-flight deposit must not race teardown).
     mailbox_sweeper_task.abort();
     let _ = mailbox_sweeper_task.await;
+    // Stop the outbox-lifecycle sweeper with the same teardown parity — an
+    // in-flight retarget/deposit must not race the transport teardown.
+    outbox_sweep_task.abort();
+    let _ = outbox_sweep_task.await;
     // Stop the chunk-sweep task with the same teardown parity.
     chunk_sweep_task.abort();
     let _ = chunk_sweep_task.await;

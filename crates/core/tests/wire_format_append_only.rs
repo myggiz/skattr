@@ -54,6 +54,7 @@ fn command_variant_tag(c: &Command) -> &'static str {
         Command::AttachmentAvailable { .. } => "attachment_available",
         Command::AttachmentStatus { .. } => "attachment_status",
         Command::RetryAttachment { .. } => "retry_attachment",
+        Command::DismissMessage { .. } => "dismiss_message",
     }
 }
 
@@ -101,6 +102,7 @@ fn expected_command_variant_set() -> Vec<&'static str> {
         "create_group",
         "create_invite",
         "daemon_info",
+        "dismiss_message",
         "export_backup",
         "export_history",
         "get_config",

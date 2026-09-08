@@ -4,10 +4,41 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — targeting v0.1.24
+## [Unreleased] — targeting v0.1.25
 
 _In-progress patch line. The version is bumped per build for tracking; entries
 accumulate here and are stamped with a date when a build is cut._
+
+### Fixed
+
+- **Messages that could not be sent now say so** (#227, #228, #229). A message
+  queued while your contact was unreachable could sit showing a "pending" clock
+  indefinitely — in one case for 23 hours — and only moved when the contact
+  happened to connect first. Three separate faults caused it: a sent-but-
+  unacknowledged message permanently blocked its own place in the queue; the
+  retry loop never tried to reconnect, so a queued message waited for a
+  connection something else created; and past a certain age a message can no
+  longer be accepted by the recipient at all, which nothing detected or
+  reported.
+
+  Now: a queued message is retried, and the app reconnects on its own to send
+  it. If your contact has a mailbox, it is deposited there and waits as long as
+  it needs to — that is what mailboxes are for, and such a message is never
+  discarded. If your contact has **no** mailbox, direct delivery is the only
+  route, and a message that can no longer arrive is marked as failed with the
+  reason, offering **Resend** and **Dismiss**. Dismiss keeps the message in your
+  history and in search; it only puts the notice away.
+
+  **Known limitation, tracked as #234:** this does not yet cover restarting the
+  app. A message queued before a restart is still not retried on its own
+  afterwards — it will be deposited to a mailbox or marked failed within the
+  hour, but direct delivery still waits for your contact to connect first.
+
+### Changed
+
+- The app now records in its log when a contact has no mailbox, so messages
+  cannot reach them while they are offline. This was previously logged below
+  the level the app ships with, which is why the situation above was invisible.
 
 ### Changed
 

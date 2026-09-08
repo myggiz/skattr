@@ -12,7 +12,14 @@
     markDelivered,
     markRetrying,
   } from "$lib/stores/attachments";
-  import { delivery, deliveryToIconStatus, hex16ToString } from "$lib/stores/delivery";
+  import {
+    delivery,
+    deliveryToIconStatus,
+    deliveryStateFromRecord,
+    failureReasonFromStatus,
+    hex16ToString,
+  } from "$lib/stores/delivery";
+  import { dismiss } from "$lib/stores/conversation";
   import { decodeManifestMemo, mimeIconName, formatBytes } from "$lib/attachments";
   import type { ManifestSummary } from "$lib/attachments";
   import { icons } from "$lib/icons";
@@ -111,6 +118,38 @@
   let complete = $derived(!isOutgoing && (xferState?.status === "complete" || xferState?.available === true));
   let failed = $derived(!isOutgoing && xferState?.status === "failed");
   let retrying = $derived(!isOutgoing && xferState?.retrying === true);
+
+  // Task 8: a Kind::File message rides the same outbox as text, so it can
+  // fail to send the same way. Precedence (delivered > dismissed > failed >
+  // pending) is pinned once in deliveryStateFromRecord — reused here rather
+  // than re-derived, so a dismissed attachment stops rendering as failed the
+  // same way it does for MessageBubble. Dismiss only: resend needs the
+  // original file path, which may no longer exist on the sender's disk.
+  let recordState = $derived(deliveryStateFromRecord(record));
+  let dismissed = $derived(recordState === "dismissed");
+  // A live DeliveryStatusChanged{Failed} event lands in the delivery map
+  // before the record is ever reloaded with failed_reason set — without this
+  // fallback, sendFailed/sendFailureReason stay false/null until the next
+  // conversation load, and the bubble shows a warning icon with no reason and
+  // no Dismiss action (only reached when recordState is still "pending": a
+  // "delivered" or "dismissed" record must not be reopened as failed by a
+  // stale map entry).
+  let sendFailed = $derived(
+    isOutgoing &&
+      (recordState === "failed" ||
+        (recordState === "pending" &&
+          failureReasonFromStatus($delivery.get(hex16ToString(record.message_id))) !== null)),
+  );
+  let sendFailureReason = $derived(
+    sendFailed
+      ? (record.failed_reason ??
+          failureReasonFromStatus($delivery.get(hex16ToString(record.message_id))))
+      : null,
+  );
+
+  function handleDismiss(): void {
+    void dismiss(record.message_id);
+  }
 
   // Sender side: chunk-transfer state supersedes the manifest-ack delivery
   // icon. The manifest is MLS-acked before any chunk moves, so the icon alone
@@ -282,7 +321,7 @@
   let iconGlyph = $derived(icons[mimeIconName(mime)]);
 </script>
 
-<div class="file-bubble" class:outgoing={isOutgoing} data-row-id={record.row_id}>
+<div class="file-bubble" class:outgoing={isOutgoing} class:dismissed data-row-id={record.row_id}>
   {#if decodeFailed}
     <div class="card">
       <span class="ficon">{@html icons["paperclip"]}</span>
@@ -324,7 +363,12 @@
           <img class="preview" src={previewSrc} alt={filename} />
         {/if}
       {/if}
-      {#if failed}
+      {#if sendFailed}
+        <span class="failed">⚠️ {sendFailureReason}</span>
+        <div class="actions">
+          <button type="button" onclick={handleDismiss}>Dismiss</button>
+        </div>
+      {:else if failed}
         <span class="failed">⚠️ {xferState?.reason ?? "Transfer failed"}</span>
         <div class="actions">
           <button type="button" onclick={doRetry} aria-label="Retry transfer">Retry</button>
@@ -365,6 +409,9 @@
     max-width: 60ch;
   }
   .file-bubble.outgoing { background: var(--accent); color: var(--bg); margin-left: auto; }
+  /* Matches MessageBubble.svelte's .dismissed: recede via opacity, no new
+     colour token. */
+  .file-bubble.dismissed { opacity: 0.6; }
   .card { display: flex; align-items: center; gap: var(--s-2); flex-wrap: wrap; }
   .ficon :global(svg) { width: 20px; height: 20px; }
   .fname { font: var(--t-ui); word-break: break-word; }

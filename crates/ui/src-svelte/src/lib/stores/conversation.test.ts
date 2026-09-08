@@ -35,6 +35,26 @@ function fakeRecord(rowId: number, body: string): MessageRecord {
     ts_daemon_recv: 100n,
     ts_envelope: 99n,
     delivered_at: null,
+    dismissed_at: null,
+    failed_reason: null,
+  };
+}
+
+/** Options-bag fixture for the delivery/failure hydration tests below. */
+function makeRecord(overrides: Partial<MessageRecord> = {}): MessageRecord {
+  return {
+    row_id: 1n,
+    message_id: "0".repeat(32),
+    contact: peer,
+    direction: "outgoing",
+    kind: { kind: "text", body: "hi" },
+    mls_generation: 1n,
+    ts_daemon_recv: 100n,
+    ts_envelope: 99n,
+    delivered_at: null,
+    dismissed_at: null,
+    failed_reason: null,
+    ...overrides,
   };
 }
 
@@ -87,8 +107,10 @@ describe("optimistic send + reconcile", () => {
 });
 
 import { vi } from "vitest";
-import { loadOlder, openConversationFromSummary, markReadIfAtBottom, isWithinBottomThreshold, send } from "./conversation";
-import { statusForMessageHex } from "./delivery";
+import { loadOlder, openConversationFromSummary, markReadIfAtBottom, isWithinBottomThreshold, send, dismiss } from "./conversation";
+import { currentToast, toast } from "./toast";
+import { statusForMessageHex, hex16ToString } from "./delivery";
+import { hydrateDeliveryFromRecords } from "./conversation";
 import { ipcClient } from "$lib/ipc/tauri";
 import type { ContactSummary } from "$lib/ipc/types";
 
@@ -423,6 +445,89 @@ describe("close vs. an in-flight load (#178 review)", () => {
 
     expect(get(conversation).contact).toBeNull();
     expect(get(conversation).messages).toEqual([]);
+    spy.mockRestore();
+  });
+});
+
+describe("hydrateDeliveryFromRecords", () => {
+  test("seeds Failed from a record's failed_reason on load", () => {
+    const rec = makeRecord({
+      direction: "outgoing",
+      delivered_at: null,
+      failed_reason: "Not delivered — this contact has no mailbox.",
+    });
+    hydrateDeliveryFromRecords([rec]);
+    const s = statusForMessageHex(hex16ToString(rec.message_id));
+    expect(s).toEqual({ Failed: "Not delivered — this contact has no mailbox." });
+  });
+
+  test("prefers delivered over a stale failed_reason", () => {
+    const rec = makeRecord({
+      direction: "outgoing",
+      delivered_at: 1700n,
+      failed_reason: "stale",
+    });
+    hydrateDeliveryFromRecords([rec]);
+    expect(statusForMessageHex(hex16ToString(rec.message_id))).toBe("Delivered");
+  });
+
+  test("a dismissed record is not pushed into the delivery map (no Dismissed wire variant)", () => {
+    const rec = makeRecord({
+      message_id: "ee".repeat(16),
+      direction: "outgoing",
+      delivered_at: null,
+      dismissed_at: 1700n,
+      failed_reason: "boom",
+    });
+    hydrateDeliveryFromRecords([rec]);
+    expect(statusForMessageHex(hex16ToString(rec.message_id))).toBeUndefined();
+  });
+});
+
+describe("dismiss", () => {
+  beforeEach(() => {
+    toast.clear();
+  });
+
+  test("a rejected dismiss_message reports the failure and leaves the record unchanged", async () => {
+    const rec = makeRecord({ failed_reason: "Not delivered — this contact has no mailbox." });
+    conversation.set({
+      contact: peer,
+      messages: [rec],
+      nextBeforeId: null,
+      loadingOlder: false,
+      unreadAnchorRowId: null,
+      readCursor: 0n,
+    });
+    const spy = vi
+      .spyOn(ipcClient, "request")
+      .mockRejectedValueOnce(new Error("daemon unreachable"));
+
+    await dismiss(rec.message_id);
+
+    expect(get(conversation).messages[0].dismissed_at).toBeNull();
+    expect(get(currentToast)?.message).toMatch(/couldn't dismiss/i);
+    spy.mockRestore();
+  });
+
+  test("a successful dismiss_message sets dismissed_at locally", async () => {
+    const rec = makeRecord({ failed_reason: "boom" });
+    conversation.set({
+      contact: peer,
+      messages: [rec],
+      nextBeforeId: null,
+      loadingOlder: false,
+      unreadAnchorRowId: null,
+      readCursor: 0n,
+    });
+    const spy = vi
+      .spyOn(ipcClient, "request")
+      .mockResolvedValueOnce({ resp: "ok", data: { result: "ok" } } as any);
+
+    await dismiss(rec.message_id);
+
+    expect(get(conversation).messages[0].dismissed_at).not.toBeNull();
+    expect(get(currentToast)).toBeNull();
     spy.mockRestore();
   });
 });

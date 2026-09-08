@@ -108,6 +108,7 @@ where
         Command::RetryAttachment { attachment_id } => {
             retry_attachment_cmd(handle, attachment_id.0).await
         }
+        Command::DismissMessage { message_id } => dismiss_message(&handle, message_id.0).await,
     }
 }
 
@@ -902,15 +903,18 @@ where
             };
             // `contact` field is always the peer — outgoing rows were sent
             // to `peer`; incoming rows were sent by `peer` (the sender).
-            Some(MessageRecord::project(
-                row.id,
-                &env,
-                peer,
-                u64::try_from(row.mls_generation).unwrap_or(0),
-                row.ts_daemon_recv,
-                direction,
-                row.delivered_at,
-            ))
+            Some(
+                MessageRecord::project(
+                    row.id,
+                    &env,
+                    peer,
+                    u64::try_from(row.mls_generation).unwrap_or(0),
+                    row.ts_daemon_recv,
+                    direction,
+                    row.delivered_at,
+                )
+                .with_persisted_status(row.dismissed_at, row.failed_reason),
+            )
         })
         .collect();
 
@@ -1022,7 +1026,8 @@ where
                     h.message.ts_daemon_recv,
                     direction,
                     h.message.delivered_at,
-                ),
+                )
+                .with_persisted_status(h.message.dismissed_at, h.message.failed_reason),
                 bm25: h.bm25,
                 snippet: h.snippet,
             })
@@ -1168,15 +1173,18 @@ where
         } else {
             Direction::Incoming
         };
-        records.push(MessageRecord::project(
-            row.id,
-            &env,
-            contact, // scoped to the requested peer
-            u64::try_from(row.mls_generation).unwrap_or(0),
-            row.ts_daemon_recv,
-            direction,
-            row.delivered_at,
-        ));
+        records.push(
+            MessageRecord::project(
+                row.id,
+                &env,
+                contact, // scoped to the requested peer
+                u64::try_from(row.mls_generation).unwrap_or(0),
+                row.ts_daemon_recv,
+                direction,
+                row.delivered_at,
+            )
+            .with_persisted_status(row.dismissed_at, row.failed_reason.clone()),
+        );
     }
 
     // Cursor logic: a FULL page (rows.len() == lim_usize) means there may
@@ -2192,6 +2200,27 @@ where
         );
     }
     tracing::info!(aid = %hex::encode(attachment_id), "attachment: retry re-armed");
+    Ok(CommandResult::Ok)
+}
+
+/// `DismissMessage` handler: mark a failed outgoing message dismissed. The
+/// row is KEPT — it stays in history and in FTS; this only hides the failed
+/// bubble's Resend/Dismiss actions. Scoped to rows we sent (see
+/// `MessageRepo::mark_dismissed`).
+async fn dismiss_message<S>(
+    handle: &Arc<DaemonHandle<S>>,
+    message_id: [u8; 16],
+) -> std::result::Result<CommandResult, IpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    crate::storage::messages::MessageRepo::new(&handle.pool)
+        .mark_dismissed(
+            &message_id,
+            &handle.identity.public().0,
+            crate::daemon::clock::now_unix_seconds(),
+        )
+        .map_err(map_err)?;
     Ok(CommandResult::Ok)
 }
 
@@ -3477,6 +3506,138 @@ mod tests {
             }
             other => panic!("expected SearchResults, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn search_messages_carries_dismissed_and_failed_outcome_to_the_wire() {
+        // Decision 4 (dismiss keeps the row searchable) is only honored end
+        // to end if the search projection also reports *why* the row is
+        // stuck — otherwise a dismissed/failed hit renders as a bare
+        // pending clock in search results (the same lesson as the
+        // recent/export paths).
+        let handle = test_handle();
+        let alice = crate::identity::PublicKey([0x79; 32]);
+        let gid = [0x8Au8; 32];
+
+        let cr = ContactRepo::new(&handle.pool);
+        cr.upsert(&crate::contact::Contact {
+            identity: alice,
+            display_name: None,
+            added_at: 0,
+            card: None,
+            muted: false,
+        })
+        .unwrap();
+        cr.set_group_id(&alice, &gid).unwrap();
+
+        let msgs = crate::storage::MessageRepo::new(&handle.pool);
+        let dismissed_id = crate::envelope::MessageId::generate();
+        let failed_id = crate::envelope::MessageId::generate();
+
+        for (id, body) in [
+            (dismissed_id, "quokka was dismissed"),
+            (failed_id, "quokka delivery failed"),
+        ] {
+            let env = crate::envelope::Envelope {
+                v: 1,
+                id,
+                ts: 1_700_000_000,
+                reply_to: None,
+                kind: crate::envelope::Kind::Text { body: body.into() },
+            };
+            msgs.insert(crate::storage::messages::InsertParams {
+                group_id: &gid,
+                sender: &handle.identity.public().0,
+                envelope: &env,
+                mls_generation: 1,
+                ts_daemon_recv: 1_700_000_000,
+            })
+            .unwrap();
+        }
+
+        msgs.mark_dismissed(&dismissed_id.0, &handle.identity.public().0, 1_234_000)
+            .unwrap();
+        msgs.mark_failed(&failed_id.0, &handle.identity.public().0, "no mailbox")
+            .unwrap();
+
+        let result = execute_command(
+            handle.clone(),
+            Command::SearchMessages {
+                query: "quokka".into(),
+                contact: None,
+                limit: 10,
+                offset: 0,
+                newest_first: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        let hits = match result {
+            CommandResult::SearchResults(hits) => hits,
+            other => panic!("expected SearchResults, got {other:?}"),
+        };
+        assert_eq!(hits.len(), 2);
+
+        let dismissed_hit = hits
+            .iter()
+            .find(|h| h.record.message_id.0 == dismissed_id.0)
+            .expect("dismissed message must still be searchable");
+        assert_eq!(dismissed_hit.record.dismissed_at, Some(1_234_000));
+        assert_eq!(dismissed_hit.record.failed_reason, None);
+
+        let failed_hit = hits
+            .iter()
+            .find(|h| h.record.message_id.0 == failed_id.0)
+            .expect("failed message must still be searchable");
+        assert_eq!(
+            failed_hit.record.failed_reason.as_deref(),
+            Some("no mailbox")
+        );
+        assert_eq!(failed_hit.record.dismissed_at, None);
+    }
+
+    #[tokio::test]
+    async fn dismiss_message_marks_the_row_and_keeps_it() {
+        let handle = test_handle();
+        let gid = [0x8Bu8; 32];
+        let eid = crate::envelope::MessageId::generate();
+
+        let env = crate::envelope::Envelope {
+            v: 1,
+            id: eid,
+            ts: 1_700_000_000,
+            reply_to: None,
+            kind: crate::envelope::Kind::Text {
+                body: "gave up".into(),
+            },
+        };
+        let msgs = crate::storage::MessageRepo::new(&handle.pool);
+        msgs.insert(crate::storage::messages::InsertParams {
+            group_id: &gid,
+            sender: &handle.identity.public().0,
+            envelope: &env,
+            mls_generation: 1,
+            ts_daemon_recv: 1_700_000_000,
+        })
+        .unwrap();
+        msgs.mark_failed(&eid.0, &handle.identity.public().0, "no mailbox")
+            .unwrap();
+
+        let result = execute_command(
+            handle.clone(),
+            Command::DismissMessage {
+                message_id: crate::daemon::hex::Hex16::from(eid.0),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(result, CommandResult::Ok));
+
+        // Decision 4: the row is KEPT — dismissal is recorded, not deleted.
+        let (dismissed, reason) = msgs.delivery_outcome(&eid.0).unwrap();
+        assert!(dismissed.is_some(), "dismissal must be recorded");
+        assert_eq!(reason.as_deref(), Some("no mailbox"));
     }
 
     #[tokio::test]
