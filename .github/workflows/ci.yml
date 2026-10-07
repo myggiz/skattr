@@ -44,8 +44,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      # Toolchain comes from rust-toolchain.toml, NOT @stable (#81): a floating
+      # toolchain breaks PRs that changed no Rust whenever clippy adds a lint.
+      # The action cannot read the file — its `toolchain` input is required —
+      # hence this step; no match leaves the input empty and it fails loudly.
+      # `shell: bash` because release.yml's matrix includes windows-latest,
+      # where `run:` defaults to pwsh: no `sed`, no `$GITHUB_OUTPUT` redirect.
+      - name: Resolve the pinned toolchain
+        id: toolchain
+        shell: bash
+        run: sed -n 's/^channel = "\(.*\)"/version=\1/p' rust-toolchain.toml >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ steps.toolchain.outputs.version }}
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
 
@@ -89,8 +100,19 @@ jobs:
             build-essential \
             pkg-config
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Toolchain comes from rust-toolchain.toml, NOT @stable (#81): a floating
+      # toolchain breaks PRs that changed no Rust whenever clippy adds a lint.
+      # The action cannot read the file — its `toolchain` input is required —
+      # hence this step; no match leaves the input empty and it fails loudly.
+      # `shell: bash` because release.yml's matrix includes windows-latest,
+      # where `run:` defaults to pwsh: no `sed`, no `$GITHUB_OUTPUT` redirect.
+      - name: Resolve the pinned toolchain
+        id: toolchain
+        shell: bash
+        run: sed -n 's/^channel = "\(.*\)"/version=\1/p' rust-toolchain.toml >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ steps.toolchain.outputs.version }}
           components: clippy
 
       - uses: Swatinem/rust-cache@v2
