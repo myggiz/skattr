@@ -1,5 +1,9 @@
 [toolchain]
-channel = "stable"
-version = "1.95.0"
+# The version goes in `channel` — that is the only key rustup reads a version
+# from. A `version = "1.95.0"` line next to `channel = "stable"` is silently
+# IGNORED, which is how this file spent months looking pinned while actually
+# resolving to whatever stable was (#81). Verify a change here with:
+#   cd $(mktemp -d) && cp <repo>/rust-toolchain.toml . && rustup show active-toolchain
+channel = "1.95.0"
 components = ["rustfmt", "clippy"]
 profile = "minimal"
