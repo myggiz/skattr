@@ -1,0 +1,56 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+name: toolchain-drift
+
+# Early warning for a new Rust stable — deliberately kept OFF the PR path.
+#
+# ci.yml pins the toolchain to rust-toolchain.toml (#81, #240) so a freshly
+# released clippy can no longer break a PR that changed no Rust. The price of
+# that pin is silence: without this job nobody learns a new lint exists until
+# someone bumps the pin by hand, and by then the lints have piled up and the
+# bump has become a chore attached to unrelated work.
+#
+# So this runs the same clippy gate on FLOATING @stable, weekly. It is NOT a
+# required check and NOT triggered by pull_request: a failure here is a
+# heads-up addressed to the maintainer, never a merge blocker. Red means "the
+# next pin bump has work attached" — information worth having *before* the
+# bump rather than during it.
+on:
+  schedule:
+    # Mondays 06:00 UTC. Rust ships stable on Thursdays, so a Monday run
+    # surfaces a new release's lints within a few days of it landing.
+    - cron: "0 6 * * 1"
+  workflow_dispatch: {}
+
+concurrency:
+  group: toolchain-drift-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  clippy-on-stable:
+    name: clippy on floating @stable (advisory, non-blocking)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      # Deliberately @stable, NOT the pinned rust-toolchain.toml version:
+      # running ahead of the pin is this workflow's entire purpose.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: drift
+
+      - name: Report the gap between stable and the pin
+        run: |
+          rustc --version
+          cargo clippy --version
+          echo "pinned in rust-toolchain.toml: $(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)"
+
+      # skattr-ui is excluded to skip the Tauri system-dependency install this
+      # advisory job does not need. It shares skattr-core, where new lints have
+      # actually bitten, so core coverage is unaffected; a new lint in
+      # skattr-ui's own code would wait until the pin bump.
+      - name: clippy (workspace, excluding skattr-ui)
+        run: cargo clippy --workspace --exclude skattr-ui --all-targets --all-features -- -D warnings
