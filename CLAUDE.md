@@ -546,22 +546,71 @@ The `using-superpowers` skill itself enforces "invoke relevant skills BEFORE any
 
 Babysit Greptile — verify each finding against the code before applying it, reject false positives with evidence, and resolve all threads before merging. Read the **check conclusion**, not the review state: a clean run lands as a green `Greptile Review` check with no comments and no formal GitHub approval, so `reviewDecision` stays empty and `reviews` is `[]` even on a branch Greptile has passed.
 
-### Issue tracking (GitHub issues are the backlog)
+### Issue tracking (Linear is the backlog)
 
-The work backlog lives in **GitHub issues** (`gh issue ...` on `myggiz/skattr`), not only in docs. Treat them as the source of truth for what to build next.
+Global `~/.claude/rules/issue-tracking.md` is authoritative; this section is the
+Skattr-specific part plus a fallback mirror of the load-bearing rules.
 
-- **Milestones** group the roadmap: **`v0.1.2`** (near-term product + cheap security/correctness fixes), **`v1.1`** (larger protocol/feature/perf work), **`polish`** (non-functional cleanup: dead code, duplication, doc drift, test hardening, UX polish). Add a milestone only when a genuinely new track appears.
-- **Topic labels**: `security`, `attachments`, `ci`, `tor`, `protocol`, `ux`, `data-path`, `performance`, `tech-debt`, `tests`, plus the defaults (`bug`, `enhancement`, `documentation`). Label by subsystem + kind.
-- **File findings as issues, don't let them rot in a doc.** Any review, audit, or brainstorming outcome that names concrete fixable work becomes issue(s) with a body that carries: context/source, `file:line`, the problem, a suggested direction (described, not pre-coded), and acceptance criteria. Reviews live in `docs/` (e.g. `docs/f_review.md`) *and* seed issues.
+The backlog lives in **Linear**, team **Skattr (`SKA`)** — not in GitHub issues,
+and not only in docs. A Linear project is an epic; an issue is one task, roughly
+one PR. Never create issues for individual steps inside a task.
+
+- **Skattr's public GitHub issues still matter.** They sync one-way into SKA, and
+  updates to a synced issue sync *back* to the public GitHub issue. So on a
+  GitHub-originated SKA issue, write nothing you wouldn't publish. Private or
+  security discussion goes in a separate Linear-only SKA issue that links the
+  public one. A vulnerability never goes in a public GitHub issue — use a
+  Linear-only issue labelled `security`, or a GitHub private security advisory.
+  Never put secrets, keys or credentials in an issue or comment, even when
+  describing a leak; point at `file:line` instead.
+- **Status and PRs.** Set the issue In Progress when starting it. Every change
+  reaches `master` through a PR — never merge locally. The PR title or body says
+  `Fixes SKA-NN`, which moves the issue to In Review on open and Done on merge;
+  don't set Done by hand for PR work.
+- **Labels** in SKA: `security`, `Bug`, `Feature`, `Improvement`, `ci`. Label by
+  kind; add one only when a genuinely new track appears.
+- **File findings, don't let them rot.** A bug, security problem or risk outside
+  the current task's scope, a deferral, a known limitation, stale work of unclear
+  purpose, or anything you're asked to remember becomes an issue — never only a
+  TODO comment, a stale branch, a note in this file, or the chat. Search SKA
+  first and comment on an existing issue rather than duplicating. The title
+  states the problem, not the fix; the body carries context/source, `file:line`,
+  why it matters, a suggested direction (described, not pre-coded), and
+  acceptance criteria. Report the issue ID back. **Don't fix a side-finding in
+  the same change unless asked.** Reviews live in `docs/` (e.g.
+  `docs/f_review.md`) *and* seed issues.
 - **Granularity:** one issue per substantive item; bundle a cluster of trivial one-liners that share a single fix-motion (all doc-drift, all dead-code) into **one checklist issue** (`- [ ]` per finding) so it's workable rather than 50 micro-issues. Cross-reference already-tracked issues instead of duplicating (e.g. "relates to #38").
-- **Close the loop:** before starting a task, check for an existing issue; a PR that resolves issues references them (`Closes #NN`) so merge auto-closes them. When new work is agreed mid-session, file the issue first, then implement.
-- Don't re-file the known-limitation deferrals already catalogued in this file and in `docs/` unless promoting one to active work.
+- **Close the loop:** before starting a task, check for an existing issue. When
+  new work is agreed mid-session, file the issue first, then implement. A PR
+  closing a *public GitHub* issue still references it (`Closes #NN`) so merge
+  auto-closes it.
+- **Superpowers hand-offs:** after `superpowers:writing-plans` is approved use
+  the `plan-to-linear` skill before executing any task; while executing use
+  `run-linear-task`; at the end use `finish-linear-work` instead of the merge
+  options in `superpowers:finishing-a-development-branch`.
+- Don't re-file the known-limitation deferrals already catalogued in this file
+  and in `docs/` unless promoting one to active work.
+- **Legacy:** the ~88 open GitHub issues predate the Linear move and remain the
+  historical record. Their milestones (`v0.1.2`, `v1.1`, `polish`) and topic
+  labels (`attachments`, `tor`, `protocol`, `ux`, `data-path`, `performance`,
+  `tech-debt`, `tests`, …) still describe that backlog, and they sync into SKA.
+  New work is tracked in SKA.
 
 ### Global coding standards (also binding)
 
-Personal/global standards live at `~/.claude/rules/standards/` (`rust.md`, `typescript.md`, `restraints.md`) and are meant to auto-attach by path glob — but that mechanism doesn't always fire, so the load-bearing rules are mirrored here (they bind regardless):
+Personal/global standards live at `~/.claude/rules/` — a symlink to the private
+`claude-standards` repo (`restraints.md`, `rust.md`, `typescript.md`,
+`coding-practices.md`, `model-routing.md`, `issue-tracking.md`). They are meant
+to auto-attach by path glob, but that mechanism doesn't always fire.
 
-- **Rust** (`src/**/*.rs`): newtypes over primitives; model states as **enums, not bool flags**; **no `unwrap`/`expect` outside tests**; errors are **our types, never a vendor's**; **test-first** (the test must fail before the fix); **`clippy -D warnings` is the done-gate**. *Functional core / imperative shell:* **no I/O, clock, randomness, or env reads inside logic — take them as parameters and wire concretes up in `main`** (the review flagged several existing violations, e.g. `now_ms`/`paths`/`group.rs` RNG — fix these as we touch that code, don't retrofit wholesale).
+**Fallback rule, and it matters because `claude-standards` is private while this
+repo is public:** when a global file is present it is authoritative and wins;
+when it is absent — any checkout that isn't the maintainer's — the mirrored copy
+in this document is binding. So everything mirrored here has to stand on its
+own, and a mirror that disagrees with its global original is stale rather than
+right. The load-bearing rules:
+
+- **Rust** (`**/*.rs`): newtypes over primitives; model states as **enums, not bool flags**; **no `unwrap`/`expect` outside tests**; errors are **our types, never a vendor's**; **test-first** (the test must fail before the fix); **`clippy -D warnings` is the done-gate**. *Functional core / imperative shell:* **no I/O, clock, randomness, or env reads inside logic — take them as parameters and wire concretes up in `main`** (the review flagged several existing violations, e.g. `now_ms`/`paths`/`group.rs` RNG — fix these as we touch that code, don't retrofit wholesale).
 - **TypeScript** (`**/*.{ts,tsx}`): `strict`; **no `any`, no `!`, no `ts-ignore`**; **branded types for IDs**, parse at the boundary; discriminated unions over optional-field soup; **`tsc --noEmit` + eslint are the done-gate**.
 - **Restraint** (everything): bias to the **smallest change that works**; **don't refactor/rename/tidy code you weren't asked about — say what you'd change and let the maintainer decide**; no speculative abstraction / single-impl interfaces / factories where a plain function does; no defensive handling for cases that can't happen (fail loudly); leave no dead code or TODO stubs; **if a rule makes the code worse here, say so and write the simpler version**; if the request is ambiguous, ask.
 
@@ -578,28 +627,37 @@ Personal/global standards live at `~/.claude/rules/standards/` (`rust.md`, `type
 
 ## Model routing
 
-The Superpowers skills (notably `subagent-driven-development` and
-`dispatching-parallel-agents`) describe model tiers in abstract terms — "most
-capable model", "standard model", "cheap model". This section is the
-**authoritative mapping** of those tiers to concrete models for this repo:
+Global `~/.claude/rules/model-routing.md` is authoritative and applies here —
+there is no Skattr-specific override. The table below is the **fallback mirror**
+for checkouts without the private `claude-standards` repo (see the fallback rule
+above). Mirrored 2026-10-08; if the two ever disagree, the global file is right
+and this copy needs updating.
 
-| Abstract tier (Superpowers) | Concrete model | Use for |
-|---|---|---|
-| **most capable model** | **opus** (`claude-opus-4-8`) | architecture, design, brainstorming, planning, spec/quality/whole-branch review, complex reasoning, anything touching crypto/protocol/auth |
-| **standard model** | **sonnet-4-6** (`claude-sonnet-4-6`) | integration, multi-file coordination, debugging, most implementation tasks once the plan is well-specified |
-| **cheap model** | **haiku-4-5** (`claude-haiku-4-5`) | mechanical implementation touching 1–2 files against a complete spec |
+Skills and workflows (notably Superpowers' `subagent-driven-development` and
+`dispatching-parallel-agents`) name tiers abstractly — "most capable model",
+"standard model", "cheap model". This is that mapping:
 
-Routing rules:
+| Abstract tier | Alias | Model ID | Use for |
+|---|---|---|---|
+| **most capable** | `opus` | `claude-opus-5-5` | architecture, design, brainstorming, planning, all reviews, complex reasoning, sensitive areas (rule 1) |
+| **standard** | `sonnet` | `claude-sonnet-5-5` | integration, multi-file coordination, debugging, most implementation once the plan is well-specified |
+| **cheap** | `haiku` | `claude-haiku-4-5-20251001` | mechanical implementation touching 1–2 files against a complete spec |
 
-- **Subagents spawned via `superpowers:dispatching-parallel-agents` default to
-  sonnet-4-6**, unless the task is explicitly architectural (design / review /
-  cross-cutting reasoning) — those go to opus.
-- In `subagent-driven-development`, pick the lowest tier that fits the task's
-  complexity signals (1–2 files + complete spec → haiku-4-5; multi-file /
-  integration → sonnet-4-6; design/review → opus). Reviews (spec compliance,
-  code quality, final whole-branch) are judgment work — prefer opus.
-- When unsure, round **up** a tier: a wrong cheap-model result costs more than
-  the model-tier savings.
+Routing rules, in order of precedence:
+
+1. **Sensitive areas override everything.** Crypto, protocol, auth, secrets/key
+   handling, security boundaries, data migrations and irreversible operations go
+   to opus regardless of file count or spec completeness. In this repo that
+   covers most of `crates/core`.
+2. **Reviews are judgment work** — always opus, never the cheap tier.
+3. **Parallel subagents default to sonnet**, unless the task is explicitly
+   architectural (design, review, cross-cutting reasoning) → opus.
+4. **Otherwise the lowest tier that fits:** 1–2 files + complete spec → haiku;
+   multi-file or integration → sonnet; design or review → opus.
+5. **When unsure, round up a tier** — a wrong cheap-model result costs more than
+   the tier savings.
+6. **Escalate on failure, don't retry sideways** — if output fails review or
+   tests, re-dispatch one tier up rather than retrying the same tier.
 
 ## What Skattr is
 
