@@ -29,6 +29,14 @@ jobs:
   clippy-on-stable:
     name: clippy on floating @stable (advisory, non-blocking)
     runs-on: ubuntu-latest
+    # Installing a toolchain does NOT make it active: rust-toolchain.toml
+    # overrides whatever the action installed, so the first version of this
+    # workflow installed 1.99.0 and then linted the pinned 1.95.0 — passing
+    # green while testing nothing at all. RUSTUP_TOOLCHAIN outranks the file
+    # (and a directory override), so it is what actually puts this job ahead
+    # of the pin. Removing it silently makes the whole workflow inert.
+    env:
+      RUSTUP_TOOLCHAIN: stable
     steps:
       - uses: actions/checkout@v6
 
@@ -44,9 +52,23 @@ jobs:
 
       - name: Report the gap between stable and the pin
         run: |
+          active=$(rustup show active-toolchain | awk '{print $1}')
+          echo "active:  $active"
+          echo "pinned:  $(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)"
           rustc --version
           cargo clippy --version
-          echo "pinned in rust-toolchain.toml: $(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)"
+          # Guard against the exact regression this workflow already shipped
+          # once: if the pin wins, every step below lints the pinned toolchain
+          # and reports a meaningless green. Checking for `stable-*` rather
+          # than "differs from the pin" stays correct when the pin is bumped
+          # all the way up to current stable, where no drift is the truth.
+          case "$active" in
+            stable-*) ;;
+            *)
+              echo "::error::expected the floating stable toolchain, got '$active' — rust-toolchain.toml is winning and this job would test nothing" >&2
+              exit 1
+              ;;
+          esac
 
       # skattr-ui is excluded to skip the Tauri system-dependency install this
       # advisory job does not need. It shares skattr-core, where new lints have
