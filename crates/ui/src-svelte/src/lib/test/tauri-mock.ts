@@ -376,6 +376,12 @@ export async function invoke<T = unknown>(
       if (!channel) throw new Error("ipc_subscribe: missing channel arg");
       // Save channel ref so fixture send_message can emit delivery events.
       _subscribeChannel = channel;
+      // e2e hook (#230): let a spec push an event through the REAL subscribe
+      // path — client -> +page dispatcher -> store -> component. Only the
+      // transport is mocked; everything the bug lives in still runs.
+      // This module is aliased in solely when TAURI_MOCK=1, so it never ships.
+      (window as unknown as { __skattrEmit?: (m: unknown) => void }).__skattrEmit =
+        (m) => channel._emit(m);
       // Fire a synthetic TorStatus Ready event after a tick so Bootstrap.svelte
       // can paint the progress bar at least once before the transition.
       setTimeout(() => {

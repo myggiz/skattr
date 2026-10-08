@@ -23,6 +23,7 @@
   import SkeletonBubble from "./SkeletonBubble.svelte";
   import { focusedRowId, setFocusedRowId } from "$lib/stores/searchPalette";
   import { continuesGroup } from "$lib/messageGrouping";
+  import { pubkeyKey } from "$lib/pubkey";
 
   let { items }: { items: (MessageRecord | OptimisticMessage)[] } = $props();
   let scrollEl = $state<HTMLDivElement | undefined>(undefined);
@@ -66,6 +67,23 @@
   });
 
   /**
+   * A PRIMITIVE identity for the open conversation (#230).
+   *
+   * `$conversation.contact` cannot be used as the rebuild dependency directly:
+   * auto-subscription tracks the STORE, not the property, so reading it makes
+   * the virtualizer rebuild on every conversation-store emission — including an
+   * append. Svelte compares a `$derived`'s VALUE, so a string key only
+   * propagates when the contact genuinely changes.
+   *
+   * It must be a string rather than the contact itself for a second reason: a
+   * `PublicKey` arrives over IPC as a freshly-deserialized byte array, so even
+   * an untracked identity check would see a new object every time.
+   */
+  let contactKey = $derived(
+    $conversation.contact === null ? null : pubkeyKey($conversation.contact),
+  );
+
+  /**
    * Built ONCE, as soon as `scrollEl` is bound (#214).
    *
    * `count` is read untracked on purpose. If it were a dependency, every
@@ -89,7 +107,7 @@
     // rows remount and re-measure, but rows outside the rendered window keep
     // the stale heights, so getTotalSize() — and the scroll extent — stays
     // wrong until you scroll far enough to render them.
-    void $conversation.contact;
+    void contactKey;
     const initialCount = untrack(() => rows.length);
     return createVirtualizer<HTMLDivElement, HTMLDivElement>({
       count: initialCount,
