@@ -86,6 +86,32 @@ ignore = [
     "RUSTSEC-2026-0207",
     "RUSTSEC-2026-0208",
     "RUSTSEC-2026-0212",
+    # crypto-bigint 0.5.5 timing variability. Fixed only in 0.7.6, but the
+    # RustCrypto elliptic-curve 0.13 line requires 0.5, and every path to it
+    # runs through the OpenMLS provider (p256/p384/k256 <- hpke-rs-rust-crypto
+    # / openmls_basic_credential <- openmls_rust_crypto 0.5.1). Our ciphersuite
+    # is X25519/Ed25519 (mls/key_package.rs, mls/group.rs), which uses the
+    # curve25519 crates, not crypto-bigint; a peer's non-25519 key would only
+    # be touched as public data. Like the libcrux entries above, this is a
+    # traced-but-unaudited judgement, not a clearance. Revisit with the
+    # OpenMLS provider bump (#84).
+    #   - RUSTSEC-2026-0387
+    "RUSTSEC-2026-0387",
+    # basic-toml unmaintained (archived upstream). Pulled by i18n-config, the
+    # build-time config reader behind age's i18n-embed-fl macro. No newer
+    # i18n-config drops it. Revisit when age moves off i18n-embed-fl or
+    # i18n-config switches to `toml`.
+    #   - RUSTSEC-2026-0374
+    "RUSTSEC-2026-0374",
+    # zvariant / zbus_names / zvariant_derive unmaintained: merged into
+    # zbus 6. We get zbus 5 through tauri-plugin-opener and
+    # tauri-plugin-single-instance (skattr-ui, Linux D-Bus only); reaching
+    # zbus 6 needs plugin releases outside the `tauri = "=2.11.0"` pin.
+    # Revisit with the next Tauri bump.
+    #   - RUSTSEC-2026-0370, RUSTSEC-2026-0371, RUSTSEC-2026-0372
+    "RUSTSEC-2026-0370",
+    "RUSTSEC-2026-0371",
+    "RUSTSEC-2026-0372",
 ]
 
 [licenses]
