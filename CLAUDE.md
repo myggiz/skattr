@@ -555,19 +555,22 @@ The backlog lives in **Linear**, team **Skattr (`SKA`)** — not in GitHub issue
 and not only in docs. A Linear project is an epic; an issue is one task, roughly
 one PR. Never create issues for individual steps inside a task.
 
-- **Skattr's public GitHub issues still matter.** They sync one-way into SKA, and
-  updates to a synced issue sync *back* to the public GitHub issue. So on a
-  GitHub-originated SKA issue, write nothing you wouldn't publish. Private or
-  security discussion goes in a separate Linear-only SKA issue that links the
-  public one. A vulnerability never goes in a public GitHub issue — use a
-  Linear-only issue labelled `security`, or a GitHub private security advisory.
-  Never put secrets, keys or credentials in an issue or comment, even when
-  describing a leak; point at `file:line` instead.
+- **Every issue is public.** Skattr is open source, so the SKA team and this
+  repo's GitHub issues sync both ways: an issue created on either side gets a
+  copy on the other, and title, description, status, labels and
+  synced-thread comments flow both ways. Anything written on an SKA issue or
+  in its synced thread is published, so write nothing you wouldn't publish.
+  Linear comments posted outside the synced thread stay private. A
+  vulnerability never goes in an SKA issue, because the sync would publish
+  it; report it as a GitHub private security advisory. Never put secrets,
+  keys or credentials in an issue or comment, even when describing a leak;
+  point at `file:line` instead.
 - **Status and PRs.** Set the issue In Progress when starting it. Every change
   reaches `master` through a PR — never merge locally. The PR title or body says
   `Fixes SKA-NN`, which moves the issue to In Review on open and Done on merge;
   don't set Done by hand for PR work.
-- **Labels** in SKA: `security`, `Bug`, `Feature`, `Improvement`, `ci`. Label by
+- **Labels** in SKA: `security`, `Bug`, `Feature`, `Improvement`, `ci`, plus
+  the GitHub topic labels the import brought over. Label by
   kind; add one only when a genuinely new track appears.
 - **File findings, don't let them rot.** A bug, security problem or risk outside
   the current task's scope, a deferral, a known limitation, stale work of unclear
@@ -582,19 +585,19 @@ one PR. Never create issues for individual steps inside a task.
 - **Granularity:** one issue per substantive item; bundle a cluster of trivial one-liners that share a single fix-motion (all doc-drift, all dead-code) into **one checklist issue** (`- [ ]` per finding) so it's workable rather than 50 micro-issues. Cross-reference already-tracked issues instead of duplicating (e.g. "relates to #38").
 - **Close the loop:** before starting a task, check for an existing issue. When
   new work is agreed mid-session, file the issue first, then implement. A PR
-  closing a *public GitHub* issue still references it (`Closes #NN`) so merge
-  auto-closes it.
+  for an issue that came from GitHub also says `Closes #NN`, so the PR links on
+  the GitHub side too.
 - **Superpowers hand-offs:** after `superpowers:writing-plans` is approved use
   the `plan-to-linear` skill before executing any task; while executing use
   `run-linear-task`; at the end use `finish-linear-work` instead of the merge
   options in `superpowers:finishing-a-development-branch`.
 - Don't re-file the known-limitation deferrals already catalogued in this file
   and in `docs/` unless promoting one to active work.
-- **Legacy:** the ~88 open GitHub issues predate the Linear move and remain the
-  historical record. Their milestones (`v0.1.2`, `v1.1`, `polish`) and topic
+- **History:** the 86 GitHub issues open at the 2026-10-26 import are in SKA
+  and stay synced. Their milestones (`v0.1.2`, `v1.1`, `polish`) and topic
   labels (`attachments`, `tor`, `protocol`, `ux`, `data-path`, `performance`,
-  `tech-debt`, `tests`, …) still describe that backlog, and they sync into SKA.
-  New work is tracked in SKA.
+  `tech-debt`, `tests`, …) still describe that backlog. Closed GitHub issues
+  were not imported; GitHub is their record.
 
 ### Global coding standards (also binding)
 
