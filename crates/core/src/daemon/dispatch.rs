@@ -2199,6 +2199,10 @@ where
             },
         );
     }
+    // Only a live actor reads the requeued begin, and after a restart none
+    // exists for this sender (#162). Spawning one lets its retry tick dial
+    // and fetch, paced by its own backoff.
+    handle.hub.ensure_actor(peer).await;
     tracing::info!(aid = %hex::encode(attachment_id), "attachment: retry re-armed");
     Ok(CommandResult::Ok)
 }
@@ -6636,6 +6640,141 @@ mod tests {
             ),
             "unknown id must be rejected, got {err:?}"
         );
+    }
+
+    /// #162: after a daemon restart no actor exists for the sender, and the
+    /// requeued begin is only ever read by a live actor. Retry must give the
+    /// sender an actor so the #76 dial-on-demand fetches the chunk; otherwise
+    /// the retry silently does nothing until the user happens to message that
+    /// peer. Drives the real seam: the command, the hub, the actor and a dial,
+    /// ending in a `ChunkRequest` on the wire.
+    #[tokio::test(start_paused = true)]
+    async fn retry_attachment_after_restart_dials_the_sender() {
+        use crate::daemon::inbound::DaemonInbound;
+        use crate::delivery::peer::InboundDispatch;
+        use crate::storage::attachments::{AttachmentRepo, TerminalStatus};
+        use crate::transport::frame::Frame;
+        use std::sync::Mutex as StdMutex;
+        use tokio::io::DuplexStream;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().to_path_buf();
+        let seed = Seed::generate().unwrap();
+        let pool = Arc::new(Pool::open(&data_dir, &seed).unwrap());
+        let identity = IdentityKey::from_seed(&seed).unwrap();
+        let (events_tx, _) = broadcast::channel::<Event>(16);
+        let dispatcher = Arc::new(DaemonInbound::new(pool.clone(), events_tx.clone()));
+
+        // The sender's end of a connection the dialer will hand over, so the
+        // dial is instant and the test asserts routing, not handshakes.
+        let local_id = IdentityKey::generate().unwrap();
+        let sender_id = IdentityKey::generate().unwrap();
+        let sender_static = sender_id.noise_static_public();
+        let sender = IdPublicKey(sender_id.public().0);
+        let (client_stream, server_stream) = tokio::io::duplex(64 * 1024);
+        let responder =
+            tokio::spawn(async move { handshake_responder(server_stream, &sender_id, None).await });
+        let (dialed_conn, _) = handshake_initiator(client_stream, &local_id, &sender_static, None)
+            .await
+            .unwrap();
+        let (mut sender_conn, _) = responder.await.unwrap().unwrap();
+
+        struct HandOverDial {
+            conn: StdMutex<Option<AuthenticatedConnection<DuplexStream>>>,
+        }
+        #[async_trait::async_trait]
+        impl OutboundDial<DuplexStream> for HandOverDial {
+            async fn dial(
+                &self,
+                _peer: IdPublicKey,
+            ) -> crate::error::Result<(
+                AuthenticatedConnection<DuplexStream>,
+                zeroize::Zeroizing<[u8; 32]>,
+            )> {
+                match self.conn.lock().unwrap().take() {
+                    Some(c) => Ok((c, zeroize::Zeroizing::new([0u8; 32]))),
+                    None => Err(crate::delivery::DeliveryErrorKind::Timeout.into()),
+                }
+            }
+            async fn dial_at(
+                &self,
+                peer: IdPublicKey,
+                _onion: &str,
+            ) -> crate::error::Result<(
+                AuthenticatedConnection<DuplexStream>,
+                zeroize::Zeroizing<[u8; 32]>,
+            )> {
+                self.dial(peer).await
+            }
+        }
+
+        let hub: Arc<DeliveryHub<DuplexStream>> =
+            Arc::new(DeliveryHub::new_with_dialer_and_chunks(
+                pool.clone(),
+                dispatcher.clone() as Arc<dyn InboundDispatch>,
+                Arc::new(HandOverDial {
+                    conn: StdMutex::new(Some(dialed_conn)),
+                }),
+                &data_dir,
+                data_dir.join("downloads"),
+            ));
+        let mut cfg = crate::daemon::config::Config::fallback_for_tests();
+        cfg.data_dir = data_dir.clone();
+        let mut h = DaemonHandle::new_with_config(
+            pool.clone(),
+            hub.clone(),
+            identity,
+            events_tx,
+            cfg,
+            data_dir.join("config.toml"),
+        );
+        h.inbound = Some(dispatcher.clone());
+        let handle: Arc<DaemonHandle<DuplexStream>> = Arc::new(h);
+
+        // A failed inbound attachment from that sender, as a fresh boot finds
+        // it: nothing has spawned an actor for the sender.
+        let (manifest, _chunks) = crate::attachment::chunker::chunk_plaintext(
+            b"payload",
+            "f.bin",
+            "application/octet-stream",
+        )
+        .unwrap();
+        let aid = manifest.attachment_id;
+        let repo = AttachmentRepo::new(&pool);
+        repo.insert(&aid, "in", &manifest.to_cbor().unwrap(), 1, 0)
+            .unwrap();
+        repo.set_peer(&aid, &sender.0).unwrap();
+        repo.claim_terminal(&aid, TerminalStatus::Failed).unwrap();
+        assert!(!hub.has_peer(&sender).await, "precondition: no actor yet");
+
+        let result = execute_command(
+            handle.clone(),
+            Command::RetryAttachment {
+                attachment_id: crate::daemon::hex::Hex16::from(aid),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(result, CommandResult::Ok), "got {result:?}");
+
+        // A correct retry yields an actor that dials on its first retry tick
+        // and asks for the missing chunk. 60 s of auto-advanced time is far
+        // past that, so this cannot pass by luck.
+        let frame =
+            tokio::time::timeout(std::time::Duration::from_secs(60), sender_conn.recv()).await;
+        match frame {
+            Ok(Ok(Some(Frame::ChunkRequest {
+                attachment_id,
+                index,
+            }))) => {
+                assert_eq!(attachment_id, aid);
+                assert_eq!(index, 0);
+            }
+            other => panic!(
+                "#162: the retry must reach the sender as a ChunkRequest; got {other:?}. \
+                 With no actor for the sender, the requeued begin is never read."
+            ),
+        }
     }
 
     /// open_attachment_cmd on a pending (status != 'complete') row must return

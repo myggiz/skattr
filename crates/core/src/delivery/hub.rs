@@ -207,6 +207,30 @@ where
         )
     }
 
+    /// Test-only constructor: inbound dispatch, an on-demand `dialer`, and
+    /// chunk transfer enabled, but no mailbox fallback. Lets a test drive an
+    /// inbound attachment fetch end to end without a mailbox factory.
+    #[cfg(test)]
+    pub(crate) fn new_with_dialer_and_chunks(
+        pool: Arc<Pool>,
+        dispatch: Arc<dyn InboundDispatch>,
+        dialer: Arc<dyn crate::delivery::dial::OutboundDial<S>>,
+        data_dir: &std::path::Path,
+        download_dir: std::path::PathBuf,
+    ) -> Self {
+        Self::new_inner(
+            pool,
+            Some(dispatch),
+            None,
+            Some(dialer),
+            DEFAULT_DIRECT_TIMEOUT,
+            Some(Arc::new(crate::attachment::store::ChunkStore::new(
+                data_dir,
+            ))),
+            Some(download_dir),
+        )
+    }
+
     /// Construct a hub that owns the direct → mailbox fallback
     /// orchestrator in addition to the pre-existing direct delivery
     /// path. `inbound` is `Some` in production (real MLS decrypt) and
@@ -374,7 +398,27 @@ where
         self.peers.lock().await.contains_key(peer)
     }
 
-    async fn ensure_actor(&self, peer: PublicKey) -> mpsc::Sender<DeliveryJob> {
+    /// Give every peer with a queued direct outbox row an actor (#234). Called
+    /// once at boot: a row only gets retried by its peer's actor, and before
+    /// this nothing spawned one for rows left over from the last run, so they
+    /// waited for the peer to dial in. Rows queued later always come from a
+    /// send, which spawns the actor itself. Dials stay paced by the actor's
+    /// own backoff ladder. Returns how many peers were resumed.
+    pub(crate) async fn resume_queued(&self) -> Result<usize> {
+        let targets = OutboxRepo::new(&self.pool).direct_targets()?;
+        for target in &targets {
+            let key = <[u8; 32]>::try_from(target.as_slice()).map_err(|_| {
+                crate::error::CoreError::Storage(crate::storage::StorageErrorKind::Other(format!(
+                    "outbox target is {} bytes, not a public key",
+                    target.len()
+                )))
+            })?;
+            self.ensure_actor(PublicKey(key)).await;
+        }
+        Ok(targets.len())
+    }
+
+    pub(crate) async fn ensure_actor(&self, peer: PublicKey) -> mpsc::Sender<DeliveryJob> {
         let mut peers = self.peers.lock().await;
         if let Some(ch) = peers.get(&peer) {
             return ch.jobs.clone();
@@ -772,6 +816,37 @@ mod tests {
         }
 
         let _ = bob_task.await;
+    }
+
+    /// #234: after a restart, a peer whose only pending work is a queued
+    /// direct outbox row has no actor, so nothing ever retries the row. The
+    /// boot-time resume must give that peer an actor, and must leave peers
+    /// without direct rows alone: mailbox rows belong to the sweeper.
+    #[tokio::test]
+    async fn resume_queued_spawns_actors_only_for_direct_outbox_targets() {
+        let pool = Arc::new(Pool::in_memory());
+        let direct_peer = PublicKey([0x11; 32]);
+        let mailbox_peer = PublicKey([0x22; 32]);
+        let idle_peer = PublicKey([0x33; 32]);
+        let repo = OutboxRepo::new(&pool);
+        repo.insert_direct(&direct_peer.0, &[0x01; 16], b"queued", 0)
+            .unwrap();
+        repo.insert_for_mailbox(&mailbox_peer.0, &[0x02; 16], 1, b"deposited", 0)
+            .unwrap();
+
+        let hub: DeliveryHub<tokio::io::DuplexStream> = DeliveryHub::new(pool.clone());
+        assert_eq!(hub.resume_queued().await.unwrap(), 1);
+
+        assert!(
+            hub.has_peer(&direct_peer).await,
+            "a peer with a queued direct row must get an actor at boot, or its \
+             retry tick never runs and the row waits for the peer to dial in"
+        );
+        assert!(
+            !hub.has_peer(&mailbox_peer).await,
+            "mailbox rows are the sweeper's job; no actor is needed for them"
+        );
+        assert!(!hub.has_peer(&idle_peer).await);
     }
 
     // ─── Task 20: ensure_mailbox_fallback orchestrator tests ───────────

@@ -330,6 +330,33 @@ impl<'p> OutboxRepo<'p> {
         })
     }
 
+    /// Distinct peers that have at least one direct-delivery row, due or not.
+    /// Read at boot to give each of them a peer actor (#234).
+    pub(crate) fn direct_targets(&self) -> Result<Vec<Vec<u8>>> {
+        self.pool.with(|c| {
+            let mut stmt = c
+                .prepare("SELECT DISTINCT target FROM outbox WHERE target_kind='direct'")
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!(
+                        "prepare direct_targets: {e}"
+                    )))
+                })?;
+            let rows = stmt
+                .query_map([], |r| r.get::<_, Vec<u8>>(0))
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!(
+                        "query direct_targets: {e}"
+                    )))
+                })?;
+            let out: std::result::Result<Vec<_>, _> = rows.collect();
+            out.map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!(
+                    "collect direct_targets: {e}"
+                )))
+            })
+        })
+    }
+
     // ── mutations ─────────────────────────────────────────────────────────────
 
     /// Look up the row id for an existing direct-delivery row keyed by

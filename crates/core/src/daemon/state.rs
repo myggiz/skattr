@@ -364,6 +364,20 @@ where
             data_dir,
             config.resolved_download_dir(),
         ));
+    // #234: direct rows left in the outbox by the last run have no actor, so
+    // nothing would retry them until the peer dialled in.
+    match hub.resume_queued().await {
+        Ok(peers) => tracing::info!(
+            target: "skattr::delivery",
+            peers,
+            "delivery: resumed queued messages for {peers} peers from durable state"
+        ),
+        Err(e) => tracing::warn!(
+            target: "skattr::delivery",
+            error = %e,
+            "delivery: could not resume queued messages on boot"
+        ),
+    }
 
     // Step 4: inbound accept loop — handshake (responder) + resolve + ingest.
     let accept_task = tokio::spawn(crate::daemon::accept::run_accept_loop(

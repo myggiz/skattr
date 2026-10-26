@@ -83,7 +83,7 @@ const BODY: &str = "queued while you were away";
 
 /// Read the peer's view of a conversation. Passive: `RecentMessages` never
 /// enqueues or dials, so calling it cannot be what delivers the message.
-async fn recent(
+pub(crate) async fn recent(
     ipc: &Path,
     contact: PublicKey,
 ) -> Vec<skattr_core::daemon::commands::MessageRecord> {
@@ -104,7 +104,7 @@ async fn recent(
 }
 
 /// Boot one loopback daemon and wait for `Ready`.
-async fn spawn(
+pub(crate) async fn spawn(
     data_dir: &Path,
     net: &LoopbackNet,
     onion: &str,
