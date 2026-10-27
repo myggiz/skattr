@@ -1205,12 +1205,34 @@ where
                             // put back.
                             if let Some(mut rx) = if matches { active_rx.take() } else { None } {
                                 if rx.verify(index, &ciphertext) {
-                                    if let Some(store) = chunk_store.as_ref() {
-                                        let _ = store.put(&attachment_id, index, &ciphertext);
+                                    let stored = match chunk_store.as_ref() {
+                                        Some(store) => {
+                                            store.put(&attachment_id, index, &ciphertext)
+                                        }
+                                        None => Ok(()),
+                                    };
+                                    if let Err(e) = stored {
+                                        // Not on disk, so not received: the chunk stays
+                                        // outstanding and is requested again (SKA-95).
+                                        tracing::warn!(
+                                            aid = %hex::encode(attachment_id),
+                                            index,
+                                            err = %e,
+                                            "attachment: chunk write failed; will re-request"
+                                        );
+                                        active_rx = Some(rx);
+                                        continue;
                                     }
                                     let repo =
                                         crate::storage::attachments::AttachmentRepo::new(&pool);
-                                    let _ = repo.mark_received(&attachment_id, index);
+                                    if let Err(e) = repo.mark_received(&attachment_id, index) {
+                                        tracing::warn!(
+                                            aid = %hex::encode(attachment_id),
+                                            index,
+                                            err = %e,
+                                            "attachment: mark_received failed; chunk is on disk"
+                                        );
+                                    }
                                     rx.on_received(index);
                                     let (recv, total) = rx.progress();
                                     tracing::debug!(
@@ -2081,6 +2103,160 @@ mod tests {
         handle.abort();
         let _ = tokio::time::timeout(std::time::Duration::from_secs(1), server_task).await;
         drop(job_tx);
+    }
+
+    /// SKA-95: a chunk that verified but failed to write was still counted as
+    /// received, so the transfer finalized and `AttachmentComplete` went out.
+    /// The sender then drops its staged chunks and the file is gone on both
+    /// ends. A failed write must leave the chunk outstanding, and the same
+    /// chunk must be accepted once the write can succeed.
+    #[tokio::test]
+    async fn a_chunk_that_fails_to_write_is_not_counted_as_received() {
+        use crate::attachment::store::ChunkStore;
+        use std::sync::Arc;
+        use std::sync::Mutex as StdMutex;
+        use std::time::Duration;
+        use tokio::io::DuplexStream;
+
+        let payload = vec![0x5Au8; 100];
+        let (manifest, ciphertexts) = crate::attachment::chunker::chunk_plaintext(
+            &payload,
+            "f.bin",
+            "application/octet-stream",
+        )
+        .unwrap();
+        assert_eq!(manifest.chunks.len(), 1);
+        let aid = manifest.attachment_id;
+
+        struct Stub {
+            begin: StdMutex<Option<crate::delivery::chunk_transfer::AttachmentBegin>>,
+            received: Arc<StdMutex<bool>>,
+        }
+        impl InboundDispatch for Stub {
+            fn dispatch(&self, _peer: PublicKey, _ct: &[u8]) -> Option<MessageId> {
+                Some(MessageId::generate())
+            }
+            #[allow(private_interfaces)]
+            fn take_begin_attachment(
+                &self,
+                _peer: PublicKey,
+            ) -> Option<crate::delivery::chunk_transfer::AttachmentBegin> {
+                self.begin.lock().unwrap().take()
+            }
+            fn attachment_received(
+                &self,
+                _peer: PublicKey,
+                _aid: [u8; 16],
+                _filename: &str,
+                _mime: &str,
+                _size: u64,
+            ) {
+                *self.received.lock().unwrap() = true;
+            }
+        }
+        let received = Arc::new(StdMutex::new(false));
+        let stub = Arc::new(Stub {
+            begin: StdMutex::new(Some(crate::delivery::chunk_transfer::AttachmentBegin {
+                attachment_id: aid,
+                manifest: manifest.clone(),
+            })),
+            received: received.clone(),
+        });
+
+        let pool = std::sync::Arc::new(Pool::in_memory());
+        crate::storage::attachments::AttachmentRepo::new(&pool)
+            .insert(&aid, "in", &manifest.to_cbor().unwrap(), 1, 0)
+            .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let chunk_store = Arc::new(ChunkStore::new(tmp.path()));
+        // A regular file where the chunk directory goes makes every put fail.
+        let blocker = tmp.path().join("attachments").join(hex::encode(aid));
+        std::fs::create_dir_all(blocker.parent().unwrap()).unwrap();
+        std::fs::write(&blocker, b"not a directory").unwrap();
+
+        let actor_id = IdentityKey::generate().unwrap();
+        let responder_id = IdentityKey::generate().unwrap();
+        let responder_static = responder_id.noise_static_public();
+        let peer = PublicKey(responder_id.public().0);
+        let (client_stream, server_stream) = tokio::io::duplex(256 * 1024);
+        let responder_task = tokio::spawn(async move {
+            handshake_responder(server_stream, &responder_id, None)
+                .await
+                .unwrap()
+        });
+        let (conn, _) = handshake_initiator(client_stream, &actor_id, &responder_static, None)
+            .await
+            .unwrap();
+        let (mut peer_conn, _) = responder_task.await.unwrap();
+
+        let (_jobs_tx, jobs_rx) = mpsc::channel::<DeliveryJob>(4);
+        let (_welcome_tx, welcome_rx) = mpsc::channel::<WelcomeJob>(4);
+        let (_ctrl_tx, ctrl_rx) = mpsc::channel::<PeerCtrl<DuplexStream>>(4);
+        let run_stub: std::sync::Arc<dyn InboundDispatch> = stub.clone();
+        let actor = tokio::spawn(super::full_run::<DuplexStream>(
+            peer,
+            Some(conn),
+            jobs_rx,
+            welcome_rx,
+            ctrl_rx,
+            pool.clone(),
+            Some(run_stub),
+            None,
+            Duration::ZERO,
+            None,
+            Some(chunk_store.clone()),
+            Some(tmp.path().join("downloads")),
+        ));
+
+        peer_conn
+            .send(Frame::MlsApp(b"manifest".to_vec()))
+            .await
+            .unwrap();
+        loop {
+            let frame = tokio::time::timeout(Duration::from_secs(3), peer_conn.recv())
+                .await
+                .expect("the actor must request the chunk")
+                .unwrap()
+                .expect("conn must not EOF");
+            match frame {
+                Frame::Ack(_) => {}
+                Frame::ChunkRequest { index: 0, .. } => break,
+                other => panic!("unexpected frame: {other:?}"),
+            }
+        }
+
+        let chunk = Frame::Chunk {
+            attachment_id: aid,
+            index: 0,
+            ciphertext: ciphertexts[0].clone(),
+        };
+        peer_conn.send(chunk.clone()).await.unwrap();
+        match tokio::time::timeout(Duration::from_millis(1_500), peer_conn.recv()).await {
+            Err(_) => {}
+            Ok(Ok(Some(Frame::AttachmentComplete { .. }))) => {
+                panic!("AttachmentComplete sent although the chunk was never written")
+            }
+            Ok(other) => panic!("unexpected frame: {other:?}"),
+        }
+        assert!(
+            !*received.lock().unwrap(),
+            "transfer finalized without its chunk"
+        );
+
+        // Once the write can succeed, the same chunk completes the transfer.
+        std::fs::remove_file(&blocker).unwrap();
+        peer_conn.send(chunk).await.unwrap();
+        let frame = tokio::time::timeout(Duration::from_secs(3), peer_conn.recv())
+            .await
+            .expect("the transfer must complete once the chunk is written");
+        assert!(
+            matches!(frame, Ok(Some(Frame::AttachmentComplete { .. }))),
+            "expected AttachmentComplete, got {frame:?}"
+        );
+        assert!(*received.lock().unwrap());
+        assert!(chunk_store.get_chunk(&aid, 0).is_ok());
+
+        actor.abort();
     }
 
     /// Actor-level in-session resume (Phase 3.B). Drives `full_run` directly as
