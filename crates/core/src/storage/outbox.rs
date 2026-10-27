@@ -330,6 +330,46 @@ impl<'p> OutboxRepo<'p> {
         })
     }
 
+    /// Due direct rows for one `target`, oldest first, up to `limit`. The
+    /// per-peer retry tick reads this so another peer's rows, or mailbox
+    /// rows, can't fill its batch (SKA-20).
+    pub(crate) fn due_direct_for(
+        &self,
+        target: &[u8],
+        now: i64,
+        limit: usize,
+    ) -> Result<Vec<OutboxRow>> {
+        self.pool.with(|c| {
+            let mut stmt = c
+                .prepare(
+                    "SELECT id, target, payload, message_id, attempts, target_kind, mailbox_id \
+                     FROM outbox WHERE next_retry_at <= ?1 AND target = ?2 \
+                     AND target_kind='direct' ORDER BY next_retry_at LIMIT ?3",
+                )
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!(
+                        "prepare due_direct_for: {e}"
+                    )))
+                })?;
+            let rows = stmt
+                .query_map(
+                    rusqlite::params![now, target, i64::try_from(limit).unwrap_or(i64::MAX)],
+                    Self::map_row,
+                )
+                .map_err(|e| {
+                    CoreError::Storage(StorageErrorKind::Other(format!(
+                        "query due_direct_for: {e}"
+                    )))
+                })?;
+            let out: std::result::Result<Vec<_>, _> = rows.collect();
+            out.map_err(|e| {
+                CoreError::Storage(StorageErrorKind::Other(format!(
+                    "collect due_direct_for: {e}"
+                )))
+            })
+        })
+    }
+
     /// Distinct peers that have at least one direct-delivery row, due or not.
     /// Read at boot to give each of them a peer actor (#234).
     pub(crate) fn direct_targets(&self) -> Result<Vec<Vec<u8>>> {
