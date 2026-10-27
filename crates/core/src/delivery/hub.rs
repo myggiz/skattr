@@ -849,6 +849,14 @@ mod tests {
         );
         let mut bob_conn2 = resp2.unwrap().0;
         hub.ingest(bob_pk, init2.unwrap().0).await;
+        // The actor only answers a Ping on a connection it has installed.
+        // Without this sync the job can win the actor's select! over the
+        // ReplaceConn and arrive while it has no connection.
+        bob_conn2.send(Frame::Ping).await.unwrap();
+        let pong = tokio::time::timeout(std::time::Duration::from_secs(5), bob_conn2.recv())
+            .await
+            .expect("the actor must take the new connection after a Bye");
+        assert!(matches!(pong, Ok(Some(Frame::Pong))), "got {pong:?}");
         let _ack = hub
             .send(bob_pk, MessageId([0x42; 16]), b"after bye".to_vec())
             .await
