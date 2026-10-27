@@ -70,6 +70,8 @@ mod mls_pair;
 #[cfg(test)]
 mod offline_fallback;
 #[cfg(test)]
+mod peer_restart_keeps_delivery;
+#[cfg(test)]
 mod queued_delivery_after_restart;
 #[cfg(test)]
 mod queued_delivery_on_peer_return;
