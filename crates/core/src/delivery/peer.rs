@@ -762,16 +762,12 @@ where
                 // A transient outbox read error must not also skip the #76
                 // dial block below, so fall back to an empty batch here
                 // rather than `continue`-ing the whole tick.
-                let due = ob.due(now, 32).unwrap_or_default();
+                let due = ob.due_direct_for(&peer, now, 32).unwrap_or_default();
                 // #227: a queued row has no live user action behind it, so
                 // nothing else will ever give it a connection. Dial for it,
                 // paced by backoff. Placed after the eviction above so a row
                 // that was just un-wedged is seen on this tick, not the next.
-                let has_direct_due = due.iter().any(|e| {
-                    e.target == peer
-                        && e.target_kind == crate::storage::outbox::OutboxTargetKind::Direct
-                        && !pending.contains_key(&e.message_id)
-                });
+                let has_direct_due = due.iter().any(|e| !pending.contains_key(&e.message_id));
                 if has_direct_due && conn.is_none() {
                     let ready = next_outbox_dial_at
                         .map(|t| tokio::time::Instant::now() >= t)
@@ -809,10 +805,6 @@ where
                 }
                 for entry in due {
                     if pending.contains_key(&entry.message_id) { continue; }
-                    if entry.target != peer { continue; }
-                    if entry.target_kind == crate::storage::outbox::OutboxTargetKind::Mailbox {
-                        continue;
-                    }
                     let Some(c) = conn.as_mut() else { break; };
                     if c.send(Frame::MlsApp(entry.payload.clone())).await.is_err() {
                         conn = None;
@@ -846,12 +838,8 @@ where
                         // pending), so no in-flight row can be double-handled.
                         let ob = Outbox::new(&pool);
                         let now = now_ms();
-                        if let Ok(due) = ob.due(now, 32) {
-                            for e in due.into_iter().filter(|e| {
-                                e.target == peer
-                                    && e.target_kind
-                                        == crate::storage::outbox::OutboxTargetKind::Direct
-                            }) {
+                        if let Ok(due) = ob.due_direct_for(&peer, now, 32) {
+                            for e in due {
                                 crate::delivery::hub::run_mailbox_fallback(
                                     &pool, shared, peer, e.message_id, e.payload,
                                 )
@@ -2446,6 +2434,66 @@ mod tests {
                 panic!("mailbox-kind row must NOT be sent as direct MlsApp")
             }
             Ok(other) => panic!("unexpected frame: {other:?}"),
+        }
+
+        handle.abort();
+    }
+
+    /// SKA-20: the retry tick read one global batch of due rows and filtered
+    /// it in Rust. Rows this actor can't act on (another peer's, or mailbox
+    /// rows) that were due earlier filled the batch, so this peer's own due
+    /// direct row was never sent while the peer was online.
+    #[tokio::test]
+    async fn retry_tick_is_not_starved_by_other_peers_or_mailbox_rows() {
+        use crate::storage::outbox::OutboxRepo;
+
+        let actor_id = IdentityKey::generate().unwrap();
+        let responder_id = IdentityKey::generate().unwrap();
+        let responder_static = responder_id.noise_static_public();
+        let peer = PublicKey(responder_id.public().0);
+        let other_peer = PublicKey([0xCC; 32]);
+
+        let (client_stream, server_stream) = tokio::io::duplex(64 * 1024);
+        let responder_task = tokio::spawn(async move {
+            handshake_responder(server_stream, &responder_id, None)
+                .await
+                .unwrap()
+        });
+        let (actor_conn, _) =
+            handshake_initiator(client_stream, &actor_id, &responder_static, None)
+                .await
+                .unwrap();
+        let (mut responder_conn, _) = responder_task.await.unwrap();
+
+        // 32 older due rows the actor can't send, then this peer's row.
+        let pool = std::sync::Arc::new(Pool::in_memory());
+        let repo = OutboxRepo::new(&pool);
+        for i in 0..16u8 {
+            repo.insert_direct(&other_peer.0, &[i; 16], b"carol", 0)
+                .unwrap();
+            repo.insert_for_mailbox(&peer.0, &[0x80 | i; 16], 7, b"mailbox", 0)
+                .unwrap();
+        }
+        repo.insert_direct(&peer.0, &[0x42; 16], b"mine", 1)
+            .unwrap();
+
+        let (_job_tx, job_rx) = mpsc::channel::<DeliveryJob>(4);
+        let handle = PeerConnection::spawn_full_for_test(
+            peer,
+            Box::new(actor_conn),
+            job_rx,
+            pool.clone(),
+            None,
+        );
+
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(2_500),
+            responder_conn.recv(),
+        )
+        .await
+        {
+            Ok(Ok(Some(Frame::MlsApp(b)))) => assert_eq!(b, b"mine"),
+            other => panic!("this peer's due direct row was not sent: {other:?}"),
         }
 
         handle.abort();

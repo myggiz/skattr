@@ -67,6 +67,17 @@ impl<'p> Outbox<'p> {
         Ok(rows.into_iter().map(row_to_entry).collect())
     }
 
+    /// Due direct entries for `target` only, up to `max`.
+    pub fn due_direct_for(
+        &self,
+        target: &PublicKey,
+        now: i64,
+        max: usize,
+    ) -> Result<Vec<OutboxEntry>> {
+        let rows = self.repo.due_direct_for(&target.0, now, max)?;
+        Ok(rows.into_iter().map(row_to_entry).collect())
+    }
+
     /// Delete the `(target, message_id)` row. Returns `true` if a row
     /// was removed.
     pub fn ack(&self, target: &PublicKey, message_id: MessageId) -> Result<bool> {
