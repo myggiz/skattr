@@ -23,8 +23,8 @@
 //! 10 s single-frame window, and a re-dial discards the fresh `h_transport` the
 //! genesis PSK is bound to). That is the disclosed lost-Welcome limitation. The
 //! lost-*Ack* lane IS recoverable: the Welcome landed, the responder joined and
-//! recorded the `first_contact_acks` row, so the re-sent Welcome is re-Acked on
-//! the same live connection. We inject exactly that fault.
+//! recorded the `first_contact_acks` row, so a re-sent Welcome is re-Acked,
+//! even on a new connection. We inject exactly that fault.
 //!
 //! ## The fault seam
 //!
@@ -34,9 +34,18 @@
 //! Bob's `add_contact` h_transport capture succeeds) and frame-parses the
 //! responder→invitee (down) direction — relaying the Noise responder handshake
 //! frame (`0x02`), then dropping the FIRST post-handshake data frame (the
-//! `Frame::Ack`) exactly once, then relaying everything after. The connection is
-//! kept fully open, so the sweeper's re-sent Welcome + the re-Ack traverse the
-//! same live connection. Alice's own transport is never wrapped.
+//! `Frame::Ack`) exactly once. Alice's own transport is never wrapped.
+//!
+//! Dropping a Noise transport message leaves Bob's receive nonce one behind, so
+//! the next frame on that connection fails to decrypt and Bob drops the
+//! connection. Recovery therefore comes from the sweeper re-dialling and
+//! re-sending the Welcome on a fresh connection, roughly a minute after the drop
+//! (the 45 s Ack timeout plus backoff).
+//!
+//! After the drop, the relay also holds back every later responder→invitee data
+//! frame until the test opens the `release` gate (SKA-92). Without that hold,
+//! a slow runner could reach the "still pending" assertions after recovery had
+//! already finished, and fail even though the behaviour is correct.
 //!
 //! ## Observable assertions (not wire bytes)
 //!
@@ -72,7 +81,7 @@ use skattr_core::test_exports::{
     LoopbackNet, LoopbackTransport, Transport, MAX_FRAME_SIZE,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream};
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 use zeroize::Zeroizing;
 
 // ---------------------------------------------------------------------------
@@ -86,12 +95,13 @@ const DUPLEX_BUF: usize = 64 * 1024;
 /// Wraps a [`LoopbackTransport`]. `publish` delegates untouched; `dial`
 /// interposes a relay that drops the first post-handshake data frame on the
 /// responder→invitee direction — the `Frame::Ack` — exactly once across the
-/// whole process (guarded by `drops_remaining`), keeping the connection open.
-/// Only the invitee's transport is wrapped, so the single drop lands on the
-/// first Ack and nothing else.
+/// whole process (guarded by `drops_remaining`), then holds later data frames
+/// until `release` opens. Only the invitee's transport is wrapped, so the
+/// single drop lands on the first Ack and nothing else.
 struct DropFirstAckTransport {
     inner: LoopbackTransport,
     drops_remaining: Arc<AtomicUsize>,
+    release: watch::Receiver<bool>,
 }
 
 impl DropFirstAckTransport {
@@ -99,10 +109,12 @@ impl DropFirstAckTransport {
         net: LoopbackNet,
         my_onion: impl Into<String>,
         drops_remaining: Arc<AtomicUsize>,
+        release: watch::Receiver<bool>,
     ) -> Self {
         Self {
             inner: LoopbackTransport::new(net, my_onion),
             drops_remaining,
+            release,
         }
     }
 }
@@ -132,8 +144,9 @@ impl Transport for DropFirstAckTransport {
         // the first post-handshake frame in the peer→daemon (down) direction.
         let (local, local_peer) = tokio::io::duplex(DUPLEX_BUF);
         let drops_remaining = self.drops_remaining.clone();
+        let release = self.release.clone();
         tokio::spawn(async move {
-            relay_dropping_first_ack(local_peer, real, drops_remaining).await;
+            relay_dropping_first_ack(local_peer, real, drops_remaining, release).await;
         });
         Ok(local)
     }
@@ -148,15 +161,13 @@ impl Transport for DropFirstAckTransport {
 /// responder and it joins. The down direction (responder→invitee, carrying the
 /// framed Noise responder message then the Welcome `Ack`) is frame-parsed: the
 /// Noise handshake frame(s) (`0x02`) are relayed, then the FIRST post-handshake
-/// data frame (the `Ack`) is dropped once, and everything after is relayed. The
-/// connection stays fully open, so the invitee's per-peer actor keeps reusing
-/// it; the durable sweeper re-sends the Welcome on that same connection, the
-/// responder re-Acks (idempotent), and the second Ack — the drop budget now
-/// spent — passes through, finalizing first contact.
+/// data frame (the `Ack`) is dropped once, and later data frames wait for
+/// `release`. See the module docs for why recovery then needs a new connection.
 async fn relay_dropping_first_ack(
     local: DuplexStream,
     real: DuplexStream,
     drops_remaining: Arc<AtomicUsize>,
+    release: watch::Receiver<bool>,
 ) {
     let (mut local_rd, mut local_wr) = tokio::io::split(local);
     let (real_rd, mut real_wr) = tokio::io::split(real);
@@ -165,8 +176,8 @@ async fn relay_dropping_first_ack(
     let up = tokio::spawn(async move {
         let _ = tokio::io::copy(&mut local_rd, &mut real_wr).await;
     });
-    // responder → invitee (down): drop the first Ack, keep the conn alive.
-    let _ = pump_down_dropping_first_ack(real_rd, &mut local_wr, &drops_remaining).await;
+    // responder → invitee (down): drop the first Ack, hold the rest.
+    let _ = pump_down_dropping_first_ack(real_rd, &mut local_wr, &drops_remaining, release).await;
     let _ = up.await;
 }
 
@@ -175,13 +186,13 @@ async fn relay_dropping_first_ack(
 /// allows. The responder sends NO raw version preamble (only the initiator
 /// does), so this parses `length(u32 BE)|type(u8)|payload` frames from byte 0:
 /// it relays the Noise responder handshake frame(s) (`0x02`), drops the first
-/// non-handshake frame once, and relays everything else verbatim. Returns on
-/// EOF. Never tears the connection down — the reused connection is exactly what
-/// lets the sweeper's re-sent Welcome (and the re-Ack) succeed.
+/// non-handshake frame once, and relays later data frames once `release` is
+/// open. Returns on EOF or when the `release` sender is gone.
 async fn pump_down_dropping_first_ack<R, W>(
     mut rd: R,
     wr: &mut W,
     drops_remaining: &Arc<AtomicUsize>,
+    mut release: watch::Receiver<bool>,
 ) -> std::io::Result<()>
 where
     R: AsyncRead + Unpin,
@@ -220,6 +231,11 @@ where
                 "dropping the first Welcome Ack (responder→invitee), connection kept alive"
             );
             continue;
+        }
+        // Hold every later data frame until the test has checked that Bob is
+        // still pending, so recovery cannot finish before that check (SKA-92).
+        if !is_handshake && release.wait_for(|open| *open).await.is_err() {
+            return Ok(());
         }
 
         wr.write_all(&len_buf).await?;
@@ -283,6 +299,9 @@ async fn first_contact_recovers_after_dropped_ack() {
     // Global one-shot drop budget: exactly one post-handshake data frame in the
     // responder→invitee direction — the first Ack — is swallowed.
     let drops_remaining = Arc::new(AtomicUsize::new(1));
+    // Opened once the "still pending" checks have run; until then the relay
+    // holds every responder→invitee data frame after the drop (SKA-92).
+    let (release_tx, release_rx) = watch::channel(false);
 
     // --- Spawn Alice (responder / joiner): plain loopback transport. ---
     let (ready_a_tx, ready_a_rx) = oneshot::channel();
@@ -317,6 +336,7 @@ async fn first_contact_recovers_after_dropped_ack() {
         net.clone(),
         "bob.onion",
         drops_remaining.clone(),
+        release_rx,
     ));
     let b_pw = pw.clone();
     let task_b = tokio::spawn(async move {
@@ -410,10 +430,10 @@ async fn first_contact_recovers_after_dropped_ack() {
     );
     assert_send_blocked_while_pending(&ready_b.ipc_socket, alice_pubkey, Duration::from_secs(10))
         .await;
+    release_tx.send(true).unwrap();
 
-    // --- THE recovery assertion: the sweeper re-sends the Welcome on the live
-    // connection, Alice re-Acks (idempotent, ADR 0012), the second Ack is
-    // relayed, and Bob finalizes — deleting the pending_welcomes row and
+    // --- THE recovery assertion: the sweeper re-sends the Welcome on a new
+    // connection, Alice re-Acks (idempotent, ADR 0012), and Bob finalizes — deleting the pending_welcomes row and
     // unblocking sends. The recovery signal is Bob's own `SendMessage`
     // succeeding (`send_until_ok`), driven through the daemon's OWN pool + IPC:
     // while pending, `send_message` returns "not connected yet"; once the
