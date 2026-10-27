@@ -1085,7 +1085,13 @@ where
                         }
                         last_traffic = tokio::time::Instant::now();
                     }
-                    Ok(Some(Frame::Bye)) => break,
+                    // A Bye closes this connection, not the actor: the hub
+                    // keeps routing sends and new connections here (SKA-94).
+                    Ok(Some(Frame::Bye)) => {
+                        conn = None;
+                        drain_pending(&mut pending);
+                        awaiting_pong_since = None;
+                    }
                     Ok(Some(Frame::Ping)) => {
                         if let Some(c) = conn.as_mut() {
                             let _ = c.send(Frame::Pong).await;

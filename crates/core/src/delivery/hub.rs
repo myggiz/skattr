@@ -818,6 +818,51 @@ mod tests {
         let _ = bob_task.await;
     }
 
+    /// SKA-94: a peer sends `Bye` on every graceful close, its own shutdown
+    /// included. That must drop the connection, not end the actor: the hub
+    /// keeps handing out the actor's channels, so a dead actor would swallow
+    /// every later send and every new connection for the peer until restart.
+    #[tokio::test]
+    async fn actor_survives_peer_bye_and_uses_the_next_connection() {
+        use crate::transport::frame::Frame;
+
+        let pool = Arc::new(Pool::in_memory());
+        let hub: DeliveryHub<tokio::io::DuplexStream> = DeliveryHub::new(pool.clone());
+        let alice = IdentityKey::generate().unwrap();
+        let bob = IdentityKey::generate().unwrap();
+        let bob_static = bob.noise_static_public();
+        let bob_pk = PublicKey(bob.public().0);
+
+        let (a1, b1) = tokio::io::duplex(16 * 1024);
+        let (init1, resp1) = tokio::join!(
+            handshake_initiator(a1, &alice, &bob_static, None),
+            handshake_responder(b1, &bob, None),
+        );
+        hub.ingest(bob_pk, init1.unwrap().0).await;
+        resp1.unwrap().0.close().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let (a2, b2) = tokio::io::duplex(16 * 1024);
+        let (init2, resp2) = tokio::join!(
+            handshake_initiator(a2, &alice, &bob_static, None),
+            handshake_responder(b2, &bob, None),
+        );
+        let mut bob_conn2 = resp2.unwrap().0;
+        hub.ingest(bob_pk, init2.unwrap().0).await;
+        let _ack = hub
+            .send(bob_pk, MessageId([0x42; 16]), b"after bye".to_vec())
+            .await
+            .unwrap();
+
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(5), bob_conn2.recv())
+            .await
+            .expect("the actor must send over the new connection after a Bye");
+        assert!(
+            matches!(frame, Ok(Some(Frame::MlsApp(ref b))) if b == b"after bye"),
+            "expected the queued message on the new connection, got {frame:?}"
+        );
+    }
+
     /// #234: after a restart, a peer whose only pending work is a queued
     /// direct outbox row has no actor, so nothing ever retries the row. The
     /// boot-time resume must give that peer an actor, and must leave peers
